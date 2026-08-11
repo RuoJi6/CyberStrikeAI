@@ -11171,6 +11171,19 @@ html[data-theme="dark"] .robot-binding-service-hint-icon {
     white-space: nowrap;
 }
 
+.builtin-mcp-tool-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    background: rgba(var(--accent-rgb, 59, 130, 246), 0.12);
+    border: 1px solid rgba(var(--accent-rgb, 59, 130, 246), 0.32);
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--accent-color);
+    white-space: nowrap;
+}
+
 .tool-item-desc {
     font-size: 0.8125rem;
     color: var(--text-secondary);

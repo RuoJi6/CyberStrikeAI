@@ -1298,6 +1298,29 @@ function searchTools() {
     loadToolsList(1, keyword);
 }
 
+// 刷新 MCP 管理页的完整数据：内置工具、外部工具与外部 MCP 状态。
+async function refreshMCPManagement(button) {
+    if (button && button.disabled) return;
+
+    if (button) {
+        button.disabled = true;
+        button.setAttribute('aria-busy', 'true');
+    }
+
+    try {
+        const currentPage = (toolsPagination && toolsPagination.page) ? toolsPagination.page : 1;
+        await Promise.all([
+            loadToolsList(currentPage, toolsSearchKeyword, { refreshExternal: true }),
+            loadExternalMCPs({ forceRender: true })
+        ]);
+    } finally {
+        if (button) {
+            button.disabled = false;
+            button.removeAttribute('aria-busy');
+        }
+    }
+}
+
 // 清除搜索
 function clearSearch() {
     const searchInput = document.getElementById('tools-search');
@@ -1389,6 +1412,16 @@ function renderToolsList() {
             }
         }
 
+        // 内置 MCP 来源标签，避免 ASM 工具被误认为普通命令或外部 MCP。
+        let builtinMCPBadge = '';
+        const builtinMCPGroup = typeof getBuiltinMCPGroup === 'function' ? getBuiltinMCPGroup(tool.name) : null;
+        if (builtinMCPGroup) {
+            const badgeTitle = typeof window.t === 'function'
+                ? window.t('mcp.builtinMCPToolFrom', { name: builtinMCPGroup.label })
+                : `系统内置工具 - 来源：${builtinMCPGroup.label}`;
+            builtinMCPBadge = `<span class="builtin-mcp-tool-badge" title="${settingsEscapeAttr(badgeTitle)}">${escapeHtml(builtinMCPGroup.label)}</span>`;
+        }
+
         // 生成唯一的checkbox id，使用工具唯一标识符
         const checkboxId = `tool-${settingsEscapeAttr(toolKey).replace(/::/g, '--')}`;
 
@@ -1397,6 +1430,7 @@ function renderToolsList() {
             <div class="tool-item-info">
                 <div class="tool-item-name">
                     ${escapeHtml(tool.name)}
+                    ${builtinMCPBadge}
                     ${externalBadge}
                     <label class="tool-resident-toggle" title="${typeof window.t === 'function' ? window.t('mcp.alwaysVisibleHint') : '始终常驻在 Tool Search 可见列表'}" onclick="event.stopPropagation()">
                         <input type="checkbox" class="theme-checkbox" ${alwaysVisibleChecked ? 'checked' : ''} ${alwaysVisibleLocked ? 'disabled' : ''} onchange="handleToolAlwaysVisibleChange(${settingsEscapeJsStringAttr(toolKey)}, this.checked)" />

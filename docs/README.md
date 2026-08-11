@@ -26,6 +26,7 @@ CyberStrikeAI documentation is organized by user journey. Start with deployment,
 
 ### 功能指南
 
+- [ASM 平台能力与适配基线](zh-CN/asm-platform-capability-baseline.md)
 - [知识库](zh-CN/knowledge-base.md)
 - [RBAC 权限管理](zh-CN/rbac.md)
 - [机器人接入](zh-CN/robot.md)
@@ -64,6 +65,7 @@ CyberStrikeAI documentation is organized by user journey. Start with deployment,
 
 ### Feature guides
 
+- [ASM Platform Capability and Adapter Baseline](en-US/asm-platform-capability-baseline.md)
 - [Knowledge Base](en-US/knowledge-base.md)
 - [RBAC Administration](en-US/rbac.md)
 - [Robot / Chatbot](en-US/robot.md)

@@ -300,15 +300,19 @@ function syncASMTaskProviderOptions() {
     const providers = asmPageState.providers.length ? asmPageState.providers : [
         { id: 'arl', name: 'ARL / 灯塔' }, { id: 'xingrin', name: 'XingRin / 星环' }, { id: 'scopesentry', name: 'ScopeSentry' },
     ];
-    select.innerHTML = `<option value="">全部 ASM</option>${providers.map(item => `<option value="${asmEscape(item.id)}">${asmEscape(item.name)}</option>`).join('')}`;
+    select.innerHTML = `<option value="">${asmEscape(asmT('asm.allProviders', '全部 ASM'))}</option>${providers.map(item => `<option value="${asmEscape(item.id)}">${asmEscape(item.name)}</option>`).join('')}`;
     select.value = selected;
 }
 
 function asmTaskStatusLabel(status) {
     return {
-        submitted: '已提交', running: '运行中', completed: '已完成',
-        failed: '失败', stopped: '已停止', unknown: '未知',
-    }[status] || status || '未知';
+        submitted: asmT('asm.statusSubmitted', '已提交'),
+        running: asmT('asm.statusRunning', '运行中'),
+        completed: asmT('asm.statusCompleted', '已完成'),
+        failed: asmT('asm.statusFailed', '失败'),
+        stopped: asmT('asm.statusStopped', '已停止'),
+        unknown: asmT('asm.statusUnknown', '未知'),
+    }[status] || status || asmT('asm.statusUnknown', '未知');
 }
 
 function asmTaskStatusClass(status) {
@@ -596,10 +600,17 @@ function initASMResourcesPage() {
         grid.dataset.bound = 'true';
         grid.addEventListener('click', handleASMGridClick);
     }
-    void Promise.all([loadASMResources(), loadASMTasks(true)]);
+    void loadASMResources();
+}
+
+async function initASMTaskCenterPage() {
+    await loadASMResources();
+    syncASMTaskProviderOptions();
+    await loadASMTasks(true);
 }
 
 window.initASMResourcesPage = initASMResourcesPage;
+window.initASMTaskCenterPage = initASMTaskCenterPage;
 window.loadASMResources = loadASMResources;
 window.openASMResourceModal = openASMResourceModal;
 window.closeASMResourceModal = closeASMResourceModal;

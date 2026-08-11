@@ -17,7 +17,7 @@
 
 ## Feature guides
 
-- [Asset Management](asset-management.md) · [Knowledge Base](knowledge-base.md) · [Robot / Chatbot](robot.md) · [Vision](VISION.md)
+- [Asset Management](asset-management.md) · [ASM Platform Capability Baseline](asm-platform-capability-baseline.md) · [Knowledge Base](knowledge-base.md) · [Robot / Chatbot](robot.md) · [Vision](VISION.md)
 - [WebShell](webshell.md) · [C2](c2.md) · [MCP Federation](mcp-federation.md)
 
 ## Operations and reference

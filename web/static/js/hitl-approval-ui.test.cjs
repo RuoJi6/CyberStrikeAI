@@ -241,7 +241,7 @@ test('多对话并发时释放隐藏主流且旧请求不能覆盖新对话状�
     assert.match(template, /monitor\.js\?v=20260811-13/);
     assert.match(template, /chat-scroll\.js\?v=20260811-2/);
     assert.match(template, /chat\.js\?v=20260811-24/);
-    assert.match(template, /style\.css\?v=20260811-34/);
+    assert.match(template, /style\.css\?v=20260811-35/);
 });
 
 test('任务结束后对话内审批按钮会变灰并禁止继续操作', () => {
