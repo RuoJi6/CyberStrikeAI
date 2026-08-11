@@ -19,6 +19,16 @@
     font-size: 14px;
 }
 
+.asm-page .btn-icon-text {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.asm-page .btn-icon-text svg {
+    flex: 0 0 auto;
+}
+
 .asm-eyebrow,
 .asm-modal-kicker {
     color: var(--accent-color);
