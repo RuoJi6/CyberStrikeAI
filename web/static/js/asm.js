@@ -52,6 +52,22 @@ function asmProviderMark(id) {
     return { arl: 'ARL', xingrin: 'XR', scopesentry: 'SS' }[id] || 'ASM';
 }
 
+const asmProviderLogoPaths = Object.freeze({
+    arl: '/static/images/asm/arl.png',
+    xingrin: '/static/images/asm/xingrin.png',
+    scopesentry: '/static/images/asm/scopesentry.png',
+});
+
+function renderASMProviderMark(id, small) {
+    const provider = String(id || '').toLowerCase();
+    const logo = asmProviderLogoPaths[provider];
+    const sizeClass = small ? ' small' : '';
+    if (!logo) {
+        return `<span class="asm-provider-mark${sizeClass}">${asmEscape(asmProviderMark(provider))}</span>`;
+    }
+    return `<span class="asm-provider-mark has-logo asm-provider-${asmEscape(provider)}${sizeClass}" aria-hidden="true"><img src="${logo}" alt="" decoding="async"></span>`;
+}
+
 function renderASMProviders() {
     const root = document.getElementById('asm-provider-strip');
     if (!root) return;
@@ -112,7 +128,7 @@ function renderASMResources() {
         return `<article class="asm-resource-card" data-asm-resource-id="${asmEscape(item.id)}">
             <div class="asm-card-head">
                 <div class="asm-card-title-row">
-                    <span class="asm-provider-mark">${asmEscape(asmProviderMark(item.provider))}</span>
+                    ${renderASMProviderMark(item.provider, false)}
                     <div class="asm-card-title"><strong title="${asmEscape(item.name)}">${asmEscape(item.name)}</strong><small>${asmEscape(asmProviderLabel(item.provider))}</small></div>
                 </div>
                 <span class="asm-enabled-badge${item.enabled ? '' : ' disabled'}">${asmEscape(enabledLabel)}</span>
@@ -339,7 +355,7 @@ function renderASMTasks() {
             const status = asmTaskStatusClass(task.status);
             return `<article class="asm-task-row" onclick="openASMTaskModal('${asmEscape(task.id)}')">
                 <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
-                <div class="asm-task-provider"><span class="asm-provider-mark small">${asmEscape(asmProviderMark(task.provider))}</span><span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small></span></div>
+                <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small></span></div>
                 <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
                 <time>${asmEscape(formatASMTime(task.created_at))}</time>
                 <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>

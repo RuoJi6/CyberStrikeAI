@@ -8,6 +8,17 @@ const asm = fs.readFileSync('web/static/js/asm.js', 'utf8');
 const zh = JSON.parse(fs.readFileSync('web/static/i18n/zh-CN.json', 'utf8'));
 const en = JSON.parse(fs.readFileSync('web/static/i18n/en-US.json', 'utf8'));
 
+test('ASM 使用固定版本下载到本地的官方平台标识', () => {
+    for (const provider of ['arl', 'xingrin', 'scopesentry']) {
+        const path = `web/static/images/asm/${provider}.png`;
+        assert.equal(fs.existsSync(path), true, `${provider} logo should exist locally`);
+        assert.match(asm, new RegExp(`/static/images/asm/${provider}\\.png`));
+    }
+    assert.match(asm, /function renderASMProviderMark\(id, small\)/);
+    assert.match(asm, /asm-provider-mark has-logo asm-provider-/);
+    assert.doesNotMatch(asm, /https?:\/\/[^'"`]+\.(?:png|svg|ico)/i);
+});
+
 test('ASM 侧边栏是资源优先的两级折叠菜单', () => {
     const parentStart = template.indexOf('class="nav-item nav-item-has-submenu" data-page="asm"');
     const resourcesItem = template.indexOf('data-page="asm-resources"', parentStart);

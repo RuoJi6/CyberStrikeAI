@@ -238,6 +238,35 @@
     box-shadow: 0 8px 20px rgba(37, 99, 235, .2);
 }
 
+.asm-provider-mark.has-logo {
+    overflow: hidden;
+    padding: 5px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 72%, transparent);
+    background: #fff;
+}
+
+.asm-provider-mark.has-logo img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.asm-provider-mark.asm-provider-arl {
+    padding: 0;
+    background: #08b9c7;
+}
+
+.asm-provider-mark.asm-provider-xingrin {
+    padding: 8px;
+    background: linear-gradient(145deg, #111827, #172554);
+}
+
+.asm-provider-mark.asm-provider-scopesentry {
+    padding: 4px;
+    background: #effaff;
+}
+
 .asm-card-title-row {
     min-width: 0;
     flex: 1;
@@ -493,6 +522,9 @@
 .asm-task-primary span { margin-top: 4px; color: var(--text-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .asm-task-provider { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .asm-provider-mark.small { width: 31px; height: 31px; flex-basis: 31px; font-size: 9px; border-radius: 9px; }
+.asm-provider-mark.has-logo.small { padding: 3px; }
+.asm-provider-mark.asm-provider-arl.small { padding: 0; }
+.asm-provider-mark.asm-provider-xingrin.small { padding: 6px; }
 .asm-task-provider strong { color: var(--text-primary); font-size: 11px; }
 .asm-task-provider small { margin-top: 2px; color: var(--text-muted); font-size: 9px; }
 .asm-task-row time { color: var(--text-secondary); font-size: 10px; }
@@ -613,6 +645,7 @@ html[data-theme="dark"] .asm-task-status.stopped { color: #fde68a; background: r
 @keyframes asmPulse { 50% { opacity: .45; } }
 
 html[data-theme="dark"] .asm-resource-card { background: rgba(17, 24, 39, .9); }
+html[data-theme="dark"] .asm-provider-mark.asm-provider-scopesentry { background: #e7f8ff; }
 
 @media (max-width: 980px) {
     .asm-overview { grid-template-columns: 1fr; }
