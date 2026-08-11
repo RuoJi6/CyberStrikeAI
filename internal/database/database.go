@@ -517,6 +517,25 @@ func (db *DB) initTables() error {
 		FOREIGN KEY (connection_id) REFERENCES webshell_connections(id) ON DELETE CASCADE
 	);`
 
+	createASMResourcesTable := `
+	CREATE TABLE IF NOT EXISTS asm_resources (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		base_url TEXT NOT NULL,
+		username TEXT NOT NULL DEFAULT '',
+		secret_ciphertext TEXT NOT NULL DEFAULT '',
+		auth_type TEXT NOT NULL DEFAULT 'password',
+		verify_tls INTEGER NOT NULL DEFAULT 1,
+		enabled INTEGER NOT NULL DEFAULT 1,
+		status TEXT NOT NULL DEFAULT 'unknown',
+		last_error TEXT NOT NULL DEFAULT '',
+		last_test_at DATETIME,
+		metadata_json TEXT NOT NULL DEFAULT '{}',
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);`
+
 	// ========================================================================
 	// C2 模块（监听器 / 会话 / 任务 / 文件 / 事件 / Malleable Profile）
 	// ========================================================================
@@ -765,6 +784,9 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_webshell_connections_created_at ON webshell_connections(created_at);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connections_project_id ON webshell_connections(project_id);
 	CREATE INDEX IF NOT EXISTS idx_webshell_connection_states_updated_at ON webshell_connection_states(updated_at);
+	CREATE INDEX IF NOT EXISTS idx_asm_resources_provider ON asm_resources(provider);
+	CREATE INDEX IF NOT EXISTS idx_asm_resources_enabled ON asm_resources(enabled);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_resources_name ON asm_resources(name);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_created_at ON c2_listeners(created_at);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_project_id ON c2_listeners(project_id);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_status ON c2_listeners(status);
@@ -880,6 +902,10 @@ func (db *DB) initTables() error {
 
 	if _, err := db.Exec(createWebshellConnectionStatesTable); err != nil {
 		return fmt.Errorf("创建webshell_connection_states表失败: %w", err)
+	}
+
+	if _, err := db.Exec(createASMResourcesTable); err != nil {
+		return fmt.Errorf("创建asm_resources表失败: %w", err)
 	}
 
 	if _, err := db.Exec(createAuditLogsTable); err != nil {

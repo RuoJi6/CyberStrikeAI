@@ -16,6 +16,15 @@ const (
 	ToolDeleteAsset       = "delete_asset"
 	ToolCompleteAssetScan = "complete_asset_scan"
 
+	// 外部 ASM 统一适配工具（ARL / XingRin / ScopeSentry）
+	ToolASMListResources  = "asm_list_resources"
+	ToolASMTestConnection = "asm_test_connection"
+	ToolASMCreateTask     = "asm_create_task"
+	ToolASMListTasks      = "asm_list_tasks"
+	ToolASMGetTask        = "asm_get_task"
+	ToolASMListAssets     = "asm_list_assets"
+	ToolASMStopTask       = "asm_stop_task"
+
 	// 项目黑板（事实）工具
 	ToolUpsertProjectFact    = "upsert_project_fact"
 	ToolGetProjectFact       = "get_project_fact"
@@ -87,6 +96,13 @@ func IsBuiltinTool(toolName string) bool {
 		ToolUpdateAsset,
 		ToolDeleteAsset,
 		ToolCompleteAssetScan,
+		ToolASMListResources,
+		ToolASMTestConnection,
+		ToolASMCreateTask,
+		ToolASMListTasks,
+		ToolASMGetTask,
+		ToolASMListAssets,
+		ToolASMStopTask,
 		ToolUpsertProjectFact,
 		ToolGetProjectFact,
 		ToolListProjectFacts,
@@ -148,6 +164,13 @@ func GetAllBuiltinTools() []string {
 		ToolUpdateAsset,
 		ToolDeleteAsset,
 		ToolCompleteAssetScan,
+		ToolASMListResources,
+		ToolASMTestConnection,
+		ToolASMCreateTask,
+		ToolASMListTasks,
+		ToolASMGetTask,
+		ToolASMListAssets,
+		ToolASMStopTask,
 		ToolUpsertProjectFact,
 		ToolGetProjectFact,
 		ToolListProjectFacts,

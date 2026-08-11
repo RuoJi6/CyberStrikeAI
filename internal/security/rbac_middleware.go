@@ -142,6 +142,11 @@ func permissionForRequest(method, fullPath string) string {
 			return "mcp:read"
 		}
 		return "mcp:write"
+	case strings.HasPrefix(path, "/asm"):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "mcp:read"
+		}
+		return "mcp:write"
 	case strings.HasPrefix(path, "/attack-chain"):
 		return crudPermission(method, "attackchain")
 	case strings.HasPrefix(path, "/knowledge"):

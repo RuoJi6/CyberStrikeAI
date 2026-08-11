@@ -1,0 +1,447 @@
+package asm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+	"time"
+
+	"cyberstrike-ai/internal/database"
+
+	"github.com/google/uuid"
+	"go.uber.org/zap"
+)
+
+const (
+	ProviderARL         = "arl"
+	ProviderXingRin     = "xingrin"
+	ProviderScopeSentry = "scopesentry"
+)
+
+type ProviderInfo struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Implemented  bool     `json:"implemented"`
+	Capabilities []string `json:"capabilities"`
+}
+
+type ResourceView struct {
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	Provider      string     `json:"provider"`
+	BaseURL       string     `json:"base_url"`
+	Username      string     `json:"username,omitempty"`
+	AuthType      string     `json:"auth_type"`
+	VerifyTLS     bool       `json:"verify_tls"`
+	Enabled       bool       `json:"enabled"`
+	Status        string     `json:"status"`
+	LastError     string     `json:"last_error,omitempty"`
+	LastTestAt    *time.Time `json:"last_test_at,omitempty"`
+	HasCredential bool       `json:"has_credential"`
+	Capabilities  []string   `json:"capabilities"`
+	ProviderReady bool       `json:"provider_ready"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+type CreateResourceInput struct {
+	Name       string
+	Provider   string
+	BaseURL    string
+	Username   string
+	Credential string
+	AuthType   string
+	VerifyTLS  *bool
+	Enabled    *bool
+}
+
+type UpdateResourceInput struct {
+	Name       *string
+	Provider   *string
+	BaseURL    *string
+	Username   *string
+	Credential *string
+	AuthType   *string
+	VerifyTLS  *bool
+	Enabled    *bool
+}
+
+type TaskRequest struct {
+	Name    string                 `json:"name"`
+	Target  string                 `json:"target"`
+	Options map[string]interface{} `json:"options,omitempty"`
+}
+
+type TaskFilter struct {
+	TaskID   string
+	Name     string
+	Target   string
+	Status   string
+	Page     int
+	PageSize int
+}
+
+type AssetFilter struct {
+	TaskID   string
+	Type     string
+	Query    string
+	Page     int
+	PageSize int
+}
+
+type Connection struct {
+	Resource *database.ASMResource
+	Secret   string
+}
+
+type Adapter interface {
+	Provider() string
+	Capabilities() []string
+	Test(context.Context, *Connection) (interface{}, error)
+	CreateTask(context.Context, *Connection, TaskRequest) (interface{}, error)
+	ListTasks(context.Context, *Connection, TaskFilter) (interface{}, error)
+	GetTask(context.Context, *Connection, string) (interface{}, error)
+	ListAssets(context.Context, *Connection, AssetFilter) (interface{}, error)
+	StopTask(context.Context, *Connection, string) (interface{}, error)
+}
+
+type Service struct {
+	db       *database.DB
+	cipher   *credentialCipher
+	logger   *zap.Logger
+	adapters map[string]Adapter
+}
+
+func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Service, error) {
+	if db == nil {
+		return nil, fmt.Errorf("ASM 服务需要数据库")
+	}
+	cipher, err := newCredentialCipher(databasePath)
+	if err != nil {
+		return nil, err
+	}
+	if logger == nil {
+		logger = zap.NewNop()
+	}
+	service := &Service{db: db, cipher: cipher, logger: logger, adapters: make(map[string]Adapter)}
+	service.RegisterAdapter(NewARLAdapter())
+	service.RegisterAdapter(NewXingRinAdapter())
+	service.RegisterAdapter(NewScopeSentryAdapter())
+	return service, nil
+}
+
+func (s *Service) RegisterAdapter(adapter Adapter) {
+	if adapter == nil {
+		return
+	}
+	provider := normalizeProvider(adapter.Provider())
+	if provider != "" {
+		s.adapters[provider] = adapter
+	}
+}
+
+func normalizeProvider(value string) string {
+	provider := strings.ToLower(strings.TrimSpace(value))
+	switch provider {
+	case "lighthouse", "arl-lighthouse", "灯塔":
+		return ProviderARL
+	case "xingrin", "xinghuan", "星环":
+		return ProviderXingRin
+	case "scope-sentry", "scope_sentry":
+		return ProviderScopeSentry
+	default:
+		return provider
+	}
+}
+
+func providerDisplayName(provider string) string {
+	switch provider {
+	case ProviderARL:
+		return "ARL / 灯塔"
+	case ProviderXingRin:
+		return "XingRin / 星环"
+	case ProviderScopeSentry:
+		return "ScopeSentry"
+	default:
+		return provider
+	}
+}
+
+func (s *Service) Providers() []ProviderInfo {
+	providers := []string{ProviderARL, ProviderXingRin, ProviderScopeSentry}
+	result := make([]ProviderInfo, 0, len(providers))
+	for _, provider := range providers {
+		adapter, ok := s.adapters[provider]
+		info := ProviderInfo{ID: provider, Name: providerDisplayName(provider), Implemented: ok, Capabilities: []string{}}
+		if ok {
+			info.Capabilities = append(info.Capabilities, adapter.Capabilities()...)
+		}
+		result = append(result, info)
+	}
+	return result
+}
+
+func (s *Service) ListResources(enabledOnly bool) ([]ResourceView, error) {
+	items, err := s.db.ListASMResources(enabledOnly)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]ResourceView, 0, len(items))
+	for _, item := range items {
+		views = append(views, s.resourceView(item))
+	}
+	return views, nil
+}
+
+func (s *Service) GetResource(id string) (ResourceView, error) {
+	item, err := s.db.GetASMResource(id)
+	if err != nil {
+		return ResourceView{}, err
+	}
+	return s.resourceView(item), nil
+}
+
+func (s *Service) resourceView(item *database.ASMResource) ResourceView {
+	adapter, ready := s.adapters[normalizeProvider(item.Provider)]
+	capabilities := []string{}
+	if ready {
+		capabilities = append(capabilities, adapter.Capabilities()...)
+	}
+	sort.Strings(capabilities)
+	return ResourceView{
+		ID: item.ID, Name: item.Name, Provider: item.Provider, BaseURL: item.BaseURL,
+		Username: item.Username, AuthType: item.AuthType, VerifyTLS: item.VerifyTLS,
+		Enabled: item.Enabled, Status: item.Status, LastError: item.LastError,
+		LastTestAt: item.LastTestAt, HasCredential: item.SecretCiphertext != "",
+		Capabilities: capabilities, ProviderReady: ready,
+		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+	}
+}
+
+func validateResourceFields(name, provider, baseURL, username, authType string) (string, string, string, string, string, error) {
+	name = strings.TrimSpace(name)
+	provider = normalizeProvider(provider)
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	username = strings.TrimSpace(username)
+	authType = strings.ToLower(strings.TrimSpace(authType))
+	if authType == "" {
+		authType = "password"
+	}
+	if name == "" || len(name) > 100 {
+		return "", "", "", "", "", fmt.Errorf("名称不能为空且不能超过 100 字符")
+	}
+	if provider != ProviderARL && provider != ProviderXingRin && provider != ProviderScopeSentry {
+		return "", "", "", "", "", fmt.Errorf("不支持的 ASM 类型: %s", provider)
+	}
+	if len(baseURL) > 2048 {
+		return "", "", "", "", "", fmt.Errorf("ASM 地址过长")
+	}
+	parsed, err := url.ParseRequestURI(baseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return "", "", "", "", "", fmt.Errorf("ASM 地址必须是有效的 http 或 https URL")
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return "", "", "", "", "", fmt.Errorf("ASM 地址不能包含凭据、查询参数或片段")
+	}
+	if len(username) > 200 {
+		return "", "", "", "", "", fmt.Errorf("用户名过长")
+	}
+	if authType != "password" && authType != "api_key" {
+		return "", "", "", "", "", fmt.Errorf("认证类型仅支持 password 或 api_key")
+	}
+	return name, provider, baseURL, username, authType, nil
+}
+
+func (s *Service) CreateResource(input CreateResourceInput) (ResourceView, error) {
+	name, provider, baseURL, username, authType, err := validateResourceFields(input.Name, input.Provider, input.BaseURL, input.Username, input.AuthType)
+	if err != nil {
+		return ResourceView{}, err
+	}
+	if _, ready := s.adapters[provider]; !ready {
+		return ResourceView{}, fmt.Errorf("%s 适配器尚未完成", providerDisplayName(provider))
+	}
+	if len(input.Credential) > 8192 {
+		return ResourceView{}, fmt.Errorf("凭据过长")
+	}
+	if strings.TrimSpace(input.Credential) == "" {
+		return ResourceView{}, fmt.Errorf("凭据不能为空")
+	}
+	verifyTLS, enabled := true, true
+	if input.VerifyTLS != nil {
+		verifyTLS = *input.VerifyTLS
+	}
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	id := "asm_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
+	ciphertext, err := s.cipher.encrypt(id, input.Credential)
+	if err != nil {
+		return ResourceView{}, err
+	}
+	item := &database.ASMResource{
+		ID: id, Name: name, Provider: provider, BaseURL: baseURL, Username: username,
+		SecretCiphertext: ciphertext, AuthType: authType, VerifyTLS: verifyTLS,
+		Enabled: enabled, Status: "unknown", MetadataJSON: "{}",
+	}
+	if err := s.db.CreateASMResource(item); err != nil {
+		return ResourceView{}, err
+	}
+	return s.resourceView(item), nil
+}
+
+func (s *Service) UpdateResource(id string, input UpdateResourceInput) (ResourceView, error) {
+	item, err := s.db.GetASMResource(id)
+	if err != nil {
+		return ResourceView{}, err
+	}
+	name, provider, baseURL, username, authType := item.Name, item.Provider, item.BaseURL, item.Username, item.AuthType
+	if input.Name != nil {
+		name = *input.Name
+	}
+	if input.Provider != nil {
+		provider = *input.Provider
+	}
+	if input.BaseURL != nil {
+		baseURL = *input.BaseURL
+	}
+	if input.Username != nil {
+		username = *input.Username
+	}
+	if input.AuthType != nil {
+		authType = *input.AuthType
+	}
+	name, provider, baseURL, username, authType, err = validateResourceFields(name, provider, baseURL, username, authType)
+	if err != nil {
+		return ResourceView{}, err
+	}
+	if _, ready := s.adapters[provider]; !ready {
+		return ResourceView{}, fmt.Errorf("%s 适配器尚未完成", providerDisplayName(provider))
+	}
+	item.Name, item.Provider, item.BaseURL, item.Username, item.AuthType = name, provider, baseURL, username, authType
+	if input.VerifyTLS != nil {
+		item.VerifyTLS = *input.VerifyTLS
+	}
+	if input.Enabled != nil {
+		item.Enabled = *input.Enabled
+	}
+	if input.Credential != nil && *input.Credential != "" {
+		if len(*input.Credential) > 8192 {
+			return ResourceView{}, fmt.Errorf("凭据过长")
+		}
+		item.SecretCiphertext, err = s.cipher.encrypt(item.ID, *input.Credential)
+		if err != nil {
+			return ResourceView{}, err
+		}
+	}
+	item.Status, item.LastError = "unknown", ""
+	if err := s.db.UpdateASMResource(item); err != nil {
+		return ResourceView{}, err
+	}
+	return s.resourceView(item), nil
+}
+
+func (s *Service) DeleteResource(id string) error {
+	return s.db.DeleteASMResource(id)
+}
+
+func (s *Service) connection(id string, requireEnabled bool) (*Connection, Adapter, error) {
+	item, err := s.db.GetASMResource(strings.TrimSpace(id))
+	if err != nil {
+		return nil, nil, err
+	}
+	if requireEnabled && !item.Enabled {
+		return nil, nil, fmt.Errorf("ASM 资源已禁用")
+	}
+	adapter, ok := s.adapters[normalizeProvider(item.Provider)]
+	if !ok {
+		return nil, nil, fmt.Errorf("%s 适配器尚未完成", providerDisplayName(item.Provider))
+	}
+	secret, err := s.cipher.decrypt(item.ID, item.SecretCiphertext)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &Connection{Resource: item, Secret: secret}, adapter, nil
+}
+
+func truncateError(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := strings.TrimSpace(err.Error())
+	if len(value) > 1000 {
+		value = value[:1000]
+	}
+	return value
+}
+
+func (s *Service) TestConnection(ctx context.Context, id string) (interface{}, error) {
+	conn, adapter, err := s.connection(id, false)
+	if err != nil {
+		return nil, err
+	}
+	result, testErr := adapter.Test(ctx, conn)
+	now := time.Now().UTC()
+	conn.Resource.LastTestAt = &now
+	if testErr != nil {
+		conn.Resource.Status = "error"
+		conn.Resource.LastError = truncateError(testErr)
+	} else {
+		conn.Resource.Status = "connected"
+		conn.Resource.LastError = ""
+	}
+	if updateErr := s.db.UpdateASMResource(conn.Resource); updateErr != nil {
+		s.logger.Warn("更新 ASM 连接状态失败", zap.String("resource_id", id), zap.Error(updateErr))
+	}
+	return result, testErr
+}
+
+func (s *Service) CreateTask(ctx context.Context, resourceID string, req TaskRequest) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.CreateTask(ctx, conn, req)
+}
+
+func (s *Service) ListTasks(ctx context.Context, resourceID string, filter TaskFilter) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.ListTasks(ctx, conn, filter)
+}
+
+func (s *Service) GetTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.GetTask(ctx, conn, strings.TrimSpace(taskID))
+}
+
+func (s *Service) ListAssets(ctx context.Context, resourceID string, filter AssetFilter) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.ListAssets(ctx, conn, filter)
+}
+
+func (s *Service) StopTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	return adapter.StopTask(ctx, conn, strings.TrimSpace(taskID))
+}
+
+func MarshalResult(value interface{}) string {
+	raw, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(raw)
+}

@@ -248,6 +248,30 @@ func TestExternalMCPRequiresDedicatedPermission(t *testing.T) {
 	}
 }
 
+func TestASMToolsRequireGlobalExternalMCPPermission(t *testing.T) {
+	authorize := mcpToolAuthorizer(nil)
+	for _, toolName := range []string{
+		builtin.ToolASMListResources, builtin.ToolASMTestConnection,
+		builtin.ToolASMCreateTask, builtin.ToolASMListTasks,
+		builtin.ToolASMGetTask, builtin.ToolASMListAssets, builtin.ToolASMStopTask,
+	} {
+		agentOnly := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", database.RBACScopeAll, map[string]bool{"agent:execute": true}))
+		if err := authorize(agentOnly, toolName, nil); err == nil {
+			t.Fatalf("%s allowed agent:execute without external MCP permission", toolName)
+		}
+
+		assigned := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", database.RBACScopeAssigned, map[string]bool{"mcp:external:execute": true}))
+		if err := authorize(assigned, toolName, nil); err == nil {
+			t.Fatalf("%s allowed assigned scope", toolName)
+		}
+
+		global := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", database.RBACScopeAll, map[string]bool{"mcp:external:execute": true}))
+		if err := authorize(global, toolName, nil); err != nil {
+			t.Fatalf("%s rejected global external MCP permission: %v", toolName, err)
+		}
+	}
+}
+
 func TestConfiguredCommandToolRequiresLocalExecutePermission(t *testing.T) {
 	authorize := mcpToolAuthorizer(nil)
 	agentOnly := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", database.RBACScopeAssigned, map[string]bool{"agent:execute": true}))

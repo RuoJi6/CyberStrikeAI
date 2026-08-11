@@ -121,6 +121,16 @@ func mcpToolAuthorizer(db *database.DB) func(context.Context, string, map[string
 			return require("knowledge:read")
 		case builtin.ToolAnalyzeImage:
 			return require("agent:execute")
+		case builtin.ToolASMListResources, builtin.ToolASMTestConnection,
+			builtin.ToolASMCreateTask, builtin.ToolASMListTasks,
+			builtin.ToolASMGetTask, builtin.ToolASMListAssets, builtin.ToolASMStopTask:
+			if err := require("mcp:external:execute"); err != nil {
+				return err
+			}
+			if principal.ScopeFor("mcp:external:execute") != database.RBACScopeAll {
+				return fmt.Errorf("ASM invocation requires global scope")
+			}
+			return nil
 		case builtin.ToolGetToolExecution, builtin.ToolWaitToolExecution:
 			return toolExecutionResource("monitor:read")
 		case builtin.ToolCancelToolExecution:

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/asm"
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/c2"
@@ -101,6 +102,10 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	if err != nil {
 		return nil, fmt.Errorf("初始化数据库失败: %w", err)
 	}
+	asmService, err := asm.NewService(db, dbPath, log.Logger)
+	if err != nil {
+		return nil, fmt.Errorf("初始化 ASM 资源服务失败: %w", err)
+	}
 
 	// 认证管理器（数据库初始化后挂载 RBAC）
 	authManager := security.NewAuthManager(cfg.Auth.SessionDurationHours)
@@ -166,6 +171,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	registerAssetTools(mcpServer, db, log.Logger)
 	registerProjectFactTools(mcpServer, db, cfg, log.Logger)
 	registerVisionTools(mcpServer, cfg, log.Logger)
+	registerASMTools(mcpServer, asmService, log.Logger)
 
 	// 创建外部MCP管理器（使用与内部MCP服务器相同的存储）
 	externalMCPMgr := mcp.NewExternalMCPManagerWithStorage(log.Logger, db)
@@ -419,6 +425,8 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	agentHandler.SetHitlDefaultReviewerSaver(configHandler)
 	externalMCPHandler := handler.NewExternalMCPHandler(externalMCPMgr, cfg, configPath, log.Logger)
 	externalMCPHandler.SetAudit(auditSvc)
+	asmHandler := handler.NewASMHandler(asmService, log.Logger)
+	asmHandler.SetAudit(auditSvc)
 	roleHandler := handler.NewRoleHandler(cfg, configPath, log.Logger)
 	roleHandler.SetAudit(auditSvc)
 	skillsHandler := handler.NewSkillsHandler(cfg, configPath, log.Logger)
@@ -569,6 +577,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		groupHandler,
 		configHandler,
 		externalMCPHandler,
+		asmHandler,
 		attackChainHandler,
 		app, // 传递 App 实例以便动态获取 knowledgeHandler
 		vulnerabilityHandler,
@@ -872,6 +881,7 @@ func setupRoutes(
 	groupHandler *handler.GroupHandler,
 	configHandler *handler.ConfigHandler,
 	externalMCPHandler *handler.ExternalMCPHandler,
+	asmHandler *handler.ASMHandler,
 	attackChainHandler *handler.AttackChainHandler,
 	app *App, // 传递 App 实例以便动态获取 knowledgeHandler
 	vulnerabilityHandler *handler.VulnerabilityHandler,
@@ -1092,6 +1102,13 @@ func setupRoutes(
 		protected.DELETE("/external-mcp/:name", externalMCPHandler.DeleteExternalMCP)
 		protected.POST("/external-mcp/:name/start", externalMCPHandler.StartExternalMCP)
 		protected.POST("/external-mcp/:name/stop", externalMCPHandler.StopExternalMCP)
+
+		// ASM 资源管理（凭据仅加密存储，列表接口永不返回明文）
+		protected.GET("/asm/resources", asmHandler.List)
+		protected.POST("/asm/resources", asmHandler.Create)
+		protected.PUT("/asm/resources/:id", asmHandler.Update)
+		protected.DELETE("/asm/resources/:id", asmHandler.Delete)
+		protected.POST("/asm/resources/:id/test", asmHandler.Test)
 
 		// 攻击链可视化
 		protected.GET("/attack-chain/:conversationId", attackChainHandler.GetAttackChain)

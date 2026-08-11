@@ -24,9 +24,10 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/style.css?v=20260811-31">
+    <link rel="stylesheet" href="/static/css/asm.css?v=20260811-1">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <script src="/static/js/router.js"></script>
+    <script src="/static/js/router.js?v=20260811-1"></script>
 </head>
 <body>
     <div id="login-overlay" class="login-overlay" style="display: none;">
@@ -236,6 +237,18 @@
                             <div class="nav-submenu-item" data-page="asset-overview" onclick="switchPage('asset-overview')" data-i18n="nav.assetOverview">资产概览</div>
                             <div class="nav-submenu-item" data-page="asset-library" onclick="switchPage('asset-library')" data-i18n="nav.assetLibrary">资产库</div>
                             <div class="nav-submenu-item" data-page="info-collect" onclick="switchPage('info-collect')" data-i18n="nav.infoCollect">信息收集</div>
+                        </div>
+                    </div>
+                    <div class="nav-item" data-page="asm-resources" data-require-permission="mcp:read">
+                        <div class="nav-item-content" data-title="ASM 资源" onclick="switchPage('asm-resources')" data-i18n="nav.asmResources" data-i18n-attr="data-title" data-i18n-skip-text="true">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <circle cx="12" cy="12" r="3"></circle>
+                                <path d="M12 2v4"></path><path d="M12 18v4"></path>
+                                <path d="m4.93 4.93 2.83 2.83"></path><path d="m16.24 16.24 2.83 2.83"></path>
+                                <path d="M2 12h4"></path><path d="M18 12h4"></path>
+                                <path d="m4.93 19.07 2.83-2.83"></path><path d="m16.24 7.76 2.83-2.83"></path>
+                            </svg>
+                            <span data-i18n="nav.asmResources">ASM 资源</span>
                         </div>
                     </div>
                     <div class="nav-item" data-page="vulnerabilities">
@@ -2231,6 +2244,113 @@
                                     </tbody>
                                 </table>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ASM 资源页面 -->
+                <div id="page-asm-resources" class="page asm-page">
+                    <div class="page-header asm-page-header">
+                        <div class="page-header-main">
+                            <div class="asm-eyebrow" data-i18n="asm.eyebrow">ATTACK SURFACE MANAGEMENT</div>
+                            <h2 data-i18n="asm.title">ASM 资源</h2>
+                            <p data-i18n="asm.subtitle">连接 ARL、XingRin 与 ScopeSentry，让 Agent 通过统一 MCP 下发任务并读取结果。</p>
+                        </div>
+                        <div class="page-header-actions">
+                            <button type="button" class="btn-secondary btn-icon-text" onclick="loadASMResources()">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                                <span data-i18n="common.refresh">刷新</span>
+                            </button>
+                            <button type="button" class="btn-primary" data-require-permission="mcp:write" onclick="openASMResourceModal()">
+                                <span aria-hidden="true">＋</span><span data-i18n="asm.addResource">添加资源</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="page-content asm-page-content">
+                        <section class="asm-overview" aria-label="ASM provider overview">
+                            <div class="asm-overview-copy">
+                                <span class="asm-overview-kicker" data-i18n="asm.unifiedMcp">统一 MCP 调度层</span>
+                                <strong data-i18n="asm.unifiedMcpTitle">一套工具，连接多种 ASM</strong>
+                                <p data-i18n="asm.unifiedMcpDesc">模型只看到标准化任务与结果接口；平台凭据始终在服务端加密保存。</p>
+                            </div>
+                            <div class="asm-provider-strip" id="asm-provider-strip"></div>
+                        </section>
+
+                        <div class="asm-section-heading">
+                            <div>
+                                <h3 data-i18n="asm.configuredResources">已配置资源</h3>
+                                <p id="asm-resource-summary" data-i18n="asm.loading">正在加载连接…</p>
+                            </div>
+                        </div>
+                        <div id="asm-resource-grid" class="asm-resource-grid">
+                            <div class="asm-empty-state"><span class="asm-spinner" aria-hidden="true"></span><span data-i18n="asm.loading">正在加载连接…</span></div>
+                        </div>
+                    </div>
+
+                    <div id="asm-resource-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="asm-resource-modal-title">
+                        <div class="modal-content asm-modal-content">
+                            <div class="modal-header">
+                                <div>
+                                    <div class="asm-modal-kicker" data-i18n="asm.connectionConfig">CONNECTION CONFIG</div>
+                                    <h3 id="asm-resource-modal-title" data-i18n="asm.addResource">添加资源</h3>
+                                </div>
+                                <button type="button" class="modal-close" onclick="closeASMResourceModal()" aria-label="关闭">&times;</button>
+                            </div>
+                            <form id="asm-resource-form" onsubmit="saveASMResource(event)">
+                                <div class="modal-body asm-form-body">
+                                    <div id="asm-form-error" class="form-error" hidden></div>
+                                    <div class="asm-form-grid">
+                                        <div class="form-group">
+                                            <label for="asm-resource-name" data-i18n="asm.name">资源名称</label>
+                                            <input id="asm-resource-name" type="text" maxlength="100" required autocomplete="off" placeholder="例如：测试 ARL" data-i18n="asm.namePlaceholder" data-i18n-attr="placeholder">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="asm-resource-provider" data-i18n="asm.provider">ASM 类型</label>
+                                            <select id="asm-resource-provider" required onchange="syncASMProviderForm()">
+                                                <option value="arl">ARL / 灯塔</option>
+                                                <option value="xingrin">XingRin / 星环</option>
+                                                <option value="scopesentry">ScopeSentry</option>
+                                            </select>
+                                            <small id="asm-provider-form-hint" class="form-hint"></small>
+                                        </div>
+                                        <div class="form-group asm-form-wide">
+                                            <label for="asm-resource-url" data-i18n="asm.baseUrl">ASM 地址</label>
+                                            <input id="asm-resource-url" type="url" maxlength="2048" required autocomplete="url" placeholder="https://asm.example.com" data-i18n="asm.baseUrlPlaceholder" data-i18n-attr="placeholder">
+                                            <small class="form-hint" data-i18n="asm.baseUrlHint">填写平台根地址，不要包含 /api 路径、查询参数或登录凭据。</small>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="asm-resource-auth-type" data-i18n="asm.authType">认证方式</label>
+                                            <select id="asm-resource-auth-type" onchange="syncASMAuthForm()">
+                                                <option value="password" data-i18n="asm.passwordAuth">用户名 / 密码</option>
+                                                <option value="api_key" data-i18n="asm.apiKeyAuth">API Key</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group" id="asm-username-group">
+                                            <label for="asm-resource-username" data-i18n="asm.username">用户名</label>
+                                            <input id="asm-resource-username" type="text" maxlength="200" autocomplete="username">
+                                        </div>
+                                        <div class="form-group asm-form-wide">
+                                            <label for="asm-resource-credential" id="asm-credential-label" data-i18n="asm.password">密码</label>
+                                            <input id="asm-resource-credential" type="password" maxlength="8192" autocomplete="new-password">
+                                            <small id="asm-credential-hint" class="form-hint" data-i18n="asm.credentialCreateHint">凭据将使用 AES-GCM 加密保存，之后不会再次显示明文。</small>
+                                        </div>
+                                    </div>
+                                    <div class="asm-form-switches">
+                                        <label class="asm-switch-row">
+                                            <input id="asm-resource-verify-tls" type="checkbox" checked>
+                                            <span><strong data-i18n="asm.verifyTls">验证 TLS 证书</strong><small data-i18n="asm.verifyTlsHint">生产环境建议保持开启；自签名实验环境可关闭。</small></span>
+                                        </label>
+                                        <label class="asm-switch-row">
+                                            <input id="asm-resource-enabled" type="checkbox" checked>
+                                            <span><strong data-i18n="asm.enabled">允许 Agent 调用</strong><small data-i18n="asm.enabledHint">关闭后该资源不会出现在 asm_list_resources 中。</small></span>
+                                        </label>
+                                    </div>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn-secondary" onclick="closeASMResourceModal()" data-i18n="common.cancel">取消</button>
+                                    <button id="asm-save-button" type="submit" class="btn-primary" data-i18n="common.save">保存</button>
+                                </div>
+                            </form>
                         </div>
                     </div>
                 </div>
@@ -6818,6 +6938,7 @@
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
     <script src="/static/js/assets.js?v=20260717-7"></script>
+    <script src="/static/js/asm.js?v=20260811-1"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260811-1"></script>
