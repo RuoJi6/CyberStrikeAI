@@ -23,7 +23,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260811-31">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260811-34">
     <link rel="stylesheet" href="/static/css/asm.css?v=20260811-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -948,19 +948,6 @@
                                         <option value="" data-i18n="chat.filterAllProjects">全部项目</option>
                                         <option value="__none__" data-i18n="chat.filterUnboundProjects">未绑定项目</option>
                                     </select>
-                                </div>
-                                
-                                <!-- 对话分组 -->
-                                <div class="conversation-groups-section">
-                                    <div class="section-header">
-                                        <span class="section-title" data-i18n="chat.conversationGroups">对话分组</span>
-                                        <button class="add-group-btn" data-require-permission="group:write" onclick="showCreateGroupModal()" data-i18n="chat.addGroup" data-i18n-attr="title" data-i18n-skip-text="true" title="新建分组">
-                                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                                <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                            </svg>
-                                        </button>
-                                    </div>
-                                    <div id="conversation-groups-list" class="conversation-groups-list"></div>
                                 </div>
                                 
                                 <!-- 最近对话 -->
@@ -6278,6 +6265,9 @@
         <div id="projects-list-menu-edit" class="context-menu-item" data-require-permission="project:write" onclick="editProjectFromListMenu()">
             <span id="projects-list-menu-edit-text"></span>
         </div>
+        <div id="projects-list-menu-pin" class="context-menu-item" data-require-permission="project:write" onclick="toggleProjectPinnedFromListMenu()">
+            <span id="projects-list-menu-pin-text"></span>
+        </div>
         <div id="projects-list-menu-archive" class="context-menu-item" data-require-permission="project:write" onclick="toggleProjectArchiveFromListMenu()">
             <span id="projects-list-menu-archive-text"></span>
         </div>
@@ -6995,10 +6985,10 @@
     <script src="/static/js/asm.js?v=20260811-3"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
-    <script src="/static/js/chat-scroll.js?v=20260811-1"></script>
-    <script src="/static/js/monitor.js?v=20260811-11"></script>
-    <script src="/static/js/chat.js?v=20260811-22"></script>
-    <script src="/static/js/hitl.js?v=20260810-3"></script>
+    <script src="/static/js/chat-scroll.js?v=20260811-2"></script>
+    <script src="/static/js/monitor.js?v=20260811-13"></script>
+    <script src="/static/js/chat.js?v=20260811-24"></script>
+    <script src="/static/js/hitl.js?v=20260811-4"></script>
     <script src="/static/js/settings.js?v=20260717-1"></script>
     <script src="/static/js/audit-datetime-picker.js"></script>
     <script src="/static/js/audit.js"></script>
@@ -7009,7 +6999,7 @@
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
-    <script src="/static/js/projects.js?v=20260811-13"></script>
+    <script src="/static/js/projects.js?v=20260811-17"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>

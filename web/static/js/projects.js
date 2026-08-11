@@ -2182,12 +2182,18 @@ function showProjectListActionMenu(event, projectId, source = '') {
     _projectListMenuTargetId = projectId;
     _projectListMenuSource = source;
     const editText = document.getElementById('projects-list-menu-edit-text');
+    const pinText = document.getElementById('projects-list-menu-pin-text');
     const archiveText = document.getElementById('projects-list-menu-archive-text');
     const deleteText = document.getElementById('projects-list-menu-delete-text');
     if (editText) {
         editText.textContent = source === 'chat'
             ? pickerMessage(tp, 'projects.renameProject', '重命名')
             : tp('projects.editProject');
+    }
+    if (pinText) {
+        pinText.textContent = p.pinned
+            ? pickerMessage(tp, 'projects.unpinProjectAction', '取消置顶')
+            : pickerMessage(tp, 'projects.pinProjectAction', '置顶项目');
     }
     if (archiveText) {
         archiveText.textContent = p.status === 'archived'
@@ -2197,6 +2203,38 @@ function showProjectListActionMenu(event, projectId, source = '') {
     if (deleteText) deleteText.textContent = tp('projects.deleteProject');
     positionProjectListActionMenu(event);
     if (typeof applyRBACToUI === 'function') applyRBACToUI(menu);
+}
+
+function updateCachedProjectPinnedState(projectId, pinned) {
+    const update = (project) => {
+        if (project?.id === projectId) project.pinned = !!pinned;
+        return project;
+    };
+    projectsCache = sortProjectsForPicker(projectsCache.map(update));
+    projectsCacheAll = sortProjectsForPicker(projectsCacheAll.map(update));
+    renderProjectsSidebar();
+    if (isProjectsCacheReady() && chatProjectFolderContext.ready) {
+        renderChatProjectFolders(projectsCacheAll);
+    }
+}
+
+async function toggleProjectPinnedFromListMenu() {
+    if (!requireProjectWrite()) return;
+    const projectId = _projectListMenuTargetId;
+    const project = findProjectById(projectId);
+    closeProjectListActionMenu();
+    if (!projectId || !project) return;
+
+    const nextPinned = !project.pinned;
+    const res = await apiFetch(`/api/projects/${projectId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pinned: nextPinned }),
+    });
+    if (!(await notifyProjectApiFailure(res, 'projects.operationFailed', '操作失败'))) return;
+
+    updateCachedProjectPinnedState(projectId, nextPinned);
+    await loadProjectsList();
 }
 
 function initProjectListActionMenu() {
@@ -2549,6 +2587,7 @@ const projectPickerPanelState = {
 
 let chatProjectFolderSearchQuery = '';
 let chatProjectFolderRenderSeq = 0;
+let chatProjectFolderContextLoadSeq = 0;
 const chatProjectFolderExpandedIds = new Set();
 let chatProjectFolderLastSelectionId = null;
 const CHAT_UNASSIGNED_PROJECT_FOLDER_ID = '__chat_unassigned_project__';
@@ -3189,6 +3228,14 @@ function appendChatProjectFolderItem(list, project, expandedIds, conversations) 
     const label = document.createElement('span');
     label.className = 'project-folder-label';
     label.appendChild(title);
+    if (!isUnassigned && project.pinned) {
+        const pinIcon = document.createElement('span');
+        pinIcon.className = 'project-folder-pinned';
+        pinIcon.textContent = '📌';
+        pinIcon.title = pickerMessage(tp, 'projects.pinned', '已置顶');
+        pinIcon.setAttribute('aria-label', pinIcon.title);
+        label.appendChild(pinIcon);
+    }
     const folderApprovals = conversations
         .map((conversation) => chatProjectFolderContext.pendingApprovalByConversation.get(conversation.id))
         .filter(Boolean);
@@ -3284,6 +3331,14 @@ function appendChatProjectConversationItem(list, conversation, project) {
     const label = document.createElement('span');
     label.className = 'project-conversation-label';
     label.appendChild(title);
+    if (conversation.pinned) {
+        const pinIcon = document.createElement('span');
+        pinIcon.className = 'conversation-item-pinned project-conversation-pinned';
+        pinIcon.textContent = '📌';
+        pinIcon.title = pickerMessage(tp, 'projects.pinned', '已置顶');
+        pinIcon.setAttribute('aria-label', pinIcon.title);
+        label.appendChild(pinIcon);
+    }
     const statusKinds = [];
     if (isWaitingApproval) statusKinds.push('approval');
     if (isRunning) statusKinds.push('running');
@@ -3348,6 +3403,7 @@ function selectChatProjectConversationItem(conversationId) {
 window.selectChatProjectConversationItem = selectChatProjectConversationItem;
 
 async function loadChatProjectFolderContext() {
+    const loadSeq = ++chatProjectFolderContextLoadSeq;
     const conversationsParams = new URLSearchParams({ limit: '1000', offset: '0', sort_by: 'updated_at' });
     const [conversationResponse, activeResponse, completedResponse, pendingResponse] = await Promise.all([
         apiFetch(`/api/conversations?${conversationsParams}`),
@@ -3360,6 +3416,7 @@ async function loadChatProjectFolderContext() {
     const activeData = activeResponse.ok ? await activeResponse.json() : { tasks: [] };
     const completedData = completedResponse.ok ? await completedResponse.json() : { tasks: [] };
     const pendingData = pendingResponse.ok ? await pendingResponse.json() : { items: [] };
+    if (loadSeq !== chatProjectFolderContextLoadSeq) return false;
     const conversations = Array.isArray(conversationData)
         ? conversationData
         : (conversationData.conversations || conversationData.items || []);
@@ -3377,7 +3434,7 @@ async function loadChatProjectFolderContext() {
         }
     });
     chatProjectFolderContext.pendingApprovalByConversation = new Map();
-    (pendingData.items || []).forEach((item) => {
+    (pendingData.items || []).filter(isHumanProjectPendingApproval).forEach((item) => {
         const conversationId = String(item?.conversationId || '').trim();
         // pending 审批必须属于当前进程仍在运行的任务；服务重启/取消后的旧记录
         // 即使在并发窗口内被读到，也不能重新显示倒计时徽标。
@@ -3387,6 +3444,67 @@ async function loadChatProjectFolderContext() {
         }
     });
     chatProjectFolderContext.ready = true;
+    return true;
+}
+
+function isHumanProjectPendingApproval(item) {
+    if (!item) return false;
+    const reviewer = String(item.reviewer || item.decidedBy || item.decided_by || '').trim().toLowerCase();
+    const status = String(item.status || '').trim().toLowerCase();
+    return reviewer !== 'audit_agent' && reviewer !== 'agent' && reviewer !== 'ai' && status !== 'audit_running';
+}
+
+function getProjectConversationSortTime(conversation) {
+    const value = conversation?.updatedAt || conversation?.updated_at
+        || conversation?.createdAt || conversation?.created_at || '';
+    const timestamp = Date.parse(value);
+    return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function sortProjectFolderConversations(conversations) {
+    return [...conversations].sort((a, b) => {
+        const pinnedDelta = Number(!!b?.pinned) - Number(!!a?.pinned);
+        if (pinnedDelta) return pinnedDelta;
+        return getProjectConversationSortTime(b) - getProjectConversationSortTime(a);
+    });
+}
+
+function updateChatProjectConversationPinnedState(conversationId, pinned) {
+    const id = String(conversationId || '').trim();
+    const conversation = chatProjectFolderContext.conversations.find(
+        (item) => String(item?.id || '').trim() === id
+    );
+    if (!conversation) return false;
+    conversation.pinned = !!pinned;
+    if (isProjectsCacheReady() && chatProjectFolderContext.ready) {
+        renderChatProjectFolders(projectsCacheAll);
+    }
+    return true;
+}
+
+function removeChatProjectConversation(conversationId) {
+    const id = String(conversationId || '').trim();
+    if (!id) return false;
+    const previousLength = chatProjectFolderContext.conversations.length;
+    chatProjectFolderContext.conversations = chatProjectFolderContext.conversations.filter(
+        (item) => String(item?.id || '').trim() !== id
+    );
+    chatProjectFolderContext.runningIds.delete(id);
+    chatProjectFolderContext.completedByConversation.delete(id);
+    chatProjectFolderContext.pendingApprovalByConversation.delete(id);
+    if (projectConversationPreviewAnchor?.querySelector('.project-conversation-item')?.dataset.conversationId === id) {
+        hideProjectConversationPreview(true);
+    }
+    if (isProjectsCacheReady() && chatProjectFolderContext.ready) {
+        renderChatProjectFolders(projectsCacheAll);
+    }
+    return chatProjectFolderContext.conversations.length !== previousLength;
+}
+
+function refreshChatProjectFoldersAfterAction() {
+    Promise.resolve().then(() => refreshChatProjectFolders()).catch((error) => {
+        console.warn('刷新项目对话列表失败:', error);
+    });
 }
 
 function resolveChatProjectFolderSelection() {
@@ -3419,7 +3537,11 @@ function renderChatProjectFolders(projects) {
         _isUnassigned: true,
     };
     const includeUnassigned = matchProjectSearchQuery(unassignedProject, chatProjectFolderSearchQuery);
-    const folders = includeUnassigned ? [unassignedProject, ...filtered] : filtered;
+    const pinnedProjects = filtered.filter((project) => !!project.pinned);
+    const regularProjects = filtered.filter((project) => !project.pinned);
+    const folders = includeUnassigned
+        ? [...pinnedProjects, unassignedProject, ...regularProjects]
+        : filtered;
     list.innerHTML = '';
     if (!folders.length) {
         const empty = document.createElement('div');
@@ -3432,8 +3554,10 @@ function renderChatProjectFolders(projects) {
     }
     folders.forEach((project) => {
         const folderId = project._isUnassigned ? CHAT_UNASSIGNED_PROJECT_FOLDER_ID : project.id;
-        const conversations = chatProjectFolderContext.conversations
-            .filter((conversation) => (conversation.projectId || conversation.project_id || '') === project.id);
+        const conversations = sortProjectFolderConversations(
+            chatProjectFolderContext.conversations
+                .filter((conversation) => (conversation.projectId || conversation.project_id || '') === project.id)
+        );
         appendChatProjectFolderItem(list, project, chatProjectFolderExpandedIds, conversations);
         if (chatProjectFolderExpandedIds.has(folderId)) {
             conversations.forEach((conversation) => appendChatProjectConversationItem(list, conversation, project));
@@ -3512,7 +3636,7 @@ function updateProjectFolderTaskStatuses(tasks) {
 function setProjectConversationApprovalStatus(conversationId, pending, details) {
     const id = String(conversationId || '').trim();
     if (!id) return;
-    if (pending) chatProjectFolderContext.pendingApprovalByConversation.set(id, details || { conversationId: id });
+    if (pending && isHumanProjectPendingApproval(details || {})) chatProjectFolderContext.pendingApprovalByConversation.set(id, details || { conversationId: id });
     else chatProjectFolderContext.pendingApprovalByConversation.delete(id);
     if (isProjectsCacheReady() && chatProjectFolderContext.ready) {
         renderChatProjectFolders(projectsCacheAll);
@@ -3522,6 +3646,7 @@ function setProjectConversationApprovalStatus(conversationId, pending, details) 
 function syncProjectConversationApprovalStatuses(items) {
     const next = new Map();
     (Array.isArray(items) ? items : []).forEach((details) => {
+        if (!isHumanProjectPendingApproval(details)) return;
         const id = String(details && details.conversationId || '').trim();
         if (id && chatProjectFolderContext.runningIds.has(id) && !next.has(id)) {
             next.set(id, details);
@@ -3545,6 +3670,20 @@ function syncProjectConversationApprovalStatuses(items) {
 
 window.setProjectConversationApprovalStatus = setProjectConversationApprovalStatus;
 window.syncProjectConversationApprovalStatuses = syncProjectConversationApprovalStatuses;
+
+if (!window._projectConversationActionEventsBound) {
+    window._projectConversationActionEventsBound = true;
+    document.addEventListener('conversation-pinned-changed', (event) => {
+        const details = event?.detail || {};
+        updateChatProjectConversationPinnedState(details.conversationId, details.pinned);
+        refreshChatProjectFoldersAfterAction();
+    });
+    document.addEventListener('conversation-deleted', (event) => {
+        const conversationId = event?.detail?.conversationId;
+        removeChatProjectConversation(conversationId);
+        refreshChatProjectFoldersAfterAction();
+    });
+}
 
 if (!window._projectApprovalStatusEventsBound) {
     window._projectApprovalStatusEventsBound = true;
@@ -3922,6 +4061,7 @@ window.archiveCurrentProject = archiveCurrentProject;
 window.deleteCurrentProject = deleteCurrentProject;
 window.showProjectListActionMenu = showProjectListActionMenu;
 window.editProjectFromListMenu = editProjectFromListMenu;
+window.toggleProjectPinnedFromListMenu = toggleProjectPinnedFromListMenu;
 window.toggleProjectArchiveFromListMenu = toggleProjectArchiveFromListMenu;
 window.deleteProjectFromListMenu = deleteProjectFromListMenu;
 window.refreshChatProjectSelector = refreshChatProjectSelector;
