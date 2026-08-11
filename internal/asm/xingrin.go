@@ -253,8 +253,20 @@ func buildXingRinConfiguration(options map[string]interface{}) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !portScan && !siteScan {
-		return "", fmt.Errorf("XingRin 至少需要启用 port_scan 或 site_identify")
+	siteCapture, err := xingrinBoolOption(options, "site_capture", false)
+	if err != nil {
+		return "", err
+	}
+	nucleiScan, err := xingrinBoolOption(options, "nuclei_scan", false)
+	if err != nil {
+		return "", err
+	}
+	if !portScan && !siteScan && !siteCapture && !nucleiScan {
+		return "", fmt.Errorf("XingRin 至少需要启用一个扫描阶段")
+	}
+	if siteCapture || nucleiScan {
+		// 截图和漏洞扫描都依赖站点发现结果。
+		siteScan = true
 	}
 	ports, err := validateXingRinPorts(strings.TrimSpace(fmt.Sprint(options["ports"])))
 	if options["ports"] == nil {
@@ -278,6 +290,13 @@ func buildXingRinConfiguration(options map[string]interface{}) (string, error) {
 	}
 	if siteScan {
 		fmt.Fprintf(&config, "site_scan:\n  tools:\n    httpx:\n      enabled: true\n      threads: %d\n      rate-limit: %d\n      request-timeout: 8\n      retries: 1\n", concurrency, rate)
+		config.WriteString("fingerprint_detect:\n  tools:\n    xingfinger:\n      enabled: true\n      fingerprint-libs: [ehole, goby, wappalyzer, fingers, fingerprinthub, arl]\n")
+	}
+	if siteCapture {
+		fmt.Fprintf(&config, "screenshot:\n  tools:\n    playwright:\n      enabled: true\n      concurrency: %d\n      url_sources: [websites]\n", concurrency)
+	}
+	if nucleiScan {
+		fmt.Fprintf(&config, "vuln_scan:\n  tools:\n    dalfox_xss:\n      enabled: false\n    nuclei:\n      enabled: true\n      template-repo-names:\n        - nuclei-templates\n      concurrency: %d\n      rate-limit: %d\n      request-timeout: 8\n      severity: medium,high,critical\n      tags: cve\n", concurrency, rate)
 	}
 	return config.String(), nil
 }

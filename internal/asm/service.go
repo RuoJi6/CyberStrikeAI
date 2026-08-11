@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -109,10 +110,11 @@ type Adapter interface {
 }
 
 type Service struct {
-	db       *database.DB
-	cipher   *credentialCipher
-	logger   *zap.Logger
-	adapters map[string]Adapter
+	db            *database.DB
+	cipher        *credentialCipher
+	logger        *zap.Logger
+	adapters      map[string]Adapter
+	screenshotDir string
 }
 
 func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Service, error) {
@@ -126,7 +128,10 @@ func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Serv
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	service := &Service{db: db, cipher: cipher, logger: logger, adapters: make(map[string]Adapter)}
+	service := &Service{
+		db: db, cipher: cipher, logger: logger, adapters: make(map[string]Adapter),
+		screenshotDir: filepath.Join(filepath.Dir(databasePath), "asm_screenshots"),
+	}
 	service.RegisterAdapter(NewARLAdapter())
 	service.RegisterAdapter(NewXingRinAdapter())
 	service.RegisterAdapter(NewScopeSentryAdapter())
@@ -403,7 +408,11 @@ func (s *Service) CreateTask(ctx context.Context, resourceID string, req TaskReq
 	if err != nil {
 		return nil, err
 	}
-	return adapter.CreateTask(ctx, conn, req)
+	result, err := adapter.CreateTask(ctx, conn, req)
+	if err != nil {
+		return nil, err
+	}
+	return s.recordCreatedTask(conn, req, result), nil
 }
 
 func (s *Service) ListTasks(ctx context.Context, resourceID string, filter TaskFilter) (interface{}, error) {
@@ -411,7 +420,12 @@ func (s *Service) ListTasks(ctx context.Context, resourceID string, filter TaskF
 	if err != nil {
 		return nil, err
 	}
-	return adapter.ListTasks(ctx, conn, filter)
+	result, err := adapter.ListTasks(ctx, conn, filter)
+	if err != nil {
+		return nil, err
+	}
+	s.recordListedTasks(conn, result)
+	return result, nil
 }
 
 func (s *Service) GetTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {

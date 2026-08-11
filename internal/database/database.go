@@ -536,6 +536,51 @@ func (db *DB) initTables() error {
 		updated_at DATETIME NOT NULL
 	);`
 
+	createASMTasksTable := `
+	CREATE TABLE IF NOT EXISTS asm_tasks (
+		id TEXT PRIMARY KEY,
+		resource_id TEXT NOT NULL,
+		resource_name TEXT NOT NULL,
+		provider TEXT NOT NULL,
+		remote_task_id TEXT NOT NULL,
+		name TEXT NOT NULL DEFAULT '',
+		target TEXT NOT NULL DEFAULT '',
+		options_json TEXT NOT NULL DEFAULT '{}',
+		status TEXT NOT NULL DEFAULT 'submitted',
+		progress INTEGER NOT NULL DEFAULT 0,
+		stage TEXT NOT NULL DEFAULT '',
+		summary_json TEXT NOT NULL DEFAULT '{}',
+		detail_json TEXT NOT NULL DEFAULT '{}',
+		last_error TEXT NOT NULL DEFAULT '',
+		last_synced_at DATETIME,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);`
+
+	createASMTaskResultsTable := `
+	CREATE TABLE IF NOT EXISTS asm_task_results (
+		task_id TEXT NOT NULL,
+		asset_type TEXT NOT NULL,
+		payload_json TEXT NOT NULL DEFAULT '{}',
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (task_id, asset_type),
+		FOREIGN KEY (task_id) REFERENCES asm_tasks(id) ON DELETE CASCADE
+	);`
+
+	createASMScreenshotsTable := `
+	CREATE TABLE IF NOT EXISTS asm_screenshots (
+		id TEXT PRIMARY KEY,
+		task_id TEXT NOT NULL,
+		source_url TEXT NOT NULL,
+		label TEXT NOT NULL DEFAULT '',
+		file_path TEXT NOT NULL,
+		content_type TEXT NOT NULL,
+		size_bytes INTEGER NOT NULL DEFAULT 0,
+		sha256 TEXT NOT NULL DEFAULT '',
+		created_at DATETIME NOT NULL,
+		FOREIGN KEY (task_id) REFERENCES asm_tasks(id) ON DELETE CASCADE
+	);`
+
 	// ========================================================================
 	// C2 模块（监听器 / 会话 / 任务 / 文件 / 事件 / Malleable Profile）
 	// ========================================================================
@@ -787,6 +832,12 @@ func (db *DB) initTables() error {
 	CREATE INDEX IF NOT EXISTS idx_asm_resources_provider ON asm_resources(provider);
 	CREATE INDEX IF NOT EXISTS idx_asm_resources_enabled ON asm_resources(enabled);
 	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_resources_name ON asm_resources(name);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_tasks_remote ON asm_tasks(resource_id, remote_task_id);
+	CREATE INDEX IF NOT EXISTS idx_asm_tasks_created_at ON asm_tasks(created_at);
+	CREATE INDEX IF NOT EXISTS idx_asm_tasks_provider ON asm_tasks(provider);
+	CREATE INDEX IF NOT EXISTS idx_asm_tasks_status ON asm_tasks(status);
+	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_screenshots_source ON asm_screenshots(task_id, source_url);
+	CREATE INDEX IF NOT EXISTS idx_asm_screenshots_task ON asm_screenshots(task_id);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_created_at ON c2_listeners(created_at);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_project_id ON c2_listeners(project_id);
 	CREATE INDEX IF NOT EXISTS idx_c2_listeners_status ON c2_listeners(status);
@@ -906,6 +957,15 @@ func (db *DB) initTables() error {
 
 	if _, err := db.Exec(createASMResourcesTable); err != nil {
 		return fmt.Errorf("创建asm_resources表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMTasksTable); err != nil {
+		return fmt.Errorf("创建asm_tasks表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMTaskResultsTable); err != nil {
+		return fmt.Errorf("创建asm_task_results表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMScreenshotsTable); err != nil {
+		return fmt.Errorf("创建asm_screenshots表失败: %w", err)
 	}
 
 	if _, err := db.Exec(createAuditLogsTable); err != nil {

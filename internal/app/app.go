@@ -1109,6 +1109,12 @@ func setupRoutes(
 		protected.PUT("/asm/resources/:id", asmHandler.Update)
 		protected.DELETE("/asm/resources/:id", asmHandler.Delete)
 		protected.POST("/asm/resources/:id/test", asmHandler.Test)
+		protected.GET("/asm/tasks", asmHandler.ListTaskHistory)
+		protected.GET("/asm/tasks/:id", asmHandler.GetTaskHistory)
+		protected.POST("/asm/tasks/:id/sync", asmHandler.SyncTaskHistory)
+		protected.GET("/asm/tasks/:id/results", asmHandler.TaskHistoryResults)
+		protected.POST("/asm/tasks/:id/screenshots/sync", asmHandler.SyncTaskScreenshots)
+		protected.GET("/asm/screenshots/:id/content", asmHandler.ScreenshotContent)
 
 		// 攻击链可视化
 		protected.GET("/attack-chain/:conversationId", attackChainHandler.GetAttackChain)

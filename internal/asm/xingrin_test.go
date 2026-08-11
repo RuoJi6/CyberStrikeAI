@@ -14,12 +14,14 @@ import (
 func TestBuildXingRinConfigurationUsesLowLoadDefaults(t *testing.T) {
 	configuration, err := buildXingRinConfiguration(map[string]interface{}{
 		"ports": "443,8083", "rate_limit": 12, "concurrency": 3,
+		"site_capture": true, "nuclei_scan": true,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
 		`ports: "443,8083"`, "rate: 12", "threads: 3", "naabu_passive:", "enabled: false", "site_scan:",
+		"fingerprint_detect:", "screenshot:", "concurrency: 3", "vuln_scan:", "dalfox_xss:", "tags: cve",
 	} {
 		if !strings.Contains(configuration, expected) {
 			t.Fatalf("configuration missing %q:\n%s", expected, configuration)
@@ -30,6 +32,15 @@ func TestBuildXingRinConfigurationUsesLowLoadDefaults(t *testing.T) {
 	}
 	if _, err := buildXingRinConfiguration(map[string]interface{}{"port_scan": false, "site_identify": false}); err == nil {
 		t.Fatal("expected empty scan configuration to fail")
+	}
+	dependencyConfiguration, err := buildXingRinConfiguration(map[string]interface{}{
+		"port_scan": false, "site_identify": false, "site_capture": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(dependencyConfiguration, "site_scan:") {
+		t.Fatal("site capture should enable its site scan dependency")
 	}
 }
 
