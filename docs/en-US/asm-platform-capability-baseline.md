@@ -1,6 +1,6 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 1.3
+> Document version: 1.5
 > Baseline date: 2026-08-12
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
@@ -26,7 +26,7 @@ Agents use ten normalized tools:
 | `asm_list_task_options` | Query live policies, engines, dictionaries, nodes, templates, plugins, POCs, or projects |
 | `asm_create_task` | Create a task for an explicitly authorized target |
 | `asm_list_tasks` / `asm_get_task` | Read task lists, progress, stages, statistics, and configuration |
-| `asm_list_assets` | Read site, domain, IP, URL, service, or vulnerability results |
+| `asm_list_assets` | Read one provider-specific result type with pagination; discover valid IDs from profile `result_types` |
 | `asm_stop_task` | Stop a remote task |
 | `asm_manage_task` | Restart, resume, delete, or synchronize results when supported |
 
@@ -70,9 +70,11 @@ Node selection, ignore/duplicate rules, target sources, projects, structured ass
 
 | Platform | Authentication/connectivity | Tasks/options | Assets |
 | --- | --- | --- | --- |
-| ARL | `/api/user/login`, `/api/console/info` | `/api/task/`, `/api/task/policy/`, stop/restart/delete/sync; policy/POC/scope lists | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/url/`, `/api/service/`, `/api/vuln/` |
+| ARL | `/api/user/login`, `/api/console/info` | `/api/task/`, `/api/task/policy/`, stop/restart/delete/sync; policy/POC/scope lists | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
 | XingRin | `/api/auth/login/`, `/api/auth/me/` | `/api/scans/quick/`, scans/detail/stop; engines/Workers/wordlists/Nuclei repositories | `/api/assets/:type/`, `/api/scans/:id/:type/` |
-| ScopeSentry | `/api/user/login`, `/api/node/online` | task templates, immediate/scheduled task creation and lifecycle; dictionary/plugin/POC/project choices | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/vulnerability` |
+| ScopeSentry | `/api/user/login`, `/api/node/online` | task templates, immediate/scheduled task creation and lifecycle; dictionary/plugin/POC/project choices | site/domain/IP/URL plus crawler, sensitive, directory, takeover, vulnerability list and vulnerability detail APIs |
+
+The task center now renders provider-aware rich cards rather than forcing all providers into a fixed generic table. Complete fields can be expanded; vulnerability cards expose severity, target, scanner evidence, and request/response detail. Pagination uses upstream totals with 10/20/50/100 page sizes. Screenshots have a dedicated view and are authenticated, downloaded, and cached by CyberStrikeAI automatically after UI or MCP result reads.
 
 ## Live MCP validation
 
@@ -100,6 +102,8 @@ The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_T
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific rich result cards, upstream-total pagination and page sizes; mapped XingRin directory/screenshot results and ScopeSentry crawler/sensitive/directory/takeover/vulnerability details; made screenshot caching automatic for UI and MCP reads |
+| 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific `result_types`; mapped all 13 ARL task-detail collections; added provider-aware tabs and paged task-center reads |
 | 1.3 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Isolated generated ScopeSentry templates by configuration fingerprint and added scheduled-task ID resolution, task-center visibility, detail, and explicit deletion semantics |
 | 1.2 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Completed provider-specific task capabilities, compact live option discovery, and real MCP create/read/stop validation |
 | 1.0 | 2026-08-11 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Initial version, capability, API, and adapter-gap baseline |

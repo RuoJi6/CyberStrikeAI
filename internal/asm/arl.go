@@ -333,6 +333,10 @@ var arlAssetEndpoints = map[string]struct{ path, queryField string }{
 	"site": {"/api/site/", "site"}, "domain": {"/api/domain/", "domain"},
 	"ip": {"/api/ip/", "ip"}, "url": {"/api/url/", "url"},
 	"service": {"/api/service/", "service_name"}, "vulnerability": {"/api/vuln/", "vul_name"},
+	"cert": {"/api/cert/", "ip"}, "fileleak": {"/api/fileleak/", "url"},
+	"npoc_service": {"/api/npoc_service/", "host"}, "cip": {"/api/cip/", "cidr_ip"},
+	"nuclei_result": {"/api/nuclei_result/", "vuln_url"}, "stat_finger": {"/api/stat_finger/", "name"},
+	"wih": {"/api/wih/", "content"},
 }
 
 func (a *ARLAdapter) ListAssets(ctx context.Context, conn *Connection, filter AssetFilter) (interface{}, error) {
@@ -386,6 +390,7 @@ func (a *ARLAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interf
 		"task_modes":           []string{"direct", "policy"},
 		"dynamic_option_kinds": []string{"policies", "policy_detail", "pocs", "scopes"},
 		"manage_actions":       []string{"restart", "delete", "sync_results"},
+		"result_types":         providerResultTypes(ProviderARL),
 		"notes": []string{
 			"direct 模式对应 /api/task/，仅支持 ARL 直接任务字段",
 			"policy 模式对应 /api/task/policy/，自定义端口、排除端口、速率、POC 和字典由 policy_id 指向的上游策略决定，不支持任务级覆盖",

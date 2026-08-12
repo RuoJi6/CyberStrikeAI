@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"cyberstrike-ai/internal/database"
@@ -93,6 +94,68 @@ type AssetFilter struct {
 	PageSize int
 }
 
+type AssetDetailFilter struct {
+	Type string
+	Key  string
+}
+
+// ResultType describes one provider-native result collection. The ID is sent
+// to ListAssets while Label is safe display metadata for the task center and
+// Agent profile discovery.
+type ResultType struct {
+	ID      string `json:"id"`
+	Label   string `json:"label"`
+	Default bool   `json:"default,omitempty"`
+}
+
+func providerResultTypes(provider string) []ResultType {
+	switch normalizeProvider(provider) {
+	case ProviderARL:
+		return []ResultType{
+			{ID: "site", Label: "站点", Default: true},
+			{ID: "domain", Label: "子域名"},
+			{ID: "ip", Label: "IP"},
+			{ID: "cert", Label: "SSL 证书"},
+			{ID: "service", Label: "服务"},
+			{ID: "fileleak", Label: "文件泄露"},
+			{ID: "url", Label: "URL 信息"},
+			{ID: "vulnerability", Label: "风险"},
+			{ID: "npoc_service", Label: "服务 (Python)"},
+			{ID: "cip", Label: "C 段"},
+			{ID: "nuclei_result", Label: "Nuclei"},
+			{ID: "stat_finger", Label: "指纹统计"},
+			{ID: "wih", Label: "WIH"},
+		}
+	case ProviderXingRin:
+		return []ResultType{
+			{ID: "site", Label: "站点", Default: true}, {ID: "domain", Label: "子域名"},
+			{ID: "ip", Label: "IP"}, {ID: "url", Label: "端点 / URL"},
+			{ID: "service", Label: "端口 / 服务"}, {ID: "directory", Label: "目录扫描"},
+			{ID: "vulnerability", Label: "漏洞"}, {ID: "screenshot", Label: "站点截图"},
+		}
+	case ProviderScopeSentry:
+		return []ResultType{
+			{ID: "site", Label: "资产 / 站点", Default: true}, {ID: "domain", Label: "子域名"},
+			{ID: "ip", Label: "IP"}, {ID: "url", Label: "URL"},
+			{ID: "service", Label: "IP / 服务"}, {ID: "crawler", Label: "爬虫结果"},
+			{ID: "sensitive", Label: "敏感信息"}, {ID: "directory", Label: "目录扫描"},
+			{ID: "takeover", Label: "子域接管"}, {ID: "vulnerability", Label: "漏洞"},
+		}
+	default:
+		return []ResultType{{ID: "site", Label: "站点", Default: true}}
+	}
+}
+
+func providerSupportsResultType(provider, resultType string) bool {
+	resultType = strings.ToLower(strings.TrimSpace(resultType))
+	for _, item := range providerResultTypes(provider) {
+		if item.ID == resultType {
+			return true
+		}
+	}
+	return false
+}
+
 type TaskOptionFilter struct {
 	Kind     string
 	Query    string
@@ -135,12 +198,21 @@ type TaskManagerAdapter interface {
 	ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error)
 }
 
+// AssetDetailAdapter exposes result details that the upstream stores outside
+// the paginated list payload (for example vulnerability request/response).
+type AssetDetailAdapter interface {
+	GetAssetDetail(context.Context, *Connection, AssetDetailFilter) (interface{}, error)
+}
+
 type Service struct {
-	db            *database.DB
-	cipher        *credentialCipher
-	logger        *zap.Logger
-	adapters      map[string]Adapter
-	screenshotDir string
+	db               *database.DB
+	cipher           *credentialCipher
+	logger           *zap.Logger
+	adapters         map[string]Adapter
+	screenshotDir    string
+	screenshotMu     sync.Mutex
+	screenshotJobs   map[string]bool
+	screenshotErrors map[string]string
 }
 
 func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Service, error) {
@@ -156,7 +228,8 @@ func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Serv
 	}
 	service := &Service{
 		db: db, cipher: cipher, logger: logger, adapters: make(map[string]Adapter),
-		screenshotDir: filepath.Join(filepath.Dir(databasePath), "asm_screenshots"),
+		screenshotDir:  filepath.Join(filepath.Dir(databasePath), "asm_screenshots"),
+		screenshotJobs: make(map[string]bool), screenshotErrors: make(map[string]string),
 	}
 	service.RegisterAdapter(NewARLAdapter())
 	service.RegisterAdapter(NewXingRinAdapter())
@@ -536,7 +609,17 @@ func (s *Service) ListAssets(ctx context.Context, resourceID string, filter Asse
 	if err != nil {
 		return nil, err
 	}
-	return adapter.ListAssets(ctx, conn, filter)
+	if filter.Type != "" && !providerSupportsResultType(conn.Resource.Provider, filter.Type) {
+		return nil, fmt.Errorf("%s 不支持结果类型: %s；请先读取 asm_get_task_profile.result_types", providerDisplayName(conn.Resource.Provider), filter.Type)
+	}
+	payload, err := adapter.ListAssets(ctx, conn, filter)
+	resultType := normalizeAssetType(filter.Type)
+	if err == nil && (resultType == "site" || resultType == "screenshot") && strings.TrimSpace(filter.TaskID) != "" {
+		if task, findErr := s.db.FindASMTask(resourceID, filter.TaskID); findErr == nil && task != nil {
+			s.enqueueTaskScreenshotCache(task.ID, payload)
+		}
+	}
+	return payload, err
 }
 
 func (s *Service) StopTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {

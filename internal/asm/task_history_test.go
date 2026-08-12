@@ -3,8 +3,10 @@ package asm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"cyberstrike-ai/internal/database"
@@ -13,7 +15,8 @@ import (
 )
 
 type taskHistoryTestAdapter struct {
-	assetsErr error
+	assetsErr   error
+	detailCalls int
 }
 
 func (a *taskHistoryTestAdapter) Provider() string { return ProviderXingRin }
@@ -53,6 +56,10 @@ func (a *taskHistoryTestAdapter) StopTask(context.Context, *Connection, string) 
 }
 func (a *taskHistoryTestAdapter) ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error) {
 	return map[string]interface{}{}, nil
+}
+func (a *taskHistoryTestAdapter) GetAssetDetail(context.Context, *Connection, AssetDetailFilter) (interface{}, error) {
+	a.detailCalls++
+	return map[string]interface{}{"request": "GET /", "response": "HTTP/1.1 200 OK"}, nil
 }
 func (a *taskHistoryTestAdapter) FetchScreenshot(context.Context, *Connection, string) ([]byte, string, error) {
 	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, "image/png", nil
@@ -175,6 +182,29 @@ func TestTaskHistoryScreenshotCache(t *testing.T) {
 	second, err := service.SyncTaskScreenshots(context.Background(), localID)
 	if err != nil || second.Skipped != 1 || second.Downloaded != 0 {
 		t.Fatalf("expected screenshot cache hit: %#v err=%v", second, err)
+	}
+}
+
+func TestTaskHistoryResultDetailUsesProviderAdapter(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	detail, err := service.GetTaskHistoryResultDetail(context.Background(), localID, AssetDetailFilter{Type: "vulnerability", Key: "hash-one"})
+	if err != nil || adapter.detailCalls != 1 || !strings.Contains(fmt.Sprint(detail), "HTTP/1.1 200 OK") {
+		t.Fatalf("unexpected result detail: %#v calls=%d err=%v", detail, adapter.detailCalls, err)
+	}
+	if _, err := service.GetTaskHistoryResultDetail(context.Background(), localID, AssetDetailFilter{Type: "vulnerability"}); err == nil {
+		t.Fatal("empty detail key was accepted")
 	}
 }
 

@@ -12,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cyberstrike-ai/internal/database"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 const asmScreenshotMaxBytes = 10 * 1024 * 1024
@@ -205,16 +207,12 @@ func enrichScreenshotURLs(items []*database.ASMScreenshot) []*database.ASMScreen
 	return items
 }
 
-func (s *Service) SyncTaskScreenshots(ctx context.Context, id string) (ScreenshotSyncResult, error) {
+func (s *Service) cacheTaskScreenshotPayload(ctx context.Context, id string, payload interface{}) (ScreenshotSyncResult, error) {
 	item, err := s.db.GetASMTask(id)
 	if err != nil {
 		return ScreenshotSyncResult{}, err
 	}
-	results, err := s.ListTaskHistoryResults(ctx, id, AssetFilter{Type: "site", Page: 1, PageSize: 100})
-	if err != nil {
-		return ScreenshotSyncResult{}, err
-	}
-	references := collectScreenshotReferences(results.Payload)
+	references := collectScreenshotReferences(payload)
 	result := ScreenshotSyncResult{TaskID: item.ID, Discovered: len(references), Errors: []string{}}
 	conn, adapter, err := s.connection(item.ResourceID, false)
 	if err != nil {
@@ -272,6 +270,81 @@ func (s *Service) SyncTaskScreenshots(ctx context.Context, id string) (Screensho
 	result.Screenshots, err = s.db.ListASMScreenshots(item.ID)
 	result.Screenshots = enrichScreenshotURLs(result.Screenshots)
 	return result, err
+}
+
+func (s *Service) screenshotSources(ctx context.Context, item *database.ASMTask) ([]interface{}, error) {
+	conn, adapter, err := s.connection(item.ResourceID, false)
+	if err != nil {
+		return nil, err
+	}
+	resultTypes := []string{"site"}
+	if normalizeProvider(item.Provider) == ProviderXingRin {
+		resultTypes = []string{"screenshot", "site"}
+	}
+	payloads := make([]interface{}, 0, len(resultTypes))
+	for _, resultType := range resultTypes {
+		payload, listErr := adapter.ListAssets(ctx, conn, AssetFilter{TaskID: item.RemoteTaskID, Type: resultType, Page: 1, PageSize: 100})
+		if listErr != nil {
+			if len(payloads) == 0 {
+				err = listErr
+			}
+			continue
+		}
+		payloads = append(payloads, payload)
+		if len(collectScreenshotReferences(payload)) > 0 {
+			break
+		}
+	}
+	if len(payloads) == 0 {
+		return nil, err
+	}
+	return payloads, nil
+}
+
+func (s *Service) SyncTaskScreenshots(ctx context.Context, id string) (ScreenshotSyncResult, error) {
+	item, err := s.db.GetASMTask(id)
+	if err != nil {
+		return ScreenshotSyncResult{}, err
+	}
+	payloads, err := s.screenshotSources(ctx, item)
+	if err != nil {
+		return ScreenshotSyncResult{}, err
+	}
+	return s.cacheTaskScreenshotPayload(ctx, id, payloads)
+}
+
+func (s *Service) enqueueTaskScreenshotCache(id string, payload interface{}) {
+	if len(collectScreenshotReferences(payload)) == 0 {
+		return
+	}
+	s.screenshotMu.Lock()
+	if s.screenshotJobs[id] {
+		s.screenshotMu.Unlock()
+		return
+	}
+	s.screenshotJobs[id] = true
+	delete(s.screenshotErrors, id)
+	s.screenshotMu.Unlock()
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		_, err := s.cacheTaskScreenshotPayload(ctx, id, payload)
+		s.screenshotMu.Lock()
+		delete(s.screenshotJobs, id)
+		if err != nil {
+			s.screenshotErrors[id] = truncateError(err)
+		}
+		s.screenshotMu.Unlock()
+		if err != nil {
+			s.logger.Warn("自动缓存 ASM 截图失败", zap.String("task_id", id), zap.Error(err))
+		}
+	}()
+}
+
+func (s *Service) ScreenshotCacheState(id string) (bool, string) {
+	s.screenshotMu.Lock()
+	defer s.screenshotMu.Unlock()
+	return s.screenshotJobs[id], s.screenshotErrors[id]
 }
 
 func (s *Service) GetScreenshotFile(id string) (*database.ASMScreenshot, error) {

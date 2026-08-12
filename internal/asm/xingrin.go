@@ -511,6 +511,7 @@ func (a *XingRinAdapter) GetTaskProfile(_ context.Context, conn *Connection) (in
 		"provider": ProviderXingRin, "resource_id": conn.Resource.ID, "upstream_version": "v1.5.8",
 		"task_modes": []string{"quick_scan"}, "dynamic_option_kinds": []string{"engines", "workers", "wordlists", "nuclei_repositories"},
 		"manage_actions": []string{},
+		"result_types":   providerResultTypes(ProviderXingRin),
 		"notes": []string{
 			"quick_scan 最多接受 5000 个目标；多个目标使用换行、逗号或空白分隔",
 			"任务名称由 XingRin 上游生成，CyberStrikeAI 不伪造不存在的 name 字段",
@@ -684,7 +685,9 @@ var xingrinAssetEndpoints = map[string]struct{ segment, queryField string }{
 	"ip":            {"ip-addresses", "ip"},
 	"url":           {"endpoints", "url"},
 	"service":       {"ip-addresses", "ip"},
+	"directory":     {"directories", "url"},
 	"vulnerability": {"vulnerabilities", "url"},
+	"screenshot":    {"screenshots", "url"},
 }
 
 func xingrinFilterExpression(field, value string) (string, error) {
@@ -733,6 +736,26 @@ func (a *XingRinAdapter) ListAssets(ctx context.Context, conn *Connection, filte
 	payload, err := xingrinRequest(ctx, client, conn, http.MethodGet, apiPath, query, nil)
 	if err != nil {
 		return nil, err
+	}
+	// XingRin deliberately omits image bytes from screenshot list responses.
+	// Add a same-origin image reference so CyberStrikeAI's authenticated fetcher
+	// can cache each screenshot without exposing upstream credentials to the UI.
+	if assetType == "screenshot" {
+		for _, raw := range xingrinCollection(payload) {
+			item := valueMap(raw)
+			if item == nil {
+				continue
+			}
+			id := meaningfulString(item["id"])
+			if id == "" {
+				continue
+			}
+			if strings.TrimSpace(filter.TaskID) != "" {
+				item["screenshot_path"] = "/api/scans/" + strings.TrimSpace(filter.TaskID) + "/screenshots/" + id + "/image/"
+			} else {
+				item["screenshot_path"] = "/api/assets/screenshots/" + id + "/image/"
+			}
+		}
 	}
 	return map[string]interface{}{
 		"provider": ProviderXingRin, "resource_id": conn.Resource.ID,

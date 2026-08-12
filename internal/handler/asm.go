@@ -177,6 +177,17 @@ func (h *ASMHandler) TaskHistoryResults(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+func (h *ASMHandler) TaskHistoryResultDetail(c *gin.Context) {
+	result, err := h.service.GetTaskHistoryResultDetail(c.Request.Context(), c.Param("id"), asm.AssetDetailFilter{
+		Type: c.Query("asset_type"), Key: c.Query("key"),
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 func (h *ASMHandler) SyncTaskScreenshots(c *gin.Context) {
 	result, err := h.service.SyncTaskScreenshots(c.Request.Context(), c.Param("id"))
 	if err != nil {

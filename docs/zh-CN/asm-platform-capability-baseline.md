@@ -1,6 +1,6 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：1.3
+> 文档版本：1.5
 > 基线日期：2026-08-12
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
@@ -37,7 +37,7 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
-| `asm_list_assets` | 读取站点、域名、IP、URL、服务或漏洞结果 | 否 |
+| `asm_list_assets` | 按平台结果类型分页读取扫描结果；先从 profile 的 `result_types` 获取合法类型 | 否 |
 | `asm_stop_task` | 停止指定远端任务 | 是 |
 | `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
@@ -118,9 +118,9 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 平台 | 连接与任务 | 结果读取 | 当前结论 |
 | --- | --- | --- | --- |
-| ARL | direct/policy 创建、策略/POC/资产范围选项、查询、详情、停止、重跑、删除、同步 | site/domain/ip/url/service/vulnerability | 已适配；自定义端口等高级字段按上游规则归属策略 |
-| XingRin | 子域、端口、站点、指纹、目录、URL、截图、Nuclei/Dalfox；引擎/字典/模板仓库实时选择 | site/domain/ip/url/service/vulnerability，可按任务限定 | 已适配当前上游快速扫描流水线；不开放任意 YAML |
-| ScopeSentry | 低负载生成模板或完整上游模板；节点、项目、字典、插件、POC、定时与生命周期动作 | site/domain/ip/url/service/vulnerability，可按任务限定 | 已适配上游模板驱动能力；不开放任意插件命令行 |
+| ARL | direct/policy 创建、策略/POC/资产范围选项、查询、详情、停止、重跑、删除、同步 | site/domain/ip/cert/service/fileleak/url/vulnerability/npoc_service/cip/nuclei_result/stat_finger/wih | 已适配上游任务详情页 13 类结果；自定义端口等高级字段按上游规则归属策略 |
+| XingRin | 子域、端口、站点、指纹、目录、URL、截图、Nuclei/Dalfox；引擎/字典/模板仓库实时选择 | site/domain/ip/url/service/directory/vulnerability/screenshot，可按任务限定 | 已适配扫描快照中的目录、漏洞与原生截图；截图二进制由 CyberStrikeAI 自动认证拉取并本地缓存；不开放任意 YAML |
+| ScopeSentry | 低负载生成模板或完整上游模板；节点、项目、字典、插件、POC、定时与生命周期动作 | site/domain/ip/url/service/crawler/sensitive/directory/takeover/vulnerability，可按任务限定 | 已适配爬虫、敏感信息、目录、子域接管和漏洞列表；漏洞请求/响应通过上游详情接口按需读取；不开放任意插件命令行 |
 
 统一 `asm_create_task` schema 是三套平台字段的并集，三个适配器现在都会严格拒绝未知选项和错误类型。Agent 必须以 provider-specific profile 为准，避免“字段看似可选但被平台忽略”。
 
@@ -130,9 +130,11 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 平台 | 认证/连通性 | 任务 | 资产 |
 | --- | --- | --- | --- |
-| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `/api/task/policy/`, `/api/task/stop/:id`, `/api/task/restart/`, `/api/task/delete/`, `/api/task/sync/`; `/api/policy/`, `/api/poc/`, `/api/asset_scope/` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/url/`, `/api/service/`, `/api/vuln/` |
+| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `/api/task/policy/`, `/api/task/stop/:id`, `/api/task/restart/`, `/api/task/delete/`, `/api/task/sync/`; `/api/policy/`, `/api/poc/`, `/api/asset_scope/` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
 | XingRin | `POST /api/auth/login/`, `GET /api/auth/me/` | `/api/scans/quick/`, `/api/scans/`, `/api/scans/:id/`, `/api/scans/:id/stop/`; `/api/engines/`, `/api/workers/`, `/api/wordlists/`, `/api/nuclei/repos/` | `/api/assets/:type/`, `/api/scans/:id/:type/` |
-| ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/scheduled/add`, `/api/task/scheduled`, `/api/task/scheduled/detail`, `/api/task/scheduled/delete`, `/api/task/`, `/api/task/detail`, `/api/task/stop`, `/api/task/start`, `/api/task/retest`, `/api/task/delete`; `/api/dictionary/*`, `/api/plugin`, `/api/poc`, `/api/project/all` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/vulnerability` |
+| ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/scheduled/add`, `/api/task/scheduled`, `/api/task/scheduled/detail`, `/api/task/scheduled/delete`, `/api/task/`, `/api/task/detail`, `/api/task/stop`, `/api/task/start`, `/api/task/retest`, `/api/task/delete`; `/api/dictionary/*`, `/api/plugin`, `/api/poc`, `/api/project/all` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/crawler`, `/api/assets/sensitive`, `/api/assets/dirscan`, `/api/assets/subdomain/taker`, `/api/assets/vulnerability`, `/api/assets/vulnerability/detail` |
+
+任务中心不再把三套平台结果塞入固定列：每种结果使用平台字段模型生成摘要卡片，完整字段可展开，漏洞显示级别、来源、目标、证据及请求/响应。分页使用上游 `total` 与页码，每页可选 10/20/50/100。截图作为独立结果视图，读取站点/截图结果后自动排队下载到 CyberStrikeAI，不再依赖人工“缓存截图”按钮；Agent 通过 MCP 读取站点或截图结果时同样触发自动缓存。
 
 ## 8. 真实 MCP 调用验证
 
@@ -162,6 +164,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心改为平台专属完整结果卡片；补齐 XingRin 目录/截图与 ScopeSentry 爬虫/敏感信息/目录/接管/漏洞详情；截图自动缓存；增加上游总数分页和页大小 |
+| 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | profile 暴露平台专属 `result_types`；补齐 ARL 任务详情 13 类结果，任务中心按平台动态展示并分页读取 |
 | 1.3 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 低负载模板改为配置指纹隔离；定时任务回查 ID、进入任务中心并支持详情/显式删除 |
 | 1.2 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 记录三平台真实 MCP 创建/读取/停止测试；增加大型动态选项的分页和摘要化约束 |
 | 1.1 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 新增 provider profile/动态选项/管理 MCP；补齐 ARL policy、XingRin 快速扫描阶段和 ScopeSentry 模板/节点/定时能力 |

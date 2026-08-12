@@ -11,7 +11,15 @@ const asmPageState = {
     loadingTasks: false,
     selectedTask: null,
     selectedAssetType: 'site',
+    resultPage: 1,
+    resultPageSize: 20,
+    resultTotal: 0,
     imageObjectUrls: [],
+    screenshotSyncing: false,
+    screenshotMessage: '',
+    resultRequestSeq: 0,
+    lastResultPayload: null,
+    lastResultQuery: '',
 };
 
 function asmT(key, fallback, options) {
@@ -432,8 +440,25 @@ function renderASMTaskDetail() {
 function renderASMResultTabs() {
     const root = document.getElementById('asm-result-tabs');
     if (!root) return;
-    const labels = { site: '站点', domain: '域名', ip: 'IP', url: 'URL', service: '服务', vulnerability: '漏洞' };
-    root.innerHTML = Object.entries(labels).map(([id, label]) => `<button type="button" class="${asmPageState.selectedAssetType === id ? 'active' : ''}" onclick="selectASMResultType('${id}')">${label}</button>`).join('');
+    const screenshotCount = asmPageState.selectedTask?.screenshots?.length || 0;
+    root.innerHTML = asmTaskResultTypes().map(item => `<button type="button" class="${asmPageState.selectedAssetType === item.id ? 'active' : ''}" onclick="selectASMResultType('${asmEscape(item.id)}')">${asmEscape(item.label)}${item.local && screenshotCount ? `<b>${screenshotCount}</b>` : ''}</button>`).join('');
+}
+
+function asmTaskResultTypes() {
+    const values = Array.isArray(asmPageState.selectedTask?.result_types) ? asmPageState.selectedTask.result_types : [];
+    const result = values.filter(item => item && /^[a-z0-9_]+$/.test(String(item.id || '')) && item.label);
+    const fallback = [
+        { id: 'site', label: '站点', default: true }, { id: 'domain', label: '域名' },
+        { id: 'ip', label: 'IP' }, { id: 'url', label: 'URL' },
+        { id: 'service', label: '服务' }, { id: 'vulnerability', label: '漏洞' },
+    ];
+    const items = result.length ? result.slice() : fallback;
+    items.push({ id: 'screenshots', label: '已缓存截图', local: true });
+    return items;
+}
+
+function asmSelectedResultType() {
+    return asmTaskResultTypes().find(item => item.id === asmPageState.selectedAssetType) || { id: asmPageState.selectedAssetType, label: asmPageState.selectedAssetType };
 }
 
 function asmFindResultRows(value, depth) {
@@ -463,6 +488,281 @@ function asmResultCell(value) {
     return raw.length > 180 ? `${raw.slice(0, 177)}…` : raw;
 }
 
+const asmResultLabels = Object.freeze({
+    site: '站点', url: 'URL', domain: '域名', host: '主机', ip: 'IP', port: '端口',
+    service: '服务', service_name: '服务', title: '标题', status: '状态', status_code: '状态码',
+    statusCode: '状态码', content_length: '内容长度', contentLength: '内容长度', content_type: '内容类型',
+    webserver: 'Web Server', webServer: 'Web Server', products: '产品 / 指纹', tech: '技术栈', finger: '指纹',
+    vulnerability: '漏洞名称', vul_name: '漏洞名称', vuln_name: '漏洞名称', vulName: '漏洞名称',
+    vuln_type: '漏洞类型', vulnType: '漏洞类型', severity: '严重级别', level: '严重级别',
+    target: '目标', matched: '匹配位置', source: '来源', template_id: '模板 ID', 'template-id': '模板 ID',
+    cvss_score: 'CVSS', cvssScore: 'CVSS', request: '请求', response: '响应', req: '请求', res: '响应',
+    raw_output: '扫描器原始结果', rawOutput: '扫描器原始结果', description: '描述', tags: '标签',
+    time: '发现时间', created_at: '创建时间', createdAt: '创建时间', save_date: '保存时间',
+    screenshot: '上游截图', screenshot_path: '上游截图', headers: '响应头', responseHeaders: '响应头',
+    banner: 'Banner', metadata: '元数据', record: '记录值', type: '类型', name: '名称', value: '值',
+    ports: '端口', hosts: '关联主机', os_info: '操作系统', geo_asn: 'ASN', geo_city: '地理位置',
+    subject: '证书主题', issuer: '签发者', not_before: '生效时间', not_after: '过期时间',
+    input: '输入', output: '输出', method: '方法', length: '长度', match: '匹配内容', color: '规则颜色',
+    content: '内容', record_type: '记录类型', cidr_ip: 'C 段', ip_count: 'IP 数', domain_count: '域名数',
+    cnt: '数量', project: '项目', taskName: '任务', rootDomain: '根域名', gfPatterns: 'GF 模式',
+});
+
+function asmPathValue(value, path) {
+    return String(path || '').split('.').reduce((current, key) => current && typeof current === 'object' ? current[key] : undefined, value);
+}
+
+function asmFirstValue(row, keys) {
+    for (const key of keys || []) {
+        const value = asmPathValue(row, key);
+        if (value !== undefined && value !== null && value !== '' && !(Array.isArray(value) && !value.length)) return value;
+    }
+    return '';
+}
+
+function asmTextValue(value) {
+    if (value == null) return '';
+    if (Array.isArray(value)) return value.map(asmTextValue).filter(Boolean).join(', ');
+    if (typeof value === 'object') {
+        for (const key of ['name', 'title', 'value', 'url', 'host', 'ip']) {
+            if (value[key] != null && value[key] !== '') return String(value[key]);
+        }
+        return JSON.stringify(value);
+    }
+    return String(value);
+}
+
+function asmLooksLikeURL(value) {
+    return /^https?:\/\//i.test(String(value || ''));
+}
+
+function asmValueHTML(value) {
+    const text = asmTextValue(value);
+    if (asmLooksLikeURL(text)) return `<a href="${asmEscape(text)}" target="_blank" rel="noopener noreferrer">${asmEscape(text)}</a>`;
+    return asmEscape(text);
+}
+
+function asmSeverity(value) {
+    const level = String(value || '').toLowerCase();
+    if (['critical', '严重', '危急'].includes(level)) return { key: 'critical', label: '严重' };
+    if (['high', '高危', 'high-risk'].includes(level)) return { key: 'high', label: '高危' };
+    if (['medium', '中危', 'moderate'].includes(level)) return { key: 'medium', label: '中危' };
+    if (['low', '低危'].includes(level)) return { key: 'low', label: '低危' };
+    if (['info', 'informational', '信息'].includes(level)) return { key: 'info', label: '信息' };
+    return value ? { key: 'unknown', label: String(value) } : null;
+}
+
+function asmResultSchema(provider, type) {
+    const common = {
+        site: { title: ['url', 'site', 'domain'], subtitle: ['title'], facts: [['状态码', 'status', 'status_code', 'statusCode'], ['IP', 'ip'], ['端口', 'port'], ['服务', 'service', 'webserver', 'webServer'], ['技术 / 指纹', 'products', 'tech', 'finger']] },
+        domain: { title: ['domain', 'host', 'name'], subtitle: ['rootDomain'], facts: [['类型', 'type'], ['记录值', 'record', 'value'], ['IP', 'ips', 'ip'], ['时间', 'time', 'created_at', 'createdAt']] },
+        ip: { title: ['ip', 'host'], subtitle: ['domain'], facts: [['端口', 'port', 'ports'], ['服务', 'service'], ['关联主机', 'hosts', 'domain'], ['产品 / 指纹', 'products'], ['时间', 'time', 'created_at', 'createdAt']] },
+        service: { title: ['service_name', 'service', 'ip'], subtitle: ['ip', 'domain'], facts: [['端口', 'port', 'ports'], ['产品', 'product', 'products'], ['版本', 'version'], ['Web Server', 'webServer', 'webserver']] },
+        url: { title: ['url', 'output', 'site'], subtitle: ['title', 'source'], facts: [['状态码', 'status', 'status_code', 'statusCode'], ['类型', 'type', 'content_type', 'contentType'], ['长度', 'length', 'content_length', 'contentLength'], ['来源', 'source'], ['时间', 'time', 'created_at', 'createdAt']] },
+        directory: { title: ['url'], subtitle: ['msg'], facts: [['状态码', 'status', 'status_code'], ['长度', 'length', 'content_length'], ['类型', 'content_type'], ['单词 / 行', 'words', 'lines'], ['耗时', 'duration']] },
+        crawler: { title: ['url'], subtitle: ['method'], facts: [['方法', 'method'], ['请求体', 'body'], ['时间', 'time'], ['标签', 'tags']] },
+        sensitive: { title: ['url'], subtitle: ['name'], facts: [['规则', 'name'], ['匹配内容', 'match'], ['状态', 'status'], ['时间', 'time'], ['标签', 'tags']] },
+        takeover: { title: ['host', 'input', 'domain'], subtitle: ['value'], facts: [['CNAME', 'type', 'cname'], ['记录值', 'value'], ['响应', 'response'], ['标签', 'tags']] },
+        screenshot: { title: ['url'], subtitle: ['status_code'], facts: [['状态码', 'status_code'], ['创建时间', 'created_at'], ['更新时间', 'updated_at']] },
+        vulnerability: { title: ['vulnerability', 'vul_name', 'vuln_name', 'vulName', 'vuln_type', 'vulnType', 'raw_output.info.name', 'rawOutput.info.name', 'template_id'], subtitle: ['url', 'target', 'matched'], facts: [['严重级别', 'severity', 'level', 'vuln_severity'], ['来源', 'source', 'plg_type'], ['模板 / 插件', 'template_id', 'vulnid', 'app_name'], ['CVSS', 'cvss_score', 'cvssScore'], ['发现时间', 'time', 'save_date', 'created_at', 'createdAt']] },
+        nuclei_result: { title: ['vuln_name', 'template_id'], subtitle: ['vuln_url', 'target'], facts: [['严重级别', 'vuln_severity'], ['模板 ID', 'template_id'], ['时间', 'save_date']] },
+        cert: { title: ['subject', 'cert.subject', 'ip'], subtitle: ['issuer', 'cert.issuer'], facts: [['IP', 'ip'], ['端口', 'port'], ['生效时间', 'not_before', 'cert.not_before'], ['过期时间', 'not_after', 'cert.not_after'], ['DNS 名称', 'dns_names', 'cert.dns_names']] },
+        fileleak: { title: ['url'], subtitle: ['title'], facts: [['状态码', 'status_code'], ['内容长度', 'content_length'], ['时间', 'save_date']] },
+        npoc_service: { title: ['target', 'host'], subtitle: ['scheme'], facts: [['协议', 'scheme'], ['主机', 'host'], ['端口', 'port'], ['时间', 'save_date']] },
+        cip: { title: ['cidr_ip'], subtitle: ['domain'], facts: [['IP 数', 'ip_count'], ['域名数', 'domain_count'], ['时间', 'save_date']] },
+        stat_finger: { title: ['name'], subtitle: ['type'], facts: [['数量', 'cnt', 'count']] },
+        wih: { title: ['site', 'content'], subtitle: ['source'], facts: [['记录类型', 'record_type'], ['内容', 'content'], ['来源', 'source']] },
+    };
+    const schema = common[type] || { title: ['name', 'title', 'url', 'site', 'domain', 'ip', 'id'], subtitle: ['description'], facts: [] };
+    if (provider === 'arl' && type === 'ip') schema.facts = [['端口信息', 'port_info'], ['操作系统', 'os_info'], ['ASN', 'geo_asn'], ['地理位置', 'geo_city']];
+    if (provider === 'xingrin' && ['ip', 'service'].includes(type)) schema.facts = [['端口', 'ports'], ['关联主机', 'hosts'], ['时间', 'created_at', 'createdAt']];
+    return schema;
+}
+
+function asmResultTitle(row, schema, index) {
+    return asmFirstValue(row, schema.title) || `结果 ${index + 1}`;
+}
+
+const asmHeavyResultFields = new Set([
+    'headers', 'responseHeaders', 'banner', 'metadata', 'body', 'response_body', 'responseBody',
+    'request', 'response', 'req', 'res', 'raw_output', 'rawOutput', 'verify_data', 'verifyData',
+]);
+
+const asmSecondaryResultFields = new Set([
+    '_id', 'id', 'task_id', 'taskId', 'hash', 'favicon', 'screenshot', 'screenshot_path',
+    'created_at', 'createdAt', 'updated_at', 'updatedAt',
+]);
+
+function asmPrettyValue(value) {
+    if (value == null) return '';
+    return typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value);
+}
+
+function asmTagValues(value) {
+    const result = [];
+    const append = item => {
+        if (item == null || item === '') return;
+        if (Array.isArray(item)) {
+            item.forEach(append);
+            return;
+        }
+        if (typeof item === 'object') {
+            const label = asmFirstValue(item, ['name', 'title', 'product', 'value', 'finger', 'tech', 'service']);
+            if (label !== '') result.push(asmTextValue(label));
+            else Object.values(item).forEach(append);
+            return;
+        }
+        result.push(String(item));
+    };
+    append(value);
+    return [...new Set(result.filter(Boolean))];
+}
+
+function asmRenderResultChips(values) {
+    const items = asmTagValues(values);
+    if (!items.length) return '';
+    return `<div class="asm-result-chips">${items.map(item => `<span>${asmEscape(item)}</span>`).join('')}</div>`;
+}
+
+function asmRenderDirectFields(row, excluded) {
+    const hidden = new Set([...(excluded || []), ...asmHeavyResultFields, ...asmSecondaryResultFields]);
+    const fields = Object.entries(row).filter(([key, value]) => {
+        if (hidden.has(key) || value == null || value === '') return false;
+        if (Array.isArray(value) && !value.length) return false;
+        if (typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length) return false;
+        return true;
+    });
+    if (!fields.length) return '';
+    return `<div class="asm-result-all-fields">${fields.map(([key, value]) => `<div><span>${asmEscape(asmResultLabels[key] || key)}</span><strong>${asmValueHTML(value)}</strong></div>`).join('')}</div>`;
+}
+
+function asmRenderEvidence(row, keys) {
+    const sections = (keys || []).filter(key => row[key] != null && row[key] !== '').map(key => {
+        const value = asmPrettyValue(row[key]);
+        if (!value || value === '{}' || value === '[]') return '';
+        return `<section class="asm-result-evidence"><h6>${asmEscape(asmResultLabels[key] || key)}</h6><pre>${asmEscape(value)}</pre></section>`;
+    }).filter(Boolean);
+    return sections.length ? `<div class="asm-result-evidence-grid">${sections.join('')}</div>` : '';
+}
+
+function asmNormalizedAssetKey(value) {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    try {
+        const parsed = new URL(text);
+        parsed.hash = '';
+        const path = parsed.pathname === '/' ? '' : parsed.pathname.replace(/\/$/, '');
+        return `${parsed.protocol.toLowerCase()}//${parsed.host.toLowerCase()}${path}${parsed.search}`;
+    } catch (_) {
+        return text.toLocaleLowerCase().replace(/\/$/, '');
+    }
+}
+
+function asmScreenshotsForRow(row, screenshots) {
+    if (!Array.isArray(screenshots) || !screenshots.length) return [];
+    const candidates = ['url', 'site', 'output', 'target', 'host', 'domain', 'ip']
+        .map(key => asmNormalizedAssetKey(row[key])).filter(Boolean);
+    if (!candidates.length) return [];
+    return screenshots.filter(item => {
+        const label = asmNormalizedAssetKey(item?.label);
+        if (!label) return false;
+        return candidates.some(candidate => candidate === label);
+    });
+}
+
+function asmRenderScreenshotFigure(item, compact) {
+    const label = item?.label || 'ASM 站点截图';
+    return `<figure class="${compact ? 'asm-record-screenshot' : ''}" data-asm-screenshot-url="${asmEscape(item.url)}"><div class="asm-screenshot-loading">正在安全加载…</div><img alt="${asmEscape(label)}" loading="lazy"><figcaption><strong>${asmEscape(label)}</strong><span>${asmEscape(item.content_type)} · ${Math.max(1, Math.round((Number(item.size_bytes) || 0) / 1024))} KiB</span></figcaption></figure>`;
+}
+
+function asmRenderSiteRecord(row, index, screenshots) {
+    const schema = asmResultSchema(asmPageState.selectedTask?.provider || '', 'site');
+    const title = asmResultTitle(row, schema, index);
+    const subtitle = asmFirstValue(row, ['title']);
+    const status = asmFirstValue(row, ['status_code', 'statusCode', 'status']);
+    const facts = [
+        ['IP', asmFirstValue(row, ['ip', 'host'])], ['端口', asmFirstValue(row, ['port'])],
+        ['服务 / Web Server', asmFirstValue(row, ['service', 'webserver', 'webServer'])],
+        ['内容类型', asmFirstValue(row, ['content_type', 'contentType'])],
+        ['内容长度', asmFirstValue(row, ['content_length', 'contentLength', 'body_length'])],
+        ['发现时间', asmFirstValue(row, ['time', 'save_date', 'created_at', 'createdAt'])],
+    ].filter(([, value]) => value !== '');
+    const finger = asmFirstValue(row, ['finger', 'products', 'tech', 'fingerprints']);
+    const matchedScreenshots = asmScreenshotsForRow(row, screenshots);
+    const media = matchedScreenshots.length
+        ? matchedScreenshots.map(item => asmRenderScreenshotFigure(item, true)).join('')
+        : `<div class="asm-record-screenshot-placeholder"><span>站点截图</span><strong>${asmPageState.screenshotSyncing ? '正在自动缓存…' : '上游未返回可关联截图'}</strong></div>`;
+    const used = ['url', 'site', 'domain', 'title', 'status', 'status_code', 'statusCode', 'ip', 'host', 'port', 'service', 'webserver', 'webServer', 'content_type', 'contentType', 'content_length', 'contentLength', 'body_length', 'time', 'save_date', 'finger', 'products', 'tech', 'fingerprints'];
+    return `<article class="asm-result-card asm-site-record">
+        <header><div class="asm-result-index">${index + 1}</div><div class="asm-result-card-title"><h5>${asmValueHTML(title)}</h5>${subtitle ? `<p>${asmValueHTML(subtitle)}</p>` : ''}</div><div class="asm-result-card-badges">${status !== '' ? `<span class="asm-result-status">HTTP ${asmEscape(status)}</span>` : ''}</div></header>
+        <div class="asm-site-record-layout"><div class="asm-site-record-data">
+            ${facts.length ? `<div class="asm-result-facts">${facts.map(([label, value]) => `<div><span>${asmEscape(label)}</span><strong>${asmValueHTML(value)}</strong></div>`).join('')}</div>` : ''}
+            ${finger !== '' ? `<section class="asm-record-section"><h6>指纹 / 技术栈</h6>${asmRenderResultChips(finger)}</section>` : ''}
+            ${asmRenderDirectFields(row, used)}
+            ${asmRenderEvidence(row, ['headers', 'responseHeaders', 'banner', 'metadata', 'body', 'response_body', 'responseBody'])}
+        </div><aside class="asm-site-record-media">${media}</aside></div>
+        <details class="asm-result-detail"><summary>查看上游原始字段</summary><dl>${asmRenderResultDetails(row)}</dl></details>
+    </article>`;
+}
+
+function asmRenderResultDetails(row) {
+    return Object.entries(row).map(([key, value]) => {
+        const label = asmResultLabels[key] || key;
+        const raw = asmTextValue(value);
+        const complex = value && typeof value === 'object' || raw.length > 240 || ['request', 'response', 'req', 'res', 'raw_output', 'rawOutput', 'headers', 'responseHeaders', 'body', 'banner', 'metadata'].includes(key);
+        return `<div class="asm-result-detail-field ${complex ? 'wide' : ''}"><dt>${asmEscape(label)}</dt><dd>${complex ? `<pre>${asmEscape(typeof value === 'object' ? JSON.stringify(value, null, 2) : raw)}</pre>` : asmValueHTML(value)}</dd></div>`;
+    }).join('');
+}
+
+function asmResultDetailKey(row) {
+    return asmFirstValue(row, ['hash']);
+}
+
+function asmRenderResultCard(row, index, screenshots) {
+    const type = asmPageState.selectedAssetType;
+    const provider = asmPageState.selectedTask?.provider || '';
+    if (type === 'site') return asmRenderSiteRecord(row, index, screenshots);
+    const schema = asmResultSchema(provider, type);
+    const title = asmResultTitle(row, schema, index);
+    const subtitle = asmFirstValue(row, schema.subtitle);
+    const severity = asmSeverity(asmFirstValue(row, ['severity', 'level', 'vuln_severity', 'raw_output.info.severity', 'rawOutput.info.severity']));
+    const status = asmFirstValue(row, ['status_code', 'statusCode', 'status']);
+    const tags = asmFirstValue(row, ['tags', 'tech', 'products', 'finger']);
+    const detailKey = provider === 'scopesentry' && type === 'vulnerability' ? asmResultDetailKey(row) : '';
+    const facts = schema.facts.map(([label, ...keys]) => {
+        const value = asmFirstValue(row, keys);
+        if (value === '') return '';
+        return `<div><span>${asmEscape(label)}</span><strong>${asmValueHTML(value)}</strong></div>`;
+    }).filter(Boolean).join('');
+    const used = [...schema.title, ...schema.subtitle, ...schema.facts.flatMap(([, ...keys]) => keys), 'severity', 'level', 'vuln_severity', 'status_code', 'statusCode', 'status', 'tags', 'tech', 'products', 'finger'];
+    return `<article class="asm-result-card ${type === 'vulnerability' || type === 'nuclei_result' ? 'is-risk' : ''}">
+        <header><div class="asm-result-index">${index + 1}</div><div class="asm-result-card-title"><h5>${asmValueHTML(title)}</h5>${subtitle ? `<p>${asmValueHTML(subtitle)}</p>` : ''}</div><div class="asm-result-card-badges">${severity ? `<span class="asm-severity ${severity.key}">${asmEscape(severity.label)}</span>` : ''}${status !== '' ? `<span class="asm-result-status">${asmEscape(status)}</span>` : ''}</div></header>
+        ${facts ? `<div class="asm-result-facts">${facts}</div>` : ''}
+        ${asmRenderResultChips(tags)}
+        ${asmRenderDirectFields(row, used)}
+        ${asmRenderEvidence(row, ['headers', 'responseHeaders', 'banner', 'metadata', 'request', 'response', 'req', 'res', 'verify_data', 'verifyData', 'body', 'raw_output', 'rawOutput'])}
+        ${detailKey ? `<section class="asm-provider-detail" data-asm-provider-detail-key="${asmEscape(detailKey)}"><span><span class="asm-spinner"></span> 正在自动读取上游漏洞请求与响应…</span></section>` : ''}
+        <details class="asm-result-detail"><summary>查看上游原始字段</summary><dl>${asmRenderResultDetails(row)}</dl></details>
+    </article>`;
+}
+
+function asmFindResultTotal(value, depth) {
+    if (depth > 8 || value == null || typeof value !== 'object') return null;
+    if (!Array.isArray(value)) {
+        for (const key of ['total', 'count', 'totalCount', 'total_count']) {
+            const parsed = Number(value[key]);
+            if (Number.isFinite(parsed) && parsed >= 0) return parsed;
+        }
+        for (const key of ['results', 'data', 'response']) {
+            if (Object.prototype.hasOwnProperty.call(value, key)) {
+                const nested = asmFindResultTotal(value[key], depth + 1);
+                if (nested != null) return nested;
+            }
+        }
+    }
+    return null;
+}
+
 function clearASMImageObjectURLs() {
     asmPageState.imageObjectUrls.forEach(value => URL.revokeObjectURL(value));
     asmPageState.imageObjectUrls = [];
@@ -478,7 +778,10 @@ async function hydrateASMScreenshotImages() {
             const objectURL = URL.createObjectURL(blob);
             asmPageState.imageObjectUrls.push(objectURL);
             const image = node.querySelector('img');
-            if (image) image.src = objectURL;
+            if (image) {
+                image.src = objectURL;
+                image.onclick = () => window.open(objectURL, '_blank', 'noopener,noreferrer');
+            }
             node.classList.add('loaded');
         } catch (_) {
             node.classList.add('failed');
@@ -489,8 +792,8 @@ async function hydrateASMScreenshotImages() {
 }
 
 function renderASMScreenshots(screenshots) {
-    if (!Array.isArray(screenshots) || !screenshots.length) return '';
-    return `<section class="asm-screenshot-section"><div class="asm-result-section-title"><strong>本地截图</strong><span>${screenshots.length} 张 · 已存储在 CyberStrikeAI</span></div><div class="asm-screenshot-grid">${screenshots.map(item => `<figure data-asm-screenshot-url="${asmEscape(item.url)}"><div class="asm-screenshot-loading">正在安全加载…</div><img alt="${asmEscape(item.label || 'ASM 站点截图')}" loading="lazy"><figcaption><strong>${asmEscape(item.label || 'ASM 站点截图')}</strong><span>${asmEscape(item.content_type)} · ${Math.max(1, Math.round((Number(item.size_bytes) || 0) / 1024))} KiB</span></figcaption></figure>`).join('')}</div></section>`;
+    if (!Array.isArray(screenshots) || !screenshots.length) return `<div class="asm-result-empty"><strong>${asmPageState.screenshotSyncing ? '正在自动缓存截图' : '暂无已缓存截图'}</strong><span>${asmPageState.screenshotMessage || '系统会自动从 ASM 获取截图并保存到 CyberStrikeAI，无需手动点击。'}</span></div>`;
+    return `<section class="asm-screenshot-section"><div class="asm-result-section-title"><strong>CyberStrikeAI 本地截图</strong><span>${screenshots.length} 张 · 已自动缓存${asmPageState.screenshotSyncing ? ' · 正在检查新增截图' : ''}</span></div><div class="asm-screenshot-grid">${screenshots.map(item => `<figure data-asm-screenshot-url="${asmEscape(item.url)}"><div class="asm-screenshot-loading">正在安全加载…</div><img alt="${asmEscape(item.label || 'ASM 站点截图')}" loading="lazy"><figcaption><strong>${asmEscape(item.label || 'ASM 站点截图')}</strong><span>${asmEscape(item.content_type)} · ${Math.max(1, Math.round((Number(item.size_bytes) || 0) / 1024))} KiB · ${asmEscape(formatASMTime(item.created_at))}</span></figcaption></figure>`).join('')}</div></section>`;
 }
 
 function asmFilterResultRows(rows, query) {
@@ -508,33 +811,72 @@ function asmFilterResultRows(rows, query) {
 function renderASMResults(payload, query) {
     const root = document.getElementById('asm-task-results');
     if (!root) return;
+    asmPageState.lastResultPayload = payload;
+    asmPageState.lastResultQuery = query || '';
     clearASMImageObjectURLs();
     const allRows = asmFindResultRows(payload?.payload, 0).filter(item => item && typeof item === 'object');
     const rows = asmFilterResultRows(allRows, query);
+    const remoteTotal = asmFindResultTotal(payload?.payload, 0);
+    asmPageState.resultTotal = remoteTotal == null ? allRows.length : remoteTotal;
     let body = '';
     if (rows.length) {
-        const preferred = ['url', 'site', 'domain', 'ip', 'port', 'service', 'title', 'status', 'severity', 'name', 'fingerprints', 'technologies'];
-        const available = Array.from(new Set(rows.slice(0, 5).flatMap(item => Object.keys(item))));
-        const columns = [...preferred.filter(key => available.includes(key)), ...available.filter(key => !preferred.includes(key))].slice(0, 7);
-        body = `<div class="asm-result-section-title"><strong>${asmEscape(asmPageState.selectedAssetType.toUpperCase())} 结果</strong><span>${rows.length} 条当前页记录${payload.stale ? ' · 离线快照' : ''}</span></div><div class="asm-result-table-wrap"><table><thead><tr>${columns.map(key => `<th>${asmEscape(key)}</th>`).join('')}</tr></thead><tbody>${rows.map(item => `<tr>${columns.map(key => `<td title="${asmEscape(asmResultCell(item[key]))}">${asmEscape(asmResultCell(item[key]))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+        const pageCount = Math.max(1, Math.ceil(asmPageState.resultTotal / asmPageState.resultPageSize));
+        const firstNumber = (asmPageState.resultPage - 1) * asmPageState.resultPageSize + 1;
+        const lastNumber = firstNumber + rows.length - 1;
+        const screenshots = Array.isArray(payload?.screenshots) ? payload.screenshots : (asmPageState.selectedTask?.screenshots || []);
+        body = `<div class="asm-result-section-title"><strong>${asmEscape(asmSelectedResultType().label)}结果</strong><span>显示 ${firstNumber}–${lastNumber} · 共 ${asmPageState.resultTotal} 条${payload.stale ? ' · 离线快照' : ''}</span></div><div class="asm-result-card-list">${rows.map((item, index) => asmRenderResultCard(item, firstNumber + index - 1, screenshots)).join('')}</div><div class="asm-result-pagination"><span>第 ${asmPageState.resultPage} / ${pageCount} 页 · 每页 ${asmPageState.resultPageSize} 条</span><div><button type="button" class="btn-secondary btn-small" onclick="changeASMResultPage(-1)" ${asmPageState.resultPage <= 1 ? 'disabled' : ''}>上一页</button><button type="button" class="btn-secondary btn-small" onclick="changeASMResultPage(1)" ${asmPageState.resultPage >= pageCount ? 'disabled' : ''}>下一页</button></div></div>`;
     } else {
         const raw = JSON.stringify(payload?.payload || {}, null, 2);
-        const emptyMessage = query ? `当前结果中没有匹配“${asmEscape(query)}”的记录。` : '任务可能仍在运行，或 ASM 未返回该类型资产。';
+        const emptyMessage = query ? `当前结果中没有匹配“${asmEscape(query)}”的记录。` : '该结果类型当前为空；打开任务时系统会自动寻找首个已有数据的类型。';
         body = `<div class="asm-result-empty"><strong>${query ? '未找到匹配结果' : '当前类型暂无结果'}</strong><span>${emptyMessage}</span>${!query && raw !== '{}' ? `<details><summary>查看原始响应</summary><pre>${asmEscape(raw)}</pre></details>` : ''}</div>`;
     }
-    root.innerHTML = `${payload?.stale ? '<div class="asm-stale-banner">远程 ASM 当前不可用，正在显示 CyberStrikeAI 缓存的最后一次结果。</div>' : ''}${renderASMScreenshots(payload?.screenshots)}${body}`;
+    root.innerHTML = `${payload?.stale ? '<div class="asm-stale-banner">远程 ASM 当前不可用，正在显示 CyberStrikeAI 缓存的最后一次结果。</div>' : ''}${body}`;
     void hydrateASMScreenshotImages();
+    void hydrateASMProviderResultDetails();
 }
 
-async function loadSelectedASMResults() {
+async function fetchASMTaskResults(type, page, query) {
+    const task = asmPageState.selectedTask;
+    const params = new URLSearchParams({ asset_type: type, page: String(page), page_size: String(asmPageState.resultPageSize) });
+    if (query) params.set('query', query);
+    return asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/results?${params.toString()}`);
+}
+
+async function loadSelectedASMResults(options) {
     const task = asmPageState.selectedTask;
     const root = document.getElementById('asm-task-results');
     if (!task || !root) return;
+    if (asmPageState.selectedAssetType === 'screenshots') {
+        renderASMScreenshotPanel();
+        return;
+    }
+    const requestSeq = ++asmPageState.resultRequestSeq;
     root.innerHTML = `<div class="asm-task-loading"><span class="asm-spinner"></span><span>正在从 ${asmEscape(asmProviderLabel(task.provider))} 读取结果…</span></div>`;
-    const params = new URLSearchParams({ asset_type: asmPageState.selectedAssetType, page: '1', page_size: '100' });
     const query = document.getElementById('asm-result-query')?.value.trim();
     try {
-        renderASMResults(await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/results?${params.toString()}`), query);
+        let payload = await fetchASMTaskResults(asmPageState.selectedAssetType, asmPageState.resultPage, query);
+        if (options?.autoSelect && !query && !asmFindResultRows(payload?.payload, 0).length) {
+            for (const candidate of asmTaskResultTypes().filter(item => !item.local)) {
+                if (candidate.id === asmPageState.selectedAssetType) continue;
+                const candidatePayload = await fetchASMTaskResults(candidate.id, 1, '');
+                if (asmFindResultRows(candidatePayload?.payload, 0).length) {
+                    asmPageState.selectedAssetType = candidate.id;
+                    asmPageState.resultPage = 1;
+                    payload = candidatePayload;
+                    renderASMResultTabs();
+                    break;
+                }
+            }
+        }
+        if (requestSeq !== asmPageState.resultRequestSeq) return;
+        if (Array.isArray(payload?.screenshots)) asmPageState.selectedTask.screenshots = payload.screenshots;
+        if (payload?.screenshot_caching) {
+            asmPageState.screenshotSyncing = true;
+            renderASMScreenshotCacheStatus();
+            void refreshASMTaskScreenshots(task.id, payload.screenshots?.length || 0);
+        }
+        renderASMResultTabs();
+        renderASMResults(payload, query);
     } catch (error) {
         root.innerHTML = `<div class="asm-result-empty error"><strong>结果读取失败</strong><span>${asmEscape(error.message)}</span></div>`;
     }
@@ -542,27 +884,175 @@ async function loadSelectedASMResults() {
 
 function selectASMResultType(type) {
     asmPageState.selectedAssetType = type;
+    asmPageState.resultPage = 1;
     renderASMResultTabs();
+    void loadSelectedASMResults();
+}
+
+function changeASMResultPageSize(value) {
+    const size = Number(value);
+    if (![10, 20, 50, 100].includes(size)) return;
+    asmPageState.resultPageSize = size;
+    asmPageState.resultPage = 1;
+    void loadSelectedASMResults();
+}
+
+function renderASMScreenshotPanel() {
+    const root = document.getElementById('asm-task-results');
+    if (!root) return;
+    clearASMImageObjectURLs();
+    root.innerHTML = renderASMScreenshots(asmPageState.selectedTask?.screenshots || []);
+    void hydrateASMScreenshotImages();
+}
+
+function renderASMScreenshotCacheStatus() {
+    const root = document.getElementById('asm-screenshot-cache-status');
+    if (!root) return;
+    const count = asmPageState.selectedTask?.screenshots?.length || 0;
+    if (asmPageState.screenshotSyncing) root.innerHTML = '<span class="asm-spinner"></span> 自动缓存截图中';
+    else if (asmPageState.screenshotMessage) root.textContent = asmPageState.screenshotMessage;
+    else root.textContent = count ? `已自动缓存 ${count} 张` : '截图将自动缓存';
+}
+
+async function autoSyncSelectedASMScreenshots() {
+    const task = asmPageState.selectedTask;
+    if (!task || asmPageState.screenshotSyncing) return;
+    asmPageState.screenshotSyncing = true;
+    asmPageState.screenshotMessage = '';
+    renderASMScreenshotCacheStatus();
+    if (asmPageState.selectedAssetType === 'screenshots') renderASMScreenshotPanel();
+    try {
+        const result = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/screenshots/sync`, { method: 'POST' });
+        if (asmPageState.selectedTask?.id !== task.id) return;
+        asmPageState.selectedTask.screenshots = Array.isArray(result.screenshots) ? result.screenshots : [];
+        asmPageState.screenshotMessage = result.errors?.length ? `已缓存 ${result.screenshots?.length || 0} 张，${result.errors.length} 张失败` : `已自动缓存 ${result.screenshots?.length || 0} 张`;
+    } catch (error) {
+        if (asmPageState.selectedTask?.id !== task.id) return;
+        asmPageState.screenshotMessage = `自动缓存暂不可用：${error.message}`;
+    } finally {
+        if (asmPageState.selectedTask?.id === task.id) {
+            asmPageState.screenshotSyncing = false;
+            renderASMScreenshotCacheStatus();
+            renderASMResultTabs();
+            if (asmPageState.selectedAssetType === 'screenshots') renderASMScreenshotPanel();
+            else if (asmPageState.lastResultPayload) {
+                asmPageState.lastResultPayload.screenshots = asmPageState.selectedTask.screenshots;
+                renderASMResults(asmPageState.lastResultPayload, asmPageState.lastResultQuery);
+            }
+        }
+    }
+}
+
+async function refreshASMTaskScreenshots(taskId, previousCount) {
+    for (let attempt = 0; attempt < 5; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 900));
+        if (asmPageState.selectedTask?.id !== taskId) return;
+        try {
+            const latest = await asmApi(`/api/asm/tasks/${encodeURIComponent(taskId)}`);
+            if (asmPageState.selectedTask?.id !== taskId) return;
+            asmPageState.selectedTask.screenshots = latest.screenshots || [];
+            asmPageState.screenshotSyncing = Boolean(latest.screenshot_caching);
+            asmPageState.screenshotMessage = latest.screenshot_error ? `自动缓存暂不可用：${latest.screenshot_error}` : (latest.screenshots?.length ? `已自动缓存 ${latest.screenshots.length} 张` : '正在等待上游生成截图');
+            renderASMScreenshotCacheStatus();
+            renderASMResultTabs();
+            if (asmPageState.selectedAssetType === 'screenshots') renderASMScreenshotPanel();
+            if (!latest.screenshot_caching && (latest.screenshots?.length || 0) >= previousCount) {
+                if (asmPageState.selectedAssetType !== 'screenshots' && asmPageState.lastResultPayload) {
+                    asmPageState.lastResultPayload.screenshots = asmPageState.selectedTask.screenshots;
+                    renderASMResults(asmPageState.lastResultPayload, asmPageState.lastResultQuery);
+                }
+                return;
+            }
+        } catch (_) {
+            return;
+        }
+    }
+}
+
+async function onASMResultDetailToggle(details) {
+    if (!details?.open || details.dataset.loaded === 'true' || details.dataset.loading === 'true') return;
+    const task = asmPageState.selectedTask;
+    const key = details.dataset.asmDetailKey;
+    const root = details.querySelector('.asm-provider-detail');
+    if (!task || !key || !root) return;
+    details.dataset.loading = 'true';
+    root.innerHTML = '<span><span class="asm-spinner"></span> 正在读取上游漏洞详情…</span>';
+    try {
+        const params = new URLSearchParams({ asset_type: asmPageState.selectedAssetType, key });
+        const payload = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/results/detail?${params.toString()}`);
+        const detail = payload?.detail?.data ?? payload?.detail ?? payload;
+        root.innerHTML = `<div class="asm-provider-detail-grid">${asmRenderResultDetails(detail && typeof detail === 'object' ? detail : { detail })}</div>`;
+        details.dataset.loaded = 'true';
+    } catch (error) {
+        root.innerHTML = `<span class="error">详情读取失败：${asmEscape(error.message)}</span>`;
+    } finally {
+        delete details.dataset.loading;
+    }
+}
+
+async function hydrateASMProviderResultDetails() {
+    const nodes = Array.from(document.querySelectorAll('[data-asm-provider-detail-key]'));
+    for (const node of nodes) {
+        if (node.dataset.loaded === 'true' || node.dataset.loading === 'true') continue;
+        const task = asmPageState.selectedTask;
+        const key = node.dataset.asmProviderDetailKey;
+        if (!task || !key) continue;
+        node.dataset.loading = 'true';
+        try {
+            const params = new URLSearchParams({ asset_type: asmPageState.selectedAssetType, key });
+            const payload = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/results/detail?${params.toString()}`);
+            if (asmPageState.selectedTask?.id !== task.id || !node.isConnected) continue;
+            const detail = payload?.detail?.data ?? payload?.detail ?? payload;
+            node.innerHTML = `<div class="asm-provider-detail-grid">${asmRenderResultDetails(detail && typeof detail === 'object' ? detail : { detail })}</div>`;
+            node.dataset.loaded = 'true';
+        } catch (error) {
+            if (node.isConnected) node.innerHTML = `<span class="error">详情读取失败：${asmEscape(error.message)}</span>`;
+        } finally {
+            delete node.dataset.loading;
+        }
+    }
+}
+
+function changeASMResultPage(delta) {
+    const next = Math.max(1, asmPageState.resultPage + Number(delta || 0));
+    if (next === asmPageState.resultPage) return;
+    asmPageState.resultPage = next;
     void loadSelectedASMResults();
 }
 
 async function openASMTaskModal(id) {
     const root = document.getElementById('asm-task-detail');
     asmPageState.selectedAssetType = 'site';
+    asmPageState.resultPage = 1;
+    asmPageState.screenshotSyncing = false;
+    asmPageState.screenshotMessage = '';
+    asmPageState.lastResultPayload = null;
+    asmPageState.lastResultQuery = '';
     if (root) root.innerHTML = `<div class="asm-task-loading"><span class="asm-spinner"></span><span>正在加载任务详情…</span></div>`;
     renderASMResultTabs();
     if (typeof openAppModal === 'function') openAppModal('asm-task-modal');
     else document.getElementById('asm-task-modal').style.display = 'flex';
     try {
         asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(id)}`);
+        const defaultType = asmTaskResultTypes().find(item => item.default) || asmTaskResultTypes()[0];
+        asmPageState.selectedAssetType = defaultType?.id || 'site';
+        try {
+            asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(id)}/sync`, { method: 'POST' });
+        } catch (_) {
+            // A temporary upstream error must not hide cached task detail/results.
+        }
         renderASMTaskDetail();
-        await loadSelectedASMResults();
+        renderASMResultTabs();
+        renderASMScreenshotCacheStatus();
+        await loadSelectedASMResults({ autoSelect: true });
+        void autoSyncSelectedASMScreenshots();
     } catch (error) {
         if (root) root.innerHTML = `<div class="asm-task-detail-error">${asmEscape(error.message)}</div>`;
     }
 }
 
 function closeASMTaskModal() {
+    asmPageState.resultRequestSeq++;
     clearASMImageObjectURLs();
     asmPageState.selectedTask = null;
     if (typeof closeAppModal === 'function') closeAppModal('asm-task-modal');
@@ -576,6 +1066,7 @@ async function syncSelectedASMTask() {
         asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/sync`, { method: 'POST' });
         renderASMTaskDetail();
         await Promise.all([loadASMTasks(false), loadSelectedASMResults()]);
+        void autoSyncSelectedASMScreenshots();
         if (typeof showNotification === 'function') showNotification('ASM 任务进度已同步', 'success');
     } catch (error) {
         if (typeof showNotification === 'function') showNotification(error.message, 'error');
@@ -583,18 +1074,7 @@ async function syncSelectedASMTask() {
 }
 
 async function syncSelectedASMScreenshots() {
-    const task = asmPageState.selectedTask;
-    if (!task) return;
-    try {
-        const result = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/screenshots/sync`, { method: 'POST' });
-        asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}`);
-        renderASMTaskDetail();
-        await loadSelectedASMResults();
-        const message = `截图同步完成：新增 ${result.downloaded || 0} 张，已缓存 ${result.screenshots?.length || 0} 张`;
-        if (typeof showNotification === 'function') showNotification(message, result.errors?.length ? 'warning' : 'success');
-    } catch (error) {
-        if (typeof showNotification === 'function') showNotification(error.message, 'error');
-    }
+    return autoSyncSelectedASMScreenshots();
 }
 
 function handleASMGridClick(event) {
@@ -640,4 +1120,7 @@ window.closeASMTaskModal = closeASMTaskModal;
 window.syncSelectedASMTask = syncSelectedASMTask;
 window.selectASMResultType = selectASMResultType;
 window.loadSelectedASMResults = loadSelectedASMResults;
+window.changeASMResultPage = changeASMResultPage;
+window.changeASMResultPageSize = changeASMResultPageSize;
+window.onASMResultDetailToggle = onASMResultDetailToggle;
 window.syncSelectedASMScreenshots = syncSelectedASMScreenshots;

@@ -155,6 +155,8 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 				t.Errorf("unexpected task asset filter: %q", got)
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": []interface{}{map[string]interface{}{"ip": "192.0.2.10", "port": "22"}}, "total": 1}})
+		case "/api/assets/common/total":
+			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"total": 1}})
 		case "/api/task/stop":
 			_, _ = w.Write([]byte(`{"code":200}`))
 		case "/api/task/start":

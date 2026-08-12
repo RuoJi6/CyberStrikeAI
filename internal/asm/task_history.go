@@ -25,24 +25,27 @@ type TaskHistoryFilter struct {
 }
 
 type TaskHistoryView struct {
-	ID           string                    `json:"id"`
-	ResourceID   string                    `json:"resource_id"`
-	ResourceName string                    `json:"resource_name"`
-	Provider     string                    `json:"provider"`
-	RemoteTaskID string                    `json:"remote_task_id"`
-	Name         string                    `json:"name"`
-	Target       string                    `json:"target"`
-	Options      map[string]interface{}    `json:"options"`
-	Status       string                    `json:"status"`
-	Progress     int                       `json:"progress"`
-	Stage        string                    `json:"stage"`
-	Summary      map[string]interface{}    `json:"summary"`
-	Detail       interface{}               `json:"detail,omitempty"`
-	LastError    string                    `json:"last_error,omitempty"`
-	LastSyncedAt *time.Time                `json:"last_synced_at,omitempty"`
-	Screenshots  []*database.ASMScreenshot `json:"screenshots,omitempty"`
-	CreatedAt    time.Time                 `json:"created_at"`
-	UpdatedAt    time.Time                 `json:"updated_at"`
+	ID                string                    `json:"id"`
+	ResourceID        string                    `json:"resource_id"`
+	ResourceName      string                    `json:"resource_name"`
+	Provider          string                    `json:"provider"`
+	RemoteTaskID      string                    `json:"remote_task_id"`
+	Name              string                    `json:"name"`
+	Target            string                    `json:"target"`
+	Options           map[string]interface{}    `json:"options"`
+	Status            string                    `json:"status"`
+	Progress          int                       `json:"progress"`
+	Stage             string                    `json:"stage"`
+	Summary           map[string]interface{}    `json:"summary"`
+	Detail            interface{}               `json:"detail,omitempty"`
+	LastError         string                    `json:"last_error,omitempty"`
+	LastSyncedAt      *time.Time                `json:"last_synced_at,omitempty"`
+	Screenshots       []*database.ASMScreenshot `json:"screenshots,omitempty"`
+	ScreenshotCaching bool                      `json:"screenshot_caching,omitempty"`
+	ScreenshotError   string                    `json:"screenshot_error,omitempty"`
+	ResultTypes       []ResultType              `json:"result_types"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	UpdatedAt         time.Time                 `json:"updated_at"`
 }
 
 type TaskHistoryPage struct {
@@ -53,12 +56,14 @@ type TaskHistoryPage struct {
 }
 
 type TaskResultsView struct {
-	TaskID      string                    `json:"task_id"`
-	AssetType   string                    `json:"asset_type"`
-	Payload     interface{}               `json:"payload"`
-	Stale       bool                      `json:"stale"`
-	CachedAt    *time.Time                `json:"cached_at,omitempty"`
-	Screenshots []*database.ASMScreenshot `json:"screenshots,omitempty"`
+	TaskID            string                    `json:"task_id"`
+	AssetType         string                    `json:"asset_type"`
+	Payload           interface{}               `json:"payload"`
+	Stale             bool                      `json:"stale"`
+	CachedAt          *time.Time                `json:"cached_at,omitempty"`
+	Screenshots       []*database.ASMScreenshot `json:"screenshots,omitempty"`
+	ScreenshotCaching bool                      `json:"screenshot_caching,omitempty"`
+	ScreenshotError   string                    `json:"screenshot_error,omitempty"`
 }
 
 func jsonObject(raw string) map[string]interface{} {
@@ -87,6 +92,7 @@ func taskHistoryView(item *database.ASMTask) TaskHistoryView {
 		Target: item.Target, Options: jsonObject(item.OptionsJSON), Status: item.Status,
 		Progress: item.Progress, Stage: item.Stage, Summary: jsonObject(item.SummaryJSON),
 		Detail: jsonValue(item.DetailJSON), LastError: item.LastError,
+		ResultTypes:  providerResultTypes(item.Provider),
 		LastSyncedAt: item.LastSyncedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 }
@@ -379,6 +385,14 @@ func (s *Service) applyRemoteTaskState(item *database.ASMTask, task map[string]i
 		item.Target = target
 	}
 	item.Progress = numberInt(mapValue(task, "progress", "percent", "percentage"))
+	if normalizeProvider(item.Provider) == ProviderARL {
+		if stage := arlPipelineStage(task); stage != "" {
+			item.Stage = stage
+		}
+		if item.Progress == 0 {
+			item.Progress = arlPipelineProgress(task)
+		}
+	}
 	if item.Progress < 0 {
 		item.Progress = 0
 	}
@@ -388,7 +402,9 @@ func (s *Service) applyRemoteTaskState(item *database.ASMTask, task map[string]i
 	if item.Status == "completed" && item.Progress < 100 {
 		item.Progress = 100
 	}
-	item.Stage = meaningfulString(mapValue(task, "currentStage", "current_stage", "stage", "service_name"))
+	if stage := meaningfulString(mapValue(task, "currentStage", "current_stage", "stage", "service_name")); stage != "" {
+		item.Stage = stage
+	}
 	if summary := valueMap(mapValue(task, "summary", "statistic", "statistics", "stats")); summary != nil {
 		raw, _ := json.Marshal(summary)
 		item.SummaryJSON = string(raw)
@@ -398,6 +414,56 @@ func (s *Service) applyRemoteTaskState(item *database.ASMTask, task map[string]i
 		now := time.Now().UTC()
 		item.LastSyncedAt = &now
 	}
+}
+
+func arlPipelineProgress(task map[string]interface{}) int {
+	services, _ := mapValue(task, "service").([]interface{})
+	completed := len(services)
+	if completed == 0 {
+		return 0
+	}
+	options := valueMap(mapValue(task, "options"))
+	total := 0
+	weights := map[string]int{
+		"domain_brute": 1, "port_scan": 1, "service_detection": 1, "service_brute": 1,
+		"os_detection": 1, "site_identify": 3, "site_capture": 1, "site_spider": 1,
+		"file_leak": 1, "ssl_cert": 1, "nuclei_scan": 1, "findvhost": 1,
+		"web_info_hunter": 1, "search_engines": 1, "dns_query_plugin": 1,
+	}
+	for key, weight := range weights {
+		if enabled, ok := options[key].(bool); ok && enabled {
+			total += weight
+		}
+	}
+	if total <= completed {
+		total = completed + 1
+	}
+	progress := int(math.Round(float64(completed) * 100 / float64(total)))
+	if progress < 1 {
+		return 1
+	}
+	if progress > 95 {
+		return 95
+	}
+	return progress
+}
+
+func arlPipelineStage(task map[string]interface{}) string {
+	status := strings.ToLower(meaningfulString(mapValue(task, "status")))
+	if normalizeTaskStatus(status) == "completed" {
+		return "completed"
+	}
+	if status != "" {
+		return status
+	}
+	services, _ := mapValue(task, "service").([]interface{})
+	if len(services) > 0 {
+		last := valueMap(services[len(services)-1])
+		if name := meaningfulString(mapValue(last, "name")); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func (s *Service) recordTaskDetail(conn *Connection, remoteTaskID string, payload interface{}) {
@@ -456,6 +522,7 @@ func (s *Service) GetTaskHistory(id string) (TaskHistoryView, error) {
 	view := taskHistoryView(item)
 	view.Screenshots, err = s.db.ListASMScreenshots(item.ID)
 	view.Screenshots = enrichScreenshotURLs(view.Screenshots)
+	view.ScreenshotCaching, view.ScreenshotError = s.ScreenshotCacheState(item.ID)
 	return view, err
 }
 
@@ -561,6 +628,9 @@ func (s *Service) ListTaskHistoryResults(ctx context.Context, id string, filter 
 		return TaskResultsView{}, err
 	}
 	assetType := normalizeAssetType(filter.Type)
+	if !providerSupportsResultType(item.Provider, assetType) {
+		return TaskResultsView{}, fmt.Errorf("%s 不支持结果类型: %s", providerDisplayName(item.Provider), assetType)
+	}
 	filter.Type, filter.TaskID = assetType, item.RemoteTaskID
 	conn, adapter, connErr := s.connection(item.ResourceID, false)
 	var payload interface{}
@@ -578,7 +648,11 @@ func (s *Service) ListTaskHistoryResults(ctx context.Context, id string, filter 
 		}
 		screenshots, _ := s.db.ListASMScreenshots(item.ID)
 		screenshots = enrichScreenshotURLs(screenshots)
-		return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: payload, Screenshots: screenshots}, nil
+		if assetType == "site" || assetType == "screenshot" {
+			s.enqueueTaskScreenshotCache(item.ID, payload)
+		}
+		caching, cacheError := s.ScreenshotCacheState(item.ID)
+		return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: payload, Screenshots: screenshots, ScreenshotCaching: caching, ScreenshotError: cacheError}, nil
 	}
 	cached, cachedAt, cacheErr := s.db.GetASMTaskResult(item.ID, assetType)
 	if cacheErr != nil {
@@ -589,5 +663,30 @@ func (s *Service) ListTaskHistoryResults(ctx context.Context, id string, filter 
 	}
 	screenshots, _ := s.db.ListASMScreenshots(item.ID)
 	screenshots = enrichScreenshotURLs(screenshots)
-	return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: jsonValue(cached), Stale: true, CachedAt: cachedAt, Screenshots: screenshots}, nil
+	caching, cacheError := s.ScreenshotCacheState(item.ID)
+	return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: jsonValue(cached), Stale: true, CachedAt: cachedAt, Screenshots: screenshots, ScreenshotCaching: caching, ScreenshotError: cacheError}, nil
+}
+
+func (s *Service) GetTaskHistoryResultDetail(ctx context.Context, id string, filter AssetDetailFilter) (interface{}, error) {
+	item, err := s.db.GetASMTask(id)
+	if err != nil {
+		return nil, err
+	}
+	assetType := normalizeAssetType(filter.Type)
+	if !providerSupportsResultType(item.Provider, assetType) {
+		return nil, fmt.Errorf("%s 不支持结果详情类型: %s", providerDisplayName(item.Provider), assetType)
+	}
+	if strings.TrimSpace(filter.Key) == "" {
+		return nil, fmt.Errorf("结果详情 key 不能为空")
+	}
+	conn, adapter, err := s.connection(item.ResourceID, false)
+	if err != nil {
+		return nil, err
+	}
+	detailAdapter, ok := adapter.(AssetDetailAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 的 %s 结果已在列表响应中完整返回，无独立详情接口", providerDisplayName(item.Provider), assetType)
+	}
+	filter.Type = assetType
+	return detailAdapter.GetAssetDetail(ctx, conn, filter)
 }

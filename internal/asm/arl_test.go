@@ -2,6 +2,7 @@ package asm
 
 import (
 	"errors"
+	"reflect"
 	"testing"
 )
 
@@ -46,5 +47,42 @@ func TestARLAlreadyFinishedStopErrorIsTyped(t *testing.T) {
 	var apiErr *arlAPIError
 	if !errors.As(err, &apiErr) || apiErr.Code != "105" || apiErr.Message != "任务已经完成" {
 		t.Fatalf("unexpected typed ARL error: %#v", err)
+	}
+}
+
+func TestARLResultTypesMatchUpstreamTaskDetailCollections(t *testing.T) {
+	want := []string{"site", "domain", "ip", "cert", "service", "fileleak", "url", "vulnerability", "npoc_service", "cip", "nuclei_result", "stat_finger", "wih"}
+	got := make([]string, 0, len(want))
+	for _, item := range providerResultTypes(ProviderARL) {
+		got = append(got, item.ID)
+		if _, ok := arlAssetEndpoints[item.ID]; !ok {
+			t.Fatalf("ARL result type %q has no endpoint", item.ID)
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ARL result types=%v want=%v", got, want)
+	}
+}
+
+func TestARLPipelineProgressUsesCompletedStages(t *testing.T) {
+	task := map[string]interface{}{
+		"service": []interface{}{map[string]interface{}{"name": "port_scan"}, map[string]interface{}{"name": "ssl_cert"}},
+		"options": map[string]interface{}{"port_scan": true, "ssl_cert": true, "site_identify": true, "file_leak": true},
+	}
+	progress := arlPipelineProgress(task)
+	if progress <= 0 || progress >= 100 {
+		t.Fatalf("unexpected running progress: %d", progress)
+	}
+	if stage := arlPipelineStage(map[string]interface{}{"status": "file_leak"}); stage != "file_leak" {
+		t.Fatalf("unexpected ARL stage: %s", stage)
+	}
+}
+
+func TestProviderResultTypeValidationIsProviderSpecific(t *testing.T) {
+	if !providerSupportsResultType(ProviderARL, "nuclei_result") {
+		t.Fatal("ARL should expose nuclei_result")
+	}
+	if providerSupportsResultType(ProviderXingRin, "nuclei_result") || providerSupportsResultType(ProviderScopeSentry, "cert") {
+		t.Fatal("provider-specific ARL result collections leaked to other adapters")
 	}
 }

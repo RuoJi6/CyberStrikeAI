@@ -672,6 +672,7 @@ func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection)
 		"task_modes":           []string{"immediate", "scheduled"},
 		"dynamic_option_kinds": []string{"nodes", "templates", "template_detail", "port_dictionaries", "dictionaries", "plugins", "pocs", "projects"},
 		"manage_actions":       []string{"resume", "restart", "delete"},
+		"result_types":         providerResultTypes(ProviderScopeSentry),
 		"notes": []string{
 			"提供 template_id 时完整复用 ScopeSentry 上游模板，端口字典、文件字典、插件参数和 POC 均由该模板决定",
 			"未提供 template_id 时按受控端口、并发、截图与 TLS 配置指纹生成独立低负载模板，任务之间不会相互覆盖",
@@ -890,13 +891,17 @@ func (a *ScopeSentryAdapter) GetTask(ctx context.Context, conn *Connection, task
 	return a.getTaskWithSession(ctx, client, conn, token, taskID)
 }
 
-var scopeSentryAssetEndpoints = map[string]struct{ path, field string }{
-	"site":          {"/api/assets/asset", "domain"},
-	"domain":        {"/api/assets/subdomain", "domain"},
-	"ip":            {"/api/assets/ip", "ip"},
-	"url":           {"/api/assets/url", "url"},
-	"service":       {"/api/assets/ip", "service"},
-	"vulnerability": {"/api/assets/vulnerability", "url"},
+var scopeSentryAssetEndpoints = map[string]struct{ path, field, index string }{
+	"site":          {"/api/assets/asset", "domain", "asset"},
+	"domain":        {"/api/assets/subdomain", "domain", "subdomain"},
+	"ip":            {"/api/assets/ip", "ip", "IPAsset"},
+	"url":           {"/api/assets/url", "url", "UrlScan"},
+	"service":       {"/api/assets/ip", "service", "IPAsset"},
+	"crawler":       {"/api/assets/crawler", "url", "crawler"},
+	"sensitive":     {"/api/assets/sensitive", "url", "SensitiveResult"},
+	"directory":     {"/api/assets/dirscan", "url", "DirScanResult"},
+	"takeover":      {"/api/assets/subdomain/taker", "domain", "SubdomainTakerResult"},
+	"vulnerability": {"/api/assets/vulnerability", "url", "vulnerability"},
 }
 
 func scopeSentrySearchValue(value string) (string, error) {
@@ -948,16 +953,47 @@ func (a *ScopeSentryAdapter) ListAssets(ctx context.Context, conn *Connection, f
 		expressions = append(expressions, endpoint.field+`="`+queryValue+`"`)
 	}
 	page, size := normalizePagination(filter.Page, filter.PageSize)
-	payload, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, endpoint.path, nil, map[string]interface{}{
+	body := map[string]interface{}{
 		"pageIndex": page, "pageSize": size, "search": strings.Join(expressions, "&&"),
 		"filter": map[string]interface{}{}, "sort": map[string]interface{}{},
-	})
+	}
+	payload, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, endpoint.path, nil, body)
+	if err != nil {
+		return nil, err
+	}
+	total := pathValue(payload, "data", "total")
+	if total == nil {
+		totalPayload, totalErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/assets/common/total", nil, map[string]interface{}{
+			"pageIndex": page, "pageSize": size, "search": body["search"], "filter": body["filter"], "index": endpoint.index,
+		})
+		if totalErr == nil {
+			total = pathValue(totalPayload, "data", "total")
+		}
+	}
+	return map[string]interface{}{
+		"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID,
+		"asset_type": assetType, "results": payload, "total": total,
+	}, nil
+}
+
+func (a *ScopeSentryAdapter) GetAssetDetail(ctx context.Context, conn *Connection, filter AssetDetailFilter) (interface{}, error) {
+	if strings.ToLower(strings.TrimSpace(filter.Type)) != "vulnerability" {
+		return nil, fmt.Errorf("ScopeSentry 结果详情类型不支持: %s", filter.Type)
+	}
+	hash := strings.TrimSpace(filter.Key)
+	if hash == "" || len(hash) > 256 {
+		return nil, fmt.Errorf("ScopeSentry 漏洞 hash 无效")
+	}
+	client, token, err := a.session(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/assets/vulnerability/detail", nil, map[string]string{"hash": hash})
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID,
-		"asset_type": assetType, "results": payload,
+		"provider": ProviderScopeSentry, "asset_type": "vulnerability", "key": hash, "detail": payload,
 	}, nil
 }
 

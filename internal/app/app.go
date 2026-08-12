@@ -1113,6 +1113,7 @@ func setupRoutes(
 		protected.GET("/asm/tasks/:id", asmHandler.GetTaskHistory)
 		protected.POST("/asm/tasks/:id/sync", asmHandler.SyncTaskHistory)
 		protected.GET("/asm/tasks/:id/results", asmHandler.TaskHistoryResults)
+		protected.GET("/asm/tasks/:id/results/detail", asmHandler.TaskHistoryResultDetail)
 		protected.POST("/asm/tasks/:id/screenshots/sync", asmHandler.SyncTaskScreenshots)
 		protected.GET("/asm/screenshots/:id/content", asmHandler.ScreenshotContent)
 
