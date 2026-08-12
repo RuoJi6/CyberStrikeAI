@@ -49,6 +49,28 @@ type ASMScreenshot struct {
 	CreatedAt   time.Time `json:"created_at"`
 }
 
+type ASMResultItem struct {
+	TaskID      string
+	AssetType   string
+	ItemKey     string
+	ProviderKey string
+	PayloadJSON string
+	SearchText  string
+	SortOrder   int
+	UpdatedAt   time.Time
+}
+
+type ASMResultSyncState struct {
+	TaskID    string     `json:"task_id"`
+	AssetType string     `json:"asset_type"`
+	Status    string     `json:"status"`
+	ItemCount int        `json:"item_count"`
+	LastError string     `json:"last_error,omitempty"`
+	StartedAt *time.Time `json:"started_at,omitempty"`
+	SyncedAt  *time.Time `json:"synced_at,omitempty"`
+	UpdatedAt time.Time  `json:"updated_at"`
+}
+
 const asmTaskColumns = `id, resource_id, resource_name, provider, remote_task_id,
 	name, target, options_json, status, progress, stage, summary_json, detail_json,
 	last_error, last_synced_at, created_at, updated_at`
@@ -220,6 +242,116 @@ func (db *DB) GetASMTaskResult(taskID, assetType string) (string, *time.Time, er
 	}
 	parsed := parseDBTime(updated)
 	return payload, &parsed, nil
+}
+
+func (db *DB) ReplaceASMResultItems(taskID, assetType string, items []ASMResultItem) error {
+	taskID, assetType = strings.TrimSpace(taskID), strings.TrimSpace(assetType)
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开启 ASM 结果事务失败: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM asm_result_items WHERE task_id = ? AND asset_type = ?`, taskID, assetType); err != nil {
+		return fmt.Errorf("清理 ASM 旧结果失败: %w", err)
+	}
+	now := time.Now().UTC()
+	for index := range items {
+		item := items[index]
+		if _, err = tx.Exec(`INSERT INTO asm_result_items
+			(task_id, asset_type, item_key, provider_key, payload_json, search_text, sort_order, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, taskID, assetType, item.ItemKey, item.ProviderKey,
+			item.PayloadJSON, item.SearchText, item.SortOrder, now); err != nil {
+			return fmt.Errorf("保存 ASM 结果失败: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *DB) ListASMResultItems(taskID, assetType, query string, page, pageSize int) ([]string, int, error) {
+	page, pageSize = normalizeASMTaskPagination(page, pageSize)
+	where := `task_id = ? AND asset_type = ?`
+	args := []interface{}{strings.TrimSpace(taskID), strings.TrimSpace(assetType)}
+	if query = strings.TrimSpace(strings.ToLower(query)); query != "" {
+		where += ` AND search_text LIKE ? ESCAPE '\'`
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(query)
+		args = append(args, "%"+escaped+"%")
+	}
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM asm_result_items WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("统计 ASM 结果失败: %w", err)
+	}
+	queryArgs := append(append([]interface{}{}, args...), pageSize, (page-1)*pageSize)
+	rows, err := db.Query(`SELECT payload_json FROM asm_result_items WHERE `+where+` ORDER BY sort_order, item_key LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("查询 ASM 结果失败: %w", err)
+	}
+	defer rows.Close()
+	result := make([]string, 0, pageSize)
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			return nil, 0, fmt.Errorf("读取 ASM 结果失败: %w", err)
+		}
+		result = append(result, raw)
+	}
+	return result, total, rows.Err()
+}
+
+func (db *DB) GetASMResultItem(taskID, assetType, providerKey string) (string, error) {
+	var raw string
+	err := db.QueryRow(`SELECT payload_json FROM asm_result_items WHERE task_id = ? AND asset_type = ? AND (provider_key = ? OR item_key = ?) LIMIT 1`,
+		strings.TrimSpace(taskID), strings.TrimSpace(assetType), strings.TrimSpace(providerKey), strings.TrimSpace(providerKey)).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("获取 ASM 结果详情失败: %w", err)
+	}
+	return raw, nil
+}
+
+func (db *DB) UpsertASMResultSyncState(state ASMResultSyncState) error {
+	now := time.Now().UTC()
+	_, err := db.Exec(`INSERT INTO asm_result_sync_states
+		(task_id, asset_type, status, item_count, last_error, started_at, synced_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(task_id, asset_type) DO UPDATE SET
+		status = excluded.status, item_count = excluded.item_count, last_error = excluded.last_error,
+		started_at = excluded.started_at, synced_at = excluded.synced_at, updated_at = excluded.updated_at`,
+		strings.TrimSpace(state.TaskID), strings.TrimSpace(state.AssetType), strings.TrimSpace(state.Status),
+		state.ItemCount, state.LastError, state.StartedAt, state.SyncedAt, now)
+	if err != nil {
+		return fmt.Errorf("保存 ASM 结果同步状态失败: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) ListASMResultSyncStates(taskID string) ([]ASMResultSyncState, error) {
+	rows, err := db.Query(`SELECT task_id, asset_type, status, item_count, last_error, started_at, synced_at, updated_at
+		FROM asm_result_sync_states WHERE task_id = ? ORDER BY asset_type`, strings.TrimSpace(taskID))
+	if err != nil {
+		return nil, fmt.Errorf("查询 ASM 结果同步状态失败: %w", err)
+	}
+	defer rows.Close()
+	states := make([]ASMResultSyncState, 0)
+	for rows.Next() {
+		var state ASMResultSyncState
+		var started, synced sql.NullString
+		var updated string
+		if err := rows.Scan(&state.TaskID, &state.AssetType, &state.Status, &state.ItemCount, &state.LastError, &started, &synced, &updated); err != nil {
+			return nil, fmt.Errorf("读取 ASM 结果同步状态失败: %w", err)
+		}
+		state.UpdatedAt = parseDBTime(updated)
+		if started.Valid {
+			value := parseDBTime(started.String)
+			state.StartedAt = &value
+		}
+		if synced.Valid {
+			value := parseDBTime(synced.String)
+			state.SyncedAt = &value
+		}
+		states = append(states, state)
+	}
+	return states, rows.Err()
 }
 
 func (db *DB) UpsertASMScreenshot(item *ASMScreenshot) error {

@@ -44,6 +44,7 @@ type TaskHistoryView struct {
 	ScreenshotCaching bool                      `json:"screenshot_caching,omitempty"`
 	ScreenshotError   string                    `json:"screenshot_error,omitempty"`
 	ResultTypes       []ResultType              `json:"result_types"`
+	ResultSync        ResultSyncView            `json:"result_sync"`
 	CreatedAt         time.Time                 `json:"created_at"`
 	UpdatedAt         time.Time                 `json:"updated_at"`
 }
@@ -64,6 +65,8 @@ type TaskResultsView struct {
 	Screenshots       []*database.ASMScreenshot `json:"screenshots,omitempty"`
 	ScreenshotCaching bool                      `json:"screenshot_caching,omitempty"`
 	ScreenshotError   string                    `json:"screenshot_error,omitempty"`
+	Source            string                    `json:"source"`
+	Sync              ResultSyncView            `json:"sync"`
 }
 
 func jsonObject(raw string) map[string]interface{} {
@@ -509,7 +512,7 @@ func (s *Service) ListTaskHistory(filter TaskHistoryFilter) (TaskHistoryPage, er
 	}
 	views := make([]TaskHistoryView, 0, len(items))
 	for _, item := range items {
-		views = append(views, taskHistoryView(item))
+		views = append(views, s.taskHistoryView(item))
 	}
 	return TaskHistoryPage{Tasks: views, Total: total, Page: page, PageSize: pageSize}, nil
 }
@@ -519,10 +522,13 @@ func (s *Service) GetTaskHistory(id string) (TaskHistoryView, error) {
 	if err != nil {
 		return TaskHistoryView{}, err
 	}
-	view := taskHistoryView(item)
+	view := s.taskHistoryView(item)
 	view.Screenshots, err = s.db.ListASMScreenshots(item.ID)
 	view.Screenshots = enrichScreenshotURLs(view.Screenshots)
 	view.ScreenshotCaching, view.ScreenshotError = s.ScreenshotCacheState(item.ID)
+	if item.Status == "completed" && view.ResultSync.Status != "completed" {
+		s.enqueueTaskResultSync(item.ID)
+	}
 	return view, err
 }
 
@@ -631,40 +637,43 @@ func (s *Service) ListTaskHistoryResults(ctx context.Context, id string, filter 
 	if !providerSupportsResultType(item.Provider, assetType) {
 		return TaskResultsView{}, fmt.Errorf("%s 不支持结果类型: %s", providerDisplayName(item.Provider), assetType)
 	}
-	filter.Type, filter.TaskID = assetType, item.RemoteTaskID
-	conn, adapter, connErr := s.connection(item.ResourceID, false)
-	var payload interface{}
-	if connErr == nil {
-		payload, err = adapter.ListAssets(ctx, conn, filter)
-	} else {
-		err = connErr
+	page, pageSize := normalizePagination(filter.Page, filter.PageSize)
+	syncView := s.resultSyncView(item)
+	legacy, legacyAt, legacyErr := s.db.GetASMTaskResult(item.ID, assetType)
+	if legacyErr != nil {
+		return TaskResultsView{}, legacyErr
 	}
-	if err == nil {
-		raw, marshalErr := json.Marshal(payload)
-		if marshalErr == nil {
-			if cacheErr := s.db.UpsertASMTaskResult(item.ID, assetType, string(raw)); cacheErr != nil {
-				s.logger.Warn("保存 ASM 结果快照失败", zap.String("task_id", item.ID), zap.Error(cacheErr))
-			}
-		}
-		screenshots, _ := s.db.ListASMScreenshots(item.ID)
-		screenshots = enrichScreenshotURLs(screenshots)
-		if assetType == "site" || assetType == "screenshot" {
-			s.enqueueTaskScreenshotCache(item.ID, payload)
-		}
-		caching, cacheError := s.ScreenshotCacheState(item.ID)
-		return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: payload, Screenshots: screenshots, ScreenshotCaching: caching, ScreenshotError: cacheError}, nil
-	}
-	cached, cachedAt, cacheErr := s.db.GetASMTaskResult(item.ID, assetType)
-	if cacheErr != nil {
-		return TaskResultsView{}, cacheErr
-	}
-	if cached == "" {
+	rawItems, total, err := s.db.ListASMResultItems(item.ID, assetType, filter.Query, page, pageSize)
+	if err != nil {
 		return TaskResultsView{}, err
+	}
+	rows := make([]interface{}, 0, len(rawItems))
+	for _, raw := range rawItems {
+		rows = append(rows, jsonValue(raw))
+	}
+	payload := interface{}(map[string]interface{}{"items": rows, "total": total, "page": page, "page_size": pageSize})
+	source, stale := "local", !syncView.typeCompleted(assetType)
+	var cachedAt *time.Time
+	for _, state := range syncView.Types {
+		if state.AssetType == assetType && state.SyncedAt != nil {
+			cachedAt = state.SyncedAt
+			break
+		}
+	}
+	if total == 0 && !syncView.typeCompleted(assetType) {
+		if legacy != "" {
+			payload, cachedAt, source, stale = jsonValue(legacy), legacyAt, "legacy_cache", true
+		}
+		if item.Status == "completed" {
+			s.enqueueTaskResultSync(item.ID)
+		}
 	}
 	screenshots, _ := s.db.ListASMScreenshots(item.ID)
 	screenshots = enrichScreenshotURLs(screenshots)
 	caching, cacheError := s.ScreenshotCacheState(item.ID)
-	return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: jsonValue(cached), Stale: true, CachedAt: cachedAt, Screenshots: screenshots, ScreenshotCaching: caching, ScreenshotError: cacheError}, nil
+	return TaskResultsView{TaskID: item.ID, AssetType: assetType, Payload: payload, Stale: stale,
+		CachedAt: cachedAt, Screenshots: screenshots, ScreenshotCaching: caching,
+		ScreenshotError: cacheError, Source: source, Sync: syncView}, nil
 }
 
 func (s *Service) GetTaskHistoryResultDetail(ctx context.Context, id string, filter AssetDetailFilter) (interface{}, error) {
@@ -679,14 +688,27 @@ func (s *Service) GetTaskHistoryResultDetail(ctx context.Context, id string, fil
 	if strings.TrimSpace(filter.Key) == "" {
 		return nil, fmt.Errorf("结果详情 key 不能为空")
 	}
-	conn, adapter, err := s.connection(item.ResourceID, false)
+	raw, err := s.db.GetASMResultItem(item.ID, assetType, filter.Key)
 	if err != nil {
 		return nil, err
 	}
-	detailAdapter, ok := adapter.(AssetDetailAdapter)
-	if !ok {
-		return nil, fmt.Errorf("%s 的 %s 结果已在列表响应中完整返回，无独立详情接口", providerDisplayName(item.Provider), assetType)
+	if raw == "" {
+		if _, syncErr := s.syncTaskResultType(ctx, item, assetType); syncErr != nil {
+			return nil, syncErr
+		}
+		raw, err = s.db.GetASMResultItem(item.ID, assetType, filter.Key)
 	}
-	filter.Type = assetType
-	return detailAdapter.GetAssetDetail(ctx, conn, filter)
+	if err != nil {
+		return nil, err
+	}
+	if raw == "" {
+		return nil, fmt.Errorf("ASM 本地结果详情不存在")
+	}
+	value := jsonValue(raw)
+	if object := valueMap(value); object != nil {
+		if detail, ok := object["provider_detail"]; ok {
+			return detail, nil
+		}
+	}
+	return value, nil
 }

@@ -37,7 +37,7 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
-| `asm_list_assets` | 按平台结果类型分页读取扫描结果；先从 profile 的 `result_types` 获取合法类型 | 否 |
+| `asm_list_assets` | 按平台结果类型分页读取 CyberStrikeAI 本地快照；先从 profile 的 `result_types` 获取合法类型 | 否 |
 | `asm_stop_task` | 停止指定远端任务 | 是 |
 | `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
@@ -134,7 +134,11 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 | XingRin | `POST /api/auth/login/`, `GET /api/auth/me/` | `/api/scans/quick/`, `/api/scans/`, `/api/scans/:id/`, `/api/scans/:id/stop/`; `/api/engines/`, `/api/workers/`, `/api/wordlists/`, `/api/nuclei/repos/` | `/api/assets/:type/`, `/api/scans/:id/:type/` |
 | ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/scheduled/add`, `/api/task/scheduled`, `/api/task/scheduled/detail`, `/api/task/scheduled/delete`, `/api/task/`, `/api/task/detail`, `/api/task/stop`, `/api/task/start`, `/api/task/retest`, `/api/task/delete`; `/api/dictionary/*`, `/api/plugin`, `/api/poc`, `/api/project/all` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/crawler`, `/api/assets/sensitive`, `/api/assets/dirscan`, `/api/assets/subdomain/taker`, `/api/assets/vulnerability`, `/api/assets/vulnerability/detail` |
 
-任务中心不再把三套平台结果塞入固定列：每种结果使用平台字段模型生成摘要卡片，完整字段可展开，漏洞显示级别、来源、目标、证据及请求/响应。分页使用上游 `total` 与页码，每页可选 10/20/50/100。截图作为独立结果视图，读取站点/截图结果后自动排队下载到 CyberStrikeAI，不再依赖人工“缓存截图”按钮；Agent 通过 MCP 读取站点或截图结果时同样触发自动缓存。
+任务中心不再把三套平台结果塞入固定列：每种结果使用平台字段模型生成摘要卡片，完整字段可展开，漏洞显示级别、来源、目标、证据及请求/响应。任务完成后，后台 worker 会顺序遍历 profile 中的所有 `result_types` 和所有上游分页，按“任务 + 结果类型 + 单条记录”写入本地数据库；ScopeSentry 漏洞独立详情也在此阶段合并缓存。任务中心和 `asm_list_assets` 后续都使用本地分页、搜索与详情，不在每次查看时重复请求上游。
+
+上游仅在以下场景请求：运行中任务的周期性进度同步、检测到完成后的首次全量结果同步、本地缺少某结果类型时 MCP 的首次兜底同步，以及用户显式点击“重新同步结果”或调用 `asm_manage_task(action=sync_results)`。任务中心分开显示“扫描进度”和“结果本地化进度”，包含已同步类型数、本地记录数、当前类型、最后时间和错误。
+
+截图二进制也由同步流程自动认证拉取到 CyberStrikeAI，无需人工点击缓存；界面将截图放在对应站点记录旁边，同时保留“已缓存截图”总览。
 
 ## 8. 真实 MCP 调用验证
 
@@ -164,6 +168,7 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 完成后自动全量同步所有结果类型与分页；任务中心与 MCP 改为本地分页/搜索/详情；新增结果同步状态、查看兜底、显式重同步和自动截图缓存 |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心改为平台专属完整结果卡片；补齐 XingRin 目录/截图与 ScopeSentry 爬虫/敏感信息/目录/接管/漏洞详情；截图自动缓存；增加上游总数分页和页大小 |
 | 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | profile 暴露平台专属 `result_types`；补齐 ARL 任务详情 13 类结果，任务中心按平台动态展示并分页读取 |
 | 1.3 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 低负载模板改为配置指纹隔离；定时任务回查 ID、进入任务中心并支持详情/显式删除 |

@@ -20,6 +20,7 @@ const asmPageState = {
     resultRequestSeq: 0,
     lastResultPayload: null,
     lastResultQuery: '',
+    resultSyncPolling: false,
 };
 
 function asmT(key, fallback, options) {
@@ -343,6 +344,25 @@ function asmTaskStatusClass(status) {
     return ['submitted', 'running', 'completed', 'failed', 'stopped'].includes(status) ? status : 'unknown';
 }
 
+function asmResultSyncLabel(sync) {
+    const status = sync?.status || 'pending';
+    return {
+        waiting: '等待扫描完成', pending: '等待同步结果', syncing: '同步结果中',
+        completed: '结果已本地化', partial: '结果部分同步', failed: '结果同步失败',
+    }[status] || status;
+}
+
+function asmResultSyncClass(sync) {
+    const status = sync?.status || 'pending';
+    return ['waiting', 'pending', 'syncing', 'completed', 'partial', 'failed'].includes(status) ? status : 'pending';
+}
+
+function asmResultSyncProgress(sync) {
+    const total = Number(sync?.total_types) || 0;
+    const completed = Number(sync?.completed_types) || 0;
+    return total ? Math.max(0, Math.min(100, Math.round(completed * 100 / total))) : 0;
+}
+
 function asmTaskProgress(value) {
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return 0;
@@ -363,7 +383,7 @@ function renderASMTasks() {
             const status = asmTaskStatusClass(task.status);
             return `<article class="asm-task-row" onclick="openASMTaskModal('${asmEscape(task.id)}')">
                 <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
-                <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small></span></div>
+                <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></div>
                 <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
                 <time>${asmEscape(formatASMTime(task.created_at))}</time>
                 <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>
@@ -425,12 +445,15 @@ function renderASMTaskDetail() {
     if (!root || !task) return;
     const progress = asmTaskProgress(task.progress);
     const summaries = asmSummaryEntries(task.summary);
+    const resultSync = task.result_sync || {};
+    const syncProgress = asmResultSyncProgress(resultSync);
     root.innerHTML = `<div class="asm-task-detail-hero">
         <div class="asm-task-detail-main"><div class="asm-task-detail-badges"><span class="asm-task-status ${asmTaskStatusClass(task.status)}">${asmEscape(asmTaskStatusLabel(task.status))}</span><span>${asmEscape(asmProviderLabel(task.provider))}</span><span>${asmEscape(task.resource_name)}</span></div><h4>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</h4><code>${asmEscape(task.target || '')}</code></div>
         <div class="asm-task-detail-progress"><strong>${progress}%</strong><span>${asmEscape(task.stage || '等待同步')}</span></div>
     </div>
     <div class="asm-detail-progress-track"><span style="width:${progress}%"></span></div>
     <div class="asm-task-meta-grid"><div><span>远程任务 ID</span><strong>${asmEscape(task.remote_task_id)}</strong></div><div><span>创建时间</span><strong>${asmEscape(formatASMTime(task.created_at))}</strong></div><div><span>最后同步</span><strong>${asmEscape(formatASMTime(task.last_synced_at))}</strong></div><div><span>本地记录 ID</span><strong>${asmEscape(task.id)}</strong></div></div>
+    <section class="asm-result-sync-panel ${asmResultSyncClass(resultSync)}"><div><span class="asm-result-sync-badge ${asmResultSyncClass(resultSync)}">${asmEscape(asmResultSyncLabel(resultSync))}</span><strong>${Number(resultSync.completed_types) || 0} / ${Number(resultSync.total_types) || 0} 类型</strong><small>${Number(resultSync.item_count) || 0} 条本地结果${resultSync.current_type ? ` · 正在同步 ${asmEscape(resultSync.current_type)}` : ''}${resultSync.synced_at ? ` · ${asmEscape(formatASMTime(resultSync.synced_at))}` : ''}</small></div><div class="asm-result-sync-track"><span style="width:${syncProgress}%"></span></div>${resultSync.last_error ? `<p>${asmEscape(resultSync.last_error)}</p>` : ''}</section>
     ${summaries.length ? `<div class="asm-summary-grid">${summaries.map(([key, value]) => `<div><strong>${asmEscape(value)}</strong><span>${asmEscape(key)}</span></div>`).join('')}</div>` : ''}
     ${task.last_error ? `<div class="asm-task-detail-error">${asmEscape(task.last_error)}</div>` : ''}`;
     const title = document.getElementById('asm-task-modal-title');
@@ -891,7 +914,9 @@ function renderASMResults(payload, query) {
         const emptyMessage = query ? `当前结果中没有匹配“${asmEscape(query)}”的记录。` : '该结果类型当前为空；打开任务时系统会自动寻找首个已有数据的类型。';
         body = `<div class="asm-result-empty"><strong>${query ? '未找到匹配结果' : '当前类型暂无结果'}</strong><span>${emptyMessage}</span>${!query && raw !== '{}' ? `<details><summary>查看原始响应</summary><pre>${asmEscape(raw)}</pre></details>` : ''}</div>`;
     }
-    root.innerHTML = `${payload?.stale ? '<div class="asm-stale-banner">远程 ASM 当前不可用，正在显示 CyberStrikeAI 缓存的最后一次结果。</div>' : ''}${body}`;
+    const pending = payload?.sync && payload.sync.status !== 'completed';
+    const banner = pending ? `<div class="asm-stale-banner">${asmEscape(asmResultSyncLabel(payload.sync))}：当前显示 CyberStrikeAI 已保存的本地结果，同步完成后将自动更新。</div>` : '';
+    root.innerHTML = `${banner}${body}`;
     void hydrateASMScreenshotImages();
     void hydrateASMProviderResultDetails();
 }
@@ -912,7 +937,7 @@ async function loadSelectedASMResults(options) {
         return;
     }
     const requestSeq = ++asmPageState.resultRequestSeq;
-    root.innerHTML = `<div class="asm-task-loading"><span class="asm-spinner"></span><span>正在从 ${asmEscape(asmProviderLabel(task.provider))} 读取结果…</span></div>`;
+    root.innerHTML = `<div class="asm-task-loading"><span class="asm-spinner"></span><span>正在读取 CyberStrikeAI 本地结果…</span></div>`;
     const query = document.getElementById('asm-result-query')?.value.trim();
     try {
         let payload = await fetchASMTaskResults(asmPageState.selectedAssetType, asmPageState.resultPage, query);
@@ -1097,16 +1122,11 @@ async function openASMTaskModal(id) {
         asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(id)}`);
         const defaultType = asmTaskResultTypes().find(item => item.default) || asmTaskResultTypes()[0];
         asmPageState.selectedAssetType = defaultType?.id || 'site';
-        try {
-            asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(id)}/sync`, { method: 'POST' });
-        } catch (_) {
-            // A temporary upstream error must not hide cached task detail/results.
-        }
         renderASMTaskDetail();
         renderASMResultTabs();
         renderASMScreenshotCacheStatus();
         await loadSelectedASMResults({ autoSelect: true });
-        void autoSyncSelectedASMScreenshots();
+        if (asmPageState.selectedTask.result_sync?.status !== 'completed') void pollASMResultSync(id);
     } catch (error) {
         if (root) root.innerHTML = `<div class="asm-task-detail-error">${asmEscape(error.message)}</div>`;
     }
@@ -1127,10 +1147,49 @@ async function syncSelectedASMTask() {
         asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/sync`, { method: 'POST' });
         renderASMTaskDetail();
         await Promise.all([loadASMTasks(false), loadSelectedASMResults()]);
-        void autoSyncSelectedASMScreenshots();
         if (typeof showNotification === 'function') showNotification('ASM 任务进度已同步', 'success');
     } catch (error) {
         if (typeof showNotification === 'function') showNotification(error.message, 'error');
+    }
+}
+
+async function syncSelectedASMTaskResults() {
+    const task = asmPageState.selectedTask;
+    if (!task) return;
+    try {
+        task.result_sync = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/results/sync`, { method: 'POST' });
+        renderASMTaskDetail();
+        void pollASMResultSync(task.id, true);
+        if (typeof showNotification === 'function') showNotification('ASM 结果全量同步已启动', 'success');
+    } catch (error) {
+        if (typeof showNotification === 'function') showNotification(error.message, 'error');
+    }
+}
+
+async function pollASMResultSync(taskId, reloadResults) {
+    if (asmPageState.resultSyncPolling) return;
+    asmPageState.resultSyncPolling = true;
+    try {
+        for (let attempt = 0; attempt < 120; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1200));
+            if (asmPageState.selectedTask?.id !== taskId) return;
+            const latest = await asmApi(`/api/asm/tasks/${encodeURIComponent(taskId)}`);
+            if (asmPageState.selectedTask?.id !== taskId) return;
+            asmPageState.selectedTask = latest;
+            const listTask = asmPageState.tasks.find(item => item.id === taskId);
+            if (listTask) listTask.result_sync = latest.result_sync;
+            renderASMTaskDetail();
+            renderASMTasks();
+            renderASMScreenshotCacheStatus();
+            if (latest.result_sync?.status === 'completed' || latest.result_sync?.status === 'partial' || latest.result_sync?.status === 'failed') {
+                if (reloadResults || asmPageState.lastResultPayload?.sync?.status !== 'completed') await loadSelectedASMResults();
+                return;
+            }
+        }
+    } catch (_) {
+        // 保留最后一次本地状态，下次打开时继续轮询。
+    } finally {
+        asmPageState.resultSyncPolling = false;
     }
 }
 
@@ -1179,6 +1238,7 @@ window.changeASMTaskPage = changeASMTaskPage;
 window.openASMTaskModal = openASMTaskModal;
 window.closeASMTaskModal = closeASMTaskModal;
 window.syncSelectedASMTask = syncSelectedASMTask;
+window.syncSelectedASMTaskResults = syncSelectedASMTaskResults;
 window.selectASMResultType = selectASMResultType;
 window.loadSelectedASMResults = loadSelectedASMResults;
 window.changeASMResultPage = changeASMResultPage;

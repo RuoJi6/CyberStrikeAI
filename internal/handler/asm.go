@@ -188,6 +188,15 @@ func (h *ASMHandler) TaskHistoryResultDetail(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+func (h *ASMHandler) SyncTaskResults(c *gin.Context) {
+	result, err := h.service.RequestTaskResultsSync(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusAccepted, result)
+}
+
 func (h *ASMHandler) SyncTaskScreenshots(c *gin.Context) {
 	result, err := h.service.SyncTaskScreenshots(c.Request.Context(), c.Param("id"))
 	if err != nil {

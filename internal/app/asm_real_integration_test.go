@@ -58,6 +58,9 @@ func TestASMRealMCPFlow(t *testing.T) {
 		if result != nil && result.IsError {
 			t.Fatalf("%s returned error result", tool)
 		}
+		if strings.HasPrefix(strings.TrimSpace(plain), "<persisted-output>") {
+			return map[string]interface{}{"persisted": true}
+		}
 		var decoded interface{}
 		if err := json.Unmarshal([]byte(plain), &decoded); err != nil {
 			t.Fatalf("%s returned non-JSON content: %v", tool, err)

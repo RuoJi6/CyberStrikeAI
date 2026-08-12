@@ -43,36 +43,37 @@ import (
 
 // App 应用
 type App struct {
-	config             *config.Config
-	logger             *logger.Logger
-	router             *gin.Engine
-	mcpServer          *mcp.Server
-	externalMCPMgr     *mcp.ExternalMCPManager
-	agent              *agent.Agent
-	executor           *security.Executor
-	db                 *database.DB
-	knowledgeDB        *database.DB // 知识库数据库连接（如果使用独立数据库）
-	auth               *security.AuthManager
-	knowledgeManager   *knowledge.Manager        // 知识库管理器（用于动态初始化）
-	knowledgeRetriever *knowledge.Retriever      // 知识库检索器（用于动态初始化）
-	knowledgeIndexer   *knowledge.Indexer        // 知识库索引器（用于动态初始化）
-	knowledgeHandler   *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
-	agentHandler       *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
-	robotHandler       *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
-	robotMu            sync.Mutex                // 保护机器人长连接的 cancel
-	dingCancel         context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
-	larkCancel         context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
-	wechatCancel       context.CancelFunc        // 微信 iLink 长轮询取消函数
-	telegramCancel     context.CancelFunc        // Telegram 长轮询取消函数
-	slackCancel        context.CancelFunc        // Slack Socket Mode 取消函数
-	discordCancel      context.CancelFunc        // Discord Gateway 取消函数
-	qqCancel           context.CancelFunc        // QQ WebSocket 取消函数
-	alertCancel        context.CancelFunc        // 漏洞提醒持久化投递 worker
-	c2Manager          *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
-	c2Watchdog         *c2.SessionWatchdog       // C2 会话看门狗
-	c2WatchdogCancel   context.CancelFunc        // 看门狗取消函数
-	c2Handler          *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
-	auditSvc           *audit.Service
+	config              *config.Config
+	logger              *logger.Logger
+	router              *gin.Engine
+	mcpServer           *mcp.Server
+	externalMCPMgr      *mcp.ExternalMCPManager
+	agent               *agent.Agent
+	executor            *security.Executor
+	db                  *database.DB
+	knowledgeDB         *database.DB // 知识库数据库连接（如果使用独立数据库）
+	auth                *security.AuthManager
+	knowledgeManager    *knowledge.Manager        // 知识库管理器（用于动态初始化）
+	knowledgeRetriever  *knowledge.Retriever      // 知识库检索器（用于动态初始化）
+	knowledgeIndexer    *knowledge.Indexer        // 知识库索引器（用于动态初始化）
+	knowledgeHandler    *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
+	agentHandler        *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
+	robotHandler        *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
+	robotMu             sync.Mutex                // 保护机器人长连接的 cancel
+	dingCancel          context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
+	larkCancel          context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
+	wechatCancel        context.CancelFunc        // 微信 iLink 长轮询取消函数
+	telegramCancel      context.CancelFunc        // Telegram 长轮询取消函数
+	slackCancel         context.CancelFunc        // Slack Socket Mode 取消函数
+	discordCancel       context.CancelFunc        // Discord Gateway 取消函数
+	qqCancel            context.CancelFunc        // QQ WebSocket 取消函数
+	alertCancel         context.CancelFunc        // 漏洞提醒持久化投递 worker
+	asmResultSyncCancel context.CancelFunc        // ASM 任务进度与结果同步 worker
+	c2Manager           *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
+	c2Watchdog          *c2.SessionWatchdog       // C2 会话看门狗
+	c2WatchdogCancel    context.CancelFunc        // 看门狗取消函数
+	c2Handler           *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
+	auditSvc            *audit.Service
 }
 
 // New 创建新应用
@@ -486,6 +487,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	alertCtx, alertCancel := context.WithCancel(context.Background())
 	app.alertCancel = alertCancel
 	go robotHandler.RunVulnerabilityAlertWorker(alertCtx)
+	asmWorkerCtx, asmWorkerCancel := context.WithCancel(context.Background())
+	app.asmResultSyncCancel = asmWorkerCancel
+	asmService.StartResultSyncWorker(asmWorkerCtx, 30*time.Second)
 
 	// 设置漏洞工具注册器（内置工具，必须设置）
 	vulnerabilityRegistrar := func() error {
@@ -753,6 +757,10 @@ func (a *App) Shutdown() {
 	if a.alertCancel != nil {
 		a.alertCancel()
 		a.alertCancel = nil
+	}
+	if a.asmResultSyncCancel != nil {
+		a.asmResultSyncCancel()
+		a.asmResultSyncCancel = nil
 	}
 
 	// 停止钉钉/飞书长连接
@@ -1114,6 +1122,7 @@ func setupRoutes(
 		protected.POST("/asm/tasks/:id/sync", asmHandler.SyncTaskHistory)
 		protected.GET("/asm/tasks/:id/results", asmHandler.TaskHistoryResults)
 		protected.GET("/asm/tasks/:id/results/detail", asmHandler.TaskHistoryResultDetail)
+		protected.POST("/asm/tasks/:id/results/sync", asmHandler.SyncTaskResults)
 		protected.POST("/asm/tasks/:id/screenshots/sync", asmHandler.SyncTaskScreenshots)
 		protected.GET("/asm/screenshots/:id/content", asmHandler.ScreenshotContent)
 

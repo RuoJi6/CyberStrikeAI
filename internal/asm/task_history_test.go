@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/database"
 
@@ -16,6 +17,7 @@ import (
 
 type taskHistoryTestAdapter struct {
 	assetsErr   error
+	assetCalls  int
 	detailCalls int
 }
 
@@ -43,9 +45,15 @@ func (a *taskHistoryTestAdapter) GetTask(context.Context, *Connection, string) (
 		"summary": map[string]interface{}{"websites": 1},
 	}}}}, nil
 }
-func (a *taskHistoryTestAdapter) ListAssets(context.Context, *Connection, AssetFilter) (interface{}, error) {
+func (a *taskHistoryTestAdapter) ListAssets(_ context.Context, _ *Connection, filter AssetFilter) (interface{}, error) {
+	a.assetCalls++
 	if a.assetsErr != nil {
 		return nil, a.assetsErr
+	}
+	if filter.Type == "vulnerability" {
+		return map[string]interface{}{"results": map[string]interface{}{"results": []interface{}{
+			map[string]interface{}{"hash": "hash-one", "url": "https://example.test", "severity": "high"},
+		}}}, nil
 	}
 	return map[string]interface{}{"results": map[string]interface{}{"results": []interface{}{
 		map[string]interface{}{"url": "https://example.test", "screenshot": "/shot.png"},
@@ -119,14 +127,25 @@ func TestTaskHistoryRecordsSyncsAndCachesResults(t *testing.T) {
 		t.Fatalf("unexpected synced task: %#v", synced)
 	}
 
+	taskRecord, err := service.db.GetASMTask(localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.syncTaskResultType(context.Background(), taskRecord, "site"); err != nil {
+		t.Fatal(err)
+	}
 	results, err := service.ListTaskHistoryResults(context.Background(), localID, AssetFilter{Type: "site"})
 	if err != nil || results.Stale {
 		t.Fatalf("unexpected live results: %#v, err=%v", results, err)
 	}
 	adapter.assetsErr = errors.New("remote unavailable")
+	callsBeforeLocalRead := adapter.assetCalls
 	cached, err := service.ListTaskHistoryResults(context.Background(), localID, AssetFilter{Type: "site"})
-	if err != nil || !cached.Stale || cached.CachedAt == nil {
-		t.Fatalf("expected cached fallback: %#v, err=%v", cached, err)
+	if err != nil || cached.Stale || cached.CachedAt == nil || cached.Source != "local" {
+		t.Fatalf("expected local database result without upstream request: %#v, err=%v", cached, err)
+	}
+	if adapter.assetCalls != callsBeforeLocalRead {
+		t.Fatalf("local result read unexpectedly called upstream: before=%d after=%d", callsBeforeLocalRead, adapter.assetCalls)
 	}
 	if _, err := service.ListTasks(context.Background(), resource.ID, TaskFilter{Page: 1, PageSize: 20}); err != nil {
 		t.Fatal(err)
@@ -206,6 +225,98 @@ func TestTaskHistoryResultDetailUsesProviderAdapter(t *testing.T) {
 	if _, err := service.GetTaskHistoryResultDetail(context.Background(), localID, AssetDetailFilter{Type: "vulnerability"}); err == nil {
 		t.Fatal("empty detail key was accepted")
 	}
+}
+
+func TestMCPListAssetsReadsCompletedLocalResultWithoutUpstream(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	task, err := service.db.GetASMTask(localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status, task.Progress = "completed", 100
+	if err := service.db.UpdateASMTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.syncTaskResultType(context.Background(), task, "site"); err != nil {
+		t.Fatal(err)
+	}
+	calls := adapter.assetCalls
+	adapter.assetsErr = errors.New("upstream must not be called")
+	result, err := service.ListAssets(context.Background(), resource.ID, AssetFilter{TaskID: "7", Type: "site", Page: 1, PageSize: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.assetCalls != calls {
+		t.Fatalf("MCP local read called upstream: before=%d after=%d", calls, adapter.assetCalls)
+	}
+	view, ok := result.(TaskResultsView)
+	if !ok || view.Source != "local" || view.Stale {
+		t.Fatalf("unexpected MCP local result: %#v", result)
+	}
+}
+
+func TestRequestTaskResultsSyncMarksQueuedTypesPending(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	task, err := service.db.GetASMTask(localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task.Status, task.Progress = "completed", 100
+	if err := service.db.UpdateASMTask(task); err != nil {
+		t.Fatal(err)
+	}
+
+	service.resultSyncSem <- struct{}{}
+	view, err := service.RequestTaskResultsSync(localID)
+	if err != nil {
+		<-service.resultSyncSem
+		t.Fatal(err)
+	}
+	if view.Status != "pending" || len(view.Types) != len(providerResultTypes(ProviderXingRin)) {
+		<-service.resultSyncSem
+		t.Fatalf("unexpected queued result sync view: %#v", view)
+	}
+	for _, state := range view.Types {
+		if state.Status != "pending" {
+			<-service.resultSyncSem
+			t.Fatalf("result type %s was not marked pending: %#v", state.AssetType, state)
+		}
+	}
+	<-service.resultSyncSem
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		current, getErr := service.GetTaskHistory(localID)
+		if getErr == nil && current.ResultSync.Status == "completed" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("queued result sync did not complete")
 }
 
 func TestResolveScreenshotURLRequiresSameOrigin(t *testing.T) {

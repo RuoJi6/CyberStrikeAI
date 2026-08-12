@@ -26,7 +26,7 @@ Agents use ten normalized tools:
 | `asm_list_task_options` | Query live policies, engines, dictionaries, nodes, templates, plugins, POCs, or projects |
 | `asm_create_task` | Create a task for an explicitly authorized target |
 | `asm_list_tasks` / `asm_get_task` | Read task lists, progress, stages, statistics, and configuration |
-| `asm_list_assets` | Read one provider-specific result type with pagination; discover valid IDs from profile `result_types` |
+| `asm_list_assets` | Page through a provider-specific result type from the CyberStrikeAI local snapshot; discover valid IDs from profile `result_types` |
 | `asm_stop_task` | Stop a remote task |
 | `asm_manage_task` | Restart, resume, delete, or synchronize results when supported |
 
@@ -74,7 +74,9 @@ Node selection, ignore/duplicate rules, target sources, projects, structured ass
 | XingRin | `/api/auth/login/`, `/api/auth/me/` | `/api/scans/quick/`, scans/detail/stop; engines/Workers/wordlists/Nuclei repositories | `/api/assets/:type/`, `/api/scans/:id/:type/` |
 | ScopeSentry | `/api/user/login`, `/api/node/online` | task templates, immediate/scheduled task creation and lifecycle; dictionary/plugin/POC/project choices | site/domain/IP/URL plus crawler, sensitive, directory, takeover, vulnerability list and vulnerability detail APIs |
 
-The task center now renders provider-aware rich cards rather than forcing all providers into a fixed generic table. Complete fields can be expanded; vulnerability cards expose severity, target, scanner evidence, and request/response detail. Pagination uses upstream totals with 10/20/50/100 page sizes. Screenshots have a dedicated view and are authenticated, downloaded, and cached by CyberStrikeAI automatically after UI or MCP result reads.
+The task center now renders provider-aware rich cards rather than forcing all providers into a fixed generic table. Complete fields can be expanded; vulnerability cards expose severity, target, scanner evidence, and request/response detail. After a task completes, the background worker walks every provider `result_type` and all upstream pages, stores one local database row per result, enriches ScopeSentry vulnerability details, and automatically downloads authenticated screenshots. The task center and `asm_list_assets` then use local pagination, search, and detail reads instead of querying the ASM on every view.
+
+Upstream result requests are limited to the initial completion sync, a first-read fallback when a completed type is missing locally, and explicit refresh through the task center or `asm_manage_task(action=sync_results)`. Scan progress and local-result synchronization are shown independently, including completed type count, local row count, current type, last synchronization time, and errors.
 
 ## Live MCP validation
 
@@ -102,6 +104,7 @@ The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_T
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added automatic full result synchronization after completion, local row-level pagination/search/detail for the task center and MCP, explicit sync state and refresh actions, and automatic screenshot caching |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific rich result cards, upstream-total pagination and page sizes; mapped XingRin directory/screenshot results and ScopeSentry crawler/sensitive/directory/takeover/vulnerability details; made screenshot caching automatic for UI and MCP reads |
 | 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific `result_types`; mapped all 13 ARL task-detail collections; added provider-aware tabs and paged task-center reads |
 | 1.3 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Isolated generated ScopeSentry templates by configuration fingerprint and added scheduled-task ID resolution, task-center visibility, detail, and explicit deletion semantics |

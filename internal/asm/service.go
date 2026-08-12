@@ -213,6 +213,10 @@ type Service struct {
 	screenshotMu     sync.Mutex
 	screenshotJobs   map[string]bool
 	screenshotErrors map[string]string
+	resultSyncMu     sync.Mutex
+	resultSyncJobs   map[string]bool
+	resultSyncSem    chan struct{}
+	workerCtx        context.Context
 }
 
 func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Service, error) {
@@ -230,6 +234,8 @@ func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Serv
 		db: db, cipher: cipher, logger: logger, adapters: make(map[string]Adapter),
 		screenshotDir:  filepath.Join(filepath.Dir(databasePath), "asm_screenshots"),
 		screenshotJobs: make(map[string]bool), screenshotErrors: make(map[string]string),
+		resultSyncJobs: make(map[string]bool), resultSyncSem: make(chan struct{}, 1),
+		workerCtx: context.Background(),
 	}
 	service.RegisterAdapter(NewARLAdapter())
 	service.RegisterAdapter(NewXingRinAdapter())
@@ -535,10 +541,6 @@ func (s *Service) ManageTask(ctx context.Context, resourceID string, req TaskMan
 	if err != nil {
 		return nil, err
 	}
-	manager, ok := adapter.(TaskManagerAdapter)
-	if !ok {
-		return nil, fmt.Errorf("%s 暂未提供扩展任务管理能力", providerDisplayName(conn.Resource.Provider))
-	}
 	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
 	req.TaskID = strings.TrimSpace(req.TaskID)
 	if req.Action == "" {
@@ -546,6 +548,20 @@ func (s *Service) ManageTask(ctx context.Context, resourceID string, req TaskMan
 	}
 	if req.Options == nil {
 		req.Options = map[string]interface{}{}
+	}
+	if req.Action == "sync_results" {
+		item, findErr := s.db.FindASMTask(resourceID, req.TaskID)
+		if findErr != nil {
+			return nil, findErr
+		}
+		if item == nil {
+			return nil, fmt.Errorf("ASM 本地任务记录不存在，请先调用 asm_list_tasks 导入任务")
+		}
+		return s.SyncTaskResults(ctx, item.ID)
+	}
+	manager, ok := adapter.(TaskManagerAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 暂未提供扩展任务管理能力", providerDisplayName(conn.Resource.Provider))
 	}
 	result, err := manager.ManageTask(ctx, conn, req)
 	if err != nil {
@@ -605,21 +621,31 @@ func (s *Service) GetTask(ctx context.Context, resourceID, taskID string) (inter
 }
 
 func (s *Service) ListAssets(ctx context.Context, resourceID string, filter AssetFilter) (interface{}, error) {
-	conn, adapter, err := s.connection(resourceID, true)
+	conn, _, err := s.connection(resourceID, true)
 	if err != nil {
 		return nil, err
 	}
 	if filter.Type != "" && !providerSupportsResultType(conn.Resource.Provider, filter.Type) {
 		return nil, fmt.Errorf("%s 不支持结果类型: %s；请先读取 asm_get_task_profile.result_types", providerDisplayName(conn.Resource.Provider), filter.Type)
 	}
-	payload, err := adapter.ListAssets(ctx, conn, filter)
+	if strings.TrimSpace(filter.TaskID) == "" {
+		return nil, fmt.Errorf("本地结果查询必须提供 task_id")
+	}
+	task, err := s.db.FindASMTask(resourceID, filter.TaskID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("ASM 本地任务记录不存在，请先调用 asm_list_tasks 导入任务")
+	}
 	resultType := normalizeAssetType(filter.Type)
-	if err == nil && (resultType == "site" || resultType == "screenshot") && strings.TrimSpace(filter.TaskID) != "" {
-		if task, findErr := s.db.FindASMTask(resourceID, filter.TaskID); findErr == nil && task != nil {
-			s.enqueueTaskScreenshotCache(task.ID, payload)
+	state := s.resultSyncView(task)
+	if task.Status == "completed" && !state.typeCompleted(resultType) && state.typeStatus(resultType) != "syncing" {
+		if _, syncErr := s.syncTaskResultType(ctx, task, resultType); syncErr != nil {
+			s.logger.Warn("MCP 首次读取 ASM 本地结果同步失败", zap.String("task_id", task.ID), zap.String("asset_type", resultType), zap.Error(syncErr))
 		}
 	}
-	return payload, err
+	return s.ListTaskHistoryResults(ctx, task.ID, filter)
 }
 
 func (s *Service) StopTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {

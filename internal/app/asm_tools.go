@@ -155,13 +155,13 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMListAssets, ShortDescription: "分页读取 ASM 发现结果",
-		Description: "按结果类型分页读取 ASM 发现结果；一次调用只返回一个类型的一页数据，不会自动汇总所有类型或所有分页。先调用 asm_get_task_profile 读取 provider-specific result_types；可用 task_id 限定某次扫描。",
+		Description: "按结果类型分页读取 CyberStrikeAI 本地数据库中的 ASM 发现结果。任务完成后会自动从上游全量同步；本地缺少所请类型时，首次调用会先同步该类型。必须传 task_id；先调用 asm_get_task_profile 读取 provider-specific result_types。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"task_id":    map[string]interface{}{"type": "string"},
 			"asset_type": map[string]interface{}{"type": "string", "enum": []string{"site", "domain", "ip", "cert", "service", "fileleak", "url", "vulnerability", "npoc_service", "cip", "nuclei_result", "stat_finger", "wih", "directory", "screenshot", "crawler", "sensitive", "takeover"}, "description": "必须使用 asm_get_task_profile.result_types 中当前平台支持的 ID"},
 			"query":      map[string]interface{}{"type": "string"},
 			"page":       map[string]interface{}{"type": "integer", "minimum": 1}, "page_size": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
-		}),
+		}, "task_id"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		return service.ListAssets(ctx, asmStringArg(args, "resource_id"), asm.AssetFilter{
 			TaskID: asmStringArg(args, "task_id"), Type: asmStringArg(args, "asset_type"), Query: asmStringArg(args, "query"),
@@ -179,7 +179,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMManageTask, ShortDescription: "执行 ASM 扩展任务动作",
-		Description: "执行平台支持的重跑、恢复、删除或结果同步动作。先读取 asm_get_task_profile 的 manage_actions；删除和同步等操作会改变远端状态。",
+		Description: "执行平台支持的重跑、恢复、删除或结果同步动作。sync_results 会从上游全量拉取所有支持的结果类型并替换 CyberStrikeAI 本地快照；其他动作会改变远端任务状态。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"action":  map[string]interface{}{"type": "string", "enum": []string{"restart", "resume", "delete", "sync_results"}},
 			"task_id": map[string]interface{}{"type": "string"},

@@ -533,7 +533,15 @@
 .asm-provider-mark.asm-provider-xingrin.small { padding: 6px; }
 .asm-task-provider strong { color: var(--text-primary); font-size: 11px; }
 .asm-task-provider small { margin-top: 2px; color: var(--text-muted); font-size: 9px; }
+.asm-task-provider .asm-result-sync-badge { margin-top: 5px; }
 .asm-task-row time { color: var(--text-secondary); font-size: 10px; }
+
+.asm-result-sync-badge { display: inline-flex; width: max-content; align-items: center; gap: 4px; padding: 3px 7px; font-size: 9px; font-style: normal; font-weight: 800; border-radius: 99px; }
+.asm-result-sync-badge.waiting, .asm-result-sync-badge.pending { color: var(--text-secondary); background: var(--bg-tertiary); }
+.asm-result-sync-badge.syncing { color: #0369a1; background: #e0f2fe; }
+.asm-result-sync-badge.completed { color: #047857; background: #d1fae5; }
+.asm-result-sync-badge.partial { color: #a16207; background: #fef3c7; }
+.asm-result-sync-badge.failed { color: #b91c1c; background: #fee2e2; }
 
 .asm-task-progress-cell {
     display: grid;
@@ -592,6 +600,17 @@ html[data-theme="dark"] .asm-task-status.stopped { color: #fde68a; background: r
 .asm-task-detail-progress strong { color: var(--text-primary); font-size: 27px; letter-spacing: -.05em; }
 .asm-task-detail-progress span { color: var(--text-secondary); font-size: 10px; }
 .asm-detail-progress-track { height: 7px; margin-top: 16px; }
+.asm-result-sync-panel { display: grid; grid-template-columns: minmax(260px, auto) minmax(180px, 1fr); gap: 14px; align-items: center; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border-color); border-radius: 11px; background: var(--bg-secondary); }
+.asm-result-sync-panel > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+.asm-result-sync-panel strong { color: var(--text-primary); font-size: 11px; }
+.asm-result-sync-panel small { color: var(--text-secondary); font-size: 10px; }
+.asm-result-sync-panel p { grid-column: 1 / -1; margin: -4px 0 0; color: var(--error-color); font-size: 10px; }
+.asm-result-sync-track { overflow: hidden; height: 6px; border-radius: 99px; background: var(--bg-tertiary); }
+.asm-result-sync-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--asm-blue), var(--asm-cyan)); transition: width .25s ease; }
+html[data-theme="dark"] .asm-result-sync-badge.syncing { color: #7dd3fc; background: rgba(14, 165, 233, .16); }
+html[data-theme="dark"] .asm-result-sync-badge.completed { color: #6ee7b7; background: rgba(16, 185, 129, .16); }
+html[data-theme="dark"] .asm-result-sync-badge.partial { color: #fde68a; background: rgba(245, 158, 11, .16); }
+html[data-theme="dark"] .asm-result-sync-badge.failed { color: #fca5a5; background: rgba(239, 68, 68, .16); }
 
 .asm-task-meta-grid,
 .asm-summary-grid { display: grid; gap: 9px; margin-top: 16px; }
@@ -779,6 +798,7 @@ html[data-theme="dark"] .asm-provider-mark.asm-provider-scopesentry { background
     .asm-task-row > button { justify-self: stretch; }
     .asm-task-meta-grid, .asm-summary-grid { grid-template-columns: 1fr 1fr; }
     .asm-task-detail-hero { flex-direction: column; }
+	.asm-result-sync-panel { grid-template-columns: 1fr; }
     .asm-task-detail-progress { align-items: flex-start; }
     .asm-page > .modal-overlay { padding: 0; }
     .asm-page > .modal-overlay > .modal-content {

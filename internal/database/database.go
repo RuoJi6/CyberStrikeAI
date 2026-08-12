@@ -567,6 +567,34 @@ func (db *DB) initTables() error {
 		FOREIGN KEY (task_id) REFERENCES asm_tasks(id) ON DELETE CASCADE
 	);`
 
+	createASMResultItemsTable := `
+	CREATE TABLE IF NOT EXISTS asm_result_items (
+		task_id TEXT NOT NULL,
+		asset_type TEXT NOT NULL,
+		item_key TEXT NOT NULL,
+		provider_key TEXT NOT NULL DEFAULT '',
+		payload_json TEXT NOT NULL DEFAULT '{}',
+		search_text TEXT NOT NULL DEFAULT '',
+		sort_order INTEGER NOT NULL DEFAULT 0,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (task_id, asset_type, item_key),
+		FOREIGN KEY (task_id) REFERENCES asm_tasks(id) ON DELETE CASCADE
+	);`
+
+	createASMResultSyncStatesTable := `
+	CREATE TABLE IF NOT EXISTS asm_result_sync_states (
+		task_id TEXT NOT NULL,
+		asset_type TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending',
+		item_count INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		started_at DATETIME,
+		synced_at DATETIME,
+		updated_at DATETIME NOT NULL,
+		PRIMARY KEY (task_id, asset_type),
+		FOREIGN KEY (task_id) REFERENCES asm_tasks(id) ON DELETE CASCADE
+	);`
+
 	createASMScreenshotsTable := `
 	CREATE TABLE IF NOT EXISTS asm_screenshots (
 		id TEXT PRIMARY KEY,
@@ -963,6 +991,18 @@ func (db *DB) initTables() error {
 	}
 	if _, err := db.Exec(createASMTaskResultsTable); err != nil {
 		return fmt.Errorf("创建asm_task_results表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMResultItemsTable); err != nil {
+		return fmt.Errorf("创建asm_result_items表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMResultSyncStatesTable); err != nil {
+		return fmt.Errorf("创建asm_result_sync_states表失败: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_asm_result_items_page ON asm_result_items(task_id, asset_type, sort_order)`); err != nil {
+		return fmt.Errorf("创建 ASM 结果分页索引失败: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_asm_result_items_provider_key ON asm_result_items(task_id, asset_type, provider_key)`); err != nil {
+		return fmt.Errorf("创建 ASM 结果键索引失败: %w", err)
 	}
 	if _, err := db.Exec(createASMScreenshotsTable); err != nil {
 		return fmt.Errorf("创建asm_screenshots表失败: %w", err)
