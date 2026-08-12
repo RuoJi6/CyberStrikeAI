@@ -675,6 +675,66 @@ function asmRenderScreenshotFigure(item, compact) {
     return `<figure class="${compact ? 'asm-record-screenshot' : ''}" data-asm-screenshot-url="${asmEscape(item.url)}"><div class="asm-screenshot-loading">正在安全加载…</div><img alt="${asmEscape(label)}" loading="lazy"><figcaption><strong>${asmEscape(label)}</strong><span>${asmEscape(item.content_type)} · ${Math.max(1, Math.round((Number(item.size_bytes) || 0) / 1024))} KiB</span></figcaption></figure>`;
 }
 
+function asmArrayValue(value) {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === 'object') {
+        if (['port_id', 'port', 'number'].some(key => value[key] !== undefined && value[key] !== null)) {
+            return [value];
+        }
+        return Object.values(value);
+    }
+    if (typeof value === 'string') {
+        try {
+            const parsed = JSON.parse(value);
+            return asmArrayValue(parsed);
+        } catch (_) {
+            return [];
+        }
+    }
+    return [];
+}
+
+function asmRenderARLPorts(value) {
+    const ports = asmArrayValue(value).filter(item => item && typeof item === 'object');
+    if (!ports.length) return '<div class="asm-arl-port-empty">上游未返回端口信息</div>';
+    return `<section class="asm-record-section asm-arl-port-section"><div class="asm-record-section-head"><h6>端口与服务</h6><span>${ports.length} 个开放端口</span></div><div class="asm-arl-port-grid">${ports.map(item => {
+        const port = asmFirstValue(item, ['port_id', 'port', 'number']);
+        const protocol = asmFirstValue(item, ['protocol', 'proto']) || 'tcp';
+        const service = asmFirstValue(item, ['service_name', 'service']);
+        const product = asmFirstValue(item, ['product']);
+        const version = asmFirstValue(item, ['version']);
+        const productLine = [asmTextValue(product), asmTextValue(version)].filter(Boolean).join(' ');
+        return `<div class="asm-arl-port-item"><div class="asm-arl-port-number"><strong>${asmEscape(port || '未知')}</strong><span>/${asmEscape(protocol)}</span></div><div class="asm-arl-port-service">${service ? `<b>${asmEscape(service)}</b>` : '<b>未识别服务</b>'}${productLine ? `<span>${asmEscape(productLine)}</span>` : '<span>暂无产品与版本信息</span>'}</div></div>`;
+    }).join('')}</div></section>`;
+}
+
+function asmRenderARLIPRecord(row, index) {
+    const ip = asmFirstValue(row, ['ip', 'host']) || `IP 结果 ${index + 1}`;
+    const os = asmTextValue(asmFirstValue(row, ['os_info']));
+    const asn = row.geo_asn && typeof row.geo_asn === 'object' ? row.geo_asn : {};
+    const asnNumber = asmFirstValue(asn, ['number', 'asn']);
+    const asnOrganization = asmFirstValue(asn, ['organization', 'org', 'name']);
+    const asnPrimary = asnNumber !== '' ? `AS${String(asnNumber).replace(/^AS/i, '')}` : '';
+    const geo = row.geo_city && typeof row.geo_city === 'object' ? row.geo_city : {};
+    const geoParts = [asmFirstValue(geo, ['city']), asmFirstValue(geo, ['region_name', 'region']), asmFirstValue(geo, ['country_name', 'country'])].map(asmTextValue).filter(Boolean);
+    const countryCode = asmTextValue(asmFirstValue(geo, ['country_code']));
+    const coordinates = [asmFirstValue(geo, ['latitude']), asmFirstValue(geo, ['longitude'])].filter(value => value !== '').map(asmTextValue).join(', ');
+    const overview = [
+        ['操作系统', os, ''],
+        ['ASN', asnPrimary || asmTextValue(asnOrganization), asnPrimary && asnOrganization ? asmTextValue(asnOrganization) : ''],
+        ['地理位置', geoParts.join(' · ') || countryCode, countryCode && geoParts.length ? countryCode : ''],
+        ['经纬度', coordinates, ''],
+    ].filter(([, primary]) => primary);
+    const used = ['ip', 'host', 'port_info', 'os_info', 'geo_asn', 'geo_city'];
+    return `<article class="asm-result-card asm-arl-ip-record">
+        <header><div class="asm-result-index">${index + 1}</div><div class="asm-result-card-title"><h5>${asmEscape(ip)}</h5><p>ARL IP 资产详情</p></div><div class="asm-result-card-badges"><span class="asm-result-status">${asmArrayValue(row.port_info).length} 端口</span></div></header>
+        ${overview.length ? `<div class="asm-arl-ip-overview">${overview.map(([label, primary, secondary]) => `<div><span>${asmEscape(label)}</span><strong>${asmEscape(primary)}</strong>${secondary ? `<small>${asmEscape(secondary)}</small>` : ''}</div>`).join('')}</div>` : ''}
+        ${asmRenderARLPorts(row.port_info)}
+        ${asmRenderDirectFields(row, used)}
+        <details class="asm-result-detail"><summary>查看上游原始字段</summary><dl>${asmRenderResultDetails(row)}</dl></details>
+    </article>`;
+}
+
 function asmRenderSiteRecord(row, index, screenshots) {
     const schema = asmResultSchema(asmPageState.selectedTask?.provider || '', 'site');
     const title = asmResultTitle(row, schema, index);
@@ -722,6 +782,7 @@ function asmRenderResultCard(row, index, screenshots) {
     const type = asmPageState.selectedAssetType;
     const provider = asmPageState.selectedTask?.provider || '';
     if (type === 'site') return asmRenderSiteRecord(row, index, screenshots);
+    if (provider === 'arl' && type === 'ip') return asmRenderARLIPRecord(row, index);
     const schema = asmResultSchema(provider, type);
     const title = asmResultTitle(row, schema, index);
     const subtitle = asmFirstValue(row, schema.subtitle);
