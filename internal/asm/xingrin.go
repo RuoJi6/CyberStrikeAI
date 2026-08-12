@@ -11,9 +11,13 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+
+	"gopkg.in/yaml.v3"
 )
 
 const xingrinMaxResponseBytes = 4 * 1024 * 1024
@@ -30,7 +34,7 @@ func NewXingRinAdapter() *XingRinAdapter { return &XingRinAdapter{} }
 func (a *XingRinAdapter) Provider() string { return ProviderXingRin }
 
 func (a *XingRinAdapter) Capabilities() []string {
-	return []string{"test_connection", "create_task", "list_tasks", "get_task", "list_assets", "stop_task"}
+	return []string{"test_connection", "get_task_profile", "list_task_options", "create_task", "list_tasks", "get_task", "list_assets", "stop_task"}
 }
 
 func xingrinHTTPClient(verifyTLS bool) (*http.Client, error) {
@@ -150,6 +154,37 @@ func xingrinCollection(payload interface{}) []interface{} {
 	return nil
 }
 
+func xingrinEngineOptions(payload interface{}, detailID string) (interface{}, error) {
+	detailID = strings.TrimSpace(detailID)
+	if detailID != "" {
+		if !xingrinTaskIDPattern.MatchString(detailID) {
+			return nil, fmt.Errorf("XingRin 引擎 ID 格式无效")
+		}
+		for _, raw := range xingrinCollection(payload) {
+			item := valueMap(raw)
+			if item != nil && meaningfulString(item["id"]) == detailID {
+				return map[string]interface{}{"item": item}, nil
+			}
+		}
+		return nil, fmt.Errorf("XingRin 引擎 ID 不存在: %s", detailID)
+	}
+
+	items := make([]interface{}, 0, len(xingrinCollection(payload)))
+	for _, raw := range xingrinCollection(payload) {
+		item := valueMap(raw)
+		if item == nil {
+			continue
+		}
+		delete(item, "configuration")
+		items = append(items, item)
+	}
+	if object := valueMap(payload); object != nil {
+		object["results"] = items
+		return object, nil
+	}
+	return items, nil
+}
+
 func xingrinEngine(payload interface{}) (interface{}, string, error) {
 	items := xingrinCollection(payload)
 	if len(items) == 0 {
@@ -179,44 +214,48 @@ func xingrinEngine(payload interface{}) (interface{}, string, error) {
 	return fallback["id"], name, nil
 }
 
-func xingrinBoolOption(options map[string]interface{}, key string, fallback bool) (bool, error) {
-	value, exists := options[key]
-	if !exists || value == nil {
-		return fallback, nil
-	}
-	result, ok := value.(bool)
-	if !ok {
-		return false, fmt.Errorf("XingRin 任务选项 %s 必须是布尔值", key)
-	}
-	return result, nil
-}
-
-func xingrinIntOption(options map[string]interface{}, key string, fallback, minimum, maximum int) (int, error) {
-	value, exists := options[key]
-	if !exists || value == nil {
-		return fallback, nil
-	}
-	var result int
-	switch number := value.(type) {
-	case int:
-		result = number
-	case int64:
-		result = int(number)
-	case float64:
-		result = int(number)
-	case json.Number:
-		parsed, err := strconv.Atoi(number.String())
+func xingrinSelectedEngines(payload interface{}, selected []int) ([]interface{}, []string, error) {
+	if len(selected) == 0 {
+		id, name, err := xingrinEngine(payload)
 		if err != nil {
-			return 0, fmt.Errorf("XingRin 任务选项 %s 必须是整数", key)
+			return nil, nil, err
 		}
-		result = parsed
-	default:
-		return 0, fmt.Errorf("XingRin 任务选项 %s 必须是整数", key)
+		return []interface{}{id}, []string{name}, nil
 	}
-	if result < minimum || result > maximum {
-		return 0, fmt.Errorf("XingRin 任务选项 %s 必须在 %d 到 %d 之间", key, minimum, maximum)
+	wanted := make(map[int]struct{}, len(selected))
+	for _, id := range selected {
+		wanted[id] = struct{}{}
 	}
-	return result, nil
+	ids := make([]interface{}, 0, len(selected))
+	names := make([]string, 0, len(selected))
+	for _, raw := range xingrinCollection(payload) {
+		item, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, err := taskOptionInt("XingRin", map[string]interface{}{"id": item["id"]}, "id", 0, 1, 1<<31-1)
+		if err != nil {
+			continue
+		}
+		if _, exists := wanted[id]; !exists {
+			continue
+		}
+		name := strings.TrimSpace(fmt.Sprint(item["name"]))
+		if name == "" || name == "<nil>" {
+			return nil, nil, fmt.Errorf("XingRin 引擎 %d 名称无效", id)
+		}
+		ids, names = append(ids, item["id"]), append(names, name)
+		delete(wanted, id)
+	}
+	if len(wanted) > 0 {
+		missing := make([]string, 0, len(wanted))
+		for id := range wanted {
+			missing = append(missing, strconv.Itoa(id))
+		}
+		sort.Strings(missing)
+		return nil, nil, fmt.Errorf("XingRin 引擎 ID 不存在: %s", strings.Join(missing, ", "))
+	}
+	return ids, names, nil
 }
 
 func validateXingRinPorts(value string) (string, error) {
@@ -245,27 +284,68 @@ func validateXingRinPorts(value string) (string, error) {
 }
 
 func buildXingRinConfiguration(options map[string]interface{}) (string, error) {
-	portScan, err := xingrinBoolOption(options, "port_scan", true)
+	allowed := taskOptionAllowed(
+		"engine_ids", "subdomain_discovery", "subdomain_bruteforce", "subdomain_permutation", "subdomain_resolve", "subdomain_wordlist",
+		"port_scan", "port_scan_passive", "ports", "top_ports", "site_identify", "fingerprint_libraries",
+		"directory_scan", "directory_wordlist", "site_capture", "screenshot_sources", "url_fetch", "crawl_depth",
+		"nuclei_scan", "nuclei_template_repos", "nuclei_severity", "nuclei_tags", "dalfox_scan",
+		"rate_limit", "concurrency", "directory_concurrency", "request_timeout",
+	)
+	if err := rejectUnknownTaskOptions("XingRin", options, allowed); err != nil {
+		return "", err
+	}
+	subdomainDiscovery, err := taskOptionBool("XingRin", options, "subdomain_discovery", false)
 	if err != nil {
 		return "", err
 	}
-	siteScan, err := xingrinBoolOption(options, "site_identify", true)
+	subdomainBruteforce, err := taskOptionBool("XingRin", options, "subdomain_bruteforce", false)
 	if err != nil {
 		return "", err
 	}
-	siteCapture, err := xingrinBoolOption(options, "site_capture", false)
+	subdomainPermutation, err := taskOptionBool("XingRin", options, "subdomain_permutation", true)
 	if err != nil {
 		return "", err
 	}
-	nucleiScan, err := xingrinBoolOption(options, "nuclei_scan", false)
+	subdomainResolve, err := taskOptionBool("XingRin", options, "subdomain_resolve", true)
 	if err != nil {
 		return "", err
 	}
-	if !portScan && !siteScan && !siteCapture && !nucleiScan {
+	portScan, err := taskOptionBool("XingRin", options, "port_scan", true)
+	if err != nil {
+		return "", err
+	}
+	portScanPassive, err := taskOptionBool("XingRin", options, "port_scan_passive", false)
+	if err != nil {
+		return "", err
+	}
+	siteScan, err := taskOptionBool("XingRin", options, "site_identify", true)
+	if err != nil {
+		return "", err
+	}
+	directoryScan, err := taskOptionBool("XingRin", options, "directory_scan", false)
+	if err != nil {
+		return "", err
+	}
+	siteCapture, err := taskOptionBool("XingRin", options, "site_capture", false)
+	if err != nil {
+		return "", err
+	}
+	urlFetch, err := taskOptionBool("XingRin", options, "url_fetch", false)
+	if err != nil {
+		return "", err
+	}
+	nucleiScan, err := taskOptionBool("XingRin", options, "nuclei_scan", false)
+	if err != nil {
+		return "", err
+	}
+	dalfoxScan, err := taskOptionBool("XingRin", options, "dalfox_scan", false)
+	if err != nil {
+		return "", err
+	}
+	if !subdomainDiscovery && !portScan && !siteScan && !directoryScan && !siteCapture && !urlFetch && !nucleiScan && !dalfoxScan {
 		return "", fmt.Errorf("XingRin 至少需要启用一个扫描阶段")
 	}
-	if siteCapture || nucleiScan {
-		// 截图和漏洞扫描都依赖站点发现结果。
+	if directoryScan || siteCapture || urlFetch || nucleiScan || dalfoxScan {
 		siteScan = true
 	}
 	ports, err := validateXingRinPorts(strings.TrimSpace(fmt.Sprint(options["ports"])))
@@ -275,30 +355,235 @@ func buildXingRinConfiguration(options map[string]interface{}) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	rate, err := xingrinIntOption(options, "rate_limit", 20, 1, 1000)
+	topPorts, err := taskOptionInt("XingRin", options, "top_ports", 0, 0, 65535)
 	if err != nil {
 		return "", err
 	}
-	concurrency, err := xingrinIntOption(options, "concurrency", 5, 1, 200)
+	if _, hasPorts := options["ports"]; hasPorts && topPorts > 0 {
+		return "", fmt.Errorf("XingRin ports 与 top_ports 不能同时使用")
+	}
+	rate, err := taskOptionInt("XingRin", options, "rate_limit", 20, 1, 1000)
 	if err != nil {
 		return "", err
 	}
-
-	var config strings.Builder
+	concurrency, err := taskOptionInt("XingRin", options, "concurrency", 5, 1, 200)
+	if err != nil {
+		return "", err
+	}
+	directoryConcurrency, err := taskOptionInt("XingRin", options, "directory_concurrency", 3, 1, 50)
+	if err != nil {
+		return "", err
+	}
+	requestTimeout, err := taskOptionInt("XingRin", options, "request_timeout", 8, 1, 120)
+	if err != nil {
+		return "", err
+	}
+	crawlDepth, err := taskOptionInt("XingRin", options, "crawl_depth", 3, 1, 20)
+	if err != nil {
+		return "", err
+	}
+	config := make(map[string]interface{})
+	if subdomainDiscovery {
+		wordlist, err := taskOptionString("XingRin", options, "subdomain_wordlist", "subdomains-top1million-110000.txt", 200)
+		if err != nil {
+			return "", err
+		}
+		config["subdomain_discovery"] = map[string]interface{}{
+			"passive_tools": map[string]interface{}{
+				"subfinder":   map[string]interface{}{"enabled": true, "timeout": 3600},
+				"sublist3r":   map[string]interface{}{"enabled": true, "timeout": 3600},
+				"assetfinder": map[string]interface{}{"enabled": true, "timeout": 3600},
+			},
+			"bruteforce":  map[string]interface{}{"enabled": subdomainBruteforce, "subdomain_bruteforce": map[string]interface{}{"wordlist-name": wordlist}},
+			"permutation": map[string]interface{}{"enabled": subdomainPermutation, "subdomain_permutation_resolve": map[string]interface{}{"timeout": 7200}},
+			"resolve":     map[string]interface{}{"enabled": subdomainResolve, "subdomain_resolve": map[string]interface{}{"timeout": "auto"}},
+		}
+	}
 	if portScan {
-		fmt.Fprintf(&config, "port_scan:\n  tools:\n    naabu_active:\n      enabled: true\n      ports: \"%s\"\n      threads: %d\n      rate: %d\n    naabu_passive:\n      enabled: false\n", ports, concurrency, rate)
+		active := map[string]interface{}{"enabled": true, "threads": concurrency, "rate": rate}
+		if topPorts > 0 {
+			active["top-ports"] = topPorts
+		} else {
+			active["ports"] = ports
+		}
+		config["port_scan"] = map[string]interface{}{"tools": map[string]interface{}{
+			"naabu_active": active, "naabu_passive": map[string]interface{}{"enabled": portScanPassive},
+		}}
 	}
 	if siteScan {
-		fmt.Fprintf(&config, "site_scan:\n  tools:\n    httpx:\n      enabled: true\n      threads: %d\n      rate-limit: %d\n      request-timeout: 8\n      retries: 1\n", concurrency, rate)
-		config.WriteString("fingerprint_detect:\n  tools:\n    xingfinger:\n      enabled: true\n      fingerprint-libs: [ehole, goby, wappalyzer, fingers, fingerprinthub, arl]\n")
+		libs, err := taskOptionStringSlice("XingRin", options, "fingerprint_libraries", []string{"ehole", "goby", "wappalyzer", "fingers", "fingerprinthub", "arl"}, 6, 32)
+		if err != nil {
+			return "", err
+		}
+		for _, lib := range libs {
+			if !optionStringIn(lib, "ehole", "goby", "wappalyzer", "fingers", "fingerprinthub", "arl") {
+				return "", fmt.Errorf("XingRin 不支持的指纹库: %s", lib)
+			}
+		}
+		config["site_scan"] = map[string]interface{}{"tools": map[string]interface{}{"httpx": map[string]interface{}{
+			"enabled": true, "threads": concurrency, "rate-limit": rate, "request-timeout": requestTimeout, "retries": 1,
+		}}}
+		config["fingerprint_detect"] = map[string]interface{}{"tools": map[string]interface{}{"xingfinger": map[string]interface{}{"enabled": true, "fingerprint-libs": libs}}}
+	}
+	if directoryScan {
+		wordlist, err := taskOptionString("XingRin", options, "directory_wordlist", "dir_default.txt", 200)
+		if err != nil {
+			return "", err
+		}
+		config["directory_scan"] = map[string]interface{}{"tools": map[string]interface{}{"ffuf": map[string]interface{}{
+			"enabled": true, "max-workers": directoryConcurrency, "wordlist-name": wordlist, "delay": "0.1-2.0",
+			"threads": concurrency, "request-timeout": requestTimeout, "match-codes": "200,201,301,302,401,403", "rate": rate,
+		}}}
 	}
 	if siteCapture {
-		fmt.Fprintf(&config, "screenshot:\n  tools:\n    playwright:\n      enabled: true\n      concurrency: %d\n      url_sources: [websites]\n", concurrency)
+		sources, err := taskOptionStringSlice("XingRin", options, "screenshot_sources", []string{"websites"}, 2, 16)
+		if err != nil {
+			return "", err
+		}
+		for _, source := range sources {
+			if !optionStringIn(source, "websites", "endpoints") {
+				return "", fmt.Errorf("XingRin 截图来源仅支持 websites 或 endpoints")
+			}
+		}
+		config["screenshot"] = map[string]interface{}{"tools": map[string]interface{}{"playwright": map[string]interface{}{"enabled": true, "concurrency": concurrency, "url_sources": sources}}}
 	}
-	if nucleiScan {
-		fmt.Fprintf(&config, "vuln_scan:\n  tools:\n    dalfox_xss:\n      enabled: false\n    nuclei:\n      enabled: true\n      template-repo-names:\n        - nuclei-templates\n      concurrency: %d\n      rate-limit: %d\n      request-timeout: 8\n      severity: medium,high,critical\n      tags: cve\n", concurrency, rate)
+	if urlFetch {
+		config["url_fetch"] = map[string]interface{}{"tools": map[string]interface{}{
+			"waymore": map[string]interface{}{"enabled": true, "timeout": 3600},
+			"katana":  map[string]interface{}{"enabled": true, "depth": crawlDepth, "threads": concurrency, "rate-limit": rate, "random-delay": 1, "retry": 2, "request-timeout": requestTimeout},
+			"uro":     map[string]interface{}{"enabled": true},
+			"httpx":   map[string]interface{}{"enabled": true, "threads": concurrency, "rate-limit": rate, "request-timeout": requestTimeout, "retries": 1},
+		}}
 	}
-	return config.String(), nil
+	if nucleiScan || dalfoxScan {
+		repositories, err := taskOptionStringSlice("XingRin", options, "nuclei_template_repos", []string{"nuclei-templates"}, 20, 200)
+		if err != nil {
+			return "", err
+		}
+		severity, err := taskOptionString("XingRin", options, "nuclei_severity", "medium,high,critical", 100)
+		if err != nil {
+			return "", err
+		}
+		for _, item := range strings.Split(severity, ",") {
+			if !optionStringIn(strings.TrimSpace(item), "info", "low", "medium", "high", "critical", "unknown") {
+				return "", fmt.Errorf("XingRin nuclei_severity 包含无效等级: %s", item)
+			}
+		}
+		tags, err := taskOptionString("XingRin", options, "nuclei_tags", "cve", 200)
+		if err != nil || (tags != "" && !regexp.MustCompile(`^[A-Za-z0-9_,.-]+$`).MatchString(tags)) {
+			return "", fmt.Errorf("XingRin nuclei_tags 格式无效")
+		}
+		config["vuln_scan"] = map[string]interface{}{"tools": map[string]interface{}{
+			"dalfox_xss": map[string]interface{}{"enabled": dalfoxScan, "request-timeout": requestTimeout, "only-poc": "r", "ignore-return": "302,404,403", "delay": 50, "worker": concurrency},
+			"nuclei":     map[string]interface{}{"enabled": nucleiScan, "template-repo-names": repositories, "concurrency": concurrency, "rate-limit": rate, "request-timeout": requestTimeout, "severity": severity, "tags": tags},
+		}}
+	}
+	raw, err := yaml.Marshal(config)
+	if err != nil {
+		return "", fmt.Errorf("生成 XingRin 引擎配置失败: %w", err)
+	}
+	return string(raw), nil
+}
+
+func splitXingRinTargets(value string) ([]map[string]string, error) {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	if len(parts) == 0 || len(parts) > 5000 {
+		return nil, fmt.Errorf("XingRin 目标数必须在 1 到 5000 之间")
+	}
+	result := make([]map[string]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, target := range parts {
+		target = strings.TrimSpace(target)
+		if target == "" || len(target) > 2048 {
+			return nil, fmt.Errorf("XingRin 目标为空或过长")
+		}
+		if _, exists := seen[target]; exists {
+			continue
+		}
+		seen[target] = struct{}{}
+		result = append(result, map[string]string{"name": target})
+	}
+	return result, nil
+}
+
+func (a *XingRinAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interface{}, error) {
+	return map[string]interface{}{
+		"provider": ProviderXingRin, "resource_id": conn.Resource.ID, "upstream_version": "v1.5.8",
+		"task_modes": []string{"quick_scan"}, "dynamic_option_kinds": []string{"engines", "workers", "wordlists", "nuclei_repositories"},
+		"manage_actions": []string{},
+		"notes": []string{
+			"quick_scan 最多接受 5000 个目标；多个目标使用换行、逗号或空白分隔",
+			"任务名称由 XingRin 上游生成，CyberStrikeAI 不伪造不存在的 name 字段",
+			"字典名称和 Nuclei 模板仓库名需从 asm_list_task_options 实时查询",
+			"engines 列表默认仅返回轻量摘要；传入 id 可查询单个引擎的完整 YAML 配置",
+		},
+		"create_options": map[string]interface{}{
+			"engine_ids":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "description": "可选引擎 ID；省略时优先 full scan"},
+			"subdomain_discovery":   map[string]interface{}{"type": "boolean", "default": false},
+			"subdomain_bruteforce":  map[string]interface{}{"type": "boolean", "default": false, "requires": "subdomain_discovery"},
+			"subdomain_permutation": map[string]interface{}{"type": "boolean", "default": true, "requires": "subdomain_discovery"},
+			"subdomain_resolve":     map[string]interface{}{"type": "boolean", "default": true, "requires": "subdomain_discovery"},
+			"subdomain_wordlist":    map[string]interface{}{"type": "string", "dynamic_kind": "wordlists", "requires": "subdomain_bruteforce"},
+			"port_scan":             map[string]interface{}{"type": "boolean", "default": true},
+			"port_scan_passive":     map[string]interface{}{"type": "boolean", "default": false, "requires": "port_scan"},
+			"ports":                 map[string]interface{}{"type": "string", "default": "80,443,8080,8083", "conflicts": "top_ports"},
+			"top_ports":             map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535, "conflicts": "ports"},
+			"site_identify":         map[string]interface{}{"type": "boolean", "default": true},
+			"fingerprint_libraries": map[string]interface{}{"type": "array", "items": map[string]interface{}{"enum": []string{"ehole", "goby", "wappalyzer", "fingers", "fingerprinthub", "arl"}}},
+			"directory_scan":        map[string]interface{}{"type": "boolean", "default": false},
+			"directory_wordlist":    map[string]interface{}{"type": "string", "dynamic_kind": "wordlists", "requires": "directory_scan"},
+			"directory_concurrency": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 50, "default": 3},
+			"site_capture":          map[string]interface{}{"type": "boolean", "default": false},
+			"screenshot_sources":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"enum": []string{"websites", "endpoints"}}},
+			"url_fetch":             map[string]interface{}{"type": "boolean", "default": false},
+			"crawl_depth":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 20, "default": 3},
+			"nuclei_scan":           map[string]interface{}{"type": "boolean", "default": false},
+			"nuclei_template_repos": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "nuclei_repositories"},
+			"nuclei_severity":       map[string]interface{}{"type": "string", "default": "medium,high,critical"},
+			"nuclei_tags":           map[string]interface{}{"type": "string", "default": "cve"},
+			"dalfox_scan":           map[string]interface{}{"type": "boolean", "default": false},
+			"rate_limit":            map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 1000, "default": 20},
+			"concurrency":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "default": 5},
+			"request_timeout":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 120, "default": 8},
+		},
+	}, nil
+}
+
+func (a *XingRinAdapter) ListTaskOptions(ctx context.Context, conn *Connection, filter TaskOptionFilter) (interface{}, error) {
+	var endpoint string
+	kind := strings.ToLower(strings.TrimSpace(filter.Kind))
+	switch kind {
+	case "engines":
+		endpoint = "/api/engines/"
+	case "workers":
+		endpoint = "/api/workers/"
+	case "wordlists":
+		endpoint = "/api/wordlists/"
+	case "nuclei_repositories":
+		endpoint = "/api/nuclei/repos/"
+	default:
+		return nil, fmt.Errorf("XingRin 不支持的动态选项类别: %s", filter.Kind)
+	}
+	page, size := normalizePagination(filter.Page, filter.PageSize)
+	query := url.Values{"page": {strconv.Itoa(page)}, "pageSize": {strconv.Itoa(size)}}
+	if filter.Query != "" {
+		query.Set("search", filter.Query)
+	}
+	client, _, err := a.session(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := xingrinRequest(ctx, client, conn, http.MethodGet, endpoint, query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "engines" {
+		payload, err = xingrinEngineOptions(payload, filter.ID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return map[string]interface{}{"provider": ProviderXingRin, "resource_id": conn.Resource.ID, "kind": filter.Kind, "options": payload}, nil
 }
 
 func (a *XingRinAdapter) CreateTask(ctx context.Context, conn *Connection, req TaskRequest) (interface{}, error) {
@@ -318,15 +603,23 @@ func (a *XingRinAdapter) CreateTask(ctx context.Context, conn *Connection, req T
 	if err != nil {
 		return nil, err
 	}
-	engineID, engineName, err := xingrinEngine(engines)
+	selectedEngineIDs, err := taskOptionIntSlice("XingRin", req.Options, "engine_ids", 20)
+	if err != nil {
+		return nil, err
+	}
+	engineIDs, engineNames, err := xingrinSelectedEngines(engines, selectedEngineIDs)
+	if err != nil {
+		return nil, err
+	}
+	targets, err := splitXingRinTargets(target)
 	if err != nil {
 		return nil, err
 	}
 	body := map[string]interface{}{
-		"targets":       []map[string]string{{"name": target}},
+		"targets":       targets,
 		"configuration": configuration,
-		"engineIds":     []interface{}{engineID},
-		"engineNames":   []string{engineName},
+		"engine_ids":    engineIDs,
+		"engine_names":  engineNames,
 	}
 	payload, err := xingrinRequest(ctx, client, conn, http.MethodPost, "/api/scans/quick/", nil, body)
 	if err != nil {

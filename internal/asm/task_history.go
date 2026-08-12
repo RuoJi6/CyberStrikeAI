@@ -145,7 +145,14 @@ func remoteTaskID(provider string, result interface{}) string {
 	paths := [][]interface{}{}
 	switch normalizeProvider(provider) {
 	case ProviderARL:
-		paths = [][]interface{}{{"response", "data", "task_id"}, {"response", "data", "_id"}, {"response", "data", "id"}, {"response", "task_id"}}
+		paths = [][]interface{}{
+			{"response", "data", "task_id"},
+			{"response", "data", "_id"},
+			{"response", "data", "id"},
+			{"response", "items", 0, "task_id"},
+			{"response", "items", 0, "_id"},
+			{"response", "task_id"},
+		}
 	case ProviderXingRin:
 		paths = [][]interface{}{{"response", "scans", 0, "id"}, {"response", "id"}}
 	case ProviderScopeSentry:
@@ -164,17 +171,31 @@ func normalizeTaskStatus(value interface{}) string {
 	switch status {
 	case "done", "completed", "complete", "finished", "success", "succeeded", "3":
 		return "completed"
-	case "running", "processing", "started", "1":
+	case "running", "processing", "started", "port_scan", "find_site", "site_identify", "site_capture", "domain_brute", "nuclei_scan", "1":
 		return "running"
 	case "failed", "failure", "error":
 		return "failed"
-	case "stopped", "cancelled", "canceled", "2":
+	case "stop", "stopped", "cancelled", "canceled", "2":
 		return "stopped"
-	case "initiated", "pending", "queued", "created", "submitted", "0", "":
+	case "initiated", "waiting", "pending", "queued", "created", "submitted", "0", "":
 		return "submitted"
 	default:
 		return status
 	}
+}
+
+func normalizeProviderTaskStatus(provider string, value interface{}) string {
+	normalized := normalizeTaskStatus(value)
+	if normalizeProvider(provider) == ProviderARL {
+		raw := strings.ToLower(meaningfulString(value))
+		if raw != "" && normalized == raw {
+			// ARL exposes the currently executing pipeline stage in status. New
+			// upstream stages are still running states unless they match one of
+			// the terminal values handled by normalizeTaskStatus.
+			return "running"
+		}
+	}
+	return normalized
 }
 
 func creationStatus(provider string, result interface{}) string {
@@ -182,7 +203,7 @@ func creationStatus(provider string, result interface{}) string {
 	paths := [][]interface{}{{"response", "status"}}
 	switch normalizeProvider(provider) {
 	case ProviderARL:
-		paths = append([][]interface{}{{"response", "data", "status"}}, paths...)
+		paths = append([][]interface{}{{"response", "data", "status"}, {"response", "items", 0, "status"}}, paths...)
 	case ProviderXingRin:
 		paths = append([][]interface{}{{"response", "scans", 0, "status"}}, paths...)
 	case ProviderScopeSentry:
@@ -190,7 +211,7 @@ func creationStatus(provider string, result interface{}) string {
 	}
 	for _, path := range paths {
 		if value := pathValue(object, path...); value != nil {
-			return normalizeTaskStatus(value)
+			return normalizeProviderTaskStatus(provider, value)
 		}
 	}
 	return "submitted"
@@ -244,14 +265,28 @@ func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result in
 
 func taskCollection(provider string, payload interface{}) []interface{} {
 	object := valueMap(payload)
+	if normalizeProvider(provider) == ProviderScopeSentry {
+		items := make([]interface{}, 0)
+		for _, path := range [][]interface{}{{"tasks", "data", "list"}, {"tasks", "data", "results"}, {"tasks", "data"}} {
+			if listed, ok := pathValue(object, path...).([]interface{}); ok {
+				items = append(items, listed...)
+				break
+			}
+		}
+		for _, path := range [][]interface{}{{"scheduled_tasks", "data", "list"}, {"scheduled_tasks", "data", "results"}, {"scheduled_tasks", "data"}} {
+			if listed, ok := pathValue(object, path...).([]interface{}); ok {
+				items = append(items, listed...)
+				break
+			}
+		}
+		return items
+	}
 	paths := [][]interface{}{}
 	switch normalizeProvider(provider) {
 	case ProviderXingRin:
 		paths = [][]interface{}{{"tasks", "results"}, {"tasks"}}
 	case ProviderARL:
 		paths = [][]interface{}{{"tasks", "items"}, {"tasks", "data", "items"}, {"tasks", "data", "results"}, {"tasks", "data", "list"}, {"tasks", "data"}}
-	case ProviderScopeSentry:
-		paths = [][]interface{}{{"tasks", "data", "list"}, {"tasks", "data", "results"}, {"tasks", "data"}}
 	}
 	for _, path := range paths {
 		if items, ok := pathValue(object, path...).([]interface{}); ok {
@@ -282,6 +317,10 @@ func (s *Service) recordListedTasks(conn *Connection, payload interface{}) {
 			continue
 		}
 		if existing, err := s.db.FindASMTask(conn.Resource.ID, remoteID); err == nil && existing != nil {
+			s.applyRemoteTaskState(existing, task, task, true)
+			if updateErr := s.db.UpdateASMTask(existing); updateErr != nil {
+				s.logger.Warn("刷新 ASM 远程任务失败", zap.String("resource_id", conn.Resource.ID), zap.String("remote_task_id", remoteID), zap.Error(updateErr))
+			}
 			continue
 		}
 		detailJSON, _ := json.Marshal(task)
@@ -290,7 +329,7 @@ func (s *Service) recordListedTasks(conn *Connection, payload interface{}) {
 			rawSummary, _ := json.Marshal(summary)
 			summaryJSON = string(rawSummary)
 		}
-		status := normalizeTaskStatus(mapValue(task, "status", "state", "taskStatus"))
+		status := normalizeProviderTaskStatus(conn.Resource.Provider, mapValue(task, "status", "state", "taskStatus"))
 		progress := numberInt(mapValue(task, "progress", "percent", "percentage"))
 		if status == "completed" && progress < 100 {
 			progress = 100
@@ -317,6 +356,79 @@ func (s *Service) recordListedTasks(conn *Connection, payload interface{}) {
 			s.logger.Warn("导入 ASM 远程任务失败", zap.String("resource_id", conn.Resource.ID), zap.String("remote_task_id", remoteID), zap.Error(err))
 		}
 	}
+}
+
+func (s *Service) applyRemoteTaskState(item *database.ASMTask, task map[string]interface{}, detail interface{}, synced bool) {
+	if item == nil || task == nil {
+		return
+	}
+	if raw, err := json.Marshal(detail); err == nil {
+		item.DetailJSON = string(raw)
+	}
+	statusValue := mapValue(task, "status", "state", "taskStatus")
+	if normalizeProvider(item.Provider) == ProviderScopeSentry {
+		if normalized := pathValue(valueMap(detail), "normalized_status"); normalized != nil {
+			statusValue = normalized
+		}
+	}
+	item.Status = normalizeProviderTaskStatus(item.Provider, statusValue)
+	if name := meaningfulString(mapValue(task, "name", "taskName")); name != "" {
+		item.Name = name
+	}
+	if target := meaningfulString(mapValue(task, "targetName", "target", "domain", "ip")); target != "" {
+		item.Target = target
+	}
+	item.Progress = numberInt(mapValue(task, "progress", "percent", "percentage"))
+	if item.Progress < 0 {
+		item.Progress = 0
+	}
+	if item.Progress > 100 {
+		item.Progress = 100
+	}
+	if item.Status == "completed" && item.Progress < 100 {
+		item.Progress = 100
+	}
+	item.Stage = meaningfulString(mapValue(task, "currentStage", "current_stage", "stage", "service_name"))
+	if summary := valueMap(mapValue(task, "summary", "statistic", "statistics", "stats")); summary != nil {
+		raw, _ := json.Marshal(summary)
+		item.SummaryJSON = string(raw)
+	}
+	item.LastError = meaningfulString(mapValue(task, "errorMessage", "error_message", "error"))
+	if synced {
+		now := time.Now().UTC()
+		item.LastSyncedAt = &now
+	}
+}
+
+func (s *Service) recordTaskDetail(conn *Connection, remoteTaskID string, payload interface{}) {
+	item, err := s.db.FindASMTask(conn.Resource.ID, strings.TrimSpace(remoteTaskID))
+	if err != nil || item == nil {
+		return
+	}
+	s.applyRemoteTaskState(item, normalizedTaskPayload(item.Provider, payload), payload, true)
+	if err := s.db.UpdateASMTask(item); err != nil {
+		s.logger.Warn("刷新 ASM 任务详情失败", zap.String("resource_id", conn.Resource.ID), zap.String("remote_task_id", remoteTaskID), zap.Error(err))
+	}
+}
+
+func (s *Service) recordTaskLifecycle(resourceID, remoteTaskID, status, stage string, resetProgress bool) bool {
+	item, err := s.db.FindASMTask(resourceID, strings.TrimSpace(remoteTaskID))
+	if err != nil || item == nil {
+		return false
+	}
+	item.Status = status
+	item.Stage = stage
+	item.LastError = ""
+	if resetProgress {
+		item.Progress = 0
+	}
+	now := time.Now().UTC()
+	item.LastSyncedAt = &now
+	if err := s.db.UpdateASMTask(item); err != nil {
+		s.logger.Warn("更新 ASM 任务生命周期失败", zap.String("resource_id", resourceID), zap.String("remote_task_id", remoteTaskID), zap.Error(err))
+		return false
+	}
+	return true
 }
 
 func (s *Service) ListTaskHistory(filter TaskHistoryFilter) (TaskHistoryPage, error) {
@@ -427,38 +539,8 @@ func (s *Service) SyncTaskHistory(ctx context.Context, id string) (TaskHistoryVi
 		_ = s.db.UpdateASMTask(item)
 		return taskHistoryView(item), syncErr
 	}
-	detailJSON, _ := json.Marshal(payload)
-	item.DetailJSON = string(detailJSON)
 	task := normalizedTaskPayload(item.Provider, payload)
-	statusValue := mapValue(task, "status", "state", "taskStatus")
-	if normalizeProvider(item.Provider) == ProviderScopeSentry {
-		if normalized := pathValue(valueMap(payload), "normalized_status"); normalized != nil {
-			statusValue = normalized
-		}
-	}
-	item.Status = normalizeTaskStatus(statusValue)
-	if name := meaningfulString(mapValue(task, "name", "taskName")); name != "" {
-		item.Name = name
-	}
-	if target := meaningfulString(mapValue(task, "targetName", "target", "domain", "ip")); target != "" {
-		item.Target = target
-	}
-	item.Progress = numberInt(mapValue(task, "progress", "percent", "percentage"))
-	if item.Progress < 0 {
-		item.Progress = 0
-	}
-	if item.Progress > 100 {
-		item.Progress = 100
-	}
-	if item.Status == "completed" && item.Progress < 100 {
-		item.Progress = 100
-	}
-	item.Stage = meaningfulString(mapValue(task, "currentStage", "current_stage", "stage", "service_name"))
-	if summary := valueMap(mapValue(task, "summary", "statistic", "statistics", "stats")); summary != nil {
-		raw, _ := json.Marshal(summary)
-		item.SummaryJSON = string(raw)
-	}
-	item.LastError = meaningfulString(mapValue(task, "errorMessage", "error_message", "error"))
+	s.applyRemoteTaskState(item, task, payload, true)
 	if err := s.db.UpdateASMTask(item); err != nil {
 		return TaskHistoryView{}, err
 	}

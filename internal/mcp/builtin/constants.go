@@ -17,13 +17,16 @@ const (
 	ToolCompleteAssetScan = "complete_asset_scan"
 
 	// 外部 ASM 统一适配工具（ARL / XingRin / ScopeSentry）
-	ToolASMListResources  = "asm_list_resources"
-	ToolASMTestConnection = "asm_test_connection"
-	ToolASMCreateTask     = "asm_create_task"
-	ToolASMListTasks      = "asm_list_tasks"
-	ToolASMGetTask        = "asm_get_task"
-	ToolASMListAssets     = "asm_list_assets"
-	ToolASMStopTask       = "asm_stop_task"
+	ToolASMListResources   = "asm_list_resources"
+	ToolASMTestConnection  = "asm_test_connection"
+	ToolASMGetTaskProfile  = "asm_get_task_profile"
+	ToolASMListTaskOptions = "asm_list_task_options"
+	ToolASMCreateTask      = "asm_create_task"
+	ToolASMListTasks       = "asm_list_tasks"
+	ToolASMGetTask         = "asm_get_task"
+	ToolASMListAssets      = "asm_list_assets"
+	ToolASMStopTask        = "asm_stop_task"
+	ToolASMManageTask      = "asm_manage_task"
 
 	// 项目黑板（事实）工具
 	ToolUpsertProjectFact    = "upsert_project_fact"
@@ -98,11 +101,14 @@ func IsBuiltinTool(toolName string) bool {
 		ToolCompleteAssetScan,
 		ToolASMListResources,
 		ToolASMTestConnection,
+		ToolASMGetTaskProfile,
+		ToolASMListTaskOptions,
 		ToolASMCreateTask,
 		ToolASMListTasks,
 		ToolASMGetTask,
 		ToolASMListAssets,
 		ToolASMStopTask,
+		ToolASMManageTask,
 		ToolUpsertProjectFact,
 		ToolGetProjectFact,
 		ToolListProjectFacts,
@@ -166,11 +172,14 @@ func GetAllBuiltinTools() []string {
 		ToolCompleteAssetScan,
 		ToolASMListResources,
 		ToolASMTestConnection,
+		ToolASMGetTaskProfile,
+		ToolASMListTaskOptions,
 		ToolASMCreateTask,
 		ToolASMListTasks,
 		ToolASMGetTask,
 		ToolASMListAssets,
 		ToolASMStopTask,
+		ToolASMManageTask,
 		ToolUpsertProjectFact,
 		ToolGetProjectFact,
 		ToolListProjectFacts,

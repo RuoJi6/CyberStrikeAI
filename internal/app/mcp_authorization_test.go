@@ -252,8 +252,10 @@ func TestASMToolsRequireGlobalExternalMCPPermission(t *testing.T) {
 	authorize := mcpToolAuthorizer(nil)
 	for _, toolName := range []string{
 		builtin.ToolASMListResources, builtin.ToolASMTestConnection,
+		builtin.ToolASMGetTaskProfile, builtin.ToolASMListTaskOptions,
 		builtin.ToolASMCreateTask, builtin.ToolASMListTasks,
 		builtin.ToolASMGetTask, builtin.ToolASMListAssets, builtin.ToolASMStopTask,
+		builtin.ToolASMManageTask,
 	} {
 		agentOnly := authctx.WithPrincipal(context.Background(), authctx.NewPrincipal("u1", "user", database.RBACScopeAll, map[string]bool{"agent:execute": true}))
 		if err := authorize(agentOnly, toolName, nil); err == nil {

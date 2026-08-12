@@ -51,6 +51,9 @@ func (a *taskHistoryTestAdapter) ListAssets(context.Context, *Connection, AssetF
 func (a *taskHistoryTestAdapter) StopTask(context.Context, *Connection, string) (interface{}, error) {
 	return map[string]interface{}{}, nil
 }
+func (a *taskHistoryTestAdapter) ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error) {
+	return map[string]interface{}{}, nil
+}
 func (a *taskHistoryTestAdapter) FetchScreenshot(context.Context, *Connection, string) ([]byte, string, error) {
 	return []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00}, "image/png", nil
 }
@@ -125,6 +128,20 @@ func TestTaskHistoryRecordsSyncsAndCachesResults(t *testing.T) {
 	if err != nil || imported.Total != 1 || imported.Tasks[0].RemoteTaskID != "8" || imported.Tasks[0].Status != "completed" {
 		t.Fatalf("unexpected imported remote task: %#v err=%v", imported, err)
 	}
+	if _, err := service.StopTask(context.Background(), resource.ID, "7"); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := service.GetTaskHistory(localID)
+	if err != nil || stopped.Status != "stopped" || stopped.Stage != "stopped" {
+		t.Fatalf("local stop lifecycle was not recorded: %#v err=%v", stopped, err)
+	}
+	if _, err := service.ManageTask(context.Background(), resource.ID, TaskManageRequest{Action: "resume", TaskID: "7"}); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.GetTaskHistory(localID)
+	if err != nil || resumed.Status != "running" || resumed.Stage != "resume" || resumed.Progress != 0 {
+		t.Fatalf("local resume lifecycle was not recorded: %#v err=%v", resumed, err)
+	}
 }
 
 func TestTaskHistoryScreenshotCache(t *testing.T) {
@@ -179,5 +196,53 @@ func TestTaskCollectionSupportsARLItemsEnvelope(t *testing.T) {
 	items := taskCollection(ProviderARL, payload)
 	if len(items) != 1 || meaningfulString(valueMap(items[0])["_id"]) != "0123456789abcdef01234567" {
 		t.Fatalf("unexpected ARL task collection: %#v", items)
+	}
+}
+
+func TestARLTaskCreationSupportsItemsEnvelope(t *testing.T) {
+	payload := map[string]interface{}{
+		"response": map[string]interface{}{
+			"items": []interface{}{map[string]interface{}{
+				"task_id": "6a7bd803e30e79c5bea45807",
+				"status":  "waiting",
+			}},
+		},
+	}
+	if got := remoteTaskID(ProviderARL, payload); got != "6a7bd803e30e79c5bea45807" {
+		t.Fatalf("unexpected ARL remote task ID: %q", got)
+	}
+	if got := creationStatus(ProviderARL, payload); got != "submitted" {
+		t.Fatalf("unexpected ARL creation status: %q", got)
+	}
+}
+
+func TestNormalizeARLTaskStages(t *testing.T) {
+	for input, expected := range map[string]string{
+		"waiting":   "submitted",
+		"port_scan": "running",
+		"find_site": "running",
+		"stop":      "stopped",
+	} {
+		if got := normalizeTaskStatus(input); got != expected {
+			t.Errorf("normalizeTaskStatus(%q) = %q, want %q", input, got, expected)
+		}
+	}
+	if got := normalizeProviderTaskStatus(ProviderARL, "future_pipeline_stage"); got != "running" {
+		t.Fatalf("future ARL pipeline stage was not treated as running: %q", got)
+	}
+}
+
+func TestScopeSentryTaskCollectionIncludesScheduledDefinitions(t *testing.T) {
+	payload := map[string]interface{}{
+		"tasks": map[string]interface{}{"data": map[string]interface{}{"list": []interface{}{
+			map[string]interface{}{"id": "64b000000000000000000001", "name": "immediate"},
+		}}},
+		"scheduled_tasks": map[string]interface{}{"data": map[string]interface{}{"list": []interface{}{
+			map[string]interface{}{"id": "64b000000000000000000002", "name": "scheduled", "stage": "scheduled"},
+		}}},
+	}
+	items := taskCollection(ProviderScopeSentry, payload)
+	if len(items) != 2 {
+		t.Fatalf("taskCollection len=%d items=%#v", len(items), items)
 	}
 }

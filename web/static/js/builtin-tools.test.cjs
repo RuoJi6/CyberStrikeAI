@@ -11,19 +11,22 @@ function loadBuiltinTools() {
     return context.api;
 }
 
-test('ASM 的 7 个内置工具都标记为 ASM MCP', () => {
+test('ASM 的 10 个内置工具都标记为 ASM MCP', () => {
     const api = loadBuiltinTools();
     const asmTools = [
         api.BuiltinTools.ASM_LIST_RESOURCES,
         api.BuiltinTools.ASM_TEST_CONNECTION,
+        api.BuiltinTools.ASM_GET_TASK_PROFILE,
+        api.BuiltinTools.ASM_LIST_TASK_OPTIONS,
         api.BuiltinTools.ASM_CREATE_TASK,
         api.BuiltinTools.ASM_LIST_TASKS,
         api.BuiltinTools.ASM_GET_TASK,
         api.BuiltinTools.ASM_LIST_ASSETS,
-        api.BuiltinTools.ASM_STOP_TASK
+        api.BuiltinTools.ASM_STOP_TASK,
+        api.BuiltinTools.ASM_MANAGE_TASK
     ];
 
-    assert.equal(new Set(asmTools).size, 7);
+    assert.equal(new Set(asmTools).size, 10);
     asmTools.forEach(toolName => {
         assert.equal(api.getBuiltinMCPGroup(toolName)?.label, 'ASM MCP');
         assert.equal(api.getAllBuiltinTools().includes(toolName), true);

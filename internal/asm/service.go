@@ -93,6 +93,20 @@ type AssetFilter struct {
 	PageSize int
 }
 
+type TaskOptionFilter struct {
+	Kind     string
+	Query    string
+	ID       string
+	Page     int
+	PageSize int
+}
+
+type TaskManageRequest struct {
+	Action  string
+	TaskID  string
+	Options map[string]interface{}
+}
+
 type Connection struct {
 	Resource *database.ASMResource
 	Secret   string
@@ -107,6 +121,18 @@ type Adapter interface {
 	GetTask(context.Context, *Connection, string) (interface{}, error)
 	ListAssets(context.Context, *Connection, AssetFilter) (interface{}, error)
 	StopTask(context.Context, *Connection, string) (interface{}, error)
+}
+
+// TaskProfileAdapter exposes provider-specific task creation metadata and
+// dynamic upstream choices without forcing every adapter to implement it.
+type TaskProfileAdapter interface {
+	GetTaskProfile(context.Context, *Connection) (interface{}, error)
+	ListTaskOptions(context.Context, *Connection, TaskOptionFilter) (interface{}, error)
+}
+
+// TaskManagerAdapter exposes provider-specific lifecycle actions beyond stop.
+type TaskManagerAdapter interface {
+	ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error)
 }
 
 type Service struct {
@@ -403,6 +429,69 @@ func (s *Service) TestConnection(ctx context.Context, id string) (interface{}, e
 	return result, testErr
 }
 
+func (s *Service) GetTaskProfile(ctx context.Context, resourceID string) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	profiler, ok := adapter.(TaskProfileAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 暂未提供任务创建配置发现能力", providerDisplayName(conn.Resource.Provider))
+	}
+	return profiler.GetTaskProfile(ctx, conn)
+}
+
+func (s *Service) ListTaskOptions(ctx context.Context, resourceID string, filter TaskOptionFilter) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	profiler, ok := adapter.(TaskProfileAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 暂未提供任务动态选项查询能力", providerDisplayName(conn.Resource.Provider))
+	}
+	filter.Kind = strings.ToLower(strings.TrimSpace(filter.Kind))
+	filter.Query = strings.TrimSpace(filter.Query)
+	filter.ID = strings.TrimSpace(filter.ID)
+	filter.Page, filter.PageSize = normalizePagination(filter.Page, filter.PageSize)
+	return profiler.ListTaskOptions(ctx, conn, filter)
+}
+
+func (s *Service) ManageTask(ctx context.Context, resourceID string, req TaskManageRequest) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	manager, ok := adapter.(TaskManagerAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 暂未提供扩展任务管理能力", providerDisplayName(conn.Resource.Provider))
+	}
+	req.Action = strings.ToLower(strings.TrimSpace(req.Action))
+	req.TaskID = strings.TrimSpace(req.TaskID)
+	if req.Action == "" {
+		return nil, fmt.Errorf("任务管理 action 不能为空")
+	}
+	if req.Options == nil {
+		req.Options = map[string]interface{}{}
+	}
+	result, err := manager.ManageTask(ctx, conn, req)
+	if err != nil {
+		return nil, err
+	}
+	updated := false
+	switch req.Action {
+	case "restart", "resume":
+		updated = s.recordTaskLifecycle(conn.Resource.ID, req.TaskID, "running", req.Action, true)
+	case "delete":
+		updated = s.recordTaskLifecycle(conn.Resource.ID, req.TaskID, "stopped", "deleted", false)
+	}
+	if object := valueMap(result); object != nil {
+		object["local_history_updated"] = updated
+		return object, nil
+	}
+	return result, nil
+}
+
 func (s *Service) CreateTask(ctx context.Context, resourceID string, req TaskRequest) (interface{}, error) {
 	conn, adapter, err := s.connection(resourceID, true)
 	if err != nil {
@@ -433,7 +522,13 @@ func (s *Service) GetTask(ctx context.Context, resourceID, taskID string) (inter
 	if err != nil {
 		return nil, err
 	}
-	return adapter.GetTask(ctx, conn, strings.TrimSpace(taskID))
+	taskID = strings.TrimSpace(taskID)
+	result, err := adapter.GetTask(ctx, conn, taskID)
+	if err != nil {
+		return nil, err
+	}
+	s.recordTaskDetail(conn, taskID, result)
+	return result, nil
 }
 
 func (s *Service) ListAssets(ctx context.Context, resourceID string, filter AssetFilter) (interface{}, error) {
@@ -449,7 +544,17 @@ func (s *Service) StopTask(ctx context.Context, resourceID, taskID string) (inte
 	if err != nil {
 		return nil, err
 	}
-	return adapter.StopTask(ctx, conn, strings.TrimSpace(taskID))
+	taskID = strings.TrimSpace(taskID)
+	result, err := adapter.StopTask(ctx, conn, taskID)
+	if err != nil {
+		return nil, err
+	}
+	updated := s.recordTaskLifecycle(conn.Resource.ID, taskID, "stopped", "stopped", false)
+	if object := valueMap(result); object != nil {
+		object["local_history_updated"] = updated
+		return object, nil
+	}
+	return result, nil
 }
 
 func MarshalResult(value interface{}) string {

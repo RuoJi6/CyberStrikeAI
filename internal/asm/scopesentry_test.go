@@ -15,20 +15,23 @@ import (
 
 func TestScopeSentryAdapterProtocol(t *testing.T) {
 	const (
-		taskID     = "64b000000000000000000001"
-		defaultID  = "64b000000000000000000002"
-		profileID  = "64b000000000000000000003"
-		token      = "test-jwt-token"
-		secret     = "scope-password"
-		name       = "Cloud ScopeSentry E2E"
-		portHash   = "port-plugin-hash"
-		handleHash = "asset-handle-hash"
-		mapHash    = "asset-map-hash"
-		fingerHash = "finger-hash"
+		taskID        = "64b000000000000000000001"
+		defaultID     = "64b000000000000000000002"
+		profileID     = "64b000000000000000000003"
+		token         = "test-jwt-token"
+		secret        = "scope-password"
+		name          = "Cloud ScopeSentry E2E"
+		portHash      = "port-plugin-hash"
+		handleHash    = "asset-handle-hash"
+		mapHash       = "asset-map-hash"
+		fingerHash    = "finger-hash"
+		scheduledID   = "64b000000000000000000004"
+		scheduledName = "Cloud ScopeSentry Scheduled"
 	)
 
 	var mu sync.Mutex
-	profileCreated, taskCreated := false, false
+	profileCreated, taskCreated, scheduledCreated := false, false, false
+	profileName := scopeSentryLowLoadTemplateName("22", 2, true, false, false, false)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/api/user/login" {
@@ -50,14 +53,14 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 
 		switch r.URL.Path {
 		case "/api/node/online":
-			_, _ = w.Write([]byte(`{"code":200,"data":{"list":["node-test"]}}`))
+			_, _ = w.Write([]byte(`{"code":200,"data":{"list":["node-test","node-backup"]}}`))
 		case "/api/task/template":
 			mu.Lock()
 			created := profileCreated
 			mu.Unlock()
 			items := []map[string]interface{}{{"id": defaultID, "name": "default"}}
 			if created {
-				items = append(items, map[string]interface{}{"id": profileID, "name": scopeSentryTemplateName})
+				items = append(items, map[string]interface{}{"id": profileID, "name": profileName})
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
 		case "/api/task/template/detail":
@@ -70,7 +73,7 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode template save: %v", err)
 			}
-			if body.Result["name"] != scopeSentryTemplateName {
+			if body.Result["name"] != profileName {
 				t.Errorf("unexpected template name: %#v", body.Result["name"])
 			}
 			if got := fmt.Sprint(scopeSentryMap(scopeSentryMap(body.Result["Parameters"])["PortScan"])[portHash]); !strings.Contains(got, "-port 22") || !strings.Contains(got, "-b 2") {
@@ -101,6 +104,18 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			taskCreated = true
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/task/scheduled/add":
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode scheduled task add: %v", err)
+			}
+			if body["name"] != scheduledName || body["target"] != "192.0.2.20" || body["template"] != profileID || body["scheduledTasks"] != true {
+				t.Errorf("unexpected scheduled task body: %#v", body)
+			}
+			mu.Lock()
+			scheduledCreated = true
+			mu.Unlock()
+			_, _ = w.Write([]byte(`{"code":200}`))
 		case "/api/task/":
 			mu.Lock()
 			created := taskCreated
@@ -110,8 +125,27 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 				items = append(items, map[string]interface{}{"id": taskID, "name": name, "status": 1, "progress": 10})
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
+		case "/api/task/scheduled":
+			mu.Lock()
+			created := scheduledCreated
+			mu.Unlock()
+			items := []map[string]interface{}{}
+			if created {
+				items = append(items, map[string]interface{}{"id": scheduledID, "name": scheduledName, "scheduledTasks": true, "cycleType": "daily"})
+			}
+			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
 		case "/api/task/detail":
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode task detail: %v", err)
+			}
+			if body["id"] == scheduledID {
+				http.Error(w, `{"code":500,"data":"task not found"}`, http.StatusInternalServerError)
+				return
+			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"id": taskID, "name": name, "status": 3, "progress": 100}})
+		case "/api/task/scheduled/detail":
+			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"id": scheduledID, "name": scheduledName, "scheduledTasks": true, "cycleType": "daily"}})
 		case "/api/assets/ip":
 			var body map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -123,6 +157,18 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": []interface{}{map[string]interface{}{"ip": "192.0.2.10", "port": "22"}}, "total": 1}})
 		case "/api/task/stop":
 			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/task/start":
+			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/task/retest":
+			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/task/delete":
+			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/task/scheduled/delete":
+			_, _ = w.Write([]byte(`{"code":200}`))
+		case "/api/dictionary/port/data":
+			_, _ = w.Write([]byte(`{"code":200,"data":{"list":[{"id":"top100","name":"TOP100","value":"1-65535"}]}}`))
+		case "/api/poc":
+			_, _ = w.Write([]byte(`{"code":200,"data":{"list":[{"id":"64b000000000000000000009","name":"Safe POC","content":"very large yaml","tags":["safe"]}],"total":1}}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -138,6 +184,18 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	ctx := context.Background()
 	if result, err := adapter.Test(ctx, connection); err != nil || !strings.Contains(fmt.Sprint(result), "connected") {
 		t.Fatalf("Test result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.GetTaskProfile(ctx, connection); err != nil || !strings.Contains(fmt.Sprint(result), "template_id") {
+		t.Fatalf("GetTaskProfile result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "port_dictionaries"}); err != nil || !strings.Contains(fmt.Sprint(result), "TOP100") {
+		t.Fatalf("ListTaskOptions result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "port_dictionaries"}); err != nil || strings.Contains(fmt.Sprint(result), "1-65535") {
+		t.Fatalf("port dictionary list must not include full values: result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "pocs", Query: "Safe", Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), "Safe POC") || strings.Contains(fmt.Sprint(result), "very large yaml") {
+		t.Fatalf("POC list must be compact and searchable: result=%#v err=%v", result, err)
 	}
 	created, err := adapter.CreateTask(ctx, connection, TaskRequest{
 		Name: name, Target: "192.0.2.10",
@@ -157,6 +215,28 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	}
 	if result, err := adapter.StopTask(ctx, connection, taskID); err != nil || !strings.Contains(fmt.Sprint(result), ProviderScopeSentry) {
 		t.Fatalf("StopTask result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.ManageTask(ctx, connection, TaskManageRequest{Action: "resume", TaskID: taskID}); err != nil || !strings.Contains(fmt.Sprint(result), "resume") {
+		t.Fatalf("ManageTask result=%#v err=%v", result, err)
+	}
+	scheduledTask, err := adapter.CreateTask(ctx, connection, TaskRequest{
+		Name: scheduledName, Target: "192.0.2.20",
+		Options: map[string]interface{}{"template_id": profileID, "scheduled": true, "cycle_type": "daily", "hour": 3, "minute": 15},
+	})
+	if err != nil || !strings.Contains(fmt.Sprint(scheduledTask), scheduledID) {
+		t.Fatalf("CreateTask scheduled result=%#v err=%v", scheduledTask, err)
+	}
+	if result, err := adapter.ListTasks(ctx, connection, TaskFilter{Name: scheduledName, Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), scheduledID) {
+		t.Fatalf("ListTasks scheduled result=%#v err=%v", result, err)
+	}
+	if result, err := adapter.GetTask(ctx, connection, scheduledID); err != nil || !strings.Contains(fmt.Sprint(result), "scheduled") {
+		t.Fatalf("GetTask scheduled result=%#v err=%v", result, err)
+	}
+	if _, err := adapter.StopTask(ctx, connection, scheduledID); err == nil || !strings.Contains(err.Error(), "不支持 stop") {
+		t.Fatalf("scheduled stop must be rejected, err=%v", err)
+	}
+	if result, err := adapter.ManageTask(ctx, connection, TaskManageRequest{Action: "delete", TaskID: scheduledID}); err != nil || !strings.Contains(fmt.Sprint(result), "delete") {
+		t.Fatalf("ManageTask scheduled delete result=%#v err=%v", result, err)
 	}
 	if _, err := adapter.GetTask(ctx, connection, "invalid"); err == nil {
 		t.Fatal("invalid task id was accepted")

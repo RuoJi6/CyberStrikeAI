@@ -13,11 +13,14 @@ const BuiltinTools = {
     // ASM 统一适配工具（ARL / XingRin / ScopeSentry）
     ASM_LIST_RESOURCES: 'asm_list_resources',
     ASM_TEST_CONNECTION: 'asm_test_connection',
+    ASM_GET_TASK_PROFILE: 'asm_get_task_profile',
+    ASM_LIST_TASK_OPTIONS: 'asm_list_task_options',
     ASM_CREATE_TASK: 'asm_create_task',
     ASM_LIST_TASKS: 'asm_list_tasks',
     ASM_GET_TASK: 'asm_get_task',
     ASM_LIST_ASSETS: 'asm_list_assets',
     ASM_STOP_TASK: 'asm_stop_task',
+    ASM_MANAGE_TASK: 'asm_manage_task',
     
     // 知识库工具
     LIST_KNOWLEDGE_RISK_TYPES: 'list_knowledge_risk_types',
@@ -32,11 +35,14 @@ const BuiltinMCPGroups = {
         tools: [
             BuiltinTools.ASM_LIST_RESOURCES,
             BuiltinTools.ASM_TEST_CONNECTION,
+            BuiltinTools.ASM_GET_TASK_PROFILE,
+            BuiltinTools.ASM_LIST_TASK_OPTIONS,
             BuiltinTools.ASM_CREATE_TASK,
             BuiltinTools.ASM_LIST_TASKS,
             BuiltinTools.ASM_GET_TASK,
             BuiltinTools.ASM_LIST_ASSETS,
-            BuiltinTools.ASM_STOP_TASK
+            BuiltinTools.ASM_STOP_TASK,
+            BuiltinTools.ASM_MANAGE_TASK
         ]
     }
 };

@@ -3,6 +3,7 @@ package asm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -20,7 +21,7 @@ func TestBuildXingRinConfigurationUsesLowLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, expected := range []string{
-		`ports: "443,8083"`, "rate: 12", "threads: 3", "naabu_passive:", "enabled: false", "site_scan:",
+		`ports: 443,8083`, "rate: 12", "threads: 3", "naabu_passive:", "enabled: false", "site_scan:",
 		"fingerprint_detect:", "screenshot:", "concurrency: 3", "vuln_scan:", "dalfox_xss:", "tags: cve",
 	} {
 		if !strings.Contains(configuration, expected) {
@@ -41,6 +42,26 @@ func TestBuildXingRinConfigurationUsesLowLoadDefaults(t *testing.T) {
 	}
 	if !strings.Contains(dependencyConfiguration, "site_scan:") {
 		t.Fatal("site capture should enable its site scan dependency")
+	}
+	fullConfiguration, err := buildXingRinConfiguration(map[string]interface{}{
+		"subdomain_discovery": true, "subdomain_bruteforce": true, "subdomain_wordlist": "sub.txt",
+		"directory_scan": true, "directory_wordlist": "dir.txt", "url_fetch": true, "dalfox_scan": true,
+		"top_ports": 100, "port_scan_passive": true, "screenshot_sources": []interface{}{"websites", "endpoints"},
+		"nuclei_template_repos": []interface{}{"official", "custom"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"subdomain_discovery:", "wordlist-name: sub.txt", "top-ports: 100", "directory_scan:", "wordlist-name: dir.txt", "url_fetch:", "dalfox_xss:", "enabled: true"} {
+		if !strings.Contains(fullConfiguration, expected) {
+			t.Fatalf("full configuration missing %q:\n%s", expected, fullConfiguration)
+		}
+	}
+	if _, err := buildXingRinConfiguration(map[string]interface{}{"unknown": true}); err == nil {
+		t.Fatal("expected unknown option to fail")
+	}
+	if _, err := buildXingRinConfiguration(map[string]interface{}{"ports": "80", "top_ports": 100}); err == nil {
+		t.Fatal("expected ports/top_ports conflict to fail")
 	}
 }
 
@@ -69,7 +90,9 @@ func TestXingRinAdapterProtocol(t *testing.T) {
 		case r.URL.Path == "/api/auth/me/":
 			_, _ = w.Write([]byte(`{"authenticated":true,"user":{"id":1,"username":"admin"}}`))
 		case r.URL.Path == "/api/engines/":
-			_, _ = w.Write([]byte(`[{"id":1,"name":"full scan","configuration":""}]`))
+			_, _ = w.Write([]byte(`[{"id":1,"name":"full scan","configuration":""},{"id":2,"name":"Web only","configuration":""}]`))
+		case r.URL.Path == "/api/wordlists/":
+			_, _ = w.Write([]byte(`{"results":[{"id":3,"name":"dir.txt"}]}`))
 		case r.URL.Path == "/api/scans/quick/":
 			var body map[string]interface{}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -77,6 +100,14 @@ func TestXingRinAdapterProtocol(t *testing.T) {
 			}
 			if !strings.Contains(body["configuration"].(string), `ports: "8083"`) {
 				t.Errorf("unexpected configuration: %v", body["configuration"])
+			}
+			targets, _ := body["targets"].([]interface{})
+			if len(targets) != 2 {
+				t.Errorf("expected two targets, got %#v", body["targets"])
+			}
+			engineIDs, _ := body["engine_ids"].([]interface{})
+			if len(engineIDs) != 1 || fmt.Sprint(engineIDs[0]) != "2" {
+				t.Errorf("unexpected selected engines: %#v", engineIDs)
 			}
 			_, _ = w.Write([]byte(`{"count":1,"scans":[{"id":7,"status":"initiated"}]}`))
 		case r.URL.Path == "/api/scans/7/" && r.Method == http.MethodGet:
@@ -103,7 +134,21 @@ func TestXingRinAdapterProtocol(t *testing.T) {
 	if _, err := adapter.Test(ctx, conn); err != nil {
 		t.Fatalf("test connection: %v", err)
 	}
-	if _, err := adapter.CreateTask(ctx, conn, TaskRequest{Target: "example.test", Options: map[string]interface{}{"ports": "8083"}}); err != nil {
+	if profile, err := adapter.GetTaskProfile(ctx, conn); err != nil || !strings.Contains(fmt.Sprint(profile), "directory_scan") {
+		t.Fatalf("get task profile: result=%#v err=%v", profile, err)
+	}
+	if options, err := adapter.ListTaskOptions(ctx, conn, TaskOptionFilter{Kind: "wordlists", Page: 1, PageSize: 20}); err != nil || !strings.Contains(fmt.Sprint(options), "dir.txt") {
+		t.Fatalf("list task options: result=%#v err=%v", options, err)
+	}
+	engineOptions, err := adapter.ListTaskOptions(ctx, conn, TaskOptionFilter{Kind: "engines", Page: 1, PageSize: 20})
+	if err != nil || strings.Contains(fmt.Sprint(engineOptions), "configuration") {
+		t.Fatalf("engine list must be compact: result=%#v err=%v", engineOptions, err)
+	}
+	engineDetail, err := adapter.ListTaskOptions(ctx, conn, TaskOptionFilter{Kind: "engines", ID: "2", Page: 1, PageSize: 20})
+	if err != nil || !strings.Contains(fmt.Sprint(engineDetail), "configuration") {
+		t.Fatalf("engine detail must include configuration: result=%#v err=%v", engineDetail, err)
+	}
+	if _, err := adapter.CreateTask(ctx, conn, TaskRequest{Target: "example.test\napi.example.test", Options: map[string]interface{}{"ports": "8083", "engine_ids": []interface{}{2}}}); err != nil {
 		t.Fatalf("create task: %v", err)
 	}
 	if _, err := adapter.ListTasks(ctx, conn, TaskFilter{Page: 1, PageSize: 20}); err != nil {

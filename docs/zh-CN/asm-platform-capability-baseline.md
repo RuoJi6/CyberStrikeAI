@@ -1,7 +1,7 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：1.0
-> 基线日期：2026-08-11
+> 文档版本：1.3
+> 基线日期：2026-08-12
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
 
@@ -26,19 +26,22 @@
 
 ## 3. CyberStrikeAI 统一 MCP 动作
 
-Agent 当前看到的是以下 7 个内置工具，而不是直接看到三套平台的全部 API：
+Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套平台的全部 API：
 
 | MCP 工具 | 动作 | 是否改变远端状态 |
 | --- | --- | --- |
 | `asm_list_resources` | 列出已启用的 ASM、类型、连接状态与能力 | 否 |
 | `asm_test_connection` | 验证地址与凭据并更新连接状态 | 仅更新本地连接状态 |
+| `asm_get_task_profile` | 读取平台版本、任务模式、字段、默认值和依赖 | 否 |
+| `asm_list_task_options` | 实时查询策略、引擎、字典、节点、模板、插件和 POC | 否 |
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
 | `asm_list_assets` | 读取站点、域名、IP、URL、服务或漏洞结果 | 否 |
 | `asm_stop_task` | 停止指定远端任务 | 是 |
+| `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
-调用链为：Agent 先调用 `asm_list_resources` 取得 `resource_id`，再按用户已授权的目标调用 `asm_create_task`；任务创建后通过任务、资产与停止工具持续操作。平台地址和凭据保留在服务端，不进入模型上下文。
+调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
 
 ## 4. 上游能力矩阵
 
@@ -64,7 +67,11 @@ Agent 当前看到的是以下 7 个内置工具，而不是直接看到三套�
 
 ### 5.1 ARL 2.6.3
 
-ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传以下字段，未知字段会被适配器拒绝：
+ARL 有两条实际上游请求路径，未知字段和类型错误会被适配器拒绝：
+
+- `task_mode=direct`：调用 `/api/task/`，支持下表直接任务开关。`port_scan_type` 为 `test|top100|top1000|all`。
+- `task_mode=policy`：调用 `/api/task/policy/`，必须提供从 `policies` 实时查询的 `policy_id`；可选 `task_tag=task|risk_cruising` 和 `result_set_id`。
+- 自定义端口、排除端口、宿主超时、端口并发/速率、POC 和弱口令字典属于策略本身；policy 任务 API 不接受任务级覆盖，因此 MCP 不会伪装成可直接传入。
 
 | 分组 | options 字段 | 默认值 | 用途 |
 | --- | --- | --- | --- |
@@ -76,7 +83,7 @@ ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传�
 
 ### 5.2 XingRin v1.5.8
 
-上游完整流水线包含子域、端口、站点、指纹、URL、目录、漏洞和截图。当前 CyberStrikeAI 只生成一个受控的低负载配置：
+上游完整流水线包含子域、端口、站点、指纹、URL、目录、漏洞和截图。CyberStrikeAI 已使用类型化字段生成受控 YAML：
 
 | options 字段 | 默认值 | 当前映射 |
 | --- | --- | --- |
@@ -88,13 +95,13 @@ ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传�
 | `rate_limit` | `20` | 1–1000 |
 | `concurrency` | `5` | 1–200 |
 
-子域、URL 收集、目录扫描和 Dalfox 等上游阶段目前为待适配。任务创建时适配器自动选择可用的全扫描引擎。
+额外已映射：子域发现/爆破/变异/DNS 验证、子域字典、被动端口、Top N 端口、指纹库、目录扫描与字典、URL 收集与深度、截图来源、Nuclei 模板仓库/等级/标签、Dalfox、请求超时和 `engine_ids`。引擎、Worker、字典和 Nuclei 仓库可实时查询；引擎列表只返回 ID/名称摘要，传入引擎 `id` 时才返回完整 YAML。多个目标会按换行、逗号或空白拆分，任意原始 YAML 不对 Agent 开放。
 
 ### 5.3 ScopeSentry v1.9.3
 
 上游任务模板含 `TargetHandler`、`SubdomainScan`、`SubdomainSecurity`、`PortScanPreparation`、`PortScan`、`PortFingerprint`、`AssetMapping`、`AssetHandle`、`URLScan`、`WebCrawler`、`URLSecurity`、`DirScan`、`VulnerabilityScan`、`PassiveScan`。
 
-当前 CyberStrikeAI 会基于上游默认模板创建或更新专用的 `CyberStrikeAI low-load` 模板，并只保留以下阶段：
+当前有两种创建方式：提供 `template_id` 时完整复用上游模板，因而支持其中已配置的端口/文件字典、插件、POC 和全部模块；未提供时则按端口、并发、截图与 TLS 设置的配置指纹生成独立 `CyberStrikeAI low-load <fingerprint>` 模板，避免不同任务互相覆盖：
 
 | options 字段 | 默认值 | 当前映射 |
 | --- | --- | --- |
@@ -102,18 +109,20 @@ ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传�
 | `site_identify` | `true` | `AssetMapping`；`AssetHandle` 始终保留 |
 | `ports` | `80,443,8080,8082` | 端口或端口范围，逗号分隔 |
 | `concurrency` | `20` | 1–200 |
+| `site_capture` | `false` | 低负载模板的截图开关 |
+| `tls_probe` | `false` | 低负载模板的 TLS 探测开关 |
 
-其他模板模块当前会被显式清空，以适配低资源测试机并避免用户未选择的扫描阶段被意外执行。ScopeSentry 的弱口令爆破不能提供为任务类型，因为 v1.9.3 上游仍未实现该能力。
+已映射节点/全节点、排除目标、去重、目标来源、项目筛选、资产查询表达式/结构化过滤、定时任务和恢复/重跑/删除。定时创建后会通过 `/api/task/scheduled` 回查远端 ID，因此可进入 ASM 任务中心，并可通过 `/api/task/scheduled/detail` 同步；定时记录是调度定义，不能使用普通 `stop/resume/restart`，仅允许用户明确要求时调用 `delete`。POC 使用 `/api/poc` 实时搜索和分页；模板、端口字典、插件和 POC 列表只返回轻量摘要，避免大量配置或 1 万以上 POC 挤占 Agent 上下文。插件命令行必须先在上游模板审核，不允许 Agent 临时传入。ScopeSentry 的弱口令爆破不能提供为任务类型，因为 v1.9.3 上游仍未实现该能力。
 
 ## 6. 当前适配范围与差距
 
 | 平台 | 连接与任务 | 结果读取 | 当前结论 |
 | --- | --- | --- | --- |
-| ARL | 创建、查询、详情、停止；任务开关完整映射 | site/domain/ip/url/service/vulnerability | 已适配；后续重点是按平台动态展示参数，而非扩充基础 API |
-| XingRin | 创建、查询、详情、停止；只映射 7 个低负载参数 | site/domain/ip/url/service/vulnerability，可按任务限定 | 部分适配；上游子域、URL、目录等阶段待开放 |
-| ScopeSentry | 创建、查询、详情、停止；只映射低负载模板 | site/domain/ip/url/service/vulnerability，可按任务限定 | 部分适配；完整任务模板与插件选择待开放 |
+| ARL | direct/policy 创建、策略/POC/资产范围选项、查询、详情、停止、重跑、删除、同步 | site/domain/ip/url/service/vulnerability | 已适配；自定义端口等高级字段按上游规则归属策略 |
+| XingRin | 子域、端口、站点、指纹、目录、URL、截图、Nuclei/Dalfox；引擎/字典/模板仓库实时选择 | site/domain/ip/url/service/vulnerability，可按任务限定 | 已适配当前上游快速扫描流水线；不开放任意 YAML |
+| ScopeSentry | 低负载生成模板或完整上游模板；节点、项目、字典、插件、POC、定时与生命周期动作 | site/domain/ip/url/service/vulnerability，可按任务限定 | 已适配上游模板驱动能力；不开放任意插件命令行 |
 
-当前统一 `asm_create_task` schema 是三套平台字段的并集。ARL 会拒绝未知选项；XingRin 与 ScopeSentry 只读取自己的字段。因此后续界面应根据资源的 `provider` 显示不同任务类型和表单，并让 MCP schema/能力描述也返回同一份 provider-specific profile，避免“字段看似可选但被平台忽略”。
+统一 `asm_create_task` schema 是三套平台字段的并集，三个适配器现在都会严格拒绝未知选项和错误类型。Agent 必须以 provider-specific profile 为准，避免“字段看似可选但被平台忽略”。
 
 ## 7. 当前适配器依赖的 API
 
@@ -121,11 +130,23 @@ ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传�
 
 | 平台 | 认证/连通性 | 任务 | 资产 |
 | --- | --- | --- | --- |
-| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `GET /api/task/stop/:id` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/url/`, `/api/service/`, `/api/vuln/` |
-| XingRin | `POST /api/auth/login/`, `GET /api/auth/me/`, `GET /api/engines/` | `/api/scans/quick/`, `/api/scans/`, `/api/scans/:id/`, `/api/scans/:id/stop/` | `/api/assets/:type/`, `/api/scans/:id/:type/` |
-| ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/`, `/api/task/detail`, `/api/task/stop` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/vulnerability` |
+| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `/api/task/policy/`, `/api/task/stop/:id`, `/api/task/restart/`, `/api/task/delete/`, `/api/task/sync/`; `/api/policy/`, `/api/poc/`, `/api/asset_scope/` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/url/`, `/api/service/`, `/api/vuln/` |
+| XingRin | `POST /api/auth/login/`, `GET /api/auth/me/` | `/api/scans/quick/`, `/api/scans/`, `/api/scans/:id/`, `/api/scans/:id/stop/`; `/api/engines/`, `/api/workers/`, `/api/wordlists/`, `/api/nuclei/repos/` | `/api/assets/:type/`, `/api/scans/:id/:type/` |
+| ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/scheduled/add`, `/api/task/scheduled`, `/api/task/scheduled/detail`, `/api/task/scheduled/delete`, `/api/task/`, `/api/task/detail`, `/api/task/stop`, `/api/task/start`, `/api/task/retest`, `/api/task/delete`; `/api/dictionary/*`, `/api/plugin`, `/api/poc`, `/api/project/all` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/vulnerability` |
 
-## 8. 上游升级维护流程
+## 8. 真实 MCP 调用验证
+
+2026-08-12 使用 CyberStrikeAI 相同的 MCP 注册、权限策略、资源数据库和加密凭据，在已授权的公司 IP 上依次验证：
+
+| 平台 | 任务 | 实际验证结果 |
+| --- | --- | --- |
+| ARL 2.6.3 | direct，低负载端口 + 站点识别 | 连接、profile、policy/POC/scope 选项、创建、列表、详情、IP 结果和停止通过；兼容 `response.items[0].task_id` 创建响应 |
+| XingRin v1.5.8 | 受控 YAML，仅 80/443，并发 2，漏洞/目录/截图关闭 | 引擎/Worker/字典/Nuclei 仓库、创建、列表、详情、结果和停止通过；本地任务历史已记录 |
+| ScopeSentry v1.9.3 | 生成低负载模板，仅 80/443，并发 2，截图/TLS 关闭；另建立不立即执行的定时定义 | 节点/模板/字典/插件/POC/项目、即时创建/列表/详情/结果/停止通过；13,510 个 POC 可实时分页；定时任务远端 ID、本地历史、列表、详情、显式删除均通过 |
+
+上述流程固化为默认跳过的 `TestASMRealMCPFlow`，只在明确设置 `CYBERSTRIKE_ASM_REAL_TEST=1` 且提供资源 ID 时连接真实 ASM。
+
+## 9. 上游升级维护流程
 
 每次准备支持新版本时：
 
@@ -137,8 +158,11 @@ ARL 是当前参数映射最完整的平台。`asm_create_task.options` 可传�
 6. 在低资源测试环境中一次只启动一个 ASM，依次验证连接、创建、列表、详情、进度、结果、搜索、停止和截图缓存。
 7. 将本节下方的文档版本递增，并写明兼容性变化。
 
-## 9. 文档变更记录
+## 10. 文档变更记录
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 1.3 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 低负载模板改为配置指纹隔离；定时任务回查 ID、进入任务中心并支持详情/显式删除 |
+| 1.2 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 记录三平台真实 MCP 创建/读取/停止测试；增加大型动态选项的分页和摘要化约束 |
+| 1.1 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 新增 provider profile/动态选项/管理 MCP；补齐 ARL policy、XingRin 快速扫描阶段和 ScopeSentry 模板/节点/定时能力 |
 | 1.0 | 2026-08-11 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 首次建立版本、能力、API 与适配差距基线 |
