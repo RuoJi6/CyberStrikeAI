@@ -5434,6 +5434,7 @@ async function startNewConversation(options = {}) {
     try {
         window.currentConversationId = '';
     } catch (e) { /* ignore */ }
+    window.dispatchEvent(new CustomEvent('conversation-changed', { detail: { conversationId: '' } }));
     updateChatPrimaryActionState();
     currentConversationGroupId = null; // 新对话不属于任何分组
     // 顶部“新任务”继承当前文件夹；文件夹内的“+”仍可显式指定（包括无项目）。
@@ -5945,6 +5946,7 @@ async function loadConversation(conversationId) {
         try {
             window.currentConversationId = conversationId;
         } catch (e) { /* ignore */ }
+        window.dispatchEvent(new CustomEvent('conversation-changed', { detail: { conversationId: conversationId } }));
         updateChatPrimaryActionState();
         if (typeof refreshChatProjectSelector === 'function') {
             refreshChatProjectSelector({ reloadFolders: false, renderFolders: false });
