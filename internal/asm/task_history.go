@@ -729,6 +729,25 @@ func (s *Service) SyncTaskHistory(ctx context.Context, id string) (TaskHistoryVi
 	return s.GetTaskHistory(item.ID)
 }
 
+// StopTaskHistory resolves the local history identifier to the provider-native
+// task identifier. The browser never needs to know a resource credential or
+// guess whether a displayed ID belongs to CyberStrikeAI or to the ASM.
+func (s *Service) StopTaskHistory(ctx context.Context, id string) (TaskHistoryView, error) {
+	item, err := s.db.GetASMTask(strings.TrimSpace(id))
+	if err != nil {
+		return TaskHistoryView{}, err
+	}
+	if item.Status == "completed" || item.Status == "failed" || item.Status == "stopped" {
+		return s.GetTaskHistory(item.ID)
+	}
+	if _, err := s.StopTask(ctx, item.ResourceID, item.RemoteTaskID); err != nil {
+		item.LastError = truncateError(err)
+		_ = s.db.UpdateASMTask(item)
+		return taskHistoryView(item), err
+	}
+	return s.GetTaskHistory(item.ID)
+}
+
 func normalizeAssetType(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if value == "" {

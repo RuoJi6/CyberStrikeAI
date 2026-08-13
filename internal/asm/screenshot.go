@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,7 +84,10 @@ func downloadScreenshot(ctx context.Context, client *http.Client, endpoint strin
 	if err != nil {
 		return nil, "", fmt.Errorf("创建截图请求失败: %w", err)
 	}
-	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,image/gif")
+	// XingRin's DRF image action negotiates a binary renderer and returns 406
+	// for a browser-style enumerated image list. Keep image preferred while
+	// accepting the provider's binary content type.
+	req.Header.Set("Accept", "image/*, */*;q=0.8")
 	req.Header.Set("User-Agent", "CyberStrikeAI-ASM/1.0")
 	for key, value := range headers {
 		req.Header.Set(key, value)
@@ -283,6 +287,24 @@ func (s *Service) screenshotSources(ctx context.Context, item *database.ASMTask)
 	}
 	payloads := make([]interface{}, 0, len(resultTypes))
 	for _, resultType := range resultTypes {
+		// Completed result localization already stores the normalized upstream
+		// records. Prefer those records so opening the task center does not repeat
+		// an expensive list request merely to discover screenshot paths.
+		if rows, _, localErr := s.db.ListASMResultItems(item.ID, resultType, "", 1, 200); localErr == nil && len(rows) > 0 {
+			local := make([]interface{}, 0, len(rows))
+			for _, raw := range rows {
+				var value interface{}
+				if json.Unmarshal([]byte(raw), &value) == nil {
+					local = append(local, value)
+				}
+			}
+			if len(local) > 0 {
+				payloads = append(payloads, map[string]interface{}{"results": local, "source": "local"})
+				if len(collectScreenshotReferences(local)) > 0 {
+					break
+				}
+			}
+		}
 		payload, listErr := adapter.ListAssets(ctx, conn, AssetFilter{TaskID: item.RemoteTaskID, Type: resultType, Page: 1, PageSize: 100})
 		if listErr != nil {
 			if len(payloads) == 0 {

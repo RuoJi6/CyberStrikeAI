@@ -1,6 +1,6 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：1.9
+> 文档版本：2.1
 > 基线日期：2026-08-13
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
@@ -26,7 +26,7 @@
 
 ## 3. CyberStrikeAI 统一 MCP 动作
 
-Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套平台的全部 API：
+Agent 当前看到的是以下 11 个内置工具，而不是直接看到三套平台的全部 API：
 
 | MCP 工具 | 动作 | 是否改变远端状态 |
 | --- | --- | --- |
@@ -34,6 +34,7 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_test_connection` | 验证地址与凭据并更新连接状态 | 仅更新本地连接状态 |
 | `asm_get_task_profile` | 读取平台版本、任务模式、字段、默认值和依赖 | 否 |
 | `asm_list_task_options` | 实时查询单类策略、引擎、字典、节点、模板、插件和 POC；或用 `kind=all` 聚合所有列表型类别 | 否 |
+| `asm_create_template` | 克隆 ScopeSentry 基模板，用结构化字段设置能力、端口、并发、截图、TLS 和 POC | 是 |
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
@@ -41,7 +42,7 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_stop_task` | 停止指定远端任务 | 是 |
 | `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
-调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
+调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称 → ScopeSentry 可选调用 `asm_create_template` 创建受控模板 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
 
 `asm_list_task_options(kind=all)` 表示一次查询该资源声明的所有列表型动态选项，不表示扫描全部目标，也不表示无分页获取全部记录。`page` 和 `page_size` 会分别应用到每个类别（默认每类第 1 页 20 条）；`policy_detail`、`template_detail` 等需要具体 `id` 的详情类别会跳过并返回原因，个别类别失败时会返回 `partial=true` 和分类错误，其余成功结果仍可使用。
 
@@ -118,6 +119,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 使用上游 `template_id` 时实行创建前强制校验：Agent 必须单独调用 `asm_list_task_options(kind=template_detail,id=...)`，读取可机读的 `capability_summary` 和 `verification_token`，创建时传回 `template_verification_token`。用户要求全端口时必须传 `required_port_scope=all`；用户指定的子域、端口、指纹、截图、URL、爬虫、敏感信息、目录、漏洞等能力必须通过 `required_capabilities` 逐项声明。MCP 会重新读取上游模板，校验令牌、端口和能力后才创建；成功响应的 `effective_template` 回显实际生效配置。模板名称、任务名称和 POC 库总数均不能作为“全功能”证据。
 
+`asm_create_template` 与 ASM 任务中心使用同一后端能力：选择 `base_template_id`，按需保留 `enabled_capabilities`，并可修改 `ports`、`concurrency`、`site_capture`、`tls_probe` 和 `poc_ids`。适配器只克隆基模板已有的插件，不允许提交任意命令行；基模板缺少所选插件时会拒绝创建。创建响应会返回新 `template_id`、`capability_summary` 和 `verification_token`，任务中心在同一次提交中立即用它下发任务。
+
 ## 6. 当前适配范围与差距
 
 | 平台 | 连接与任务 | 结果读取 | 当前结论 |
@@ -144,6 +147,10 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 截图二进制也由同步流程自动认证拉取到 CyberStrikeAI，无需人工点击缓存；界面将截图放在对应站点记录旁边，同时保留“已缓存截图”总览。
 
+ASM 任务中心也复用同一 provider profile：手动创建时先读取 `create_options`，再从上游动态加载 ARL 策略、XingRin 引擎/字典以及 ScopeSentry 模板/节点/项目。ScopeSentry 模板在界面选中后会自动读取 `template_detail`、显示实际能力并携带校验令牌。任务详情可直接调用上游停止动作；ScopeSentry 即时任务可后续恢复，ARL 需重跑，XingRin 停止后需新建任务。
+
+XingRin 截图只在 `site_capture=true` 或选中的上游引擎包含 screenshot 阶段时产生。任务中心会优先从本地 `screenshot` 结果记录发现图片路径，仅对未缓存的图片进行认证下载，不会为寻找截图重复拉取整份上游结果列表。
+
 ## 8. 真实 MCP 调用验证
 
 2026-08-12 使用 CyberStrikeAI 相同的 MCP 注册、权限策略、资源数据库和加密凭据，在已授权的公司 IP 上依次验证：
@@ -155,6 +162,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 | ScopeSentry v1.9.3 | 生成低负载模板，仅 80/443，并发 2，截图/TLS 关闭；另建立不立即执行的定时定义 | 节点/模板/字典/插件/POC/项目、即时创建/列表/详情/结果/停止通过；13,510 个 POC 可实时分页；定时任务远端 ID、本地历史、列表、详情、显式删除均通过 |
 
 上述流程固化为默认跳过的 `TestASMRealMCPFlow`，只在明确设置 `CYBERSTRIKE_ASM_REAL_TEST=1` 且提供资源 ID 时连接真实 ASM。
+
+2026-08-13 另使用 ScopeSentry v1.9.3 完成模板创建专项验证：任务中心成功克隆 `default` 基模板、按结构化字段设置端口与并发并立即完成任务；MCP 的 `asm_create_template` 成功创建独立模板，随后由 `asm_create_task` 使用该模板下发任务，并通过 `asm_get_task` 读取后由 `asm_manage_task` 停止。两条路径均返回经过回读校验的模板 ID、能力摘要和校验令牌。
 
 ## 9. 上游升级维护流程
 
@@ -172,6 +181,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 2.1 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 新增 `asm_create_template`，Agent 和任务中心均可克隆 ScopeSentry 基模板、设置受控能力/端口/并发/POC 并立即用新模板下发任务 |
+| 2.0 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心新增 provider-native 手动创建、任务停止/暂停操作，并使 XingRin 截图首次缓存优先复用本地结果索引 |
 | 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | XingRin 多目标创建响应改为全量子任务落库，MCP 返回完整本地/远程 ID 列表，任务中心按 `batch_id` 折叠展示同次下发 |
 | 1.8 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 模板创建新增详情校验令牌、全端口/能力断言与实际生效配置回显，防止 Agent 仅根据模板名误判“全功能” |
 | 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | `asm_list_task_options` 新增 `kind=all`，按统一分页聚合所有列表型动态选项，跳过需 ID 的详情类型并返回分类错误 |

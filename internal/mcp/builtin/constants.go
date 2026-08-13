@@ -21,6 +21,7 @@ const (
 	ToolASMTestConnection  = "asm_test_connection"
 	ToolASMGetTaskProfile  = "asm_get_task_profile"
 	ToolASMListTaskOptions = "asm_list_task_options"
+	ToolASMCreateTemplate  = "asm_create_template"
 	ToolASMCreateTask      = "asm_create_task"
 	ToolASMListTasks       = "asm_list_tasks"
 	ToolASMGetTask         = "asm_get_task"
@@ -103,6 +104,7 @@ func IsBuiltinTool(toolName string) bool {
 		ToolASMTestConnection,
 		ToolASMGetTaskProfile,
 		ToolASMListTaskOptions,
+		ToolASMCreateTemplate,
 		ToolASMCreateTask,
 		ToolASMListTasks,
 		ToolASMGetTask,
@@ -174,6 +176,7 @@ func GetAllBuiltinTools() []string {
 		ToolASMTestConnection,
 		ToolASMGetTaskProfile,
 		ToolASMListTaskOptions,
+		ToolASMCreateTemplate,
 		ToolASMCreateTask,
 		ToolASMListTasks,
 		ToolASMGetTask,

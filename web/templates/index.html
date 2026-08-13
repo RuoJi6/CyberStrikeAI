@@ -24,7 +24,7 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/style.css?v=20260812-4">
-    <link rel="stylesheet" href="/static/css/asm.css?v=20260813-2">
+	<link rel="stylesheet" href="/static/css/asm.css?v=20260813-8">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
     <script src="/static/js/router.js?v=20260811-2"></script>
@@ -2360,6 +2360,10 @@
 							<p data-i18n="asm.taskCenterSubtitle">统一查看 Agent 与 MCP 创建的 ASM 任务、扫描进度、结果和站点截图。</p>
 						</div>
 						<div class="page-header-actions">
+							<button type="button" class="btn-primary btn-icon-text" data-require-permission="mcp:write" onclick="openASMTaskCreateModal()">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+								<span>创建扫描任务</span>
+							</button>
 							<button type="button" class="btn-secondary btn-icon-text" onclick="loadASMTasks(true)">
 								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
 								<span data-i18n="asm.refreshTasks">刷新任务</span>
@@ -2399,6 +2403,7 @@
 									<h3 id="asm-task-modal-title">ASM 任务详情</h3>
 								</div>
 								<div class="asm-task-modal-actions">
+									<button id="asm-task-stop-button" type="button" class="btn-secondary btn-small asm-stop-task-button" data-require-permission="mcp:write" onclick="stopSelectedASMTask()" style="display:none">停止任务</button>
 									<button type="button" class="btn-secondary btn-small" data-require-permission="mcp:write" onclick="syncSelectedASMTask()">同步进度</button>
 									<button type="button" class="btn-primary btn-small" data-require-permission="mcp:write" onclick="syncSelectedASMTaskResults()">重新同步结果</button>
 									<button type="button" class="modal-close" onclick="closeASMTaskModal()" aria-label="关闭">&times;</button>
@@ -2418,6 +2423,28 @@
 								<div id="asm-task-results" class="asm-task-results"></div>
 							</div>
 						</div>
+					</div>
+
+					<div id="asm-task-create-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="asm-task-create-title">
+						<form class="modal-content asm-task-create-content" onsubmit="event.preventDefault();submitASMTaskCreate()">
+							<div class="modal-header">
+								<div><div class="asm-modal-kicker">PROVIDER-NATIVE TASK</div><h3 id="asm-task-create-title">创建 ASM 扫描任务</h3></div>
+								<button type="button" class="modal-close" onclick="closeASMTaskCreateModal()" aria-label="关闭">&times;</button>
+							</div>
+							<div class="modal-body asm-task-create-body">
+								<div class="asm-create-intro"><strong>按平台能力下发</strong><span>选择资源后，字段会切换为该 ASM 版本真正支持的配置；动态引擎、策略、模板、节点和字典从上游实时读取。</span></div>
+								<div class="asm-create-core-grid">
+									<label><span>ASM 资源 *</span><select id="asm-create-resource" required onchange="loadASMTaskCreateProfile()"></select></label>
+									<label><span>任务名称</span><input id="asm-create-name" type="text" maxlength="200" placeholder="例如：季度外网资产复核"></label>
+								</div>
+								<label class="asm-create-target-field"><span>扫描目标 *</span><textarea id="asm-create-target" required maxlength="10000" rows="4" placeholder="每行一个 IP、IP 段或域名"></textarea><small>请只填写已获得明确授权的目标。</small></label>
+								<div id="asm-create-profile-summary" class="asm-create-profile-summary"></div>
+								<section id="asm-create-template-builder" class="asm-template-builder" hidden></section>
+								<div id="asm-create-options" class="asm-create-options"><div class="asm-task-loading"><span class="asm-spinner"></span><span>正在读取平台任务能力…</span></div></div>
+								<div id="asm-create-error" class="asm-task-detail-error" style="display:none"></div>
+							</div>
+							<div class="modal-footer"><button type="button" class="btn-secondary" onclick="closeASMTaskCreateModal()">取消</button><button id="asm-create-submit" type="submit" class="btn-primary" data-require-permission="mcp:write">确认下发</button></div>
+						</form>
 					</div>
                 </div>
 
@@ -7007,7 +7034,7 @@
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
     <script src="/static/js/assets.js?v=20260717-7"></script>
-    <script src="/static/js/asm.js?v=20260813-2"></script>
+	<script src="/static/js/asm.js?v=20260813-5"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260812-1"></script>

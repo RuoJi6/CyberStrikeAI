@@ -18,6 +18,8 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 		taskID        = "64b000000000000000000001"
 		defaultID     = "64b000000000000000000002"
 		profileID     = "64b000000000000000000003"
+		customID      = "64b000000000000000000005"
+		customName    = "CyberStrikeAI controlled full ports"
 		token         = "test-jwt-token"
 		secret        = "scope-password"
 		name          = "Cloud ScopeSentry E2E"
@@ -30,8 +32,8 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	)
 
 	var mu sync.Mutex
-	var profileTemplate map[string]interface{}
-	profileCreated, taskCreated, scheduledCreated := false, false, false
+	var profileTemplate, customTemplate map[string]interface{}
+	profileCreated, customCreated, taskCreated, scheduledCreated := false, false, false, false
 	profileName := scopeSentryLowLoadTemplateName("22", 2, true, false, false, false)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -57,11 +59,14 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			_, _ = w.Write([]byte(`{"code":200,"data":{"list":["node-test","node-backup"]}}`))
 		case "/api/task/template":
 			mu.Lock()
-			created := profileCreated
+			created, explicitCreated := profileCreated, customCreated
 			mu.Unlock()
 			items := []map[string]interface{}{{"id": defaultID, "name": "default"}}
 			if created {
 				items = append(items, map[string]interface{}{"id": profileID, "name": profileName})
+			}
+			if explicitCreated {
+				items = append(items, map[string]interface{}{"id": customID, "name": customName})
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
 		case "/api/task/template/detail":
@@ -70,10 +75,14 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 				t.Errorf("decode template detail: %v", err)
 			}
 			mu.Lock()
-			profile := profileTemplate
+			profile, explicitProfile := profileTemplate, customTemplate
 			mu.Unlock()
 			if fmt.Sprint(body["id"]) == profileID && profile != nil {
 				writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": profile})
+				return
+			}
+			if fmt.Sprint(body["id"]) == customID && explicitProfile != nil {
+				writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": explicitProfile})
 				return
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": scopeSentryTestDefaultTemplate(defaultID, portHash, handleHash, mapHash, fingerHash)})
@@ -84,6 +93,21 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Errorf("decode template save: %v", err)
+			}
+			if body.Result["name"] == customName {
+				if got := fmt.Sprint(scopeSentryMap(scopeSentryMap(body.Result["Parameters"])["PortScan"])[portHash]); !strings.Contains(got, "-port 1-65535") || !strings.Contains(got, "-b 5") {
+					t.Errorf("unexpected controlled template port profile: %q", got)
+				}
+				if got, _ := body.Result["SubdomainScan"].([]interface{}); len(got) != 0 {
+					t.Errorf("controlled template retained disabled subdomain scan: %#v", got)
+				}
+				mu.Lock()
+				body.Result["id"] = customID
+				customTemplate = body.Result
+				customCreated = true
+				mu.Unlock()
+				_, _ = w.Write([]byte(`{"code":200}`))
+				return
 			}
 			if body.Result["name"] != profileName {
 				t.Errorf("unexpected template name: %#v", body.Result["name"])
@@ -222,6 +246,18 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	defaultToken := strings.TrimSpace(fmt.Sprint(defaultOptions["verification_token"]))
 	if defaultToken == "" || defaultSummary["port_scope"] != "top1000" || defaultSummary["full_ports"] != false {
 		t.Fatalf("unexpected default template inspection: %#v", defaultOptions)
+	}
+	createdTemplate, err := adapter.CreateTemplate(ctx, connection, TemplateRequest{
+		Name: customName, BaseTemplateID: defaultID,
+		Options: map[string]interface{}{
+			"enabled_capabilities": []interface{}{"port_scan", "service_fingerprint", "asset_handle"},
+			"ports":                "1-65535", "concurrency": 5,
+		},
+	})
+	createdTemplateMap := scopeSentryMap(createdTemplate)
+	createdSummary := scopeSentryMap(createdTemplateMap["capability_summary"])
+	if err != nil || createdTemplateMap["template_id"] != customID || createdSummary["full_ports"] != true {
+		t.Fatalf("CreateTemplate result=%#v err=%v", createdTemplate, err)
 	}
 	if _, err := adapter.CreateTask(ctx, connection, TaskRequest{
 		Name: "must inspect", Target: "192.0.2.11", Options: map[string]interface{}{"template_id": defaultID},

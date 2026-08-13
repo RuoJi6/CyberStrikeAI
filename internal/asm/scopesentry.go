@@ -56,7 +56,7 @@ func NewScopeSentryAdapter() *ScopeSentryAdapter { return &ScopeSentryAdapter{} 
 func (a *ScopeSentryAdapter) Provider() string { return ProviderScopeSentry }
 
 func (a *ScopeSentryAdapter) Capabilities() []string {
-	return []string{"test_connection", "get_task_profile", "list_task_options", "create_task", "list_tasks", "get_task", "list_assets", "stop_task", "manage_task"}
+	return []string{"test_connection", "get_task_profile", "list_task_options", "create_template", "create_task", "list_tasks", "get_task", "list_assets", "stop_task", "manage_task"}
 }
 
 func scopeSentryHTTPClient(verifyTLS bool) *http.Client {
@@ -562,6 +562,259 @@ func scopeSentryPruneTemplate(source map[string]interface{}, name, ports string,
 	return result
 }
 
+var scopeSentryTemplateOptions = taskOptionAllowed(
+	"enabled_capabilities", "ports", "concurrency", "site_capture", "tls_probe", "poc_ids",
+)
+
+func scopeSentryCloneTemplate(source map[string]interface{}) (map[string]interface{}, error) {
+	raw, err := json.Marshal(source)
+	if err != nil {
+		return nil, fmt.Errorf("ScopeSentry 复制基模板失败: %w", err)
+	}
+	var result map[string]interface{}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil, fmt.Errorf("ScopeSentry 复制基模板失败: %w", err)
+	}
+	return result, nil
+}
+
+func scopeSentrySetParameter(command, name, value string) string {
+	pattern := regexp.MustCompile(`(^|\s)-` + regexp.QuoteMeta(name) + `(?:\s+|=)[^\s]+`)
+	replacement := `${1}-` + name + ` ` + value
+	if pattern.MatchString(command) {
+		return strings.TrimSpace(pattern.ReplaceAllString(command, replacement))
+	}
+	return strings.TrimSpace(command + " -" + name + " " + value)
+}
+
+func scopeSentryUpdateModuleParameters(template map[string]interface{}, module string, update func(string) string) {
+	for _, parameterKey := range []string{"Parameters", "ParameterLists"} {
+		parameters := scopeSentryMap(template[parameterKey])
+		if parameters == nil {
+			continue
+		}
+		pluginParameters := scopeSentryMap(parameters[module])
+		for hash, raw := range pluginParameters {
+			pluginParameters[hash] = update(strings.TrimSpace(fmt.Sprint(raw)))
+		}
+		parameters[module] = pluginParameters
+		template[parameterKey] = parameters
+	}
+}
+
+func scopeSentryCapabilitySet(options map[string]interface{}) (map[string]bool, bool, error) {
+	_, configured := options["enabled_capabilities"]
+	values, err := taskOptionStringSlice("ScopeSentry", options, "enabled_capabilities", nil, len(scopeSentryRequiredCapabilities), 64)
+	if err != nil {
+		return nil, false, err
+	}
+	if configured && len(values) == 0 {
+		return nil, false, fmt.Errorf("ScopeSentry enabled_capabilities 至少需要一项能力")
+	}
+	known := make(map[string]struct{}, len(scopeSentryRequiredCapabilities))
+	for _, capability := range scopeSentryRequiredCapabilities {
+		known[capability] = struct{}{}
+	}
+	result := make(map[string]bool, len(values))
+	for _, value := range values {
+		capability := strings.ToLower(strings.TrimSpace(value))
+		if _, exists := known[capability]; !exists {
+			return nil, false, fmt.Errorf("ScopeSentry 不支持的模板能力: %s", capability)
+		}
+		result[capability] = true
+	}
+	if configured && result["service_fingerprint"] && !result["port_scan"] {
+		return nil, false, fmt.Errorf("ScopeSentry service_fingerprint 需要同时启用 port_scan")
+	}
+	if configured && (result["site_capture"] || result["tls_probe"]) && !result["site_identify"] {
+		return nil, false, fmt.Errorf("ScopeSentry site_capture/tls_probe 需要同时启用 site_identify")
+	}
+	return result, configured, nil
+}
+
+func scopeSentryCustomizeTemplate(source map[string]interface{}, name string, options map[string]interface{}) (map[string]interface{}, error) {
+	result, err := scopeSentryCloneTemplate(source)
+	if err != nil {
+		return nil, err
+	}
+	delete(result, "id")
+	result["name"] = name
+	result["TaskName"] = ""
+
+	capabilities, configured, err := scopeSentryCapabilitySet(options)
+	if err != nil {
+		return nil, err
+	}
+	if configured {
+		for _, mapping := range scopeSentryCapabilityModules {
+			if !capabilities[mapping.Capability] {
+				result[mapping.Module] = []interface{}{}
+				for _, parameterKey := range []string{"Parameters", "ParameterLists"} {
+					parameters := scopeSentryMap(result[parameterKey])
+					if parameters != nil {
+						parameters[mapping.Module] = map[string]interface{}{}
+					}
+				}
+			}
+		}
+	}
+
+	if raw, exists := options["ports"]; exists {
+		ports, portsErr := scopeSentryPorts(strings.TrimSpace(fmt.Sprint(raw)))
+		if portsErr != nil {
+			return nil, portsErr
+		}
+		if !scopeSentrySelectionEnabled(result["PortScan"]) {
+			return nil, fmt.Errorf("ScopeSentry 设置 ports 前需要启用 port_scan")
+		}
+		scopeSentryUpdateModuleParameters(result, "PortScan", func(command string) string {
+			return scopeSentrySetParameter(command, "port", ports)
+		})
+	}
+	if _, exists := options["concurrency"]; exists {
+		concurrency, concurrencyErr := taskOptionInt("ScopeSentry", options, "concurrency", 20, 1, 200)
+		if concurrencyErr != nil {
+			return nil, concurrencyErr
+		}
+		if !scopeSentrySelectionEnabled(result["PortScan"]) {
+			return nil, fmt.Errorf("ScopeSentry 设置 concurrency 前需要启用 port_scan")
+		}
+		scopeSentryUpdateModuleParameters(result, "PortScan", func(command string) string {
+			return scopeSentrySetParameter(command, "b", strconv.Itoa(concurrency))
+		})
+	}
+
+	siteEnabled := scopeSentrySelectionEnabled(result["AssetMapping"])
+	for _, field := range []string{"site_capture", "tls_probe"} {
+		if _, exists := options[field]; !exists && !configured {
+			continue
+		}
+		value := capabilities[field]
+		if _, exists := options[field]; exists {
+			value, err = taskOptionBool("ScopeSentry", options, field, value)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if value && !siteEnabled {
+			return nil, fmt.Errorf("ScopeSentry 启用 %s 前需要启用 site_identify", field)
+		}
+		if siteEnabled {
+			flag := map[string]string{"site_capture": "screenshot", "tls_probe": "tlsprobe"}[field]
+			scopeSentryUpdateModuleParameters(result, "AssetMapping", func(command string) string {
+				return scopeSentrySetParameter(command, flag, strconv.FormatBool(value))
+			})
+		}
+	}
+
+	if _, exists := options["poc_ids"]; exists {
+		pocIDs, pocErr := taskOptionStringSlice("ScopeSentry", options, "poc_ids", nil, 500, 200)
+		if pocErr != nil {
+			return nil, pocErr
+		}
+		if len(pocIDs) > 0 && !scopeSentrySelectionEnabled(result["VulnerabilityScan"]) {
+			return nil, fmt.Errorf("ScopeSentry 选择 POC 前需要启用 vulnerability_scan")
+		}
+		selected := make([]interface{}, len(pocIDs))
+		for index, value := range pocIDs {
+			selected[index] = value
+		}
+		result["VulList"] = selected
+		result["vullist"] = selected
+	}
+
+	summary := scopeSentryTemplateCapabilitySummary(result)
+	if configured {
+		actual, _ := summary["capabilities"].(map[string]bool)
+		missing := make([]string, 0)
+		for capability := range capabilities {
+			if !actual[capability] {
+				missing = append(missing, capability)
+			}
+		}
+		if len(missing) > 0 {
+			return nil, fmt.Errorf("ScopeSentry 基模板不包含请求的插件能力: %s", strings.Join(missing, ", "))
+		}
+	}
+	return result, nil
+}
+
+func (a *ScopeSentryAdapter) CreateTemplate(ctx context.Context, conn *Connection, req TemplateRequest) (interface{}, error) {
+	if err := rejectUnknownTaskOptions("ScopeSentry 模板", req.Options, scopeSentryTemplateOptions); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len(name) > 150 || strings.ContainsAny(name, "\r\n") {
+		return nil, fmt.Errorf("ScopeSentry 模板名称必填、不能换行且不能超过 150 字符")
+	}
+	client, token, err := a.session(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	templates, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template", nil, map[string]interface{}{
+		"pageIndex": 1, "pageSize": 100, "query": "", "search": "",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if existingID, _ := scopeSentryTemplateByName(templates, name); existingID != "" {
+		return nil, fmt.Errorf("ScopeSentry 模板名称已存在: %s", name)
+	}
+	baseID := strings.TrimSpace(req.BaseTemplateID)
+	if baseID == "" {
+		baseID, _ = scopeSentryTemplateByName(templates, "default")
+		if baseID == "" {
+			return nil, fmt.Errorf("ScopeSentry 未找到 default 基模板")
+		}
+	} else {
+		baseID, err = scopeSentryValidateObjectID(baseID, "base_template_id", false)
+		if err != nil {
+			return nil, err
+		}
+	}
+	detail, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": baseID})
+	if err != nil {
+		return nil, err
+	}
+	source := scopeSentryMap(scopeSentryData(detail))
+	if source == nil {
+		return nil, fmt.Errorf("ScopeSentry 基模板详情无效")
+	}
+	profile, err := scopeSentryCustomizeTemplate(source, name, req.Options)
+	if err != nil {
+		return nil, err
+	}
+	if _, err = scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/save", nil, map[string]interface{}{
+		"id": "", "result": profile,
+	}); err != nil {
+		return nil, err
+	}
+	for attempt := 0; attempt < 10; attempt++ {
+		listed, listErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template", nil, map[string]interface{}{
+			"pageIndex": 1, "pageSize": 20, "query": name, "search": name,
+		})
+		if listErr == nil {
+			if templateID, _ := scopeSentryTemplateByName(listed, name); templateID != "" {
+				createdDetail, detailErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": templateID})
+				if detailErr != nil {
+					return nil, detailErr
+				}
+				summary, verificationToken, inspectErr := scopeSentryTemplateInspection(createdDetail)
+				if inspectErr != nil {
+					return nil, inspectErr
+				}
+				return map[string]interface{}{
+					"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID,
+					"template_id": templateID, "template_name": name, "base_template_id": baseID,
+					"capability_summary": summary, "verification_token": verificationToken,
+				}, nil
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("ScopeSentry 模板已保存但回查不到: %s", name)
+}
+
 func (a *ScopeSentryAdapter) ensureTemplate(ctx context.Context, client *http.Client, conn *Connection, token string, options map[string]interface{}) (string, error) {
 	ports, concurrency, portScan, siteIdentify, siteCapture, tlsProbe, err := scopeSentryLowLoadOptions(options)
 	if err != nil {
@@ -910,12 +1163,22 @@ func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection)
 		"result_types":         providerResultTypes(ProviderScopeSentry),
 		"notes": []string{
 			"提供 template_id 时完整复用 ScopeSentry 上游模板，端口字典、文件字典、插件参数和 POC 均由该模板决定",
+			"Agent 和 ASM 任务中心可以克隆已有模板，通过受控字段选择能力、端口、并发、截图、TLS 和 POC，并立即用新模板下发任务",
 			"使用 template_id 前必须单独调用 template_detail，并在创建时传回 template_verification_token；模板列表或名称不能证明实际能力",
 			"用户要求全端口或指定能力时，必须分别传 required_port_scope 和 required_capabilities；模板不满足时会在上游创建前拒绝",
 			"未提供 template_id 时按受控端口、并发、截图与 TLS 配置指纹生成独立低负载模板，任务之间不会相互覆盖",
-			"不允许 Agent 直接传入任意插件命令行；需在 ScopeSentry 上游模板中审核配置后再选择 template_id",
+			"不允许 Agent 直接传入任意插件命令行；模板创建仅能修改适配器已声明的结构化字段",
 			"模板、端口字典和 POC 列表仅返回选择所需的轻量摘要，避免大型上游响应挤占 Agent 上下文",
 			"定时任务会回查上游 ID 并记录到 ASM 任务中心；定时定义不支持 stop/resume/restart，仅支持显式 delete",
+		},
+		"template_create_options": map[string]interface{}{
+			"base_template_id":     map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "要克隆的上游模板；留空使用 default"},
+			"enabled_capabilities": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": scopeSentryRequiredCapabilities}, "description": "新模板保留的能力；留空完整继承基模板"},
+			"ports":                map[string]interface{}{"type": "string", "description": "结构化端口表达式，例如 1-65535 或 80,443"},
+			"concurrency":          map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "description": "端口扫描并发"},
+			"site_capture":         map[string]interface{}{"type": "boolean", "description": "是否截图"},
+			"tls_probe":            map[string]interface{}{"type": "boolean", "description": "是否执行 TLS 探测"},
+			"poc_ids":              map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "pocs", "description": "漏洞扫描选用的 POC"},
 		},
 		"create_options": map[string]interface{}{
 			"template_id":                 map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "选择已在上游配置好的完整模板；选择后必须查询 template_detail"},

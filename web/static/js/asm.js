@@ -22,6 +22,11 @@ const asmPageState = {
     lastResultPayload: null,
     lastResultQuery: '',
     resultSyncPolling: false,
+    createProfile: null,
+    createOptionSets: {},
+    createTemplateToken: '',
+    createTemplateBaseSummary: null,
+    createLoading: false,
 };
 
 function asmT(key, fallback, options) {
@@ -1211,9 +1216,14 @@ async function openASMTaskModal(id) {
         const defaultType = asmTaskResultTypes().find(item => item.default) || asmTaskResultTypes()[0];
         asmPageState.selectedAssetType = defaultType?.id || 'site';
         renderASMTaskDetail();
+        syncASMTaskStopButton();
         renderASMResultTabs();
         renderASMScreenshotCacheStatus();
         await loadSelectedASMResults({ autoSelect: true });
+        const screenshotState = (asmPageState.selectedTask.result_sync?.types || []).find(item => item.asset_type === 'screenshot');
+        if (asmPageState.selectedTask.provider === 'xingrin' && !asmPageState.selectedTask.screenshots?.length && Number(screenshotState?.item_count) > 0) {
+            void autoSyncSelectedASMScreenshots();
+        }
         if (asmPageState.selectedTask.result_sync?.status !== 'completed') void pollASMResultSync(id);
     } catch (error) {
         if (root) root.innerHTML = `<div class="asm-task-detail-error">${asmEscape(error.message)}</div>`;
@@ -1234,10 +1244,594 @@ async function syncSelectedASMTask() {
     try {
         asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/sync`, { method: 'POST' });
         renderASMTaskDetail();
+        syncASMTaskStopButton();
         await Promise.all([loadASMTasks(false), loadSelectedASMResults()]);
         if (typeof showNotification === 'function') showNotification('ASM 任务进度已同步', 'success');
     } catch (error) {
         if (typeof showNotification === 'function') showNotification(error.message, 'error');
+    }
+}
+
+function asmTaskCanStop(task) {
+    return task && !['completed', 'failed', 'stopped'].includes(String(task.status || '').toLowerCase());
+}
+
+function syncASMTaskStopButton() {
+    const button = document.getElementById('asm-task-stop-button');
+    const task = asmPageState.selectedTask;
+    if (!button) return;
+    button.style.display = asmTaskCanStop(task) ? '' : 'none';
+    button.textContent = task?.provider === 'scopesentry' ? '暂停任务' : '停止任务';
+    button.disabled = false;
+}
+
+async function stopSelectedASMTask() {
+    const task = asmPageState.selectedTask;
+    if (!asmTaskCanStop(task)) return;
+    const action = task.provider === 'scopesentry' ? '暂停' : '停止';
+    const note = task.provider === 'xingrin' ? '（XingRin 不支持原任务续传，停止后需新建任务）' : '';
+    if (!window.confirm(`确定要${action}该任务吗？${note}`)) return;
+    const button = document.getElementById('asm-task-stop-button');
+    if (button) { button.disabled = true; button.textContent = `${action}中…`; }
+    try {
+        asmPageState.selectedTask = await asmApi(`/api/asm/tasks/${encodeURIComponent(task.id)}/stop`, { method: 'POST' });
+        renderASMTaskDetail();
+        syncASMTaskStopButton();
+        await loadASMTasks(false);
+        if (typeof showNotification === 'function') showNotification(`ASM 任务已${action}`, 'success');
+    } catch (error) {
+        if (typeof showNotification === 'function') showNotification(error.message, 'error');
+        syncASMTaskStopButton();
+    }
+}
+
+const asmCreateFieldLabels = Object.freeze({
+    task_mode: '任务模式', policy_id: 'ARL 策略', task_tag: '任务类型', result_set_id: '结果集 ID',
+    domain_brute: '子域名爆破', domain_brute_type: '域名字典级别', port_scan: '端口扫描', port_scan_type: '端口范围',
+    service_detection: '服务识别', service_brute: '弱口令爆破', os_detection: '操作系统识别', site_identify: '站点识别', site_capture: '站点截图',
+    file_leak: '文件泄露', search_engines: '搜索引擎', site_spider: '站点爬虫', arl_search: 'ARL 历史查询', alt_dns: 'DNS 字典生成',
+    ssl_cert: 'SSL 证书', dns_query_plugin: '域名查询插件', skip_scan_cdn_ip: '跳过 CDN IP', nuclei_scan: 'Nuclei 漏洞扫描', findvhost: 'Host 碰撞', web_info_hunter: 'WIH 调用',
+    engine_ids: '扫描引擎', subdomain_discovery: '子域名发现', subdomain_bruteforce: '子域名字典爆破', subdomain_permutation: '子域名变异', subdomain_resolve: 'DNS 解析',
+    subdomain_wordlist: '子域名字典', port_scan_passive: '被动端口发现', ports: '自定义端口', top_ports: 'Top 端口数', fingerprint_libraries: '指纹库',
+    directory_scan: '目录扫描', directory_wordlist: '目录字典', directory_concurrency: '目录扫描并发', screenshot_sources: '截图来源', url_fetch: 'URL 抓取', crawl_depth: '爬虫深度',
+    nuclei_template_repos: 'Nuclei 模板仓库', nuclei_severity: 'Nuclei 严重程度', nuclei_tags: 'Nuclei 标签', dalfox_scan: 'Dalfox XSS', rate_limit: '请求速率', concurrency: '并发数', request_timeout: '请求超时（秒）',
+    template_id: '上游任务模板', required_port_scope: '必须满足的端口范围', required_capabilities: '必须满足的扫描能力', node_names: '扫描节点', all_nodes: '使用全部在线节点', ignore: '忽略目标',
+    duplicates: '去重方式', target_source: '目标来源', project_ids: '项目', source_search: '来源搜索表达式', source_limit: '来源结果上限', source_filter: '来源结构化过滤',
+    scheduled: '定时任务', cycle_type: '执行周期', hour: '小时', minute: '分钟', day: '日期', week: '星期', tls_probe: 'TLS 探测',
+});
+
+const asmCreateOrders = Object.freeze({
+    arl: ['task_mode', 'policy_id', 'task_tag', 'result_set_id', 'domain_brute', 'domain_brute_type', 'port_scan', 'port_scan_type', 'service_detection', 'service_brute', 'os_detection', 'site_identify', 'site_capture', 'file_leak', 'search_engines', 'site_spider', 'arl_search', 'alt_dns', 'ssl_cert', 'dns_query_plugin', 'skip_scan_cdn_ip', 'nuclei_scan', 'findvhost', 'web_info_hunter'],
+    xingrin: ['engine_ids', 'port_scan', 'ports', 'top_ports', 'port_scan_passive', 'site_identify', 'fingerprint_libraries', 'site_capture', 'screenshot_sources', 'subdomain_discovery', 'subdomain_bruteforce', 'subdomain_permutation', 'subdomain_resolve', 'subdomain_wordlist', 'directory_scan', 'directory_wordlist', 'directory_concurrency', 'url_fetch', 'crawl_depth', 'nuclei_scan', 'nuclei_template_repos', 'nuclei_severity', 'nuclei_tags', 'dalfox_scan', 'rate_limit', 'concurrency', 'request_timeout'],
+    scopesentry: ['template_id', 'required_port_scope', 'required_capabilities', 'node_names', 'all_nodes', 'target_source', 'project_ids', 'source_search', 'source_limit', 'source_filter', 'ignore', 'duplicates', 'scheduled', 'cycle_type', 'hour', 'minute', 'day', 'week', 'port_scan', 'ports', 'site_identify', 'site_capture', 'tls_probe', 'concurrency'],
+});
+
+const asmScopeTemplateCapabilities = Object.freeze([
+    ['subdomain_discovery', '子域名发现'], ['subdomain_takeover', '子域接管'], ['port_scan', '端口扫描'], ['service_fingerprint', '服务指纹'],
+    ['site_identify', '站点识别'], ['site_capture', '站点截图'], ['tls_probe', 'TLS 探测'], ['url_scan', 'URL 扫描'],
+    ['web_crawler', 'Web 爬虫'], ['sensitive_scan', '敏感信息'], ['directory_scan', '目录扫描'], ['vulnerability_scan', '漏洞扫描'],
+    ['passive_scan', '被动扫描'], ['asset_handle', '资产处理'],
+]);
+
+function asmCreateResource() {
+    const id = document.getElementById('asm-create-resource')?.value;
+    return asmPageState.resources.find(item => item.id === id) || null;
+}
+
+function asmOptionRows(value, depth) {
+    if (depth > 7 || value == null) return [];
+    if (Array.isArray(value)) return value;
+    if (typeof value !== 'object') return [value];
+    for (const key of ['results', 'list', 'items', 'data', 'options', 'response']) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) {
+            const rows = asmOptionRows(value[key], depth + 1);
+            if (rows.length) return rows;
+        }
+    }
+    return [];
+}
+
+function asmOptionValue(field, item) {
+    if (item == null || typeof item !== 'object') return String(item ?? '');
+    if (['node_names', 'subdomain_wordlist', 'directory_wordlist', 'nuclei_template_repos'].includes(field)) return String(item.name ?? item.label ?? item.id ?? '');
+    return String(item.id ?? item._id ?? item.value ?? item.name ?? '');
+}
+
+function asmOptionLabel(item) {
+    if (item == null || typeof item !== 'object') return String(item ?? '');
+    const name = item.name ?? item.title ?? item.label ?? item.id ?? item._id ?? item.value;
+    const extra = item.description ?? item.introduction ?? item.status;
+    return `${name ?? ''}${extra && String(extra) !== String(name) ? ` · ${extra}` : ''}`;
+}
+
+function asmDynamicKind(field, schema) {
+    return schema.dynamic_kind || ({ policy_id: 'policies', engine_ids: 'engines' }[field] || '');
+}
+
+function asmCreateInputValue(node) {
+    if (!node) return null;
+    if (node.type === 'checkbox') return node.checked;
+    if (node.multiple) return Array.from(node.selectedOptions).map(option => option.value);
+    return String(node.value || '').trim();
+}
+
+function asmCreateFieldValue(key) {
+    return asmCreateInputValue(document.getElementById(`asm-create-option-${key}`));
+}
+
+function asmCreateHasValue(value) {
+    return Array.isArray(value) ? value.length > 0 : (typeof value === 'boolean' ? value : String(value ?? '').trim() !== '');
+}
+
+function closeASMCreateDropdowns(except) {
+    document.querySelectorAll('.asm-create-select.is-open').forEach(wrapper => {
+        if (wrapper === except) return;
+        wrapper.classList.remove('is-open');
+        wrapper._asmCreateSelectMenu?.classList.remove('is-open');
+        wrapper.querySelector('.asm-create-select-trigger')?.setAttribute('aria-expanded', 'false');
+    });
+}
+
+function positionASMCreateDropdown(wrapper) {
+    const trigger = wrapper?.querySelector('.asm-create-select-trigger');
+    const menu = wrapper?._asmCreateSelectMenu;
+    if (!trigger || !menu || !wrapper.classList.contains('is-open')) return;
+    const rect = trigger.getBoundingClientRect();
+    const gap = 6;
+    const maxHeight = Math.min(280, Math.max(120, window.innerHeight - 32));
+    const below = window.innerHeight - rect.bottom - gap - 12;
+    const above = rect.top - gap - 12;
+    const openUp = below < Math.min(220, maxHeight) && above > below;
+    const height = Math.max(96, Math.min(maxHeight, openUp ? above : below));
+    menu.style.left = `${Math.round(rect.left)}px`;
+    menu.style.width = `${Math.round(rect.width)}px`;
+    menu.style.maxHeight = `${Math.round(height)}px`;
+    menu.style.top = openUp ? 'auto' : `${Math.round(rect.bottom + gap)}px`;
+    menu.style.bottom = openUp ? `${Math.round(window.innerHeight - rect.top + gap)}px` : 'auto';
+}
+
+function syncASMCreateSelect(select) {
+    if (!select || select.multiple) return;
+    const wrapper = select.closest('.asm-create-select');
+    if (!wrapper) return;
+    const trigger = wrapper.querySelector('.asm-create-select-trigger');
+    const valueNode = wrapper.querySelector('.asm-create-select-value');
+    const menu = wrapper._asmCreateSelectMenu;
+    const options = Array.from(select.options || []);
+    const selected = options.find(option => option.value === select.value) || options[0];
+    if (valueNode) valueNode.textContent = selected?.textContent || '请选择';
+    if (trigger) {
+        trigger.disabled = select.disabled;
+        trigger.classList.toggle('is-placeholder', !selected?.value);
+    }
+    menu?.querySelectorAll('.asm-create-select-option').forEach((button, index) => {
+        const active = options[index]?.value === select.value;
+        button.classList.toggle('is-selected', active);
+        button.setAttribute('aria-selected', String(active));
+    });
+    if (select.disabled) closeASMCreateDropdowns();
+}
+
+function enhanceASMCreateSelect(select) {
+    if (!select || select.multiple || select.dataset.asmCustomSelect === 'true') return;
+    select.dataset.asmCustomSelect = 'true';
+    const wrapper = document.createElement('div');
+    wrapper.className = 'asm-create-select';
+    const trigger = document.createElement('button');
+    trigger.type = 'button';
+    trigger.className = 'asm-create-select-trigger';
+    trigger.setAttribute('aria-haspopup', 'listbox');
+    trigger.setAttribute('aria-expanded', 'false');
+    const fieldLabel = select.closest('label')?.querySelector(':scope > span')?.textContent?.trim() || select.getAttribute('aria-label') || '选择选项';
+    trigger.setAttribute('aria-label', fieldLabel);
+    trigger.innerHTML = '<span class="asm-create-select-value"></span><span class="asm-create-select-chevron" aria-hidden="true"></span>';
+    const menu = document.createElement('div');
+    menu.className = 'asm-create-select-menu';
+    menu.setAttribute('role', 'listbox');
+    Array.from(select.options || []).forEach(option => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'asm-create-select-option';
+        button.setAttribute('role', 'option');
+        button.dataset.value = option.value;
+        button.textContent = option.textContent;
+        button.addEventListener('click', () => {
+            select.value = option.value;
+            syncASMCreateSelect(select);
+            closeASMCreateDropdowns();
+            trigger.focus();
+            select.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+        button.addEventListener('keydown', event => {
+            const optionButtons = Array.from(menu.querySelectorAll('.asm-create-select-option'));
+            const index = optionButtons.indexOf(button);
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                const offset = event.key === 'ArrowDown' ? 1 : -1;
+                optionButtons[(index + offset + optionButtons.length) % optionButtons.length]?.focus();
+            } else if (event.key === 'Escape') {
+                event.preventDefault();
+                closeASMCreateDropdowns();
+                trigger.focus();
+            }
+        });
+        menu.appendChild(button);
+    });
+    select.parentNode.insertBefore(wrapper, select);
+    wrapper.append(select, trigger);
+    wrapper._asmCreateSelectMenu = menu;
+    menu._asmCreateSelectWrapper = wrapper;
+    document.body.appendChild(menu);
+    select.classList.add('asm-create-select-native');
+    select.setAttribute('aria-hidden', 'true');
+    select.tabIndex = -1;
+    trigger.addEventListener('click', () => {
+        const willOpen = !wrapper.classList.contains('is-open');
+        closeASMCreateDropdowns(wrapper);
+        wrapper.classList.toggle('is-open', willOpen);
+        menu.classList.toggle('is-open', willOpen);
+        trigger.setAttribute('aria-expanded', String(willOpen));
+        if (willOpen) {
+            positionASMCreateDropdown(wrapper);
+            const selectedButton = menu.querySelector('.asm-create-select-option.is-selected') || menu.querySelector('.asm-create-select-option');
+            if (selectedButton) menu.scrollTop = Math.max(0, selectedButton.offsetTop - ((menu.clientHeight - selectedButton.offsetHeight) / 2));
+        }
+    });
+    trigger.addEventListener('keydown', event => {
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+        event.preventDefault();
+        if (!wrapper.classList.contains('is-open')) trigger.click();
+        const selectedButton = menu.querySelector('.asm-create-select-option.is-selected') || menu.querySelector('.asm-create-select-option');
+        selectedButton?.focus();
+    });
+    syncASMCreateSelect(select);
+}
+
+function enhanceASMCreateSelects(root) {
+    const scope = root || document.getElementById('asm-task-create-modal');
+    if (!scope) return;
+    if (scope.matches?.('select:not([multiple])')) enhanceASMCreateSelect(scope);
+    scope.querySelectorAll('select:not([multiple])').forEach(enhanceASMCreateSelect);
+}
+
+function destroyASMCreateSelects(root) {
+    root?.querySelectorAll('.asm-create-select').forEach(wrapper => {
+        wrapper._asmCreateSelectMenu?.remove();
+        wrapper._asmCreateSelectMenu = null;
+    });
+}
+
+document.addEventListener('click', event => {
+    if (!event.target.closest('.asm-create-select, .asm-create-select-menu')) closeASMCreateDropdowns();
+});
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') closeASMCreateDropdowns();
+});
+window.addEventListener('resize', () => closeASMCreateDropdowns());
+document.addEventListener('scroll', event => {
+    if (event.target?.classList?.contains('asm-create-select-menu')) return;
+    document.querySelectorAll('.asm-create-select.is-open').forEach(positionASMCreateDropdown);
+}, true);
+
+function asmCreateSchemaEntries() {
+    const options = asmPageState.createProfile?.create_options || {};
+    const provider = asmPageState.createProfile?.provider || '';
+    const order = asmCreateOrders[provider] || [];
+    return Object.keys(options).filter(key => key !== 'template_verification_token').sort((a, b) => {
+        const ai = order.indexOf(a), bi = order.indexOf(b);
+        return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi) || a.localeCompare(b);
+    }).map(key => [key, options[key] || {}]);
+}
+
+function asmRenderCreateField(key, schema) {
+    const id = `asm-create-option-${key}`;
+    const label = asmCreateFieldLabels[key] || key;
+    const dynamicKind = asmDynamicKind(key, schema);
+    const rows = dynamicKind ? asmOptionRows(asmPageState.createOptionSets[dynamicKind], 0) : [];
+    const defaultValue = schema.default;
+    const description = schema.description ? `<small>${asmEscape(schema.description)}</small>` : '';
+    let control = '';
+    if (schema.type === 'boolean') {
+        control = `<label class="asm-create-switch"><input id="${id}" data-asm-create-option="${asmEscape(key)}" type="checkbox" ${defaultValue ? 'checked' : ''} onchange="onASMCreateOptionChange('${asmEscape(key)}')"><span>${asmEscape(label)}</span></label>`;
+        return `<div class="asm-create-field asm-create-boolean" data-asm-create-field="${asmEscape(key)}" data-requires="${asmEscape(schema.requires || '')}">${control}${description}</div>`;
+    }
+    const enums = Array.isArray(schema.enum) ? schema.enum : (Array.isArray(schema.items?.enum) ? schema.items.enum : []);
+    if (schema.type === 'array' && (rows.length || enums.length)) {
+        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), String(value)]);
+        control = `<select id="${id}" data-asm-create-option="${asmEscape(key)}" multiple size="${Math.min(6, Math.max(3, choices.length))}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">${choices.map(([value, text]) => `<option value="${asmEscape(value)}">${asmEscape(text)}</option>`).join('')}</select><small>可按 Ctrl / Command 多选</small>`;
+    } else if (schema.type === 'array') {
+        control = `<textarea id="${id}" data-asm-create-option="${asmEscape(key)}" rows="3" placeholder="每行一项" onchange="onASMCreateOptionChange('${asmEscape(key)}')"></textarea>`;
+    } else if (rows.length || enums.length) {
+        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), String(value)]);
+        control = `<select id="${id}" data-asm-create-option="${asmEscape(key)}" onchange="onASMCreateOptionChange('${asmEscape(key)}')"><option value="">请选择</option>${choices.map(([value, text]) => `<option value="${asmEscape(value)}" ${String(defaultValue ?? '') === value ? 'selected' : ''}>${asmEscape(text)}</option>`).join('')}</select>`;
+    } else if (schema.type === 'integer') {
+        control = `<input id="${id}" data-asm-create-option="${asmEscape(key)}" type="number" ${schema.minimum != null ? `min="${asmEscape(schema.minimum)}"` : ''} ${schema.maximum != null ? `max="${asmEscape(schema.maximum)}"` : ''} value="${asmEscape(defaultValue ?? '')}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">`;
+    } else if (schema.type === 'object') {
+        control = `<textarea id="${id}" data-asm-create-option="${asmEscape(key)}" rows="4" placeholder='{"field":["value"]}' onchange="onASMCreateOptionChange('${asmEscape(key)}')"></textarea>`;
+    } else {
+        control = `<input id="${id}" data-asm-create-option="${asmEscape(key)}" type="text" value="${asmEscape(defaultValue ?? '')}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">`;
+    }
+    return `<label class="asm-create-field" data-asm-create-field="${asmEscape(key)}" data-requires="${asmEscape(schema.requires || '')}"><span>${asmEscape(label)}</span>${control}${description}</label>`;
+}
+
+function renderASMTaskCreateProfile() {
+    const root = document.getElementById('asm-create-options');
+    const summary = document.getElementById('asm-create-profile-summary');
+    const profile = asmPageState.createProfile;
+    if (!root || !profile) return;
+    const notes = Array.isArray(profile.notes) ? profile.notes : [];
+    if (summary) summary.innerHTML = `<div><strong>${asmEscape(asmProviderLabel(profile.provider))}</strong><span>上游版本 ${asmEscape(profile.upstream_version || '未识别')} · ${asmCreateSchemaEntries().length} 项可配置字段</span></div>${notes.length ? `<details><summary>查看平台差异说明</summary><ul>${notes.map(note => `<li>${asmEscape(note)}</li>`).join('')}</ul></details>` : ''}`;
+    renderASMTemplateBuilder();
+    destroyASMCreateSelects(root);
+    root.innerHTML = asmCreateSchemaEntries().map(([key, schema]) => asmRenderCreateField(key, schema)).join('');
+    enhanceASMCreateSelects(root);
+    syncASMCreateDependencies();
+}
+
+function asmTemplateBuilderEnabled() {
+    return Boolean(document.getElementById('asm-template-create-enabled')?.checked);
+}
+
+function renderASMTemplateBuilder() {
+    const root = document.getElementById('asm-create-template-builder');
+    const profile = asmPageState.createProfile;
+    if (!root) return;
+    asmPageState.createTemplateBaseSummary = null;
+    if (profile?.provider !== 'scopesentry' || !profile.template_create_options) {
+        root.hidden = true;
+        root.innerHTML = '';
+        return;
+    }
+    const templates = asmOptionRows(asmPageState.createOptionSets.templates, 0);
+    const pocs = asmOptionRows(asmPageState.createOptionSets.pocs, 0);
+    const defaultTemplate = templates.find(item => String(item?.name || '').toLowerCase() === 'default') || templates[0];
+    const baseOptions = templates.map(item => {
+        const value = String(item?.id || item?._id || '');
+        const label = asmOptionLabel(item);
+        return `<option value="${asmEscape(value)}" ${value && value === String(defaultTemplate?.id || defaultTemplate?._id || '') ? 'selected' : ''}>${asmEscape(label)}</option>`;
+    }).join('');
+    const pocOptions = pocs.map(item => {
+        const value = String(item?.id || item?._id || item?.['Template ID'] || '');
+        return value ? `<option value="${asmEscape(value)}">${asmEscape(asmOptionLabel(item))}</option>` : '';
+    }).join('');
+    root.hidden = false;
+    root.innerHTML = `
+        <div class="asm-template-builder-head">
+            <div><strong>新建 ScopeSentry 模板</strong><span>克隆上游已审核模板，仅修改结构化扫描参数，并用新模板下发本次任务。</span></div>
+            <label class="asm-create-switch asm-template-builder-toggle"><input id="asm-template-create-enabled" type="checkbox" onchange="toggleASMTemplateBuilder()"><span>创建并使用</span></label>
+        </div>
+        <div id="asm-template-builder-fields" class="asm-template-builder-fields" hidden>
+            <div class="asm-template-builder-grid">
+                <label><span>模板名称 *</span><input id="asm-template-create-name" maxlength="150" placeholder="例如：CyberStrikeAI 外网复核模板"></label>
+                <label><span>基模板 *</span><select id="asm-template-create-base" onchange="inspectASMTemplateBase()">${baseOptions}</select></label>
+                <label><span>端口范围</span><input id="asm-template-create-ports" maxlength="200" placeholder="留空继承，例如 1-65535"></label>
+                <label><span>端口扫描并发</span><input id="asm-template-create-concurrency" type="number" min="1" max="200" placeholder="留空继承"></label>
+            </div>
+            <fieldset class="asm-template-capability-picker"><legend>保留的扫描能力</legend>${asmScopeTemplateCapabilities.map(([key, label]) => `<label><input type="checkbox" data-asm-template-capability="${asmEscape(key)}"><span>${asmEscape(label)}</span><code>${asmEscape(key)}</code></label>`).join('')}</fieldset>
+            ${pocOptions ? `<label class="asm-template-poc-picker"><span>POC 选择（可选）</span><select id="asm-template-create-pocs" multiple size="5">${pocOptions}</select><small>留空时继承基模板的 POC 选择。</small></label>` : ''}
+            <div id="asm-template-base-status" class="asm-template-base-status">开启后将实时核对基模板能力。</div>
+        </div>`;
+    enhanceASMCreateSelects(root);
+}
+
+async function toggleASMTemplateBuilder() {
+    const fields = document.getElementById('asm-template-builder-fields');
+    const enabled = asmTemplateBuilderEnabled();
+    if (fields) fields.hidden = !enabled;
+    syncASMCreateDependencies();
+    if (enabled) await inspectASMTemplateBase();
+}
+
+async function inspectASMTemplateBase() {
+    const resource = asmCreateResource();
+    const templateID = document.getElementById('asm-template-create-base')?.value || '';
+    const status = document.getElementById('asm-template-base-status');
+    asmPageState.createTemplateBaseSummary = null;
+    if (!resource || !templateID) return;
+    if (status) status.innerHTML = '<span class="asm-spinner"></span><span>正在核对基模板…</span>';
+    try {
+        const payload = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=template_detail&option_id=${encodeURIComponent(templateID)}&page=1&page_size=1`);
+        const summary = payload.options?.capability_summary || {};
+        asmPageState.createTemplateBaseSummary = summary;
+        const capabilities = summary.capabilities || {};
+        document.querySelectorAll('[data-asm-template-capability]').forEach(node => {
+            const available = Boolean(capabilities[node.dataset.asmTemplateCapability]);
+            node.checked = available;
+            node.disabled = !available;
+        });
+        const ports = document.getElementById('asm-template-create-ports');
+        if (ports && !ports.value) ports.value = String(summary.port_expression || '');
+        if (status) status.textContent = `已核对：${(summary.enabled_capabilities || []).length} 项能力 · 端口 ${summary.port_scope || 'unknown'}${summary.selected_poc_count ? ` · ${summary.selected_poc_count} 个 POC` : ''}`;
+    } catch (error) {
+        if (status) status.textContent = error.message;
+    }
+}
+
+function collectASMTemplateCreateRequest(taskName) {
+    if (!asmTemplateBuilderEnabled()) return null;
+    if (!asmPageState.createTemplateBaseSummary) throw new Error('请等待 ScopeSentry 基模板能力核对完成');
+    const name = document.getElementById('asm-template-create-name')?.value.trim() || `${taskName || 'CyberStrikeAI'} 模板 ${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}`;
+    const baseTemplateID = document.getElementById('asm-template-create-base')?.value || '';
+    const enabledCapabilities = Array.from(document.querySelectorAll('[data-asm-template-capability]:checked')).map(node => node.dataset.asmTemplateCapability);
+    if (!enabledCapabilities.length) throw new Error('请至少保留一项 ScopeSentry 扫描能力');
+    const options = { enabled_capabilities: enabledCapabilities };
+    const ports = document.getElementById('asm-template-create-ports')?.value.trim();
+    const concurrency = document.getElementById('asm-template-create-concurrency')?.value;
+    const pocs = document.getElementById('asm-template-create-pocs');
+    if (ports) options.ports = ports;
+    if (concurrency) options.concurrency = Number(concurrency);
+    if (pocs && pocs.selectedOptions.length) options.poc_ids = Array.from(pocs.selectedOptions).map(option => option.value);
+    return { name, base_template_id: baseTemplateID, options };
+}
+
+function syncASMCreateDependencies() {
+    const profile = asmPageState.createProfile;
+    if (!profile) return;
+    const templateSelected = asmCreateHasValue(asmCreateFieldValue('template_id'));
+    const templateBuilder = asmTemplateBuilderEnabled();
+    const mode = asmCreateFieldValue('task_mode') || 'direct';
+    asmCreateSchemaEntries().forEach(([key, schema]) => {
+        const field = document.querySelector(`[data-asm-create-field="${CSS.escape(key)}"]`);
+        if (!field) return;
+        let visible = !schema.requires || asmCreateHasValue(asmCreateFieldValue(schema.requires));
+        if (profile.provider === 'scopesentry' && schema.mode === 'generated_low_load_template' && templateSelected) visible = false;
+        if (profile.provider === 'scopesentry' && templateBuilder && ['template_id', 'required_port_scope', 'required_capabilities', 'port_scan', 'ports', 'site_identify', 'site_capture', 'tls_probe', 'concurrency'].includes(key)) visible = false;
+        if (profile.provider === 'arl') {
+            const policyFields = ['policy_id', 'task_tag', 'result_set_id'];
+            if (mode === 'policy') visible = key === 'task_mode' || policyFields.includes(key);
+            else if (policyFields.includes(key)) visible = false;
+        }
+        field.hidden = !visible;
+        field.querySelectorAll('input,select,textarea').forEach(node => { node.disabled = !visible; });
+        field.querySelectorAll('select:not([multiple])').forEach(syncASMCreateSelect);
+    });
+}
+
+async function inspectASMCreateTemplate(templateID) {
+    const resource = asmCreateResource();
+    asmPageState.createTemplateToken = '';
+    if (!resource || !templateID) return;
+    const summary = document.getElementById('asm-create-profile-summary');
+    try {
+        const payload = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=template_detail&option_id=${encodeURIComponent(templateID)}&page=1&page_size=1`);
+        const detail = payload.options || {};
+        asmPageState.createTemplateToken = String(detail.verification_token || '');
+        if (summary && detail.capability_summary) summary.insertAdjacentHTML('beforeend', `<div class="asm-template-capabilities"><strong>已核对模板实际能力</strong><code>${asmEscape(JSON.stringify(detail.capability_summary, null, 2))}</code></div>`);
+    } catch (error) {
+        const errorRoot = document.getElementById('asm-create-error');
+        if (errorRoot) { errorRoot.style.display = ''; errorRoot.textContent = error.message; }
+    }
+}
+
+function onASMCreateOptionChange(key) {
+    const profile = asmPageState.createProfile;
+    const schema = profile?.create_options?.[key] || {};
+    if (schema.conflicts && asmCreateHasValue(asmCreateFieldValue(key))) {
+        const other = document.getElementById(`asm-create-option-${schema.conflicts}`);
+        if (other) {
+            if (other.type === 'checkbox') other.checked = false;
+            else other.value = '';
+            syncASMCreateSelect(other);
+        }
+    }
+    syncASMCreateDependencies();
+    if (key === 'template_id') void inspectASMCreateTemplate(String(asmCreateFieldValue(key) || ''));
+}
+
+async function loadASMTaskCreateProfile() {
+    const resource = asmCreateResource();
+    const root = document.getElementById('asm-create-options');
+    const errorRoot = document.getElementById('asm-create-error');
+    asmPageState.createProfile = null;
+    asmPageState.createOptionSets = {};
+    asmPageState.createTemplateToken = '';
+    asmPageState.createTemplateBaseSummary = null;
+    if (errorRoot) { errorRoot.style.display = 'none'; errorRoot.textContent = ''; }
+    if (!resource) { if (root) root.innerHTML = '<div class="asm-result-empty"><strong>请选择 ASM 资源</strong></div>'; return; }
+    if (root) root.innerHTML = '<div class="asm-task-loading"><span class="asm-spinner"></span><span>正在读取平台能力和实时选项…</span></div>';
+    try {
+        const profile = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-profile`);
+        const supportedKinds = new Set(Array.isArray(profile.dynamic_option_kinds) ? profile.dynamic_option_kinds : []);
+        const dynamicSchemas = { ...(profile.create_options || {}), ...(profile.template_create_options || {}) };
+        const kinds = [...new Set(Object.entries(dynamicSchemas).map(([key, schema]) => asmDynamicKind(key, schema || {})).filter(kind => kind && supportedKinds.has(kind) && !String(kind).endsWith('_detail')))];
+        const optionPayload = { options: {}, errors: {}, partial: false };
+        await Promise.all(kinds.map(async kind => {
+            try {
+                const value = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=${encodeURIComponent(kind)}&page=1&page_size=100`);
+                optionPayload.options[kind] = value.options;
+            } catch (error) {
+                optionPayload.partial = true;
+                optionPayload.errors[kind] = error.message;
+            }
+        }));
+        asmPageState.createProfile = profile;
+        asmPageState.createOptionSets = optionPayload.options || {};
+        renderASMTaskCreateProfile();
+        if (optionPayload.partial && errorRoot) { errorRoot.style.display = ''; errorRoot.textContent = `部分实时选项未能读取：${Object.values(optionPayload.errors || {}).join('；')}`; }
+    } catch (error) {
+        if (root) root.innerHTML = `<div class="asm-result-empty error"><strong>平台能力读取失败</strong><span>${asmEscape(error.message)}</span></div>`;
+    }
+}
+
+async function openASMTaskCreateModal() {
+    await loadASMResources();
+    const select = document.getElementById('asm-create-resource');
+    const enabled = asmPageState.resources.filter(item => item.enabled);
+    if (select) select.innerHTML = enabled.map(item => `<option value="${asmEscape(item.id)}">${asmEscape(item.name)} · ${asmEscape(asmProviderLabel(item.provider))}</option>`).join('');
+    enhanceASMCreateSelects(select);
+    syncASMCreateSelect(select);
+    document.getElementById('asm-create-name').value = '';
+    document.getElementById('asm-create-target').value = '';
+    if (typeof openAppModal === 'function') openAppModal('asm-task-create-modal');
+    else document.getElementById('asm-task-create-modal').style.display = 'flex';
+    await loadASMTaskCreateProfile();
+}
+
+function closeASMTaskCreateModal() {
+    closeASMCreateDropdowns();
+    if (typeof closeAppModal === 'function') closeAppModal('asm-task-create-modal');
+    else document.getElementById('asm-task-create-modal').style.display = 'none';
+}
+
+function collectASMTaskCreateOptions() {
+    const profile = asmPageState.createProfile;
+    const result = {};
+    const templateSelected = !asmTemplateBuilderEnabled() && asmCreateHasValue(asmCreateFieldValue('template_id'));
+    const mode = asmCreateFieldValue('task_mode') || 'direct';
+    asmCreateSchemaEntries().forEach(([key, schema]) => {
+        const field = document.querySelector(`[data-asm-create-field="${CSS.escape(key)}"]`);
+        if (!field || field.hidden) return;
+        if (profile.provider === 'scopesentry' && schema.mode === 'generated_low_load_template' && templateSelected) return;
+        if (profile.provider === 'arl' && mode === 'policy' && !['task_mode', 'policy_id', 'task_tag', 'result_set_id'].includes(key)) return;
+        const node = document.getElementById(`asm-create-option-${key}`);
+        let value = asmCreateInputValue(node);
+        if (schema.type === 'boolean') { result[key] = Boolean(value); return; }
+        if (!asmCreateHasValue(value)) return;
+        if (schema.type === 'integer') value = Number(value);
+        if (schema.type === 'array' && !node.multiple) value = String(value).split(/[\n,]+/).map(item => item.trim()).filter(Boolean);
+        if (schema.type === 'array' && schema.items?.type === 'integer') value = value.map(item => Number(item));
+        if (schema.type === 'object') value = JSON.parse(String(value));
+        result[key] = value;
+    });
+    if (templateSelected) {
+        if (!asmPageState.createTemplateToken) throw new Error('请等待 ScopeSentry 模板详情核对完成');
+        result.template_verification_token = asmPageState.createTemplateToken;
+    }
+    return result;
+}
+
+async function submitASMTaskCreate() {
+    if (asmPageState.createLoading) return;
+    const resource = asmCreateResource();
+    const target = document.getElementById('asm-create-target')?.value.trim();
+    const name = document.getElementById('asm-create-name')?.value.trim();
+    const errorRoot = document.getElementById('asm-create-error');
+    const submit = document.getElementById('asm-create-submit');
+    if (!resource || !target) return;
+    try {
+        const templateRequest = collectASMTemplateCreateRequest(name);
+        const options = collectASMTaskCreateOptions();
+        asmPageState.createLoading = true;
+        if (submit) { submit.disabled = true; submit.textContent = templateRequest ? '正在创建模板…' : '正在下发…'; }
+        if (errorRoot) { errorRoot.style.display = 'none'; errorRoot.textContent = ''; }
+        if (templateRequest) {
+            const template = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/templates`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(templateRequest) });
+            options.template_id = template.template_id;
+            options.template_verification_token = template.verification_token;
+            if (template.capability_summary?.port_scope) options.required_port_scope = template.capability_summary.port_scope;
+            options.required_capabilities = templateRequest.options.enabled_capabilities;
+            if (submit) submit.textContent = '模板已创建，正在下发…';
+        }
+        const result = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, target, options }) });
+        closeASMTaskCreateModal();
+        await loadASMTasks(true);
+        const count = Number(result.history_recorded_count) || 1;
+        if (typeof showNotification === 'function') showNotification(`ASM 任务已下发，记录 ${count} 个扫描子任务`, 'success');
+    } catch (error) {
+        if (errorRoot) { errorRoot.style.display = ''; errorRoot.textContent = error.message; }
+    } finally {
+        asmPageState.createLoading = false;
+        if (submit) { submit.disabled = false; submit.textContent = '确认下发'; }
     }
 }
 
@@ -1326,6 +1920,7 @@ window.changeASMTaskPage = changeASMTaskPage;
 window.openASMTaskModal = openASMTaskModal;
 window.closeASMTaskModal = closeASMTaskModal;
 window.syncSelectedASMTask = syncSelectedASMTask;
+window.stopSelectedASMTask = stopSelectedASMTask;
 window.syncSelectedASMTaskResults = syncSelectedASMTaskResults;
 window.selectASMResultType = selectASMResultType;
 window.loadSelectedASMResults = loadSelectedASMResults;
@@ -1333,3 +1928,10 @@ window.changeASMResultPage = changeASMResultPage;
 window.changeASMResultPageSize = changeASMResultPageSize;
 window.onASMResultDetailToggle = onASMResultDetailToggle;
 window.syncSelectedASMScreenshots = syncSelectedASMScreenshots;
+window.openASMTaskCreateModal = openASMTaskCreateModal;
+window.closeASMTaskCreateModal = closeASMTaskCreateModal;
+window.loadASMTaskCreateProfile = loadASMTaskCreateProfile;
+window.onASMCreateOptionChange = onASMCreateOptionChange;
+window.toggleASMTemplateBuilder = toggleASMTemplateBuilder;
+window.inspectASMTemplateBase = inspectASMTemplateBase;
+window.submitASMTaskCreate = submitASMTaskCreate;

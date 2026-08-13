@@ -1,6 +1,6 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 1.9
+> Document version: 2.1
 > Baseline date: 2026-08-13
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
@@ -16,7 +16,7 @@ This document distinguishes upstream platform capabilities from actions currentl
 
 ## Unified MCP actions
 
-Agents use ten normalized tools:
+Agents use eleven normalized tools:
 
 | Tool | Purpose |
 | --- | --- |
@@ -24,6 +24,7 @@ Agents use ten normalized tools:
 | `asm_test_connection` | Verify the address and server-side credential |
 | `asm_get_task_profile` | Read the provider version, modes, typed fields, defaults, and dependencies |
 | `asm_list_task_options` | Query one live option kind, or aggregate every list-style kind with `kind=all` |
+| `asm_create_template` | Clone a ScopeSentry base template and configure typed capabilities, ports, concurrency, screenshots, TLS, and POCs |
 | `asm_create_task` | Create a task for an explicitly authorized target |
 | `asm_list_tasks` / `asm_get_task` | Read task lists, progress, stages, statistics, and configuration |
 | `asm_list_assets` | Page through a provider-specific result type from the CyberStrikeAI local snapshot; discover valid IDs from profile `result_types` |
@@ -66,6 +67,8 @@ Live choices include engines, Workers, wordlists, and Nuclei repositories. Engin
 
 With `template_id`, the adapter reuses an upstream-reviewed template and all of its configured modules, dictionaries, plugins, and POCs. Without it, CyberStrikeAI generates a controlled low-load template whose name includes a fingerprint of ports, concurrency, site identification, screenshots, and TLS settings, preventing one task profile from overwriting another.
 
+`asm_create_template` and the task-center form can also clone a selected upstream template, retain a typed `enabled_capabilities` set, and adjust `ports`, `concurrency`, `site_capture`, `tls_probe`, and `poc_ids`. The adapter can only retain plugins already present in the base template; it rejects missing requested capabilities and never accepts arbitrary plugin command lines. The response includes the new `template_id`, inspected `capability_summary`, and `verification_token`, so the new template can be used immediately by `asm_create_task`.
+
 Node selection, ignore/duplicate rules, target sources, projects, structured asset filters, scheduling, resume, restart, and delete are mapped. Scheduled creation resolves the new remote ID through `/api/task/scheduled`, records it in the local task center, and reads it through `/api/task/scheduled/detail`. A scheduled definition cannot be stopped/resumed/restarted as an immediate scan; only explicit deletion is supported. Arbitrary plugin command lines are not exposed. POCs use the paginated `/api/poc` endpoint; template, dictionary, plugin, and POC lists are compacted so large upstream payloads do not consume the agent context.
 
 Upstream `template_id` creation now requires a preflight inspection. The agent must call `asm_list_task_options(kind=template_detail,id=...)`, inspect the machine-readable `capability_summary`, and pass its `verification_token` back as `template_verification_token`. Full-port requests must assert `required_port_scope=all`; explicitly requested stages must be listed in `required_capabilities`. MCP re-reads the upstream template and validates its token, ports, and capabilities before creating anything. Successful responses include `effective_template`, which is the only authoritative basis for capability claims; template names, task names, and the total POC catalog size are not evidence that every feature is enabled.
@@ -79,6 +82,10 @@ Upstream `template_id` creation now requires a preflight inspection. The agent m
 | ScopeSentry | `/api/user/login`, `/api/node/online` | task templates, immediate/scheduled task creation and lifecycle; dictionary/plugin/POC/project choices | site/domain/IP/URL plus crawler, sensitive, directory, takeover, vulnerability list and vulnerability detail APIs |
 
 The task center now renders provider-aware rich cards rather than forcing all providers into a fixed generic table. Complete fields can be expanded; vulnerability cards expose severity, target, scanner evidence, and request/response detail. After a task completes, the background worker walks every provider `result_type` and all upstream pages, stores one local database row per result, enriches ScopeSentry vulnerability details, and automatically downloads authenticated screenshots. The task center and `asm_list_assets` then use local pagination, search, and detail reads instead of querying the ASM on every view.
+
+Manual task creation in the task center reads the same provider profile used by MCP and loads live ARL policies, XingRin engines/wordlists, or ScopeSentry templates/nodes/projects. Selecting a ScopeSentry template automatically inspects its detail and carries the verification token. Task details expose the provider-native stop action: ScopeSentry immediate tasks can later resume, ARL tasks can restart, while stopped XingRin scans require a new task.
+
+XingRin produces screenshots only when `site_capture=true` or the selected upstream engine includes its screenshot stage. The task center discovers XingRin screenshot paths from localized `screenshot` rows first and only authenticates upstream to download image bytes that are not yet cached.
 
 Upstream result requests are limited to the initial completion sync, a first-read fallback when a completed type is missing locally, and explicit refresh through the task center or `asm_manage_task(action=sync_results)`. Scan progress and local-result synchronization are shown independently, including completed type count, local row count, current type, last synchronization time, and errors.
 
@@ -94,6 +101,8 @@ On 2026-08-12, all three adapters were tested through the same MCP registrations
 
 The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_TEST=1` and an explicit resource ID are supplied.
 
+On 2026-08-13, ScopeSentry v1.9.3 received an additional template-creation validation. The task center cloned the `default` base template, applied typed port and concurrency settings, and immediately completed a task. MCP created a separate template through `asm_create_template`, submitted a task with it through `asm_create_task`, read it through `asm_get_task`, and stopped it through `asm_manage_task`. Both paths returned a template ID, capability summary, and verification token that had been validated by reading the saved template back from ScopeSentry.
+
 ## Upgrade checklist
 
 1. Record the stable release, date, and tag commit.
@@ -108,6 +117,8 @@ The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_T
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 2.1 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added `asm_create_template`; agents and the task center can clone a ScopeSentry base template, configure controlled capabilities/ports/concurrency/POCs, and immediately create a task with it |
+| 2.0 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-native manual creation and stop actions to the task center, and made first-time XingRin screenshot caching reuse localized result indexes |
 | 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Persisted every XingRin multi-target child, returned complete local/remote ID lists from MCP, and grouped children from one request under a collapsible `batch_id` in the task center |
 | 1.8 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added mandatory ScopeSentry template inspection tokens, full-port/capability assertions, pre-create validation, and effective-template response summaries to prevent name-based “full scan” claims |
 | 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added `kind=all` to `asm_list_task_options`, with per-kind pagination, detail-kind skips, and categorized partial failures |

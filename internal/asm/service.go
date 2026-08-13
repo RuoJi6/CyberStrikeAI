@@ -77,6 +77,15 @@ type TaskRequest struct {
 	Options map[string]interface{} `json:"options,omitempty"`
 }
 
+// TemplateRequest describes a provider-native scan template created through
+// typed, audited settings. Adapters must not interpret Options as arbitrary
+// upstream command lines.
+type TemplateRequest struct {
+	Name           string                 `json:"name"`
+	BaseTemplateID string                 `json:"base_template_id,omitempty"`
+	Options        map[string]interface{} `json:"options,omitempty"`
+}
+
 type TaskFilter struct {
 	TaskID   string
 	Name     string
@@ -216,6 +225,13 @@ type TaskProfileAdapter interface {
 // TaskManagerAdapter exposes provider-specific lifecycle actions beyond stop.
 type TaskManagerAdapter interface {
 	ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error)
+}
+
+// TemplateCreatorAdapter is implemented only by providers that expose a safe
+// template-save API. The service keeps this separate from generic task
+// creation so callers can inspect and explicitly select the created template.
+type TemplateCreatorAdapter interface {
+	CreateTemplate(context.Context, *Connection, TemplateRequest) (interface{}, error)
 }
 
 // AssetDetailAdapter exposes result details that the upstream stores outside
@@ -712,6 +728,21 @@ func (s *Service) CreateTask(ctx context.Context, resourceID string, req TaskReq
 		return nil, err
 	}
 	return s.recordCreatedTask(conn, req, result), nil
+}
+
+func (s *Service) CreateTemplate(ctx context.Context, resourceID string, req TemplateRequest) (interface{}, error) {
+	conn, adapter, err := s.connection(resourceID, true)
+	if err != nil {
+		return nil, err
+	}
+	creator, ok := adapter.(TemplateCreatorAdapter)
+	if !ok {
+		return nil, fmt.Errorf("%s 暂未提供扫描模板创建能力", providerDisplayName(conn.Resource.Provider))
+	}
+	if req.Options == nil {
+		req.Options = map[string]interface{}{}
+	}
+	return creator.CreateTemplate(ctx, conn, req)
 }
 
 func (s *Service) ListTasks(ctx context.Context, resourceID string, filter TaskFilter) (interface{}, error) {

@@ -98,6 +98,23 @@ func TestASMRealMCPFlow(t *testing.T) {
 			}
 		}
 	}
+	var createdTemplate map[string]interface{}
+	if templateName := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_NAME")); templateName != "" {
+		templateOptions := map[string]interface{}{}
+		if raw := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_OPTIONS")); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &templateOptions); err != nil {
+				t.Fatalf("invalid CYBERSTRIKE_ASM_REAL_TEMPLATE_OPTIONS: %v", err)
+			}
+		}
+		createdTemplate = call(builtin.ToolASMCreateTemplate, map[string]interface{}{
+			"resource_id": resourceID,
+			"name":        templateName,
+			"base_template_id": strings.TrimSpace(
+				os.Getenv("CYBERSTRIKE_ASM_REAL_BASE_TEMPLATE_ID"),
+			),
+			"options": templateOptions,
+		})
+	}
 
 	target := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TARGET"))
 	remoteTaskID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_EXISTING_TASK_ID"))
@@ -110,6 +127,14 @@ func TestASMRealMCPFlow(t *testing.T) {
 		if raw := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_OPTIONS")); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &options); err != nil {
 				t.Fatalf("invalid CYBERSTRIKE_ASM_REAL_OPTIONS: %v", err)
+			}
+		}
+		if createdTemplate != nil {
+			options["template_id"] = createdTemplate["template_id"]
+			options["template_verification_token"] = createdTemplate["verification_token"]
+			if summary, ok := createdTemplate["capability_summary"].(map[string]interface{}); ok {
+				options["required_port_scope"] = summary["port_scope"]
+				options["required_capabilities"] = summary["enabled_capabilities"]
 			}
 		}
 		if name == "" {

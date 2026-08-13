@@ -46,6 +46,18 @@ type asmResourcePatchRequest struct {
 	Enabled    *bool   `json:"enabled"`
 }
 
+type asmTaskRequest struct {
+	Name    string                 `json:"name"`
+	Target  string                 `json:"target" binding:"required"`
+	Options map[string]interface{} `json:"options"`
+}
+
+type asmTemplateRequest struct {
+	Name           string                 `json:"name" binding:"required"`
+	BaseTemplateID string                 `json:"base_template_id"`
+	Options        map[string]interface{} `json:"options"`
+}
+
 func (h *ASMHandler) List(c *gin.Context) {
 	items, err := h.service.ListResources(false)
 	if err != nil {
@@ -126,6 +138,73 @@ func (h *ASMHandler) Test(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "连接成功", "result": result})
 }
 
+func (h *ASMHandler) TaskProfile(c *gin.Context) {
+	result, err := h.service.GetTaskProfile(c.Request.Context(), c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *ASMHandler) TaskOptions(c *gin.Context) {
+	result, err := h.service.ListTaskOptions(c.Request.Context(), c.Param("id"), asm.TaskOptionFilter{
+		Kind: c.Query("kind"), Query: c.Query("query"), ID: c.Query("option_id"),
+		Page: asmQueryInt(c, "page", 1), PageSize: asmQueryInt(c, "page_size", 100),
+	})
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func (h *ASMHandler) CreateTask(c *gin.Context) {
+	var req asmTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的任务参数: " + err.Error()})
+		return
+	}
+	resourceID := strings.TrimSpace(c.Param("id"))
+	result, err := h.service.CreateTask(c.Request.Context(), resourceID, asm.TaskRequest{
+		Name: req.Name, Target: req.Target, Options: req.Options,
+	})
+	if err != nil {
+		if h.audit != nil {
+			h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_task", Result: "failure", ResourceType: "asm_resource", ResourceID: resourceID, Message: "手动创建 ASM 任务失败", Detail: map[string]interface{}{"error": err.Error()}})
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_task", Result: "success", ResourceType: "asm_resource", ResourceID: resourceID, Message: "从 ASM 任务中心创建任务", Detail: map[string]interface{}{"name": req.Name, "target": req.Target}})
+	}
+	c.JSON(http.StatusCreated, result)
+}
+
+func (h *ASMHandler) CreateTemplate(c *gin.Context) {
+	var req asmTemplateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的模板参数: " + err.Error()})
+		return
+	}
+	resourceID := strings.TrimSpace(c.Param("id"))
+	result, err := h.service.CreateTemplate(c.Request.Context(), resourceID, asm.TemplateRequest{
+		Name: req.Name, BaseTemplateID: req.BaseTemplateID, Options: req.Options,
+	})
+	if err != nil {
+		if h.audit != nil {
+			h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "failure", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板失败", Detail: map[string]interface{}{"name": req.Name, "error": err.Error()}})
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
+		return
+	}
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "success", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板", Detail: map[string]interface{}{"name": req.Name, "base_template_id": req.BaseTemplateID}})
+	}
+	c.JSON(http.StatusCreated, result)
+}
+
 func asmQueryInt(c *gin.Context, key string, fallback int) int {
 	value, err := strconv.Atoi(strings.TrimSpace(c.Query(key)))
 	if err != nil || value < 1 {
@@ -161,6 +240,22 @@ func (h *ASMHandler) SyncTaskHistory(c *gin.Context) {
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "task": item})
 		return
+	}
+	c.JSON(http.StatusOK, item)
+}
+
+func (h *ASMHandler) StopTaskHistory(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	item, err := h.service.StopTaskHistory(c.Request.Context(), id)
+	if err != nil {
+		if h.audit != nil {
+			h.audit.Record(c, audit.Entry{Category: "asm", Action: "stop_task", Result: "failure", ResourceType: "asm_task", ResourceID: id, Message: "停止 ASM 任务失败", Detail: map[string]interface{}{"error": err.Error()}})
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "task": item})
+		return
+	}
+	if h.audit != nil {
+		h.audit.Record(c, audit.Entry{Category: "asm", Action: "stop_task", Result: "success", ResourceType: "asm_task", ResourceID: id, Message: "从 ASM 任务中心停止任务"})
 	}
 	c.JSON(http.StatusOK, item)
 }

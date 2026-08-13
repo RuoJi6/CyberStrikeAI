@@ -20,6 +20,7 @@ type taskHistoryTestAdapter struct {
 	assetCalls  int
 	detailCalls int
 	createScans []interface{}
+	stoppedID   string
 }
 
 func (a *taskHistoryTestAdapter) Provider() string { return ProviderXingRin }
@@ -64,7 +65,8 @@ func (a *taskHistoryTestAdapter) ListAssets(_ context.Context, _ *Connection, fi
 		map[string]interface{}{"url": "https://example.test", "screenshot": "/shot.png"},
 	}}}, nil
 }
-func (a *taskHistoryTestAdapter) StopTask(context.Context, *Connection, string) (interface{}, error) {
+func (a *taskHistoryTestAdapter) StopTask(_ context.Context, _ *Connection, id string) (interface{}, error) {
+	a.stoppedID = id
 	return map[string]interface{}{}, nil
 }
 func (a *taskHistoryTestAdapter) ManageTask(context.Context, *Connection, TaskManageRequest) (interface{}, error) {
@@ -268,6 +270,63 @@ func TestTaskHistoryScreenshotCache(t *testing.T) {
 	second, err := service.SyncTaskScreenshots(context.Background(), localID)
 	if err != nil || second.Skipped != 1 || second.Downloaded != 0 {
 		t.Fatalf("expected screenshot cache hit: %#v err=%v", second, err)
+	}
+}
+
+func TestTaskHistoryScreenshotCachePrefersLocalizedResult(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	if err := service.db.ReplaceASMResultItems(localID, "screenshot", []database.ASMResultItem{{
+		ItemKey: "shot-one", ProviderKey: "1",
+		PayloadJSON: `{"url":"https://example.test","screenshot_path":"/shot.png"}`,
+		SearchText:  "https://example.test", SortOrder: 0,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	before := adapter.assetCalls
+	result, err := service.SyncTaskScreenshots(context.Background(), localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.assetCalls != before {
+		t.Fatalf("localized screenshot discovery called upstream: before=%d after=%d", before, adapter.assetCalls)
+	}
+	if result.Downloaded != 1 || len(result.Screenshots) != 1 {
+		t.Fatalf("unexpected localized screenshot sync: %#v", result)
+	}
+}
+
+func TestStopTaskHistoryResolvesRemoteTaskID(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	view, err := service.StopTaskHistory(context.Background(), localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adapter.stoppedID != "7" || view.Status != "stopped" {
+		t.Fatalf("unexpected stop mapping: remote=%q view=%#v", adapter.stoppedID, view)
 	}
 }
 

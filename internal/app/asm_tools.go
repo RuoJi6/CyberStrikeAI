@@ -78,6 +78,38 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 		})
 	})
 
+	register(mcp.Tool{
+		Name: builtin.ToolASMCreateTemplate, ShortDescription: "创建 ScopeSentry 扫描模板",
+		Description: "在 ScopeSentry 上游创建可审计的扫描模板。先用 asm_list_task_options(kind=templates) 选择基模板，再通过结构化字段设置能力、端口、并发、截图、TLS 和 POC。不接受任意插件命令行。成功后返回 template_id、capability_summary 和 verification_token，可直接传给 asm_create_task。当 enabled_capabilities 留空时完整继承基模板。",
+		InputSchema: resourceSchema(map[string]interface{}{
+			"name":             map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 150, "description": "新模板的唯一名称"},
+			"base_template_id": map[string]interface{}{"type": "string", "description": "由 templates 返回的基模板 ID；留空克隆 default"},
+			"options": map[string]interface{}{
+				"type": "object", "additionalProperties": false,
+				"properties": map[string]interface{}{
+					"enabled_capabilities": map[string]interface{}{
+						"type": "array", "description": "仅保留指定能力；省略时完整继承基模板",
+						"items": map[string]interface{}{"type": "string", "enum": []string{
+							"subdomain_discovery", "subdomain_takeover", "port_scan", "service_fingerprint", "site_identify",
+							"site_capture", "tls_probe", "url_scan", "web_crawler", "sensitive_scan", "directory_scan",
+							"vulnerability_scan", "passive_scan", "asset_handle",
+						}}, "uniqueItems": true,
+					},
+					"ports":        map[string]interface{}{"type": "string", "description": "端口表达式，例如 1-65535 或 80,443,8080-8090"},
+					"concurrency":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200},
+					"site_capture": map[string]interface{}{"type": "boolean"},
+					"tls_probe":    map[string]interface{}{"type": "boolean"},
+					"poc_ids":      map[string]interface{}{"type": "array", "maxItems": 500, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
+				},
+			},
+		}, "name"),
+	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+		options, _ := args["options"].(map[string]interface{})
+		return service.CreateTemplate(ctx, asmStringArg(args, "resource_id"), asm.TemplateRequest{
+			Name: asmStringArg(args, "name"), BaseTemplateID: asmStringArg(args, "base_template_id"), Options: options,
+		})
+	})
+
 	optionProperties := map[string]interface{}{}
 	for _, name := range []string{"domain_brute", "port_scan", "service_detection", "service_brute", "os_detection", "site_identify", "site_capture", "file_leak", "search_engines", "site_spider", "arl_search", "alt_dns", "ssl_cert", "dns_query_plugin", "skip_scan_cdn_ip", "nuclei_scan", "findvhost", "web_info_hunter"} {
 		optionProperties[name] = map[string]interface{}{"type": "boolean"}

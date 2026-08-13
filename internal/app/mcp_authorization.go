@@ -123,7 +123,7 @@ func mcpToolAuthorizer(db *database.DB) func(context.Context, string, map[string
 			return require("agent:execute")
 		case builtin.ToolASMListResources, builtin.ToolASMTestConnection,
 			builtin.ToolASMGetTaskProfile, builtin.ToolASMListTaskOptions,
-			builtin.ToolASMCreateTask, builtin.ToolASMListTasks,
+			builtin.ToolASMCreateTemplate, builtin.ToolASMCreateTask, builtin.ToolASMListTasks,
 			builtin.ToolASMGetTask, builtin.ToolASMListAssets, builtin.ToolASMStopTask,
 			builtin.ToolASMManageTask:
 			if err := require("mcp:external:execute"); err != nil {
