@@ -1,6 +1,6 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：1.7
+> 文档版本：1.9
 > 基线日期：2026-08-13
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
@@ -97,7 +97,7 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 | `rate_limit` | `20` | 1–1000 |
 | `concurrency` | `5` | 1–200 |
 
-额外已映射：子域发现/爆破/变异/DNS 验证、子域字典、被动端口、Top N 端口、指纹库、目录扫描与字典、URL 收集与深度、截图来源、Nuclei 模板仓库/等级/标签、Dalfox、请求超时和 `engine_ids`。引擎、Worker、字典和 Nuclei 仓库可实时查询；引擎列表只返回 ID/名称摘要，传入引擎 `id` 时才返回完整 YAML。多个目标会按换行、逗号或空白拆分，任意原始 YAML 不对 Agent 开放。
+额外已映射：子域发现/爆破/变异/DNS 验证、子域字典、被动端口、Top N 端口、指纹库、目录扫描与字典、URL 收集与深度、截图来源、Nuclei 模板仓库/等级/标签、Dalfox、请求超时和 `engine_ids`。引擎、Worker、字典和 Nuclei 仓库可实时查询；引擎列表只返回 ID/名称摘要，传入引擎 `id` 时才返回完整 YAML。多个目标会按换行、逗号或空白拆分，上游为每个目标生成独立扫描 ID；CyberStrikeAI 会遍历全部 `response.scans[]`、为每个远程扫描落库，并用统一 `batch_id` 保留同次 MCP 下发关系。任意原始 YAML 不对 Agent 开放。
 
 ### 5.3 ScopeSentry v1.9.3
 
@@ -115,6 +115,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 | `tls_probe` | `false` | 低负载模板的 TLS 探测开关 |
 
 已映射节点/全节点、排除目标、去重、目标来源、项目筛选、资产查询表达式/结构化过滤、定时任务和恢复/重跑/删除。定时创建后会通过 `/api/task/scheduled` 回查远端 ID，因此可进入 ASM 任务中心，并可通过 `/api/task/scheduled/detail` 同步；定时记录是调度定义，不能使用普通 `stop/resume/restart`，仅允许用户明确要求时调用 `delete`。POC 使用 `/api/poc` 实时搜索和分页；模板、端口字典、插件和 POC 列表只返回轻量摘要，避免大量配置或 1 万以上 POC 挤占 Agent 上下文。插件命令行必须先在上游模板审核，不允许 Agent 临时传入。ScopeSentry 的弱口令爆破不能提供为任务类型，因为 v1.9.3 上游仍未实现该能力。
+
+使用上游 `template_id` 时实行创建前强制校验：Agent 必须单独调用 `asm_list_task_options(kind=template_detail,id=...)`，读取可机读的 `capability_summary` 和 `verification_token`，创建时传回 `template_verification_token`。用户要求全端口时必须传 `required_port_scope=all`；用户指定的子域、端口、指纹、截图、URL、爬虫、敏感信息、目录、漏洞等能力必须通过 `required_capabilities` 逐项声明。MCP 会重新读取上游模板，校验令牌、端口和能力后才创建；成功响应的 `effective_template` 回显实际生效配置。模板名称、任务名称和 POC 库总数均不能作为“全功能”证据。
 
 ## 6. 当前适配范围与差距
 
@@ -170,6 +172,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | XingRin 多目标创建响应改为全量子任务落库，MCP 返回完整本地/远程 ID 列表，任务中心按 `batch_id` 折叠展示同次下发 |
+| 1.8 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 模板创建新增详情校验令牌、全端口/能力断言与实际生效配置回显，防止 Agent 仅根据模板名误判“全功能” |
 | 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | `asm_list_task_options` 新增 `kind=all`，按统一分页聚合所有列表型动态选项，跳过需 ID 的详情类型并返回分类错误 |
 | 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 完成后自动全量同步所有结果类型与分页；任务中心与 MCP 改为本地分页/搜索/详情；新增结果同步状态、查看兜底、显式重同步和自动截图缓存 |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心改为平台专属完整结果卡片；补齐 XingRin 目录/截图与 ScopeSentry 爬虫/敏感信息/目录/接管/漏洞详情；截图自动缓存；增加上游总数分页和页大小 |

@@ -9,6 +9,7 @@ const asmPageState = {
     taskPageSize: 20,
     taskTotal: 0,
     loadingTasks: false,
+    expandedBatches: new Set(),
     selectedTask: null,
     selectedAssetType: 'site',
     resultPage: 1,
@@ -393,26 +394,89 @@ function asmTaskProgress(value) {
     return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
+function asmTaskGroups(tasks) {
+    const groups = [];
+    const byKey = new Map();
+    (Array.isArray(tasks) ? tasks : []).forEach(task => {
+        const batchSize = Math.max(1, Number(task.batch_size) || 1);
+        const batchID = String(task.batch_id || '');
+        const grouped = Boolean(batchID) && batchSize > 1;
+        const key = grouped ? `batch:${batchID}` : `task:${task.id}`;
+        let group = byKey.get(key);
+        if (!group) {
+            group = { key, batchID, grouped, expected: batchSize, tasks: [] };
+            byKey.set(key, group);
+            groups.push(group);
+        }
+        group.expected = Math.max(group.expected, batchSize);
+        group.tasks.push(task);
+    });
+    groups.forEach(group => group.tasks.sort((left, right) => (Number(left.batch_index) || 0) - (Number(right.batch_index) || 0)));
+    return groups;
+}
+
+function asmBatchState(group) {
+    const expected = Math.max(group.expected, group.tasks.length);
+    const completed = group.tasks.filter(task => task.status === 'completed').length;
+    const stopped = group.tasks.filter(task => task.status === 'stopped').length;
+    const failed = group.tasks.filter(task => task.status === 'failed').length;
+    const progress = Math.round(group.tasks.reduce((total, task) => total + asmTaskProgress(task.progress), 0) / expected);
+    let status = 'submitted';
+    if (completed >= expected) status = 'completed';
+    else if (failed > 0) status = 'failed';
+    else if (group.tasks.some(task => task.status === 'running') || completed > 0) status = 'running';
+    else if (stopped >= expected) status = 'stopped';
+    return { expected, completed, progress, status };
+}
+
+function renderASMTaskRow(task, child) {
+    const progress = asmTaskProgress(task.progress);
+    const status = asmTaskStatusClass(task.status);
+    return `<article class="asm-task-row${child ? ' asm-task-child' : ''}" onclick="openASMTaskModal('${asmEscape(task.id)}')">
+        <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
+        <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></div>
+        <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
+        <time>${asmEscape(formatASMTime(task.created_at))}</time>
+        <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>
+    </article>`;
+}
+
+function renderASMBatch(group) {
+    const first = group.tasks[0];
+    const state = asmBatchState(group);
+    const expanded = asmPageState.expandedBatches.has(group.batchID);
+    const targets = [...new Set(group.tasks.map(task => String(task.target || '').trim()).filter(Boolean))];
+    const targetLabel = targets.join(' · ') || `${state.expected} 个目标`;
+    const status = asmTaskStatusClass(state.status);
+    const children = expanded ? group.tasks.map(task => renderASMTaskRow(task, true)).join('') : '';
+    return `<section class="asm-task-batch${expanded ? ' expanded' : ''}" data-batch-id="${asmEscape(group.batchID)}">
+        <article class="asm-task-row asm-task-batch-row" onclick="toggleASMBatch('${asmEscape(group.batchID)}')">
+            <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span></div>
+            <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></div>
+            <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(state.status))}</span><small>${state.completed}/${state.expected} 个子任务完成</small></div><div class="asm-progress-track"><span style="width:${state.progress}%"></span></div><b>${state.progress}%</b></div>
+            <time>${asmEscape(formatASMTime(first.created_at))}</time>
+            <button type="button" class="btn-secondary btn-small" aria-expanded="${expanded}" onclick="event.stopPropagation();toggleASMBatch('${asmEscape(group.batchID)}')">${expanded ? '收起' : '展开'} ${expanded ? '↑' : '↓'}</button>
+        </article>${children}
+    </section>`;
+}
+
+function toggleASMBatch(batchID) {
+    if (asmPageState.expandedBatches.has(batchID)) asmPageState.expandedBatches.delete(batchID);
+    else asmPageState.expandedBatches.add(batchID);
+    renderASMTasks();
+}
+
 function renderASMTasks() {
     const root = document.getElementById('asm-task-list');
     const summary = document.getElementById('asm-task-summary');
     const pagination = document.getElementById('asm-task-pagination');
     if (!root) return;
-    if (summary) summary.textContent = `${asmPageState.taskTotal} 条历史任务 · MCP 下发后自动记录`;
+    if (summary) summary.textContent = `${asmPageState.taskTotal} 条历史子任务 · MCP 下发后自动记录`;
     if (!asmPageState.tasks.length) {
         root.innerHTML = `<div class="asm-task-empty"><strong>暂无任务记录</strong><span>Agent 或 MCP 创建任务后会自动出现在这里。</span></div>`;
     } else {
-        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间</span><span></span></div>${asmPageState.tasks.map(task => {
-            const progress = asmTaskProgress(task.progress);
-            const status = asmTaskStatusClass(task.status);
-            return `<article class="asm-task-row" onclick="openASMTaskModal('${asmEscape(task.id)}')">
-                <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
-                <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></div>
-                <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
-                <time>${asmEscape(formatASMTime(task.created_at))}</time>
-                <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>
-            </article>`;
-        }).join('')}`;
+        const groups = asmTaskGroups(asmPageState.tasks);
+        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间</span><span></span></div>${groups.map(group => group.grouped ? renderASMBatch(group) : renderASMTaskRow(group.tasks[0], false)).join('')}`;
     }
     const pages = Math.max(1, Math.ceil(asmPageState.taskTotal / asmPageState.taskPageSize));
     if (pagination) pagination.innerHTML = asmPageState.taskTotal > asmPageState.taskPageSize

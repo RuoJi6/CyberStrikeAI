@@ -1,6 +1,6 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 1.7
+> Document version: 1.9
 > Baseline date: 2026-08-13
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
@@ -60,13 +60,15 @@ The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> 
 
 CyberStrikeAI generates controlled YAML from typed options for subdomain discovery/brute force, active/passive ports, custom or top-N ports, HTTP probing, fingerprints, directories, URL collection, screenshots, Nuclei, Dalfox, rate, concurrency, and timeouts. Arbitrary YAML is not exposed.
 
-Live choices include engines, Workers, wordlists, and Nuclei repositories. Engine lists return compact ID/name metadata; a specific engine `id` must be supplied to retrieve its complete YAML configuration. Quick Scan accepts up to 5,000 targets.
+Live choices include engines, Workers, wordlists, and Nuclei repositories. Engine lists return compact ID/name metadata; a specific engine `id` must be supplied to retrieve its complete YAML configuration. Quick Scan accepts up to 5,000 targets. XingRin creates one remote scan ID per target; CyberStrikeAI persists every `response.scans[]` child and links children from the same MCP request with one `batch_id`.
 
 ### ScopeSentry v1.9.3
 
 With `template_id`, the adapter reuses an upstream-reviewed template and all of its configured modules, dictionaries, plugins, and POCs. Without it, CyberStrikeAI generates a controlled low-load template whose name includes a fingerprint of ports, concurrency, site identification, screenshots, and TLS settings, preventing one task profile from overwriting another.
 
 Node selection, ignore/duplicate rules, target sources, projects, structured asset filters, scheduling, resume, restart, and delete are mapped. Scheduled creation resolves the new remote ID through `/api/task/scheduled`, records it in the local task center, and reads it through `/api/task/scheduled/detail`. A scheduled definition cannot be stopped/resumed/restarted as an immediate scan; only explicit deletion is supported. Arbitrary plugin command lines are not exposed. POCs use the paginated `/api/poc` endpoint; template, dictionary, plugin, and POC lists are compacted so large upstream payloads do not consume the agent context.
+
+Upstream `template_id` creation now requires a preflight inspection. The agent must call `asm_list_task_options(kind=template_detail,id=...)`, inspect the machine-readable `capability_summary`, and pass its `verification_token` back as `template_verification_token`. Full-port requests must assert `required_port_scope=all`; explicitly requested stages must be listed in `required_capabilities`. MCP re-reads the upstream template and validates its token, ports, and capabilities before creating anything. Successful responses include `effective_template`, which is the only authoritative basis for capability claims; template names, task names, and the total POC catalog size are not evidence that every feature is enabled.
 
 ## API compatibility surface
 
@@ -106,6 +108,8 @@ The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_T
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Persisted every XingRin multi-target child, returned complete local/remote ID lists from MCP, and grouped children from one request under a collapsible `batch_id` in the task center |
+| 1.8 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added mandatory ScopeSentry template inspection tokens, full-port/capability assertions, pre-create validation, and effective-template response summaries to prevent name-based “full scan” claims |
 | 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added `kind=all` to `asm_list_task_options`, with per-kind pagination, detail-kind skips, and categorized partial failures |
 | 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added automatic full result synchronization after completion, local row-level pagination/search/detail for the task center and MCP, explicit sync state and refresh actions, and automatic screenshot caching |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific rich result cards, upstream-total pagination and page sizes; mapped XingRin directory/screenshot results and ScopeSentry crawler/sensitive/directory/takeover/vulnerability details; made screenshot caching automatic for UI and MCP reads |

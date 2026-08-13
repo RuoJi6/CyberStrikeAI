@@ -566,6 +566,36 @@
 }
 .asm-task-row:last-child { border-bottom: 0; }
 .asm-task-row:hover { background: color-mix(in srgb, var(--accent-color) 5%, transparent); }
+.asm-task-batch { border-bottom: 1px solid color-mix(in srgb, var(--border-color) 78%, transparent); }
+.asm-task-batch > .asm-task-row { border-bottom: 0; }
+.asm-task-batch.expanded > .asm-task-batch-row { background: color-mix(in srgb, var(--accent-color) 6%, transparent); }
+.asm-task-batch-row .asm-task-primary strong::before {
+    display: inline-flex;
+    margin-right: 7px;
+    padding: 2px 6px;
+    color: var(--accent-color);
+    border: 1px solid color-mix(in srgb, var(--accent-color) 24%, transparent);
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--accent-color) 8%, transparent);
+    content: '批次';
+    font-size: 8px;
+    vertical-align: 1px;
+}
+.asm-task-child {
+    position: relative;
+    padding-left: 46px;
+    background: color-mix(in srgb, var(--bg-secondary) 72%, transparent);
+}
+.asm-task-child::before {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 31px;
+    width: 2px;
+    background: color-mix(in srgb, var(--accent-color) 24%, transparent);
+    content: '';
+}
+.asm-task-child .asm-task-primary strong { font-size: 11px; }
 
 .asm-task-primary,
 .asm-task-provider > span,
@@ -845,6 +875,8 @@ html[data-theme="dark"] .asm-provider-mark.asm-provider-scopesentry { background
     .asm-task-center-head, .asm-task-filters, .asm-result-toolbar, .asm-result-toolbar-actions { align-items: stretch; flex-direction: column; }
     .asm-task-filters input, .asm-task-filters select, .asm-result-toolbar input, .asm-result-toolbar select { width: 100%; min-width: 0; }
     .asm-task-row { grid-template-columns: 1fr; }
+	.asm-task-child { padding-left: 32px; }
+	.asm-task-child::before { left: 18px; }
     .asm-task-row > button { justify-self: stretch; }
     .asm-task-meta-grid, .asm-summary-grid { grid-template-columns: 1fr 1fr; }
     .asm-task-detail-hero { flex-direction: column; }

@@ -19,6 +19,7 @@ type taskHistoryTestAdapter struct {
 	assetsErr   error
 	assetCalls  int
 	detailCalls int
+	createScans []interface{}
 }
 
 func (a *taskHistoryTestAdapter) Provider() string { return ProviderXingRin }
@@ -29,9 +30,13 @@ func (a *taskHistoryTestAdapter) Test(context.Context, *Connection) (interface{}
 	return map[string]interface{}{"connected": true}, nil
 }
 func (a *taskHistoryTestAdapter) CreateTask(context.Context, *Connection, TaskRequest) (interface{}, error) {
+	scans := a.createScans
+	if len(scans) == 0 {
+		scans = []interface{}{map[string]interface{}{"id": 7, "status": "initiated"}}
+	}
 	return map[string]interface{}{
 		"provider": ProviderXingRin,
-		"response": map[string]interface{}{"scans": []interface{}{map[string]interface{}{"id": 7, "status": "initiated"}}},
+		"response": map[string]interface{}{"count": len(scans), "scans": scans},
 	}, nil
 }
 func (a *taskHistoryTestAdapter) ListTasks(context.Context, *Connection, TaskFilter) (interface{}, error) {
@@ -167,6 +172,68 @@ func TestTaskHistoryRecordsSyncsAndCachesResults(t *testing.T) {
 	resumed, err := service.GetTaskHistory(localID)
 	if err != nil || resumed.Status != "running" || resumed.Stage != "resume" || resumed.Progress != 0 {
 		t.Fatalf("local resume lifecycle was not recorded: %#v err=%v", resumed, err)
+	}
+}
+
+func TestTaskHistoryRecordsEveryXingRinChildInOneBatch(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	adapter.createScans = []interface{}{
+		map[string]interface{}{"id": 31, "status": "initiated", "targetName": "192.0.2.31"},
+		map[string]interface{}{"id": 32, "status": "running", "targetName": "192.0.2.32"},
+	}
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin batch", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{
+		Name: "two targets", Target: "192.0.2.31 192.0.2.32",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := valueMap(created)
+	if metadata["history_recorded"] != true || numberInt(metadata["history_recorded_count"]) != 2 {
+		t.Fatalf("unexpected history metadata: %#v", metadata)
+	}
+	batchID := meaningfulString(metadata["batch_id"])
+	localIDs, _ := metadata["local_task_ids"].([]string)
+	if batchID == "" || len(localIDs) != 2 || meaningfulString(metadata["local_task_id"]) != localIDs[0] {
+		t.Fatalf("missing compatible batch metadata: %#v", metadata)
+	}
+	page, err := service.ListTaskHistory(TaskHistoryFilter{Query: "192.0.2.3", Page: 1, PageSize: 20})
+	if err != nil || page.Total != 2 || len(page.Tasks) != 2 {
+		t.Fatalf("unexpected batch history: %#v err=%v", page, err)
+	}
+	seen := map[string]TaskHistoryView{}
+	for _, task := range page.Tasks {
+		seen[task.RemoteTaskID] = task
+		if task.BatchID != batchID || task.BatchSize != 2 {
+			t.Fatalf("task missing batch relationship: %#v", task)
+		}
+	}
+	if seen["31"].Target != "192.0.2.31" || seen["31"].BatchIndex != 0 || seen["31"].Status != "submitted" {
+		t.Fatalf("unexpected first child: %#v", seen["31"])
+	}
+	if seen["32"].Target != "192.0.2.32" || seen["32"].BatchIndex != 1 || seen["32"].Status != "running" {
+		t.Fatalf("unexpected second child: %#v", seen["32"])
+	}
+}
+
+func TestCreatedTaskEntriesIncludesEveryARLItem(t *testing.T) {
+	entries := createdTaskEntries(ProviderARL, TaskRequest{Target: "192.0.2.41 192.0.2.42"}, map[string]interface{}{
+		"response": map[string]interface{}{"items": []interface{}{
+			map[string]interface{}{"task_id": "aaaaaaaaaaaaaaaaaaaaaaaa", "target": "192.0.2.41", "status": "waiting"},
+			map[string]interface{}{"task_id": "bbbbbbbbbbbbbbbbbbbbbbbb", "target": "192.0.2.42", "status": "running"},
+		}},
+	})
+	if len(entries) != 2 || entries[0].RemoteID != "aaaaaaaaaaaaaaaaaaaaaaaa" || entries[1].RemoteID != "bbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("unexpected ARL creation entries: %#v", entries)
+	}
+	if entries[0].Target != "192.0.2.41" || entries[1].Target != "192.0.2.42" {
+		t.Fatalf("unexpected ARL targets: %#v", entries)
 	}
 }
 

@@ -539,6 +539,9 @@ func (db *DB) initTables() error {
 	createASMTasksTable := `
 	CREATE TABLE IF NOT EXISTS asm_tasks (
 		id TEXT PRIMARY KEY,
+		batch_id TEXT NOT NULL DEFAULT '',
+		batch_index INTEGER NOT NULL DEFAULT 0,
+		batch_size INTEGER NOT NULL DEFAULT 1,
 		resource_id TEXT NOT NULL,
 		resource_name TEXT NOT NULL,
 		provider TEXT NOT NULL,
@@ -862,6 +865,7 @@ func (db *DB) initTables() error {
 	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_resources_name ON asm_resources(name);
 	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_tasks_remote ON asm_tasks(resource_id, remote_task_id);
 	CREATE INDEX IF NOT EXISTS idx_asm_tasks_created_at ON asm_tasks(created_at);
+	CREATE INDEX IF NOT EXISTS idx_asm_tasks_batch ON asm_tasks(batch_id, batch_index);
 	CREATE INDEX IF NOT EXISTS idx_asm_tasks_provider ON asm_tasks(provider);
 	CREATE INDEX IF NOT EXISTS idx_asm_tasks_status ON asm_tasks(status);
 	CREATE UNIQUE INDEX IF NOT EXISTS uq_asm_screenshots_source ON asm_screenshots(task_id, source_url);
@@ -988,6 +992,9 @@ func (db *DB) initTables() error {
 	}
 	if _, err := db.Exec(createASMTasksTable); err != nil {
 		return fmt.Errorf("创建asm_tasks表失败: %w", err)
+	}
+	if err := db.migrateASMTasksTable(); err != nil {
+		return fmt.Errorf("迁移asm_tasks表失败: %w", err)
 	}
 	if _, err := db.Exec(createASMTaskResultsTable); err != nil {
 		return fmt.Errorf("创建asm_task_results表失败: %w", err)
@@ -1929,6 +1936,32 @@ func (db *DB) migrateKnowledgeEmbeddingsColumns() error {
 			continue
 		}
 		if _, err := db.Exec(m.stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateASMTasksTable adds request-batch metadata without rebuilding existing
+// task history. Empty batch IDs keep legacy rows as independent tasks.
+func (db *DB) migrateASMTasksTable() error {
+	migrations := []struct {
+		col  string
+		stmt string
+	}{
+		{"batch_id", `ALTER TABLE asm_tasks ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''`},
+		{"batch_index", `ALTER TABLE asm_tasks ADD COLUMN batch_index INTEGER NOT NULL DEFAULT 0`},
+		{"batch_size", `ALTER TABLE asm_tasks ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 1`},
+	}
+	for _, migration := range migrations {
+		var count int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('asm_tasks') WHERE name = ?`, migration.col).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		if _, err := db.Exec(migration.stmt); err != nil {
 			return err
 		}
 	}

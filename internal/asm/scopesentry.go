@@ -23,6 +23,32 @@ const (
 
 var scopeSentryTaskIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
 
+var scopeSentryPortArgumentPattern = regexp.MustCompile(`(?:^|\s)-port(?:\s+|=)([^\s]+)`)
+
+var scopeSentryCapabilityModules = []struct {
+	Capability string
+	Module     string
+}{
+	{Capability: "subdomain_discovery", Module: "SubdomainScan"},
+	{Capability: "subdomain_takeover", Module: "SubdomainSecurity"},
+	{Capability: "port_scan", Module: "PortScan"},
+	{Capability: "service_fingerprint", Module: "PortFingerprint"},
+	{Capability: "site_identify", Module: "AssetMapping"},
+	{Capability: "url_scan", Module: "URLScan"},
+	{Capability: "web_crawler", Module: "WebCrawler"},
+	{Capability: "sensitive_scan", Module: "URLSecurity"},
+	{Capability: "directory_scan", Module: "DirScan"},
+	{Capability: "vulnerability_scan", Module: "VulnerabilityScan"},
+	{Capability: "passive_scan", Module: "PassiveScan"},
+	{Capability: "asset_handle", Module: "AssetHandle"},
+}
+
+var scopeSentryRequiredCapabilities = []string{
+	"subdomain_discovery", "subdomain_takeover", "port_scan", "service_fingerprint",
+	"site_identify", "site_capture", "tls_probe", "url_scan", "web_crawler",
+	"sensitive_scan", "directory_scan", "vulnerability_scan", "passive_scan", "asset_handle",
+}
+
 type ScopeSentryAdapter struct{}
 
 func NewScopeSentryAdapter() *ScopeSentryAdapter { return &ScopeSentryAdapter{} }
@@ -165,6 +191,181 @@ func scopeSentryCompactOptionPayload(kind string, payload interface{}) interface
 		}
 	}
 	return result
+}
+
+func scopeSentrySelectionEnabled(value interface{}) bool {
+	switch typed := value.(type) {
+	case []interface{}:
+		return len(typed) > 0
+	case []string:
+		return len(typed) > 0
+	case nil:
+		return false
+	default:
+		text := strings.TrimSpace(fmt.Sprint(typed))
+		return text != "" && text != "<nil>" && text != "[]"
+	}
+}
+
+func scopeSentryTemplateParameters(template map[string]interface{}, module string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, containerName := range []string{"Parameters", "ParameterLists"} {
+		container := scopeSentryMap(template[containerName])
+		values := scopeSentryMap(container[module])
+		for _, raw := range values {
+			value := strings.TrimSpace(fmt.Sprint(raw))
+			if value == "" || value == "<nil>" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func scopeSentryParameterFlag(parameters []string, name string) bool {
+	for _, parameter := range parameters {
+		fields := strings.Fields(strings.ToLower(parameter))
+		for index, field := range fields {
+			if field == "-"+name && index+1 < len(fields) && fields[index+1] == "true" {
+				return true
+			}
+			if field == "-"+name+"=true" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scopeSentryPortSummary(template map[string]interface{}, enabled bool) (string, string) {
+	if !enabled {
+		return "disabled", ""
+	}
+	for _, parameter := range scopeSentryTemplateParameters(template, "PortScan") {
+		match := scopeSentryPortArgumentPattern.FindStringSubmatch(parameter)
+		if len(match) != 2 {
+			continue
+		}
+		expression := strings.Trim(strings.TrimSpace(match[1]), `"'`)
+		normalized := strings.ToLower(expression)
+		switch {
+		case normalized == "1-65535", normalized == "{port.all}", normalized == "all":
+			return "all", expression
+		case strings.Contains(normalized, "top1000"):
+			return "top1000", expression
+		case strings.Contains(normalized, "top100"):
+			return "top100", expression
+		default:
+			return "custom", expression
+		}
+	}
+	return "unknown", ""
+}
+
+func scopeSentryTemplateCapabilitySummary(template map[string]interface{}) map[string]interface{} {
+	capabilities := make(map[string]bool, len(scopeSentryRequiredCapabilities))
+	enabled := make([]string, 0, len(scopeSentryRequiredCapabilities))
+	disabled := make([]string, 0, len(scopeSentryRequiredCapabilities))
+	for _, mapping := range scopeSentryCapabilityModules {
+		capabilities[mapping.Capability] = scopeSentrySelectionEnabled(template[mapping.Module])
+	}
+	assetMappingParameters := scopeSentryTemplateParameters(template, "AssetMapping")
+	capabilities["site_capture"] = capabilities["site_identify"] && scopeSentryParameterFlag(assetMappingParameters, "screenshot")
+	capabilities["tls_probe"] = capabilities["site_identify"] && scopeSentryParameterFlag(assetMappingParameters, "tlsprobe")
+	for _, capability := range scopeSentryRequiredCapabilities {
+		if capabilities[capability] {
+			enabled = append(enabled, capability)
+		} else {
+			disabled = append(disabled, capability)
+		}
+	}
+	portScope, portExpression := scopeSentryPortSummary(template, capabilities["port_scan"])
+	pocSelection := "disabled"
+	pocCount := 0
+	if capabilities["vulnerability_scan"] {
+		pocSelection = "template_default"
+		for _, key := range []string{"vullist", "VulList"} {
+			if values, ok := template[key].([]interface{}); ok && len(values) > 0 {
+				pocSelection = "selected"
+				pocCount = len(values)
+				break
+			}
+		}
+	}
+	return map[string]interface{}{
+		"template_id":           strings.TrimSpace(fmt.Sprint(template["id"])),
+		"template_name":         strings.TrimSpace(fmt.Sprint(template["name"])),
+		"port_scope":            portScope,
+		"port_expression":       portExpression,
+		"full_ports":            portScope == "all",
+		"capabilities":          capabilities,
+		"enabled_capabilities":  enabled,
+		"disabled_capabilities": disabled,
+		"all_capabilities":      len(disabled) == 0,
+		"poc_selection":         pocSelection,
+		"selected_poc_count":    pocCount,
+	}
+}
+
+func scopeSentryTemplateVerificationToken(template map[string]interface{}) (string, error) {
+	raw, err := json.Marshal(template)
+	if err != nil {
+		return "", fmt.Errorf("ScopeSentry 生成模板校验令牌失败: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return fmt.Sprintf("sha256:%x", digest[:]), nil
+}
+
+func scopeSentryTemplateInspection(payload interface{}) (map[string]interface{}, string, error) {
+	template := scopeSentryMap(scopeSentryData(payload))
+	if template == nil {
+		return nil, "", fmt.Errorf("ScopeSentry 模板详情响应无效")
+	}
+	token, err := scopeSentryTemplateVerificationToken(template)
+	if err != nil {
+		return nil, "", err
+	}
+	return scopeSentryTemplateCapabilitySummary(template), token, nil
+}
+
+func scopeSentryValidateTemplateExpectations(options map[string]interface{}, summary map[string]interface{}) error {
+	requiredPortScope, err := taskOptionEnum("ScopeSentry", options, "required_port_scope", "", "", "all", "top1000", "top100", "custom")
+	if err != nil {
+		return err
+	}
+	actualPortScope := strings.TrimSpace(fmt.Sprint(summary["port_scope"]))
+	if requiredPortScope != "" && requiredPortScope != actualPortScope {
+		return fmt.Errorf("ScopeSentry 模板端口范围不符合要求: 要求 %s，实际 %s（%s）", requiredPortScope, actualPortScope, strings.TrimSpace(fmt.Sprint(summary["port_expression"])))
+	}
+	required, err := taskOptionStringSlice("ScopeSentry", options, "required_capabilities", nil, len(scopeSentryRequiredCapabilities), 64)
+	if err != nil {
+		return err
+	}
+	known := make(map[string]struct{}, len(scopeSentryRequiredCapabilities))
+	for _, capability := range scopeSentryRequiredCapabilities {
+		known[capability] = struct{}{}
+	}
+	capabilities, _ := summary["capabilities"].(map[string]bool)
+	missing := make([]string, 0)
+	for _, capability := range required {
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if _, exists := known[capability]; !exists {
+			return fmt.Errorf("ScopeSentry 不支持的能力断言: %s", capability)
+		}
+		if !capabilities[capability] {
+			missing = append(missing, capability)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("ScopeSentry 模板未开启用户要求的能力: %s", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 func (a *ScopeSentryAdapter) session(ctx context.Context, conn *Connection) (*http.Client, string, error) {
@@ -414,6 +615,7 @@ var scopeSentryTaskOptions = taskOptionAllowed(
 	"source_search", "source_limit", "source_filter",
 	"scheduled", "cycle_type", "hour", "minute", "day", "week",
 	"port_scan", "site_identify", "ports", "concurrency", "site_capture", "tls_probe",
+	"template_verification_token", "required_port_scope", "required_capabilities",
 )
 
 func scopeSentryValidateObjectID(value, field string, optional bool) (string, error) {
@@ -520,6 +722,7 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 	if err != nil {
 		return nil, err
 	}
+	var templateSummary map[string]interface{}
 	if templateID != "" {
 		templateID, err = scopeSentryValidateObjectID(templateID, "template_id", false)
 		if err != nil {
@@ -530,10 +733,40 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 				return nil, fmt.Errorf("ScopeSentry 选择 template_id 时不能使用低负载模板覆盖字段 %s，请在上游模板中配置", field)
 			}
 		}
+		verificationToken, tokenErr := taskOptionString("ScopeSentry", req.Options, "template_verification_token", "", 100)
+		if tokenErr != nil {
+			return nil, tokenErr
+		}
+		if verificationToken == "" {
+			return nil, fmt.Errorf("ScopeSentry 使用 template_id 前必须先调用 asm_list_task_options(kind=template_detail,id=%s)，并传入返回的 template_verification_token", templateID)
+		}
+		detail, detailErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": templateID})
+		if detailErr != nil {
+			return nil, detailErr
+		}
+		actualToken := ""
+		templateSummary, actualToken, detailErr = scopeSentryTemplateInspection(detail)
+		if detailErr != nil {
+			return nil, detailErr
+		}
+		if verificationToken != actualToken {
+			return nil, fmt.Errorf("ScopeSentry 模板已在详情查询后发生变化，请重新调用 asm_list_task_options(kind=template_detail,id=%s) 确认实际配置", templateID)
+		}
+		if err := scopeSentryValidateTemplateExpectations(req.Options, templateSummary); err != nil {
+			return nil, err
+		}
 	} else {
 		templateID, err = a.ensureTemplate(ctx, client, conn, token, req.Options)
 		if err != nil {
 			return nil, err
+		}
+		detail, detailErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": templateID})
+		if detailErr != nil {
+			return nil, detailErr
+		}
+		templateSummary, _, detailErr = scopeSentryTemplateInspection(detail)
+		if detailErr != nil {
+			return nil, detailErr
 		}
 	}
 	name := strings.TrimSpace(req.Name)
@@ -634,6 +867,7 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 						return map[string]interface{}{
 							"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "scheduled": true,
 							"task": task, "template_id": templateID, "nodes": selectedNodes,
+							"template_verified": true, "effective_template": templateSummary,
 						}, nil
 					}
 				}
@@ -657,6 +891,7 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 					return map[string]interface{}{
 						"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID,
 						"task": task, "template_id": templateID, "nodes": selectedNodes,
+						"template_verified": true, "effective_template": templateSummary,
 					}, nil
 				}
 			}
@@ -675,34 +910,39 @@ func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection)
 		"result_types":         providerResultTypes(ProviderScopeSentry),
 		"notes": []string{
 			"提供 template_id 时完整复用 ScopeSentry 上游模板，端口字典、文件字典、插件参数和 POC 均由该模板决定",
+			"使用 template_id 前必须单独调用 template_detail，并在创建时传回 template_verification_token；模板列表或名称不能证明实际能力",
+			"用户要求全端口或指定能力时，必须分别传 required_port_scope 和 required_capabilities；模板不满足时会在上游创建前拒绝",
 			"未提供 template_id 时按受控端口、并发、截图与 TLS 配置指纹生成独立低负载模板，任务之间不会相互覆盖",
 			"不允许 Agent 直接传入任意插件命令行；需在 ScopeSentry 上游模板中审核配置后再选择 template_id",
 			"模板、端口字典和 POC 列表仅返回选择所需的轻量摘要，避免大型上游响应挤占 Agent 上下文",
 			"定时任务会回查上游 ID 并记录到 ASM 任务中心；定时定义不支持 stop/resume/restart，仅支持显式 delete",
 		},
 		"create_options": map[string]interface{}{
-			"template_id":   map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "选择已在上游配置好的完整模板"},
-			"node_names":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "nodes"},
-			"all_nodes":     map[string]interface{}{"type": "boolean", "default": false},
-			"ignore":        map[string]interface{}{"type": "string", "description": "排除目标，按上游格式分行"},
-			"duplicates":    map[string]interface{}{"type": "string", "enum": []string{"None", "subdomain"}, "default": "None"},
-			"target_source": map[string]interface{}{"type": "string", "enum": []string{"general", "project", "asset", "RootDomain", "subdomain"}, "default": "general"},
-			"project_ids":   map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "projects"},
-			"source_search": map[string]interface{}{"type": "string", "description": "非 general/project 目标来源的上游查询表达式"},
-			"source_limit":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100000, "default": 1000},
-			"source_filter": map[string]interface{}{"type": "object", "description": "非 general/project 目标来源的结构化过滤条件"},
-			"scheduled":     map[string]interface{}{"type": "boolean", "default": false},
-			"cycle_type":    map[string]interface{}{"type": "string", "enum": []string{"daily", "ndays", "nhours", "weekly", "monthly"}, "default": "daily", "requires": "scheduled"},
-			"hour":          map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 23, "default": 0, "requires": "scheduled"},
-			"minute":        map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 59, "default": 0, "requires": "scheduled"},
-			"day":           map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 31, "default": 1, "requires": "scheduled"},
-			"week":          map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 6, "default": 1, "requires": "scheduled"},
-			"port_scan":     map[string]interface{}{"type": "boolean", "default": true, "mode": "generated_low_load_template"},
-			"site_identify": map[string]interface{}{"type": "boolean", "default": true, "mode": "generated_low_load_template"},
-			"ports":         map[string]interface{}{"type": "string", "default": "80,443,8080,8082", "mode": "generated_low_load_template"},
-			"concurrency":   map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "default": 20, "mode": "generated_low_load_template"},
-			"site_capture":  map[string]interface{}{"type": "boolean", "default": false, "mode": "generated_low_load_template"},
-			"tls_probe":     map[string]interface{}{"type": "boolean", "default": false, "mode": "generated_low_load_template"},
+			"template_id":                 map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "选择已在上游配置好的完整模板；选择后必须查询 template_detail"},
+			"template_verification_token": map[string]interface{}{"type": "string", "requires": "template_id", "dynamic_kind": "template_detail", "description": "template_detail 返回的校验令牌，用于证明已核对实际模板配置"},
+			"required_port_scope":         map[string]interface{}{"type": "string", "enum": []string{"all", "top1000", "top100", "custom"}, "requires": "template_id", "description": "用户要求的端口范围断言；要求全端口时必须传 all"},
+			"required_capabilities":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": scopeSentryRequiredCapabilities}, "requires": "template_id", "description": "用户明确要求的能力断言；MCP 在创建上游任务前逐项校验"},
+			"node_names":                  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "nodes"},
+			"all_nodes":                   map[string]interface{}{"type": "boolean", "default": false},
+			"ignore":                      map[string]interface{}{"type": "string", "description": "排除目标，按上游格式分行"},
+			"duplicates":                  map[string]interface{}{"type": "string", "enum": []string{"None", "subdomain"}, "default": "None"},
+			"target_source":               map[string]interface{}{"type": "string", "enum": []string{"general", "project", "asset", "RootDomain", "subdomain"}, "default": "general"},
+			"project_ids":                 map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "projects"},
+			"source_search":               map[string]interface{}{"type": "string", "description": "非 general/project 目标来源的上游查询表达式"},
+			"source_limit":                map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100000, "default": 1000},
+			"source_filter":               map[string]interface{}{"type": "object", "description": "非 general/project 目标来源的结构化过滤条件"},
+			"scheduled":                   map[string]interface{}{"type": "boolean", "default": false},
+			"cycle_type":                  map[string]interface{}{"type": "string", "enum": []string{"daily", "ndays", "nhours", "weekly", "monthly"}, "default": "daily", "requires": "scheduled"},
+			"hour":                        map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 23, "default": 0, "requires": "scheduled"},
+			"minute":                      map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 59, "default": 0, "requires": "scheduled"},
+			"day":                         map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 31, "default": 1, "requires": "scheduled"},
+			"week":                        map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 6, "default": 1, "requires": "scheduled"},
+			"port_scan":                   map[string]interface{}{"type": "boolean", "default": true, "mode": "generated_low_load_template"},
+			"site_identify":               map[string]interface{}{"type": "boolean", "default": true, "mode": "generated_low_load_template"},
+			"ports":                       map[string]interface{}{"type": "string", "default": "80,443,8080,8082", "mode": "generated_low_load_template"},
+			"concurrency":                 map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "default": 20, "mode": "generated_low_load_template"},
+			"site_capture":                map[string]interface{}{"type": "boolean", "default": false, "mode": "generated_low_load_template"},
+			"tls_probe":                   map[string]interface{}{"type": "boolean", "default": false, "mode": "generated_low_load_template"},
 		},
 	}, nil
 }
@@ -752,6 +992,18 @@ func (a *ScopeSentryAdapter) ListTaskOptions(ctx context.Context, conn *Connecti
 	payload, err := scopeSentryRequest(ctx, client, conn, token, method, endpoint, query, body)
 	if err != nil {
 		return nil, err
+	}
+	if kind == "template_detail" {
+		summary, verificationToken, inspectionErr := scopeSentryTemplateInspection(payload)
+		if inspectionErr != nil {
+			return nil, inspectionErr
+		}
+		return map[string]interface{}{
+			"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "kind": kind,
+			"options": map[string]interface{}{
+				"detail": payload, "capability_summary": summary, "verification_token": verificationToken,
+			},
+		}, nil
 	}
 	payload = scopeSentryCompactOptionPayload(kind, payload)
 	return map[string]interface{}{"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "kind": kind, "options": payload}, nil

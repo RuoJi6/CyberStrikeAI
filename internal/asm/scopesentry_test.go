@@ -30,6 +30,7 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	)
 
 	var mu sync.Mutex
+	var profileTemplate map[string]interface{}
 	profileCreated, taskCreated, scheduledCreated := false, false, false
 	profileName := scopeSentryLowLoadTemplateName("22", 2, true, false, false, false)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -64,6 +65,17 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
 		case "/api/task/template/detail":
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode template detail: %v", err)
+			}
+			mu.Lock()
+			profile := profileTemplate
+			mu.Unlock()
+			if fmt.Sprint(body["id"]) == profileID && profile != nil {
+				writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": profile})
+				return
+			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": scopeSentryTestDefaultTemplate(defaultID, portHash, handleHash, mapHash, fingerHash)})
 		case "/api/task/template/save":
 			var body struct {
@@ -89,6 +101,8 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 				t.Errorf("port fingerprint was disabled, so open ports cannot reach asset handling")
 			}
 			mu.Lock()
+			body.Result["id"] = profileID
+			profileTemplate = body.Result
 			profileCreated = true
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"code":200}`))
@@ -199,12 +213,45 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	if result, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "pocs", Query: "Safe", Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), "Safe POC") || strings.Contains(fmt.Sprint(result), "very large yaml") {
 		t.Fatalf("POC list must be compact and searchable: result=%#v err=%v", result, err)
 	}
+	defaultInspection, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "template_detail", ID: defaultID})
+	if err != nil {
+		t.Fatalf("template detail: %v", err)
+	}
+	defaultOptions := scopeSentryMap(scopeSentryMap(defaultInspection)["options"])
+	defaultSummary := scopeSentryMap(defaultOptions["capability_summary"])
+	defaultToken := strings.TrimSpace(fmt.Sprint(defaultOptions["verification_token"]))
+	if defaultToken == "" || defaultSummary["port_scope"] != "top1000" || defaultSummary["full_ports"] != false {
+		t.Fatalf("unexpected default template inspection: %#v", defaultOptions)
+	}
+	if _, err := adapter.CreateTask(ctx, connection, TaskRequest{
+		Name: "must inspect", Target: "192.0.2.11", Options: map[string]interface{}{"template_id": defaultID},
+	}); err == nil || !strings.Contains(err.Error(), "template_detail") {
+		t.Fatalf("template creation without verification token must fail, err=%v", err)
+	}
+	if _, err := adapter.CreateTask(ctx, connection, TaskRequest{
+		Name: "must be full ports", Target: "192.0.2.11", Options: map[string]interface{}{
+			"template_id": defaultID, "template_verification_token": defaultToken, "required_port_scope": "all",
+		},
+	}); err == nil || !strings.Contains(err.Error(), "实际 top1000") {
+		t.Fatalf("template with top1000 must fail full-port assertion, err=%v", err)
+	}
+	if _, err := adapter.CreateTask(ctx, connection, TaskRequest{
+		Name: "must scan vulnerabilities", Target: "192.0.2.11", Options: map[string]interface{}{
+			"template_id": defaultID, "template_verification_token": defaultToken,
+			"required_capabilities": []interface{}{"vulnerability_scan", "directory_scan"},
+		},
+	}); err == nil || !strings.Contains(err.Error(), "vulnerability_scan, directory_scan") {
+		t.Fatalf("template with disabled required capabilities must fail, err=%v", err)
+	}
 	created, err := adapter.CreateTask(ctx, connection, TaskRequest{
 		Name: name, Target: "192.0.2.10",
 		Options: map[string]interface{}{"ports": "22", "port_scan": true, "site_identify": false, "concurrency": 2},
 	})
 	if err != nil || !strings.Contains(fmt.Sprint(created), taskID) {
 		t.Fatalf("CreateTask result=%#v err=%v", created, err)
+	}
+	if !strings.Contains(fmt.Sprint(created), "effective_template") || !strings.Contains(fmt.Sprint(created), "custom") {
+		t.Fatalf("CreateTask must return the effective template summary: %#v", created)
 	}
 	if result, err := adapter.ListTasks(ctx, connection, TaskFilter{Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), taskID) {
 		t.Fatalf("ListTasks result=%#v err=%v", result, err)
@@ -221,9 +268,15 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	if result, err := adapter.ManageTask(ctx, connection, TaskManageRequest{Action: "resume", TaskID: taskID}); err != nil || !strings.Contains(fmt.Sprint(result), "resume") {
 		t.Fatalf("ManageTask result=%#v err=%v", result, err)
 	}
+	profileInspection, err := adapter.ListTaskOptions(ctx, connection, TaskOptionFilter{Kind: "template_detail", ID: profileID})
+	if err != nil {
+		t.Fatalf("profile template detail: %v", err)
+	}
+	profileOptions := scopeSentryMap(scopeSentryMap(profileInspection)["options"])
+	profileToken := strings.TrimSpace(fmt.Sprint(profileOptions["verification_token"]))
 	scheduledTask, err := adapter.CreateTask(ctx, connection, TaskRequest{
 		Name: scheduledName, Target: "192.0.2.20",
-		Options: map[string]interface{}{"template_id": profileID, "scheduled": true, "cycle_type": "daily", "hour": 3, "minute": 15},
+		Options: map[string]interface{}{"template_id": profileID, "template_verification_token": profileToken, "scheduled": true, "cycle_type": "daily", "hour": 3, "minute": 15},
 	})
 	if err != nil || !strings.Contains(fmt.Sprint(scheduledTask), scheduledID) {
 		t.Fatalf("CreateTask scheduled result=%#v err=%v", scheduledTask, err)

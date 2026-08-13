@@ -26,6 +26,9 @@ type TaskHistoryFilter struct {
 
 type TaskHistoryView struct {
 	ID                string                    `json:"id"`
+	BatchID           string                    `json:"batch_id,omitempty"`
+	BatchIndex        int                       `json:"batch_index,omitempty"`
+	BatchSize         int                       `json:"batch_size,omitempty"`
 	ResourceID        string                    `json:"resource_id"`
 	ResourceName      string                    `json:"resource_name"`
 	Provider          string                    `json:"provider"`
@@ -90,7 +93,8 @@ func jsonValue(raw string) interface{} {
 
 func taskHistoryView(item *database.ASMTask) TaskHistoryView {
 	return TaskHistoryView{
-		ID: item.ID, ResourceID: item.ResourceID, ResourceName: item.ResourceName,
+		ID: item.ID, BatchID: item.BatchID, BatchIndex: item.BatchIndex, BatchSize: item.BatchSize,
+		ResourceID: item.ResourceID, ResourceName: item.ResourceName,
 		Provider: item.Provider, RemoteTaskID: item.RemoteTaskID, Name: item.Name,
 		Target: item.Target, Options: jsonObject(item.OptionsJSON), Status: item.Status,
 		Progress: item.Progress, Stage: item.Stage, Summary: jsonObject(item.SummaryJSON),
@@ -226,50 +230,155 @@ func creationStatus(provider string, result interface{}) string {
 	return "submitted"
 }
 
-func withHistoryMetadata(result interface{}, localID string, recorded bool, warning string) interface{} {
+type createdTaskEntry struct {
+	RemoteID string
+	Target   string
+	Status   string
+	Detail   interface{}
+}
+
+type recordedTaskEntry struct {
+	LocalID  string
+	RemoteID string
+	Target   string
+	Status   string
+}
+
+func requestTargetList(value string) []string {
+	return strings.Fields(strings.NewReplacer(",", " ", "\r", " ", "\n", " ", "\t", " ").Replace(value))
+}
+
+func createdTaskEntries(provider string, req TaskRequest, result interface{}) []createdTaskEntry {
+	provider = normalizeProvider(provider)
+	object := valueMap(result)
+	var rawTasks []interface{}
+	switch provider {
+	case ProviderXingRin:
+		rawTasks, _ = pathValue(object, "response", "scans").([]interface{})
+	case ProviderARL:
+		rawTasks, _ = pathValue(object, "response", "items").([]interface{})
+	}
+	requestTargets := requestTargetList(req.Target)
+	entries := make([]createdTaskEntry, 0, len(rawTasks))
+	for index, rawTask := range rawTasks {
+		task := valueMap(rawTask)
+		if task == nil {
+			continue
+		}
+		remoteID := meaningfulString(mapValue(task, "id", "_id", "task_id", "TaskID"))
+		if remoteID == "" {
+			continue
+		}
+		target := meaningfulString(mapValue(task, "targetName", "target", "domain", "ip"))
+		if target == "" && index < len(requestTargets) {
+			target = requestTargets[index]
+		}
+		if target == "" {
+			target = strings.TrimSpace(req.Target)
+		}
+		status := creationStatus(provider, result)
+		if rawStatus := mapValue(task, "status", "state", "taskStatus"); rawStatus != nil {
+			status = normalizeProviderTaskStatus(provider, rawStatus)
+		}
+		entries = append(entries, createdTaskEntry{
+			RemoteID: remoteID, Target: target, Status: status,
+			Detail: map[string]interface{}{"creation_response": result, "remote_task": task},
+		})
+	}
+	if len(entries) > 0 {
+		return entries
+	}
+	remoteID := remoteTaskID(provider, result)
+	if remoteID == "" {
+		return nil
+	}
+	return []createdTaskEntry{{
+		RemoteID: remoteID, Target: strings.TrimSpace(req.Target),
+		Status: creationStatus(provider, result), Detail: result,
+	}}
+}
+
+func withHistoryMetadata(result interface{}, batchID string, expected int, records []recordedTaskEntry, warnings []string) interface{} {
 	object := valueMap(result)
 	if object == nil {
 		object = map[string]interface{}{"response": result}
 	}
-	object["history_recorded"] = recorded
-	if localID != "" {
-		object["local_task_id"] = localID
+	object["history_recorded"] = len(records) > 0
+	object["history_recorded_count"] = len(records)
+	object["history_expected_count"] = expected
+	if batchID != "" {
+		object["batch_id"] = batchID
 	}
-	if warning != "" {
-		object["history_warning"] = warning
+	localIDs := make([]string, 0, len(records))
+	remoteIDs := make([]string, 0, len(records))
+	historyRecords := make([]map[string]interface{}, 0, len(records))
+	for _, record := range records {
+		localIDs = append(localIDs, record.LocalID)
+		remoteIDs = append(remoteIDs, record.RemoteID)
+		historyRecords = append(historyRecords, map[string]interface{}{
+			"local_task_id": record.LocalID, "remote_task_id": record.RemoteID,
+			"target": record.Target, "status": record.Status,
+		})
+	}
+	if len(localIDs) > 0 {
+		object["local_task_id"] = localIDs[0]
+		object["local_task_ids"] = localIDs
+		object["remote_task_ids"] = remoteIDs
+		object["history_records"] = historyRecords
+	}
+	if len(warnings) > 0 {
+		object["history_warning"] = strings.Join(warnings, "; ")
+		object["history_partial"] = len(records) > 0 && len(records) < expected
 	}
 	return object
 }
 
 func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result interface{}) interface{} {
-	remoteID := remoteTaskID(conn.Resource.Provider, result)
-	if remoteID == "" {
+	entries := createdTaskEntries(conn.Resource.Provider, req, result)
+	if len(entries) == 0 {
 		warning := "ASM 已接收任务，但响应中没有可识别的任务 ID"
 		s.logger.Warn(warning, zap.String("resource_id", conn.Resource.ID), zap.String("provider", conn.Resource.Provider))
-		return withHistoryMetadata(result, "", false, warning)
+		return withHistoryMetadata(result, "", 0, nil, []string{warning})
 	}
-	if existing, err := s.db.FindASMTask(conn.Resource.ID, remoteID); err == nil && existing != nil {
-		return withHistoryMetadata(result, existing.ID, true, "")
-	}
+	batchID := "asmbatch_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
 	optionsJSON, _ := json.Marshal(req.Options)
-	detailJSON, _ := json.Marshal(result)
-	localID := "asmtask_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
-	item := &database.ASMTask{
-		ID: localID, ResourceID: conn.Resource.ID, ResourceName: conn.Resource.Name,
-		Provider: normalizeProvider(conn.Resource.Provider), RemoteTaskID: remoteID,
-		Name: strings.TrimSpace(req.Name), Target: strings.TrimSpace(req.Target),
-		OptionsJSON: string(optionsJSON), Status: creationStatus(conn.Resource.Provider, result),
-		SummaryJSON: "{}", DetailJSON: string(detailJSON),
+	if string(optionsJSON) == "" || string(optionsJSON) == "null" {
+		optionsJSON = []byte("{}")
 	}
-	if item.OptionsJSON == "" || item.OptionsJSON == "null" {
-		item.OptionsJSON = "{}"
+	records := make([]recordedTaskEntry, 0, len(entries))
+	warnings := make([]string, 0)
+	for index, entry := range entries {
+		if existing, err := s.db.FindASMTask(conn.Resource.ID, entry.RemoteID); err == nil && existing != nil {
+			existing.BatchID, existing.BatchIndex, existing.BatchSize = batchID, index, len(entries)
+			if existing.Target == "" {
+				existing.Target = entry.Target
+			}
+			if updateErr := s.db.UpdateASMTask(existing); updateErr != nil {
+				warnings = append(warnings, entry.RemoteID+": "+truncateError(updateErr))
+				continue
+			}
+			records = append(records, recordedTaskEntry{LocalID: existing.ID, RemoteID: entry.RemoteID, Target: existing.Target, Status: existing.Status})
+			continue
+		}
+		detailJSON, _ := json.Marshal(entry.Detail)
+		localID := "asmtask_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
+		item := &database.ASMTask{
+			ID: localID, BatchID: batchID, BatchIndex: index, BatchSize: len(entries),
+			ResourceID: conn.Resource.ID, ResourceName: conn.Resource.Name,
+			Provider: normalizeProvider(conn.Resource.Provider), RemoteTaskID: entry.RemoteID,
+			Name: strings.TrimSpace(req.Name), Target: entry.Target,
+			OptionsJSON: string(optionsJSON), Status: entry.Status,
+			SummaryJSON: "{}", DetailJSON: string(detailJSON),
+		}
+		if err := s.db.CreateASMTask(item); err != nil {
+			warning := entry.RemoteID + ": " + truncateError(err)
+			warnings = append(warnings, warning)
+			s.logger.Error("保存 ASM 任务历史失败", zap.String("resource_id", conn.Resource.ID), zap.String("remote_task_id", entry.RemoteID), zap.Error(err))
+			continue
+		}
+		records = append(records, recordedTaskEntry{LocalID: localID, RemoteID: entry.RemoteID, Target: entry.Target, Status: entry.Status})
 	}
-	if err := s.db.CreateASMTask(item); err != nil {
-		warning := truncateError(err)
-		s.logger.Error("保存 ASM 任务历史失败", zap.String("resource_id", conn.Resource.ID), zap.String("remote_task_id", remoteID), zap.Error(err))
-		return withHistoryMetadata(result, "", false, warning)
-	}
-	return withHistoryMetadata(result, localID, true, "")
+	return withHistoryMetadata(result, batchID, len(entries), records, warnings)
 }
 
 func taskCollection(provider string, payload interface{}) []interface{} {
