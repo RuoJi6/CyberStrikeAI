@@ -6,6 +6,10 @@ const ACTIVE_TASK_REFRESH_INTERVAL = 2000; // 运行态与审批态需要及时�
 const TASK_FINAL_STATUSES = new Set(['failed', 'timeout', 'cancelled', 'completed']);
 const hitlInterruptToolItemMap = new Map();
 let activeTasksLoadPromise = null;
+const CHAT_TASK_SYNC_CHANNEL_NAME = 'cyberstrike-chat-task-sync-v1';
+let chatTaskSyncChannel = null;
+let visibleConversationReplaySyncPromise = null;
+let visibleConversationReplaySyncId = '';
 
 /**
  * 主对话 POST 流仍在读取时，禁止再挂 task-events 补流，否则同一事件会画两遍（与 HITL 是否开启无关）。
@@ -28,6 +32,9 @@ function setCurrentConversationIdFromStream(cid) {
     currentConversationId = cid;
     try {
         window.currentConversationId = cid;
+        if (typeof window.syncChatConversationHash === 'function') {
+            window.syncChatConversationHash(cid);
+        }
     } catch (e) { /* ignore */ }
 }
 
@@ -524,6 +531,43 @@ function shouldReuseMainResponseStream(progressId, prevStream, responseData, str
     return areMainResponseStreamIterationsCompatible(prevIterTag, streamIterTag, orch);
 }
 
+/** 刷新后从数据库恢复的 planning 行，继续复用为当前 response_stream 容器。 */
+function findRestoredMainResponseStreamItem(timeline, responseData) {
+    if (!timeline) return null;
+    const data = responseData || {};
+    const streamId = data.streamId != null ? String(data.streamId).trim() : '';
+    const agent = data.einoAgent != null ? String(data.einoAgent).trim() : '';
+    const orchestration = data.orchestration != null ? String(data.orchestration).trim() : '';
+    const items = timeline.querySelectorAll('.timeline-item-planning, .timeline-item-thinking');
+    for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        const itemStreamId = String(item.dataset.responseStreamId || '').trim();
+        if (streamId) {
+            if (itemStreamId === streamId) return item;
+            continue;
+        }
+        const itemAgent = String(item.dataset.einoAgent || '').trim();
+        const itemOrchestration = String(item.dataset.orchestration || '').trim();
+        if (agent && itemAgent === agent && itemOrchestration === orchestration) return item;
+    }
+    return null;
+}
+
+function responseStreamStateFromRestoredItem(progressId, item, responseData) {
+    if (!item) return null;
+    const data = responseData || {};
+    const contentEl = item.querySelector('.timeline-item-content');
+    item.dataset.responseStreamPlaceholder = '1';
+    return {
+        progressId: progressId,
+        itemId: item.id,
+        buffer: contentEl ? String(contentEl.textContent || '') : '',
+        streamMeta: data,
+        streamIdentity: buildMainResponseStreamIdentity(progressId, data),
+        streamId: data.streamId != null ? String(data.streamId).trim() : ''
+    };
+}
+
 // AI 思考流式输出：progressId -> Map(streamId -> { itemId, buffer })
 const thinkingStreamStateByProgressId = new Map();
 
@@ -1003,6 +1047,11 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
     if (copyBtn) copyBtn.remove();
 
     const newContent = content == null ? '' : String(content);
+    const normalizedContent = newContent.trim();
+    if (normalizedContent !== '处理中...' && normalizedContent !== 'Processing...') {
+        assistantElement.classList.remove('assistant-placeholder-content');
+        bubble.hidden = false;
+    }
     const html = renderMarkdown
         ? formatAssistantMarkdownContent(newContent)
         : escapeHtmlLocal(newContent).replace(/\n/g, '<br>');
@@ -1040,8 +1089,50 @@ const conversationExecutionTracker = {
     },
     isRunning(conversationId) {
         return !!conversationId && this.activeConversations.has(conversationId);
+    },
+    markRunning(conversationId) {
+        const id = String(conversationId || '').trim();
+        if (!id) return false;
+        this.activeConversations.add(id);
+        this.ready = true;
+        return true;
     }
 };
+
+function notifyConversationTaskStarted(conversationId) {
+    const id = String(conversationId || '').trim();
+    if (!id) return false;
+    conversationExecutionTracker.markRunning(id);
+    if (typeof window.updateChatPrimaryActionState === 'function') {
+        window.updateChatPrimaryActionState();
+    }
+    if (chatTaskSyncChannel) {
+        chatTaskSyncChannel.postMessage({ type: 'task-started', conversationId: id, at: Date.now() });
+    }
+    return true;
+}
+
+function initChatTaskSyncChannel() {
+    if (chatTaskSyncChannel || typeof BroadcastChannel !== 'function') return;
+    chatTaskSyncChannel = new BroadcastChannel(CHAT_TASK_SYNC_CHANNEL_NAME);
+    chatTaskSyncChannel.addEventListener('message', function (event) {
+        const payload = event && event.data;
+        if (!payload || payload.type !== 'task-started') return;
+        const id = String(payload.conversationId || '').trim();
+        if (!id) return;
+        conversationExecutionTracker.markRunning(id);
+        if (typeof window.updateChatPrimaryActionState === 'function') {
+            window.updateChatPrimaryActionState();
+        }
+        // 服务端任务注册可能比跨标签页通知晚一瞬，稍后由权威任务列表确认并挂载补流。
+        setTimeout(function () {
+            if (typeof loadActiveTasks === 'function') loadActiveTasks();
+        }, 180);
+    });
+}
+
+initChatTaskSyncChannel();
+window.notifyConversationTaskStarted = notifyConversationTaskStarted;
 
 const hitlPendingInterruptTracker = {
     pendingById: new Map(),
@@ -1222,6 +1313,7 @@ function markProgressCancelling(progressId) {
 }
 
 function finalizeProgressTask(progressId, finalLabel) {
+    stopLiveProgressLatestFollow(progressId);
     const stopBtn = document.getElementById(`${progressId}-stop-btn`);
     if (stopBtn) {
         stopBtn.disabled = true;
@@ -1494,6 +1586,7 @@ function addProgressMessage() {
     }
 
     startProgressElapsedClock(id);
+    startLiveProgressLatestFollow(id);
     return id;
 }
 
@@ -1519,6 +1612,7 @@ function toggleProgressDetails(progressId) {
 // 编排器开始输出最终回复时隐藏整条进度消息（过程已迁入助手气泡的「展开详情」，避免与进度卡重复）
 function hideProgressMessageForFinalReply(progressId) {
     if (!progressId) return;
+    stopLiveProgressLatestFollow(progressId);
     const el = document.getElementById(progressId);
     if (el) {
         el.style.display = 'none';
@@ -1526,12 +1620,16 @@ function hideProgressMessageForFinalReply(progressId) {
 }
 
 // 折叠所有进度详情
-function collapseAllProgressDetails(assistantMessageId, progressId) {
+function collapseAllProgressDetails(assistantMessageId, progressId, options) {
+    const forceCollapse = !!(options && options.force);
     // 折叠集成到MCP区域的详情
     if (assistantMessageId) {
         const detailsId = 'process-details-' + assistantMessageId;
         const detailsContainer = document.getElementById(detailsId);
-        if (detailsContainer && detailsContainer.dataset.userExpanded !== '1') {
+        if (detailsContainer && (forceCollapse || detailsContainer.dataset.userExpanded !== '1')) {
+            if (forceCollapse) {
+                delete detailsContainer.dataset.userExpanded;
+            }
             const timeline = detailsContainer.querySelector('.progress-timeline');
             if (timeline) {
                 timeline.classList.remove('expanded');
@@ -1580,8 +1678,7 @@ function getAssistantId() {
     return null;
 }
 
-// 将进度详情集成到工具调用区域（流式阶段助手消息不挂 mcp 条，结束时在此创建，避免图二整行 MCP 芯片样式）
-function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecutionIds) {
+function applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus) {
     const progressElement = document.getElementById(progressId);
     const progressStartedAt = progressElement && progressElement.dataset
         ? (progressElement.dataset.turnStartedAt || new Date(Number(progressElement.dataset.turnStartedAtMs) || Date.now()).toISOString())
@@ -1590,6 +1687,18 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
         ? Number(progressElement.dataset.turnStartedAtMs)
         : Date.now();
     const completedAt = new Date();
+    stopProgressElapsedClock(progressId);
+    if (!assistantElement || typeof window.setAssistantTurnTiming !== 'function') return;
+    window.setAssistantTurnTiming(assistantElement, {
+        startedAt: progressStartedAt,
+        completedAt: completedAt.toISOString(),
+        durationMs: Math.max(0, completedAt.getTime() - (Number.isFinite(progressStartedAtMs) ? progressStartedAtMs : completedAt.getTime())),
+        status: terminalStatus || 'completed'
+    });
+}
+
+// 将进度详情集成到工具调用区域（流式阶段助手消息不挂 mcp 条，结束时在此创建，避免图二整行 MCP 芯片样式）
+function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecutionIds, terminalStatus) {
     stopProgressElapsedClock(progressId);
 
     // 只 flush 终态标题/正文；完成后的详情回看统一走后端分页，不再复制实时 DOM 快照。
@@ -1617,14 +1726,7 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
     if (typeof window.ensureMcpCallSectionChrome === 'function') {
         window.ensureMcpCallSectionChrome(assistantElement, assistantMessageId);
     }
-    if (typeof window.setAssistantTurnTiming === 'function') {
-        window.setAssistantTurnTiming(assistantElement, {
-            startedAt: progressStartedAt,
-            completedAt: completedAt.toISOString(),
-            durationMs: Math.max(0, completedAt.getTime() - (Number.isFinite(progressStartedAtMs) ? progressStartedAtMs : completedAt.getTime())),
-            status: 'completed'
-        });
-    }
+    applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus || 'completed');
     const mcpSection = assistantElement.querySelector('.mcp-call-section');
     if (!mcpSection) {
         removeMessage(progressId);
@@ -1693,6 +1795,11 @@ function integrateProgressToMCPSection(progressId, assistantMessageId, mcpExecut
 
 const PROCESS_DETAILS_PAGE_SIZE = 50;
 const processDetailsAutoLoadObservers = new WeakMap();
+const processDetailsLatestFollowStates = new Map();
+const PROCESS_DETAILS_RESTORE_FOLLOW_MS = 6000;
+const PROCESS_DETAILS_FOLLOW_SCROLLBAR_GUTTER_PX = 18;
+// 只有用户真正滚到底部才恢复自动跟随；保留 2px 兼容亚像素滚动。
+const PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX = 2;
 
 function processDetailsContinuousLabel(kind) {
     if (kind === 'older') {
@@ -1836,6 +1943,216 @@ function scrollProcessDetailsToLatest(assistantMessageId, smooth = true) {
 
 window.scrollProcessDetailsToLatest = scrollProcessDetailsToLatest;
 
+function stopProcessDetailsLatestFollow(assistantMessageId) {
+    const key = String(assistantMessageId || '');
+    const state = processDetailsLatestFollowStates.get(key);
+    if (!state) return false;
+    state.stopped = true;
+    if (state.rafId) cancelAnimationFrame(state.rafId);
+    if (state.timeoutId) clearTimeout(state.timeoutId);
+    if (state.observer) state.observer.disconnect();
+    if (state.resizeObserver) state.resizeObserver.disconnect();
+    state.cleanup.forEach(function (cleanup) {
+        try { cleanup(); } catch (e) { /* ignore */ }
+    });
+    processDetailsLatestFollowStates.delete(key);
+    return true;
+}
+
+function stopAllProcessDetailsLatestFollow() {
+    Array.from(processDetailsLatestFollowStates.keys()).forEach(stopProcessDetailsLatestFollow);
+}
+
+/**
+ * 刷新恢复运行中会话时，迭代思考区有自己独立的滚动容器。
+ * 历史详情首屏、后续分帧渲染和 SSE 字符增量都会继续增高该容器，
+ * 因此不能只粘住外层 #chat-messages，也不能只在首屏完成时滚动一次。
+ */
+function startProcessDetailsLatestFollow(assistantMessageId, options) {
+    const opts = options || {};
+    const key = String(opts.stateKey || assistantMessageId || '');
+    if (!key) return false;
+    const explicitTimeline = opts.timeline && opts.timeline.nodeType === 1 ? opts.timeline : null;
+    const container = explicitTimeline
+        ? explicitTimeline.closest('.progress-container, .process-details-container')
+        : document.getElementById('process-details-' + key);
+    const timeline = explicitTimeline || (container && container.querySelector('.progress-timeline'));
+    if (!container || !timeline) return false;
+
+    stopProcessDetailsLatestFollow(key);
+    const persistent = !!opts.persistent;
+    const durationMs = Number.isFinite(Number(opts.durationMs))
+        ? Math.max(250, Number(opts.durationMs))
+        : PROCESS_DETAILS_RESTORE_FOLLOW_MS;
+    const state = {
+        stopped: false,
+        detached: false,
+        persistent: persistent,
+        lastScrollTop: timeline.scrollTop,
+        userScrollIntentUntil: 0,
+        touchLastY: null,
+        rafId: 0,
+        timeoutId: 0,
+        observer: null,
+        resizeObserver: null,
+        cleanup: []
+    };
+    processDetailsLatestFollowStates.set(key, state);
+
+    const detachForUserNavigation = function () {
+        state.detached = true;
+        if (state.rafId) {
+            cancelAnimationFrame(state.rafId);
+            state.rafId = 0;
+        }
+    };
+    const onWheel = function (event) {
+        if (!event) return;
+        if (Math.abs(event.deltaY) > 1) {
+            state.userScrollIntentUntil = Date.now() + 1200;
+        }
+        if (event.deltaY < -1) detachForUserNavigation();
+    };
+    const onPointerDown = function (event) {
+        if (!event) return;
+        const rect = timeline.getBoundingClientRect();
+        if (event.clientX >= rect.right - PROCESS_DETAILS_FOLLOW_SCROLLBAR_GUTTER_PX) {
+            state.userScrollIntentUntil = Date.now() + 1800;
+        }
+    };
+    const onKeyDown = function (event) {
+        if (!event) return;
+        if (['ArrowUp', 'PageUp', 'Home', 'ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) {
+            state.userScrollIntentUntil = Date.now() + 1200;
+        }
+        if (event.key === 'ArrowUp' || event.key === 'PageUp' || event.key === 'Home') {
+            detachForUserNavigation();
+        }
+    };
+    const onTouchStart = function (event) {
+        if (!event || !event.touches || event.touches.length !== 1) return;
+        state.touchLastY = event.touches[0].clientY;
+        state.userScrollIntentUntil = Date.now() + 1200;
+    };
+    const onTouchMove = function (event) {
+        if (!event || !event.touches || event.touches.length !== 1) return;
+        const nextY = event.touches[0].clientY;
+        state.userScrollIntentUntil = Date.now() + 1200;
+        if (state.touchLastY != null && nextY > state.touchLastY + 4) {
+            detachForUserNavigation();
+        }
+        state.touchLastY = nextY;
+    };
+    const onTouchEnd = function () {
+        state.touchLastY = null;
+    };
+    const onScroll = function () {
+        if (state.stopped) return;
+        const currentTop = timeline.scrollTop;
+        const scrolledUp = currentTop < state.lastScrollTop - 1;
+        const scrolledDown = currentTop > state.lastScrollTop + 1;
+        const distance = Math.max(0, timeline.scrollHeight - timeline.clientHeight - timeline.scrollTop);
+
+        // 第一次小幅上滑时仍可能处在“距底部 32px”阈值内，不能在同一个 scroll
+        // 事件里刚脱离又立即恢复，否则持续输出会把视口反复拉回底部。
+        // 刷新后重建历史迭代会引起无用户输入的滚动锚定变化；这种布局滚动
+        // 不能停止内层最新内容跟随，只有明确用户意图或已分离状态才保持分离。
+        if (scrolledUp && (state.detached || Date.now() <= state.userScrollIntentUntil)) {
+            detachForUserNavigation();
+        } else if (
+            state.detached &&
+            scrolledDown &&
+            Date.now() <= state.userScrollIntentUntil &&
+            distance <= PROCESS_DETAILS_FOLLOW_RESUME_THRESHOLD_PX
+        ) {
+            state.detached = false;
+            scheduleFollowLatest();
+        }
+        state.lastScrollTop = currentTop;
+    };
+    timeline.addEventListener('wheel', onWheel, { passive: true });
+    timeline.addEventListener('pointerdown', onPointerDown, { passive: true });
+    timeline.addEventListener('keydown', onKeyDown);
+    timeline.addEventListener('touchstart', onTouchStart, { passive: true });
+    timeline.addEventListener('touchmove', onTouchMove, { passive: true });
+    timeline.addEventListener('touchend', onTouchEnd, { passive: true });
+    timeline.addEventListener('scroll', onScroll, { passive: true });
+    state.cleanup.push(function () { timeline.removeEventListener('wheel', onWheel); });
+    state.cleanup.push(function () { timeline.removeEventListener('pointerdown', onPointerDown); });
+    state.cleanup.push(function () { timeline.removeEventListener('keydown', onKeyDown); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchstart', onTouchStart); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchmove', onTouchMove); });
+    state.cleanup.push(function () { timeline.removeEventListener('touchend', onTouchEnd); });
+    state.cleanup.push(function () { timeline.removeEventListener('scroll', onScroll); });
+
+    const followLatest = function () {
+        state.rafId = 0;
+        if (state.stopped || !timeline.isConnected) {
+            stopProcessDetailsLatestFollow(key);
+            return;
+        }
+        if (state.detached) return;
+        if (typeof opts.scrollToLatest === 'function') {
+            opts.scrollToLatest(timeline);
+        } else {
+            scrollProcessDetailsToLatest(String(assistantMessageId || ''), false);
+        }
+        state.lastScrollTop = timeline.scrollTop;
+        // 内层迭代区与外层对话区分别粘底；用户上滑内层后，本状态会暂停两者的自动跟随。
+        if (window.CyberStrikeChatScroll &&
+            typeof window.CyberStrikeChatScroll.scrollIfPinned === 'function') {
+            window.CyberStrikeChatScroll.scrollIfPinned(true);
+        }
+    };
+    const scheduleFollowLatest = function () {
+        if (state.stopped || state.detached || state.rafId) return;
+        state.rafId = requestAnimationFrame(followLatest);
+    };
+
+    state.observer = new MutationObserver(scheduleFollowLatest);
+    state.observer.observe(timeline, { childList: true, subtree: true, characterData: true });
+    if (typeof ResizeObserver === 'function') {
+        state.resizeObserver = new ResizeObserver(scheduleFollowLatest);
+        state.resizeObserver.observe(timeline);
+    }
+    scheduleFollowLatest();
+
+    if (!persistent) {
+        state.timeoutId = setTimeout(function () {
+            stopProcessDetailsLatestFollow(key);
+        }, durationMs);
+    }
+    return true;
+}
+
+function liveProgressLatestFollowKey(progressId) {
+    return 'live-progress:' + String(progressId || '');
+}
+
+function startLiveProgressLatestFollow(progressId) {
+    const id = String(progressId || '');
+    const timeline = id ? document.getElementById(id + '-timeline') : null;
+    if (!timeline) return false;
+    return startProcessDetailsLatestFollow(id, {
+        stateKey: liveProgressLatestFollowKey(id),
+        timeline: timeline,
+        persistent: true,
+        scrollToLatest: function (target) {
+            target.scrollTop = Math.max(0, target.scrollHeight - target.clientHeight);
+        }
+    });
+}
+
+function stopLiveProgressLatestFollow(progressId) {
+    return stopProcessDetailsLatestFollow(liveProgressLatestFollowKey(progressId));
+}
+
+window.startProcessDetailsLatestFollow = startProcessDetailsLatestFollow;
+window.stopProcessDetailsLatestFollow = stopProcessDetailsLatestFollow;
+window.stopAllProcessDetailsLatestFollow = stopAllProcessDetailsLatestFollow;
+window.startLiveProgressLatestFollow = startLiveProgressLatestFollow;
+window.stopLiveProgressLatestFollow = stopLiveProgressLatestFollow;
+
 /**
  * 分页加载过程详情并增量渲染。默认全量加载供恢复流程使用；
  * 用户手动展开时由任务状态选择首个历史页或最新页，滚动到边界后自动加载相邻页。
@@ -1933,6 +2250,11 @@ async function loadProcessDetailsPaginated(assistantMessageId, backendMessageId,
         await new Promise((resolve) => requestAnimationFrame(resolve));
     }
     if (opts.initialLatest) {
+        // renderProcessDetails 可能继续分帧追加，且恢复后的 SSE 会继续增长同一条思考文本；
+        // 为迭代详情单独建立短时粘底，而不只滚动外层对话容器。
+        startProcessDetailsLatestFollow(assistantMessageId, {
+            durationMs: PROCESS_DETAILS_RESTORE_FOLLOW_MS
+        });
         requestAnimationFrame(function () {
             scrollProcessDetailsToLatest(assistantMessageId, false);
             if (detailsContainer) {
@@ -3171,8 +3493,9 @@ function handleStreamEvent(event, progressElement, progressId,
                 if (assistantElement) {
                     const detailsId = 'process-details-' + assistantId;
                     if (!document.getElementById(detailsId)) {
-                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : []);
+                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], 'cancelled');
                     } else if (preferredMessageId) {
+                        applyAssistantTurnTimingFromProgress(progressId, assistantElement, 'cancelled');
                         maybeReloadLazyProcessDetails(assistantId);
                     }
                     setTimeout(() => {
@@ -3226,6 +3549,14 @@ function handleStreamEvent(event, progressElement, progressId,
                 responseStreamStateByProgressId.set(progressId, prevStream);
                 break;
             }
+            const restoredItem = findRestoredMainResponseStreamItem(timeline, responseData);
+            if (restoredItem) {
+                responseStreamStateByProgressId.set(
+                    progressId,
+                    responseStreamStateFromRestoredItem(progressId, restoredItem, responseData)
+                );
+                break;
+            }
             const title = einoMainStreamPlanningTitle(responseData);
             const itemId = addTimelineItem(timeline, 'thinking', {
                 title: title,
@@ -3260,7 +3591,23 @@ function handleStreamEvent(event, progressElement, progressId,
             let state = responseStreamStateByProgressId.get(progressId);
             const incomingStreamId = responseData.streamId != null ? String(responseData.streamId).trim() : '';
             if (!state) {
-                state = { progressId: progressId, itemId: null, buffer: '', streamMeta: responseData, streamId: incomingStreamId };
+                const restoredItem = findRestoredMainResponseStreamItem(timeline, responseData);
+                state = responseStreamStateFromRestoredItem(progressId, restoredItem, responseData);
+                if (!state) {
+                    const itemId = addTimelineItem(timeline, 'thinking', {
+                        title: einoMainStreamPlanningTitle(responseData),
+                        message: ' ',
+                        data: Object.assign({}, responseData, { responseStreamPlaceholder: true })
+                    });
+                    state = {
+                        progressId: progressId,
+                        itemId: itemId,
+                        buffer: '',
+                        streamMeta: responseData,
+                        streamIdentity: buildMainResponseStreamIdentity(progressId, responseData),
+                        streamId: incomingStreamId
+                    };
+                }
                 responseStreamStateByProgressId.set(progressId, state);
             } else if (!state.streamMeta && responseData && (responseData.einoAgent || responseData.orchestration)) {
                 state.streamMeta = responseData;
@@ -3430,8 +3777,11 @@ function handleStreamEvent(event, progressElement, progressId,
                 if (assistantElement) {
                     const detailsId = 'process-details-' + assistantId;
                     if (!document.getElementById(detailsId)) {
-                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : []);
+                        const terminalStatus = event.data && event.data.errorType === 'timeout' ? 'timeout' : 'failed';
+                        integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], terminalStatus);
                     } else if (preferredMessageId) {
+                        const terminalStatus = event.data && event.data.errorType === 'timeout' ? 'timeout' : 'failed';
+                        applyAssistantTurnTimingFromProgress(progressId, assistantElement, terminalStatus);
                         maybeReloadLazyProcessDetails(assistantId);
                     }
                     setTimeout(() => {
@@ -4796,10 +5146,76 @@ const taskEventReplayAttachState = {
     abortController: null
 };
 
+function assistantMessageNeedsTaskReplayReconcile(assistantEl) {
+    if (!assistantEl) return false;
+    if (assistantEl.classList.contains('assistant-placeholder-content')) return true;
+    const bubble = assistantEl.querySelector('.message-bubble');
+    const text = bubble ? String(bubble.textContent || '').trim() : '';
+    return !!(bubble && bubble.hidden) || text === '处理中...' || text === 'Processing...';
+}
+
+/**
+ * task-events 订阅存在一个不可避免的竞态：任务列表仍显示 running，但在 SSE 请求
+ * 真正建立前任务已经完成。此时不能只停止计时，必须从数据库对账最后一条助手正文。
+ */
+async function reconcileConversationAfterTaskReplay(conversationId, keepFollowing) {
+    if (!conversationId || typeof apiFetch !== 'function') return false;
+    if (String(window.currentConversationId || '') !== String(conversationId)) return false;
+
+    const response = await apiFetch(
+        '/api/conversations/' + encodeURIComponent(String(conversationId)) + '?include_process_details=0'
+    );
+    if (!response.ok) return false;
+    const conversation = await response.json().catch(function () { return {}; });
+    const messages = Array.isArray(conversation.messages) ? conversation.messages : [];
+    let finalMessage = null;
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i] && messages[i].role === 'assistant') {
+            finalMessage = messages[i];
+            break;
+        }
+    }
+    const assistantEl = findLastAssistantMessageElInChat();
+    if (!finalMessage || !assistantEl || !assistantEl.id) return false;
+
+    updateAssistantBubbleContent(assistantEl.id, finalMessage.content || '', true);
+    if (finalMessage.id) {
+        applyBackendMessageIdToAssistantDom(assistantEl.id, finalMessage.id);
+    }
+    if (typeof window.setAssistantTurnTiming === 'function') {
+        const startedAt = finalMessage.createdAt || null;
+        const completedAt = finalMessage.updatedAt || startedAt;
+        window.setAssistantTurnTiming(assistantEl, {
+            startedAt: startedAt,
+            completedAt: completedAt,
+            status: 'completed'
+        });
+    }
+    if (finalMessage.id && typeof loadProcessDetailsPaginated === 'function') {
+        await loadProcessDetailsPaginated(assistantEl.id, finalMessage.id, {
+            initialLatest: true,
+            autoLoadAll: false
+        });
+    } else {
+        await refreshLastAssistantProcessDetails(conversationId);
+    }
+    collapseAllProgressDetails(assistantEl.id, null, { force: true });
+    if (keepFollowing && window.CyberStrikeChatScroll) {
+        if (typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function') {
+            window.CyberStrikeChatScroll.settleToBottomIfFollowing(24);
+        } else if (typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function') {
+            window.CyberStrikeChatScroll.forceScrollToBottom(false);
+        }
+    }
+    if (typeof loadConversations === 'function') loadConversations();
+    return true;
+}
+
 function cancelRunningTaskEventStream(nextConversationId) {
     const nextId = String(nextConversationId || '').trim();
     const activeId = String(taskEventReplayAttachState.conversationId || '').trim();
     if (!activeId || activeId === nextId) return false;
+    stopAllProcessDetailsLatestFollow();
     if (taskEventReplayAttachState.abortController) {
         taskEventReplayAttachState.abortController.abort();
     }
@@ -4831,10 +5247,29 @@ async function attachRunningTaskEventStream(conversationId) {
             const active = (j.tasks || []).some(function (t) {
                 return t && t.conversationId === conversationId && (t.status === 'running' || t.status === 'cancelling');
             });
-            if (!active) return false;
+            if (!active) {
+                const staleAssistant = findLastAssistantMessageElInChat();
+                if (assistantMessageNeedsTaskReplayReconcile(staleAssistant)) {
+                    await reconcileConversationAfterTaskReplay(conversationId, true);
+                }
+                return false;
+            }
 
             const asEl = findLastAssistantMessageElInChat();
             if (!asEl || !asEl.id) return false;
+            // 先发起 SSE 请求，再加载长过程详情，避免详情分页期间产生的增量完全错过。
+            const url = '/api/agent-loop/task-events?conversationId=' + encodeURIComponent(conversationId);
+            const eventStreamResponsePromise = apiFetch(url, {
+                method: 'GET',
+                headers: { Accept: 'text/event-stream' },
+                signal: abortController.signal
+            }).then(function (response) {
+                return { response: response, error: null };
+            }, function (error) {
+                // 详情分页可能持续较久；先接住网络异常，避免在稍后 await 前产生
+                // unhandledrejection，再交给当前 attach 流程统一清理。
+                return { response: null, error: error };
+            });
             const backendId = asEl.dataset && asEl.dataset.backendMessageId;
             if (backendId && typeof renderProcessDetails === 'function') {
                 // 运行中会话可能远超默认 50 条；切换时只恢复最新一页，旧记录由滚动分页补齐。
@@ -4867,10 +5302,18 @@ async function attachRunningTaskEventStream(conversationId) {
             if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamBegin === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamBegin(conversationId, asEl.id, progressId);
             }
+            // task-events 补流期间持续跟随迭代思考区；用户向上滚动详情时会立即解除。
+            startProcessDetailsLatestFollow(asEl.id, { persistent: true });
 
             // 刷新后的初始消息渲染已经滚到底部，但恢复最新一页详情会再次增高 DOM。
             // 若用户期间没有主动上滑，完成补页后重新精确粘底；主动浏览历史时不抢滚动。
             if (
+                window.CyberStrikeChatScroll &&
+                typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function' &&
+                (typeof window.captureScrollPinState !== 'function' || window.captureScrollPinState())
+            ) {
+                window.CyberStrikeChatScroll.settleToBottomIfFollowing(12);
+            } else if (
                 window.CyberStrikeChatScroll &&
                 typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function' &&
                 (typeof window.captureScrollPinState !== 'function' || window.captureScrollPinState())
@@ -4878,13 +5321,11 @@ async function attachRunningTaskEventStream(conversationId) {
                 window.CyberStrikeChatScroll.forceScrollToBottom(false);
             }
 
-            const url = '/api/agent-loop/task-events?conversationId=' + encodeURIComponent(conversationId);
-            const response = await apiFetch(url, {
-                method: 'GET',
-                headers: { Accept: 'text/event-stream' },
-                signal: abortController.signal
-            });
+            const eventStreamResult = await eventStreamResponsePromise;
+            if (eventStreamResult.error) throw eventStreamResult.error;
+            const response = eventStreamResult.response;
             if (!response.ok) {
+                stopProcessDetailsLatestFollow(asEl.id);
                 clearCsTaskReplay();
                 if (progressTaskState.has(progressId)) {
                     progressTaskState.delete(progressId);
@@ -4892,6 +5333,7 @@ async function attachRunningTaskEventStream(conversationId) {
                 if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                     window.CyberStrikeChatScroll.onTaskEventStreamEnd();
                 }
+                await reconcileConversationAfterTaskReplay(conversationId, true);
                 return false;
             }
 
@@ -4942,10 +5384,17 @@ async function attachRunningTaskEventStream(conversationId) {
             if (window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamEnd();
             }
+            stopProcessDetailsLatestFollow(asEl.id);
             if (typeof loadActiveTasks === 'function') loadActiveTasks();
+            if (!replaySawDone) {
+                // 任务结束会关闭事件总线；若终态帧在连接竞态或拥塞中丢失，仍从 DB 对账正文。
+                const keepFollowingOnClose = typeof window.captureScrollPinState === 'function'
+                    ? window.captureScrollPinState()
+                    : true;
+                await reconcileConversationAfterTaskReplay(conversationId, keepFollowingOnClose);
+            }
             if (replaySawDone && typeof window.loadConversation === 'function' && window.currentConversationId === conversationId) {
                 const replayTimeline = document.getElementById('process-details-' + asEl.id + '-timeline');
-                const keepExpanded = !!(replayTimeline && replayTimeline.classList.contains('expanded'));
                 const keepFollowingFinalRender = typeof window.captureScrollPinState === 'function'
                     ? window.captureScrollPinState()
                     : true;
@@ -4953,14 +5402,20 @@ async function attachRunningTaskEventStream(conversationId) {
                 // loadConversation 使用轻量消息接口，会把详情重新置为懒加载状态；
                 // 任务终态再从 DB 全量对账一次，补回订阅建立期间可能错过的事件。
                 await refreshLastAssistantProcessDetails(conversationId);
-                if (keepExpanded) {
-                    const finalAssistant = findLastAssistantMessageElInChat();
-                    if (finalAssistant && finalAssistant.id) {
-                        expandProcessDetailsTimeline(finalAssistant.id);
-                    }
+                // 补流完成即回到终态摘要；刷新期间为展示实时迭代而自动展开的详情
+                // 不应继续保持展开。用户之后仍可通过“展开详情”手动查看。
+                const finalAssistant = findLastAssistantMessageElInChat();
+                if (finalAssistant && finalAssistant.id) {
+                    collapseAllProgressDetails(finalAssistant.id, progressId, { force: true });
                 }
                 // 最终消息和详情重绘都会增高 DOM；仅当用户之前仍在跟随时重新粘底。
                 if (
+                    keepFollowingFinalRender &&
+                    window.CyberStrikeChatScroll &&
+                    typeof window.CyberStrikeChatScroll.settleToBottomIfFollowing === 'function'
+                ) {
+                    window.CyberStrikeChatScroll.settleToBottomIfFollowing(18);
+                } else if (
                     keepFollowingFinalRender &&
                     window.CyberStrikeChatScroll &&
                     typeof window.CyberStrikeChatScroll.forceScrollToBottom === 'function'
@@ -4979,6 +5434,15 @@ async function attachRunningTaskEventStream(conversationId) {
             }
             if (ownsCurrentAttach && window.CyberStrikeChatScroll && typeof window.CyberStrikeChatScroll.onTaskEventStreamEnd === 'function') {
                 window.CyberStrikeChatScroll.onTaskEventStreamEnd();
+            }
+            if (ownsCurrentAttach) {
+                const currentAssistant = findLastAssistantMessageElInChat();
+                if (currentAssistant && currentAssistant.id) {
+                    stopProcessDetailsLatestFollow(currentAssistant.id);
+                }
+            }
+            if (ownsCurrentAttach && !abortController.signal.aborted) {
+                abortController.abort();
             }
             return false;
         } finally {
@@ -5328,6 +5792,7 @@ function mergeToolResultIntoCallItem(item, data, options) {
         item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
         item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
         item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+        applyToolCallStatus(item, item.dataset.toolDisplayStatus);
         return true;
     }
 
@@ -5367,6 +5832,7 @@ function mergeToolResultIntoCallItem(item, data, options) {
     item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
     item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
     item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+    applyToolCallStatus(item, item.dataset.toolDisplayStatus);
     return true;
 }
 
@@ -5477,6 +5943,54 @@ window.getToolResultDisplayState = getToolResultDisplayState;
 window.getBackgroundRunningToolLabel = getBackgroundRunningToolLabel;
 window.buildToolResultSectionHtml = buildToolResultSectionHtml;
 
+function getToolCallStatusPresentation(status) {
+    const normalized = String(status || '').toLowerCase();
+    const translate = function (key, fallback) {
+        if (typeof window.t !== 'function') return fallback;
+        const value = window.t(key);
+        return value && value !== key ? value : fallback;
+    };
+    if (normalized === 'running') {
+        return { status: normalized, itemClass: 'tool-call-running', badgeClass: 'tool-status-running', label: translate('timeline.running', '执行中...'), icon: '' };
+    }
+    if (normalized === 'background_running') {
+        return { status: normalized, itemClass: 'tool-call-running', badgeClass: 'tool-status-running', label: getBackgroundRunningToolLabel(), icon: '' };
+    }
+    if (normalized === 'completed') {
+        return { status: normalized, itemClass: 'tool-call-completed', badgeClass: 'tool-status-completed', label: translate('timeline.completed', '已完成'), icon: '✅ ' };
+    }
+    if (normalized === 'failed') {
+        return { status: normalized, itemClass: 'tool-call-failed', badgeClass: 'tool-status-failed', label: translate('timeline.execFailed', '执行失败'), icon: '❌ ' };
+    }
+    if (normalized === 'result_missing') {
+        return { status: normalized, itemClass: 'tool-call-incomplete', badgeClass: 'tool-status-incomplete', label: translate('timeline.resultMissing', '结果记录缺失'), icon: '⚠️ ' };
+    }
+    return null;
+}
+
+// 实时事件、刷新后的历史记录和语言切换都复用同一套工具状态展示。
+function applyToolCallStatus(item, status) {
+    if (!item) return;
+    const presentation = getToolCallStatusPresentation(status);
+    const titleElement = item.querySelector('.timeline-item-title');
+    if (!titleElement) return;
+
+    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed', 'tool-call-incomplete');
+    const previousBadge = titleElement.querySelector('.tool-status-badge');
+    if (previousBadge) previousBadge.remove();
+    if (!presentation) {
+        delete item.dataset.toolDisplayStatus;
+        return;
+    }
+
+    item.dataset.toolDisplayStatus = presentation.status;
+    item.classList.add(presentation.itemClass);
+    const badge = document.createElement('span');
+    badge.className = 'tool-status-badge ' + presentation.badgeClass;
+    badge.textContent = presentation.icon + presentation.label;
+    titleElement.appendChild(badge);
+}
+
 // 更新工具调用状态
 function updateToolCallStatus(progressId, toolCallId, status) {
     const mapping = getToolCallMapping(progressId, toolCallId);
@@ -5485,35 +5999,7 @@ function updateToolCallStatus(progressId, toolCallId, status) {
     const item = document.getElementById(mapping.itemId);
     if (!item) return;
     
-    const titleElement = item.querySelector('.timeline-item-title');
-    if (!titleElement) return;
-    
-    // 移除之前的状态类
-    item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
-    
-    const runningLabel = typeof window.t === 'function' ? window.t('timeline.running') : '执行中...';
-    const completedLabel = typeof window.t === 'function' ? window.t('timeline.completed') : '已完成';
-    const failedLabel = typeof window.t === 'function' ? window.t('timeline.execFailed') : '执行失败';
-    const backgroundRunningLabel = getBackgroundRunningToolLabel();
-    let statusText = '';
-    if (status === 'running' || status === 'background_running') {
-        item.classList.add('tool-call-running');
-        statusText = ' <span class="tool-status-badge tool-status-running">' +
-            escapeHtml(status === 'background_running' ? backgroundRunningLabel : runningLabel) +
-            '</span>';
-    } else if (status === 'completed') {
-        item.classList.add('tool-call-completed');
-        statusText = ' <span class="tool-status-badge tool-status-completed">✅ ' + escapeHtml(completedLabel) + '</span>';
-    } else if (status === 'failed') {
-        item.classList.add('tool-call-failed');
-        statusText = ' <span class="tool-status-badge tool-status-failed">❌ ' + escapeHtml(failedLabel) + '</span>';
-    }
-    
-    // 更新标题（保留原有文本，追加状态）
-    const originalText = titleElement.innerHTML;
-    // 移除之前可能存在的状态标记
-    const cleanText = originalText.replace(/\s*<span class="tool-status-badge[^>]*>.*?<\/span>/g, '');
-    titleElement.innerHTML = cleanText + statusText;
+    applyToolCallStatus(item, status);
 }
 
 // 添加时间线项目
@@ -5672,10 +6158,15 @@ function addTimelineItem(timeline, type, options) {
             }
         } else if (terminalStatus === 'completed' || terminalStatus === 'failed') {
             item.dataset.toolSuccess = terminalStatus === 'completed' ? '1' : '0';
+            item.dataset.toolDisplayStatus = terminalStatus;
             item.classList.add(terminalStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed');
         } else if (terminalStatus === 'result_missing') {
+            item.dataset.toolDisplayStatus = 'result_missing';
             item.classList.add('tool-call-incomplete');
             item.title = typeof window.t === 'function' ? window.t('timeline.resultMissing') : '结果记录缺失';
+        } else if (terminalStatus === 'running' || terminalStatus === 'background_running') {
+            item.dataset.toolDisplayStatus = terminalStatus;
+            item.classList.add('tool-call-running');
         }
     }
     if ((type === 'hitl_interrupt' || type === 'hitl_audit_agent_started' || type === 'hitl_audit_agent' || type === 'hitl_resumed' || type === 'hitl_rejected') && options.data && options.data.interruptId != null && String(options.data.interruptId).trim() !== '') {
@@ -5705,6 +6196,9 @@ function addTimelineItem(timeline, type, options) {
     }
     if (options.data && options.data.orchestration != null && String(options.data.orchestration).trim() !== '') {
         item.dataset.orchestration = String(options.data.orchestration).trim();
+    }
+    if (options.data && options.data.streamId != null && String(options.data.streamId).trim() !== '') {
+        item.dataset.responseStreamId = String(options.data.streamId).trim();
     }
     if (options.data && options.data.responseStreamPlaceholder === true) {
         item.dataset.responseStreamPlaceholder = '1';
@@ -5846,6 +6340,15 @@ function addTimelineItem(timeline, type, options) {
     }
 
     item.innerHTML = content;
+    if (type === 'tool_call') {
+        let initialToolStatus = item.dataset.toolDisplayStatus || '';
+        if (!initialToolStatus && item.classList.contains('tool-call-running')) {
+            initialToolStatus = 'running';
+        }
+        if (initialToolStatus) {
+            applyToolCallStatus(item, initialToolStatus);
+        }
+    }
     if (type === 'iteration') {
         const scope = options.data && options.data.einoScope != null
             ? String(options.data.einoScope).trim()
@@ -5921,6 +6424,58 @@ function loadActiveTasks(showErrors = false) {
     return activeTasksLoadPromise;
 }
 
+function syncVisibleConversationTaskReplay(tasks) {
+    const conversationId = String(window.currentConversationId ||
+        (typeof currentConversationId === 'string' ? currentConversationId : '') || '').trim();
+    if (!conversationId) return false;
+    const active = (Array.isArray(tasks) ? tasks : []).some(function (task) {
+        return task && String(task.conversationId || '').trim() === conversationId &&
+            !TASK_FINAL_STATUSES.has(String(task.status || '').toLowerCase());
+    });
+    if (!active) {
+        if (visibleConversationReplaySyncId === conversationId && !visibleConversationReplaySyncPromise) {
+            visibleConversationReplaySyncId = '';
+        }
+        return false;
+    }
+    if (shouldSkipTaskEventReplayAttach(conversationId)) return false;
+    if (
+        taskEventReplayAttachState.conversationId === conversationId &&
+        taskEventReplayAttachState.inFlightPromise
+    ) {
+        return true;
+    }
+    if (visibleConversationReplaySyncPromise && visibleConversationReplaySyncId === conversationId) {
+        return true;
+    }
+    visibleConversationReplaySyncId = conversationId;
+    visibleConversationReplaySyncPromise = Promise.resolve()
+        .then(async function () {
+            // 另一标签页已新增用户消息和运行中助手轮次；先重载轻量历史，避免把补流挂到旧助手消息上。
+            if (typeof window.loadConversation === 'function') {
+                await window.loadConversation(conversationId);
+            }
+            if (
+                String(window.currentConversationId || '') === conversationId &&
+                typeof attachRunningTaskEventStream === 'function' &&
+                !shouldSkipTaskEventReplayAttach(conversationId)
+            ) {
+                return attachRunningTaskEventStream(conversationId);
+            }
+            return false;
+        })
+        .catch(function (error) {
+            console.warn('同步其他标签页的运行中对话失败:', error);
+            return false;
+        })
+        .finally(function () {
+            if (visibleConversationReplaySyncId === conversationId) {
+                visibleConversationReplaySyncPromise = null;
+            }
+        });
+    return true;
+}
+
 function getActiveTaskDisplayName(task) {
     const _t = function (k) { return typeof window.t === 'function' ? window.t(k) : k; };
     const unnamedTaskText = _t('tasks.unnamedTask');
@@ -5960,6 +6515,7 @@ function renderActiveTasks(tasks) {
     if (typeof updateAttackChainAvailability === 'function') {
         updateAttackChainAvailability();
     }
+    syncVisibleConversationTaskReplay(normalizedTasks);
 
     if (normalizedTasks.length === 0) {
         bar.style.display = 'none';
@@ -8423,6 +8979,9 @@ function refreshProgressAndTimelineI18n() {
                 ? formatToolCallTimelineTitle(name, index, total)
                 : _t('chat.callTool', { name: name, index: index, total: total });
             titleSpan.textContent = ap + '\uD83D\uDD27 ' + callTitle;
+            if (item.dataset.toolDisplayStatus) {
+                applyToolCallStatus(item, item.dataset.toolDisplayStatus);
+            }
         } else if (type === 'tool_result' && (item.dataset.toolName !== undefined || item.dataset.toolSuccess !== undefined)) {
             const name = (item.dataset.toolName != null && item.dataset.toolName !== '') ? item.dataset.toolName : _t('chat.unknownTool');
             const displayStatus = item.dataset.toolDisplayStatus || '';

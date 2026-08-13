@@ -23,11 +23,19 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260812-4">
+    <script>
+        (function () {
+            var initialPage = String(window.location.hash || '').replace(/^#/, '').split('?')[0];
+            if (initialPage && initialPage !== 'dashboard') {
+                document.documentElement.classList.add('initial-route-pending');
+            }
+        })();
+    </script>
+    <link rel="stylesheet" href="/static/css/style.css?v=20260813-5">
 	<link rel="stylesheet" href="/static/css/asm.css?v=20260813-8">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <script src="/static/js/router.js?v=20260811-2"></script>
+    <script src="/static/js/router.js?v=20260813-2"></script>
 </head>
 <body>
     <div id="login-overlay" class="login-overlay" style="display: none;">
@@ -7028,8 +7036,8 @@
     <script src="/static/vendor/i18next.min.js"></script>
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/theme.js"></script>
-    <script src="/static/js/builtin-tools.js?v=20260811-1"></script>
-    <script src="/static/js/auth.js"></script>
+    <script src="/static/js/builtin-tools.js"></script>
+    <script src="/static/js/auth.js?v=20260813-1"></script>
     <script src="/static/js/modal.js"></script>
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
@@ -7037,9 +7045,9 @@
 	<script src="/static/js/asm.js?v=20260813-5"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
-    <script src="/static/js/chat-scroll.js?v=20260812-1"></script>
-    <script src="/static/js/monitor.js?v=20260812-2"></script>
-    <script src="/static/js/chat.js?v=20260812-5"></script>
+    <script src="/static/js/chat-scroll.js?v=20260813-6"></script>
+    <script src="/static/js/monitor.js?v=20260813-9"></script>
+    <script src="/static/js/chat.js?v=20260813-3"></script>
     <script src="/static/js/hitl.js?v=20260811-4"></script>
     <script src="/static/js/settings.js?v=20260811-1"></script>
     <script src="/static/js/audit-datetime-picker.js"></script>
@@ -7051,7 +7059,7 @@
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
-    <script src="/static/js/projects.js?v=20260812-4"></script>
+    <script src="/static/js/projects.js?v=20260812-6"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>

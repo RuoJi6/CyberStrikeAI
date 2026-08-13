@@ -1,4 +1,15 @@
 let currentConversationId = null;
+
+/** Persist the visible chat in the URL so a reload can restore and reconnect it. */
+function syncChatConversationHash(conversationId) {
+    const normalizedConversationId = String(conversationId || '').trim();
+    if (!normalizedConversationId || window.location.hash.split('?')[0] !== '#chat') return;
+    const targetHash = '#chat?conversation=' + encodeURIComponent(normalizedConversationId);
+    if (window.location.hash !== targetHash) {
+        window.history.replaceState(null, '', targetHash);
+    }
+}
+window.syncChatConversationHash = syncChatConversationHash;
 let loadConversationRequestSeq = 0;
 let loadConversationAbortController = null;
 
@@ -2046,6 +2057,17 @@ async function sendMessage() {
         return;
     }
 
+    // Enter 会直接调用 sendMessage；同一会话在其他标签页已启动任务时，
+    // 必须在渲染用户气泡和发起 POST 前做一次权威状态同步，避免生成一轮“已有任务执行中”伪对话。
+    if (currentConversationId && typeof loadActiveTasks === 'function') {
+        await loadActiveTasks();
+    }
+    if (isCurrentChatTaskActive()) {
+        updateChatPrimaryActionState();
+        showChatToast(chatTranslate('chat.taskAlreadyRunning', '当前会话已有任务正在执行，请先等待完成或停止任务。'), 'info');
+        return;
+    }
+
     if (hasAttachments) {
         const needWait = chatAttachments.some((a) => a.uploading);
         if (needWait) {
@@ -2173,6 +2195,9 @@ async function sendMessage() {
         detached: false
     };
     window.__csAgentLiveStream = liveStreamState;
+    if (streamConversationId && typeof window.notifyConversationTaskStarted === 'function') {
+        window.notifyConversationTaskStarted(streamConversationId);
+    }
     updateChatPrimaryActionState();
     loadActiveTasks();
     let assistantMessageId = null;
@@ -3147,8 +3172,31 @@ function wrapTablesInBubble(bubble) {
     });
 }
 
+const PROJECT_NAME_DISPLAY_MAX_CHARACTERS = 12;
+
+/** 仅限制项目名的界面展示，不修改实际保存的名称。 */
+function formatProjectNameForDisplay(value) {
+    const fullName = String(value == null ? '' : value);
+    const characters = Array.from(fullName);
+    if (characters.length <= PROJECT_NAME_DISPLAY_MAX_CHARACTERS) return fullName;
+    return `${characters.slice(0, PROJECT_NAME_DISPLAY_MAX_CHARACTERS).join('')}…`;
+}
+
+function applyProjectNameDisplay(element, value, fallback = '') {
+    if (!element) return '';
+    const fullName = String(value || fallback || '');
+    element.textContent = formatProjectNameForDisplay(fullName);
+    element.dataset.fullName = fullName;
+    element.title = fullName;
+    return fullName;
+}
+
+window.formatProjectNameForDisplay = formatProjectNameForDisplay;
+window.applyProjectNameDisplay = applyProjectNameDisplay;
+
 function getChatWelcomeProjectName() {
-    const projectText = document.getElementById('chat-project-text')?.textContent?.trim();
+    const projectElement = document.getElementById('chat-project-text');
+    const projectText = (projectElement?.dataset?.fullName || projectElement?.textContent || '').trim();
     return projectText || (typeof window.t === 'function' ? window.t('projects.noProject') : '无项目');
 }
 
@@ -3184,7 +3232,7 @@ function updateChatWelcomeTitle(title) {
             : ' 项目中测试什么？';
         const projectName = document.createElement('span');
         projectName.className = 'chat-welcome-project-name';
-        projectName.textContent = project;
+        applyProjectNameDisplay(projectName, project);
         title.replaceChildren(document.createTextNode(prefix), projectName, document.createTextNode(suffix));
     }
 
@@ -3291,6 +3339,13 @@ function addMessage(role, content, mcpExecutionIds = null, progressId = null, cr
     }
     
     bubble.innerHTML = formattedContent;
+
+    // 刷新恢复运行中会话时，后端正文可能仍是持久化占位值“处理中...”。
+    // 保留消息节点供迭代详情和最终回复复用，但不要把占位值显示成助手正文。
+    if (role === 'assistant' && options && options.hideAssistantPlaceholder) {
+        messageDiv.classList.add('assistant-placeholder-content');
+        bubble.hidden = true;
+    }
     
     if (typeof window.csMarkdownSanitize !== 'undefined') {
         window.csMarkdownSanitize.stripSuspiciousImages(bubble);
@@ -4537,6 +4592,24 @@ function assistantTurnTimestamp(value) {
     return Number.isFinite(n) ? n : NaN;
 }
 
+function assistantTurnTerminalState(processDetails) {
+    if (!Array.isArray(processDetails)) return null;
+    for (let i = processDetails.length - 1; i >= 0; i--) {
+        const detail = processDetails[i] || {};
+        const eventType = String(detail.eventType || '').trim().toLowerCase();
+        if (eventType === 'cancelled') {
+            return { status: 'cancelled', completedAt: detail.createdAt || null, detail: detail };
+        }
+        if (eventType === 'timeout') {
+            return { status: 'timeout', completedAt: detail.createdAt || null, detail: detail };
+        }
+        if (eventType === 'error') {
+            return { status: 'failed', completedAt: detail.createdAt || null, detail: detail };
+        }
+    }
+    return null;
+}
+
 let assistantTurnElapsedTimer = null;
 
 function syncRunningAssistantTurnSummaries() {
@@ -4611,9 +4684,18 @@ function syncAssistantTurnSummary(messageElementOrId) {
             : 0;
     }
     const duration = formatAssistantTurnDuration(durationMs);
-    const text = status === 'running'
-        ? (typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : '已处理 ' + duration)
-        : (typeof window.t === 'function' ? window.t('chat.turnElapsedComplete', { duration: duration }) : '耗时 ' + duration);
+    let text;
+    if (status === 'running') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : '已处理 ' + duration;
+    } else if (status === 'cancelled') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedCancelled', { duration: duration }) : '已中断 · 耗时 ' + duration;
+    } else if (status === 'timeout') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedTimeout', { duration: duration }) : '已超时 · 耗时 ' + duration;
+    } else if (status === 'failed') {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedFailed', { duration: duration }) : '执行失败 · 耗时 ' + duration;
+    } else {
+        text = typeof window.t === 'function' ? window.t('chat.turnElapsedComplete', { duration: duration }) : '耗时 ' + duration;
+    }
     label.innerHTML = `
         <span class="turn-process-leading">
             <span class="turn-process-status-dot${status === 'running' ? ' is-running' : ''}" aria-hidden="true"></span>
@@ -5767,6 +5849,12 @@ async function prefetchLastAssistantProcessDetails() {
 }
 
 async function loadConversation(conversationId) {
+    // Keep the visible conversation addressable across a full page refresh.
+    // Sidebar/project entries call loadConversation directly (rather than the
+    // router helper), so without this synchronization #chat loses the active
+    // conversation and reload falls back to the welcome screen instead of
+    // reconnecting the running task event stream.
+    syncChatConversationHash(conversationId);
     const seq = ++loadConversationRequestSeq;
     const previousConversationId = currentConversationId;
     cancelPendingConversationLoad();
@@ -5921,15 +6009,14 @@ async function loadConversation(conversationId) {
                 if (msg.role === 'user' && isInterruptContinueInjectChatMessage(msg.content)) {
                     return;
                 }
+                const assistantContent = String(msg && msg.content != null ? msg.content : '').trim();
+                const terminalState = msg && msg.role === 'assistant'
+                    ? assistantTurnTerminalState(msg.processDetails)
+                    : null;
                 let displayContent = msg.content;
-                if (msg.role === 'assistant' && msg.content === '处理中...' && msg.processDetails && msg.processDetails.length > 0) {
-                    for (let i = msg.processDetails.length - 1; i >= 0; i--) {
-                        const detail = msg.processDetails[i];
-                        if (detail.eventType === 'error' || detail.eventType === 'cancelled') {
-                            displayContent = detail.message || msg.content;
-                            break;
-                        }
-                    }
+                if (msg.role === 'assistant' &&
+                    (assistantContent === '处理中...' || assistantContent === 'Processing...') && terminalState) {
+                    displayContent = terminalState.detail.message || msg.content;
                 }
 
                 // 消息时间口径：
@@ -5937,7 +6024,15 @@ async function loadConversation(conversationId) {
                 // - assistant: 如果后端提供 updatedAt（任务完成时写回），优先用它，避免占位消息“任务开始时间”误导
                 const msgTime = (msg && msg.role === 'assistant' && msg.updatedAt) ? msg.updatedAt : (msg ? msg.createdAt : null);
                 const mcpIds = (msg.mcpExecutionIds && Array.isArray(msg.mcpExecutionIds)) ? msg.mcpExecutionIds : [];
-                const addOpts = (msg.role === 'assistant' && mcpIds.length > 0) ? { deferMcpButtons: true } : null;
+                const isAssistantPlaceholder = msg.role === 'assistant' && (
+                    assistantContent === '处理中...' || assistantContent === 'Processing...'
+                );
+                const addOpts = (msg.role === 'assistant' && (mcpIds.length > 0 || isAssistantPlaceholder))
+                    ? {
+                        deferMcpButtons: mcpIds.length > 0,
+                        hideAssistantPlaceholder: isAssistantPlaceholder
+                    }
+                    : null;
                 const messageId = addMessage(msg.role, displayContent, mcpIds, null, msgTime, addOpts);
                 const messageEl = document.getElementById(messageId);
                 if (messageEl && msg && msg.id) {
@@ -5947,17 +6042,20 @@ async function loadConversation(conversationId) {
                 if (msg.role === 'assistant') {
                     if (messageEl && typeof window.setAssistantTurnTiming === 'function') {
                         const startedAt = msg && msg.createdAt ? msg.createdAt : null;
-                        const completedAt = msg && msg.updatedAt ? msg.updatedAt : startedAt;
+                        const completedAt = terminalState && terminalState.completedAt
+                            ? terminalState.completedAt
+                            : (msg && msg.updatedAt ? msg.updatedAt : startedAt);
                         const startedMs = assistantTurnTimestamp(startedAt);
                         const completedMs = assistantTurnTimestamp(completedAt);
-                        const isRunning = String(msg.content || '').trim() === '处理中...' || String(msg.content || '').trim() === 'Processing...';
+                        const isRunning = isAssistantPlaceholder && !terminalState;
+                        const status = terminalState ? terminalState.status : (isRunning ? 'running' : 'completed');
                         window.setAssistantTurnTiming(messageEl, {
                             startedAt: startedAt,
                             completedAt: isRunning ? null : completedAt,
                             durationMs: (!isRunning && Number.isFinite(startedMs) && Number.isFinite(completedMs))
                                 ? Math.max(0, completedMs - startedMs)
                                 : undefined,
-                            status: isRunning ? 'running' : 'completed'
+                            status: status
                         });
                     }
                     if (messageEl && msg.reasoningContent) {
@@ -6027,6 +6125,12 @@ async function loadConversation(conversationId) {
             if (currentConversationId === conversationId && typeof window.restoreHitlInlineForConversation === 'function') {
                 await window.restoreHitlInlineForConversation(conversationId);
             }
+            if (
+                window.CyberStrikeChatScroll &&
+                typeof window.CyberStrikeChatScroll.settleConversationRestoreToBottom === 'function'
+            ) {
+                window.CyberStrikeChatScroll.settleConversationRestoreToBottom(30);
+            }
         } else {
             renderChatWelcomeEmptyState();
             if (window.CyberStrikeChatScroll) {
@@ -6071,6 +6175,9 @@ async function loadConversation(conversationId) {
         console.error('加载对话失败:', error);
         showChatToast('加载对话失败: ' + (error && error.message ? error.message : String(error)), 'error');
     } finally {
+        if (seq === loadConversationRequestSeq && typeof window.finishChatConversationRestore === 'function') {
+            window.finishChatConversationRestore(conversationId);
+        }
         if (loadConversationAbortController === conversationLoadController) {
             loadConversationAbortController = null;
         }

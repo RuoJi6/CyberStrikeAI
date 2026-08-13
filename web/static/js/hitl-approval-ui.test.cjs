@@ -7,6 +7,7 @@ const monitor = fs.readFileSync('web/static/js/monitor.js', 'utf8');
 const chatScroll = fs.readFileSync('web/static/js/chat-scroll.js', 'utf8');
 const projects = fs.readFileSync('web/static/js/projects.js', 'utf8');
 const chat = fs.readFileSync('web/static/js/chat.js', 'utf8');
+const styles = fs.readFileSync('web/static/css/style.css', 'utf8');
 const template = fs.readFileSync('web/templates/index.html', 'utf8');
 const handler = fs.readFileSync('internal/handler/hitl.go', 'utf8');
 const zh = JSON.parse(fs.readFileSync('web/static/i18n/zh-CN.json', 'utf8'));
@@ -243,10 +244,16 @@ test('多对话并发时释放隐藏主流且旧请求不能覆盖新对话状�
     assert.match(chat, /let loadConversationAbortController = null/);
     assert.match(chat, /cancelPendingConversationLoad\(\);[\s\S]{0,220}const conversationLoadController = new AbortController\(\)/);
     assert.match(chat, /signal: conversationLoadController\.signal/);
-    assert.match(template, /monitor\.js\?v=20260812-2/);
-    assert.match(template, /chat-scroll\.js\?v=20260812-1/);
-    assert.match(template, /chat\.js\?v=20260812-5/);
-    assert.match(template, /style\.css\?v=20260812-4/);
+    assert.match(template, /monitor\.js\?v=20260813-9/);
+    assert.match(template, /chat-scroll\.js\?v=20260813-6/);
+    assert.match(template, /chat\.js\?v=20260813-3/);
+    assert.match(template, /style\.css\?v=20260813-5/);
+});
+
+test('输入区 Agent 审查文字保留足够行高且不会裁切字形', () => {
+    assert.match(styles, /\.chat-hitl-shortcut > span\s*\{[\s\S]*?display: block/);
+    assert.match(styles, /\.chat-hitl-shortcut > span\s*\{[\s\S]*?padding-block: 1px/);
+    assert.match(styles, /\.chat-hitl-shortcut > span\s*\{[\s\S]*?line-height: 1\.4/);
 });
 
 test('任务结束后对话内审批按钮会变灰并禁止继续操作', () => {
@@ -285,7 +292,7 @@ test('审批状态主动轮询并在服务不可用时立即关闭旧审批', ()
     assert.match(monitor, /renderActiveTasks\(\[\]\);[\s\S]{0,260}hitlPendingInterruptTracker\.update\(\[\]\)/);
     assert.match(projects, /function syncProjectConversationApprovalStatuses\(items\)/);
     assert.match(projects, /window\.syncProjectConversationApprovalStatuses/);
-    assert.match(template, /projects\.js\?v=20260812-4/);
+    assert.match(template, /projects\.js\?v=20260812-6/);
 });
 
 test('旧会话首次升级到五分钟默认审批时限，仍允许用户之后主动选择不限时', () => {
