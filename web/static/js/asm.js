@@ -187,6 +187,26 @@ function syncASMProviderOptions() {
         option.textContent = `${asmProviderLabel(option.value)}${provider && !provider.implemented ? ` · ${asmT('asm.pending', '待接入')}` : ''}`;
     });
     syncASMProviderForm();
+    refreshASMFormSelects();
+}
+
+function decorateASMFormSelect(select, kind) {
+    if (!select) return;
+    const wrapper = select.closest('.settings-custom-select');
+    if (!wrapper) return;
+    wrapper.classList.add('asm-form-select', `asm-form-select-${kind}`);
+    const menu = wrapper.querySelector('.settings-custom-select-menu');
+    if (menu) menu.classList.add('asm-form-select-menu', `asm-form-select-menu-${kind}`);
+    if (kind === 'provider') wrapper.dataset.provider = select.value || 'arl';
+}
+
+function refreshASMFormSelects() {
+    const form = document.getElementById('asm-resource-form');
+    if (!form || typeof window.initSettingsCustomSelects !== 'function') return;
+    window.initSettingsCustomSelects(form);
+    if (typeof window.refreshSettingsCustomSelects === 'function') window.refreshSettingsCustomSelects();
+    decorateASMFormSelect(document.getElementById('asm-resource-provider'), 'provider');
+    decorateASMFormSelect(document.getElementById('asm-resource-auth-type'), 'auth');
 }
 
 function openASMResourceModal(id) {
@@ -210,11 +230,13 @@ function openASMResourceModal(id) {
         : asmT('asm.credentialCreateHint', '凭据将使用 AES-GCM 加密保存，之后不会再次显示明文。');
     syncASMProviderOptions();
     syncASMAuthForm();
+    refreshASMFormSelects();
     if (typeof openAppModal === 'function') openAppModal('asm-resource-modal', { focusEl: document.getElementById('asm-resource-name') });
     else document.getElementById('asm-resource-modal').style.display = 'flex';
 }
 
 function closeASMResourceModal() {
+    if (typeof window.closeAllSettingsCustomSelects === 'function') window.closeAllSettingsCustomSelects();
     if (typeof closeAppModal === 'function') closeAppModal('asm-resource-modal');
     else document.getElementById('asm-resource-modal').style.display = 'none';
     asmPageState.editId = '';
@@ -227,6 +249,8 @@ function syncASMProviderForm() {
     if (hint) hint.textContent = provider && !provider.implemented
         ? asmT('asm.providerNotReady', '该适配器尚未完成，当前不能保存。')
         : asmT('asm.providerReadyHint', '保存后可先测试连接，再由角色工具白名单授权给 Agent。');
+    const wrapper = document.getElementById('asm-resource-provider')?.closest('.settings-custom-select');
+    if (wrapper) wrapper.dataset.provider = providerId;
 }
 
 function syncASMAuthForm() {

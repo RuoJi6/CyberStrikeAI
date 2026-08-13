@@ -1,7 +1,7 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：1.5
-> 基线日期：2026-08-12
+> 文档版本：1.7
+> 基线日期：2026-08-13
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
 
@@ -33,7 +33,7 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_list_resources` | 列出已启用的 ASM、类型、连接状态与能力 | 否 |
 | `asm_test_connection` | 验证地址与凭据并更新连接状态 | 仅更新本地连接状态 |
 | `asm_get_task_profile` | 读取平台版本、任务模式、字段、默认值和依赖 | 否 |
-| `asm_list_task_options` | 实时查询策略、引擎、字典、节点、模板、插件和 POC | 否 |
+| `asm_list_task_options` | 实时查询单类策略、引擎、字典、节点、模板、插件和 POC；或用 `kind=all` 聚合所有列表型类别 | 否 |
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
@@ -42,6 +42,8 @@ Agent 当前看到的是以下 10 个内置工具，而不是直接看到三套�
 | `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
 调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
+
+`asm_list_task_options(kind=all)` 表示一次查询该资源声明的所有列表型动态选项，不表示扫描全部目标，也不表示无分页获取全部记录。`page` 和 `page_size` 会分别应用到每个类别（默认每类第 1 页 20 条）；`policy_detail`、`template_detail` 等需要具体 `id` 的详情类别会跳过并返回原因，个别类别失败时会返回 `partial=true` 和分类错误，其余成功结果仍可使用。
 
 ## 4. 上游能力矩阵
 
@@ -168,6 +170,7 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | `asm_list_task_options` 新增 `kind=all`，按统一分页聚合所有列表型动态选项，跳过需 ID 的详情类型并返回分类错误 |
 | 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 完成后自动全量同步所有结果类型与分页；任务中心与 MCP 改为本地分页/搜索/详情；新增结果同步状态、查看兜底、显式重同步和自动截图缓存 |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心改为平台专属完整结果卡片；补齐 XingRin 目录/截图与 ScopeSentry 爬虫/敏感信息/目录/接管/漏洞详情；截图自动缓存；增加上游总数分页和页大小 |
 | 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | profile 暴露平台专属 `result_types`；补齐 ARL 任务详情 13 类结果，任务中心按平台动态展示并分页读取 |

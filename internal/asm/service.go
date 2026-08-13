@@ -164,6 +164,26 @@ type TaskOptionFilter struct {
 	PageSize int
 }
 
+type TaskOptionSkip struct {
+	Kind   string `json:"kind"`
+	Reason string `json:"reason"`
+}
+
+type AllTaskOptionsResult struct {
+	Provider       string                 `json:"provider"`
+	ResourceID     string                 `json:"resource_id"`
+	Kind           string                 `json:"kind"`
+	Query          string                 `json:"query,omitempty"`
+	Page           int                    `json:"page"`
+	PageSize       int                    `json:"page_size"`
+	SupportedKinds []string               `json:"supported_kinds"`
+	QueriedKinds   []string               `json:"queried_kinds"`
+	SkippedKinds   []TaskOptionSkip       `json:"skipped_kinds,omitempty"`
+	Options        map[string]interface{} `json:"options"`
+	Errors         map[string]string      `json:"errors,omitempty"`
+	Partial        bool                   `json:"partial"`
+}
+
 type TaskManageRequest struct {
 	Action  string
 	TaskID  string
@@ -517,7 +537,105 @@ func (s *Service) GetTaskProfile(ctx context.Context, resourceID string) (interf
 	if !ok {
 		return nil, fmt.Errorf("%s 暂未提供任务创建配置发现能力", providerDisplayName(conn.Resource.Provider))
 	}
-	return profiler.GetTaskProfile(ctx, conn)
+	profile, err := profiler.GetTaskProfile(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	if object := valueMap(profile); object != nil {
+		object["task_option_query_modes"] = []string{"single", "all"}
+		object["task_option_all_note"] = "kind=all 会按当前分页批量读取所有列表型动态选项；*_detail 类型需要 id，必须单独查询"
+		return object, nil
+	}
+	return profile, nil
+}
+
+func taskOptionKinds(profile interface{}) []string {
+	object := valueMap(profile)
+	if object == nil {
+		return nil
+	}
+	raw, exists := object["dynamic_option_kinds"]
+	if !exists {
+		return nil
+	}
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	appendKind := func(value interface{}) {
+		kind := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+		if kind == "" || kind == "all" {
+			return
+		}
+		if _, exists := seen[kind]; exists {
+			return
+		}
+		seen[kind] = struct{}{}
+		result = append(result, kind)
+	}
+	switch values := raw.(type) {
+	case []string:
+		for _, value := range values {
+			appendKind(value)
+		}
+	case []interface{}:
+		for _, value := range values {
+			appendKind(value)
+		}
+	default:
+		appendKind(values)
+	}
+	return result
+}
+
+func taskOptionPayload(value interface{}) interface{} {
+	if object := valueMap(value); object != nil {
+		if options, exists := object["options"]; exists {
+			return options
+		}
+	}
+	return value
+}
+
+func (s *Service) listAllTaskOptions(ctx context.Context, conn *Connection, profiler TaskProfileAdapter, filter TaskOptionFilter) (AllTaskOptionsResult, error) {
+	profile, err := profiler.GetTaskProfile(ctx, conn)
+	if err != nil {
+		return AllTaskOptionsResult{}, err
+	}
+	kinds := taskOptionKinds(profile)
+	if len(kinds) == 0 {
+		return AllTaskOptionsResult{}, fmt.Errorf("%s 未声明可查询的动态选项类别", providerDisplayName(conn.Resource.Provider))
+	}
+	result := AllTaskOptionsResult{
+		Provider: normalizeProvider(conn.Resource.Provider), ResourceID: conn.Resource.ID, Kind: "all",
+		Query: filter.Query, Page: filter.Page, PageSize: filter.PageSize,
+		SupportedKinds: kinds, QueriedKinds: []string{}, SkippedKinds: []TaskOptionSkip{},
+		Options: map[string]interface{}{}, Errors: map[string]string{},
+	}
+	for _, kind := range kinds {
+		if strings.HasSuffix(kind, "_detail") {
+			result.SkippedKinds = append(result.SkippedKinds, TaskOptionSkip{
+				Kind: kind, Reason: "该类型需要 id，请使用具体 kind 和 id 单独查询",
+			})
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
+		child := filter
+		child.Kind = kind
+		child.ID = ""
+		result.QueriedKinds = append(result.QueriedKinds, kind)
+		value, optionErr := profiler.ListTaskOptions(ctx, conn, child)
+		if optionErr != nil {
+			result.Errors[kind] = truncateError(optionErr)
+			continue
+		}
+		result.Options[kind] = taskOptionPayload(value)
+	}
+	result.Partial = len(result.Errors) > 0
+	if !result.Partial {
+		result.Errors = nil
+	}
+	return result, nil
 }
 
 func (s *Service) ListTaskOptions(ctx context.Context, resourceID string, filter TaskOptionFilter) (interface{}, error) {
@@ -533,6 +651,9 @@ func (s *Service) ListTaskOptions(ctx context.Context, resourceID string, filter
 	filter.Query = strings.TrimSpace(filter.Query)
 	filter.ID = strings.TrimSpace(filter.ID)
 	filter.Page, filter.PageSize = normalizePagination(filter.Page, filter.PageSize)
+	if filter.Kind == "all" {
+		return s.listAllTaskOptions(ctx, conn, profiler, filter)
+	}
 	return profiler.ListTaskOptions(ctx, conn, filter)
 }
 

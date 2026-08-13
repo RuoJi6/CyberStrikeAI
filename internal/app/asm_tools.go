@@ -63,9 +63,9 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMListTaskOptions, ShortDescription: "查询 ASM 动态任务选项",
-		Description: "按类别查询平台实时的策略、引擎、字典、端口字典、节点、模板、插件或 POC。kind 必须来自 asm_get_task_profile 返回的 dynamic_option_kinds。",
+		Description: "按类别查询平台实时的策略、引擎、字典、端口字典、节点、模板、插件或 POC。kind 可传 all，按当前分页批量查询全部列表型类别；否则必须使用 asm_get_task_profile.dynamic_option_kinds 中的单个值。*_detail 需传 id 单独查询。",
 		InputSchema: resourceSchema(map[string]interface{}{
-			"kind":      map[string]interface{}{"type": "string", "description": "动态选项类别"},
+			"kind":      map[string]interface{}{"type": "string", "description": "动态选项类别；传 all 会按 page/page_size 为每个列表型类别各查询一页"},
 			"query":     map[string]interface{}{"type": "string", "description": "名称或关键字筛选"},
 			"id":        map[string]interface{}{"type": "string", "description": "查询详情时使用的上游 ID"},
 			"page":      map[string]interface{}{"type": "integer", "minimum": 1},

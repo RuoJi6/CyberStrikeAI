@@ -1,7 +1,7 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 1.5
-> Baseline date: 2026-08-12
+> Document version: 1.7
+> Baseline date: 2026-08-13
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
 This document distinguishes upstream platform capabilities from actions currently exposed to agents by CyberStrikeAI. Update it before changing MCP schemas, adapters, or UI after an upstream release.
@@ -23,7 +23,7 @@ Agents use ten normalized tools:
 | `asm_list_resources` | List enabled resources, state, and capabilities |
 | `asm_test_connection` | Verify the address and server-side credential |
 | `asm_get_task_profile` | Read the provider version, modes, typed fields, defaults, and dependencies |
-| `asm_list_task_options` | Query live policies, engines, dictionaries, nodes, templates, plugins, POCs, or projects |
+| `asm_list_task_options` | Query one live option kind, or aggregate every list-style kind with `kind=all` |
 | `asm_create_task` | Create a task for an explicitly authorized target |
 | `asm_list_tasks` / `asm_get_task` | Read task lists, progress, stages, statistics, and configuration |
 | `asm_list_assets` | Page through a provider-specific result type from the CyberStrikeAI local snapshot; discover valid IDs from profile `result_types` |
@@ -31,6 +31,8 @@ Agents use ten normalized tools:
 | `asm_manage_task` | Restart, resume, delete, or synchronize results when supported |
 
 The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> optionally `asm_list_task_options` -> `asm_create_task`. Credentials remain on the server and are never placed in model context.
+
+`asm_list_task_options(kind=all)` queries every list-style dynamic option kind declared by the selected resource. It does not scan all targets or retrieve an unbounded option corpus: `page` and `page_size` apply independently to every kind (defaulting to the first 20 records of each). Detail kinds such as `policy_detail` and `template_detail` are skipped because they require a specific `id`. A per-kind failure produces `partial=true` and a categorized error while preserving successful results.
 
 ## Upstream action matrix
 
@@ -104,6 +106,7 @@ The reusable `TestASMRealMCPFlow` remains skipped unless `CYBERSTRIKE_ASM_REAL_T
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 1.7 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added `kind=all` to `asm_list_task_options`, with per-kind pagination, detail-kind skips, and categorized partial failures |
 | 1.6 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added automatic full result synchronization after completion, local row-level pagination/search/detail for the task center and MCP, explicit sync state and refresh actions, and automatic screenshot caching |
 | 1.5 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific rich result cards, upstream-total pagination and page sizes; mapped XingRin directory/screenshot results and ScopeSentry crawler/sensitive/directory/takeover/vulnerability details; made screenshot caching automatic for UI and MCP reads |
 | 1.4 | 2026-08-12 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-specific `result_types`; mapped all 13 ARL task-detail collections; added provider-aware tabs and paged task-center reads |
