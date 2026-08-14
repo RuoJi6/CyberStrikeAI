@@ -531,8 +531,19 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 				}
 				principal := authctx.NewPrincipalWithScopes(access.User.ID, access.User.Username, access.Scope, access.Permissions, access.PermissionScopes)
 				logicalStartedAt := time.Time{}
-				if continuation.AgentWasRunning && continuation.AgentStartedAt != nil {
+				if continuation.AgentStartedAt != nil {
 					logicalStartedAt = *continuation.AgentStartedAt
+				}
+				if logicalStartedAt.IsZero() {
+					logicalStartedAt, err = db.GetPendingAssistantTurnStartedAt(continuation.ConversationID)
+					if err != nil {
+						return fmt.Errorf("恢复 ASM 续跑累计时间失败: %w", err)
+					}
+				}
+				if !continuation.AgentWasRunning && !logicalStartedAt.IsZero() {
+					if _, err = db.FinalizePendingAssistantForASMContinuation(continuation.ConversationID, logicalStartedAt, time.Now().UTC()); err != nil {
+						return fmt.Errorf("结束 ASM 续跑前置任务失败: %w", err)
+					}
 				}
 				_, _, err = agentHandler.ProcessMessageForRobotAt(turnCtx, "asm-auto-resume", principal, continuation.ConversationID, prompt, conversation.RoleName, conversation.AgentMode, logicalStartedAt, func() error {
 					latest, readErr := db.GetASMAgentContinuation(continuation.ID)

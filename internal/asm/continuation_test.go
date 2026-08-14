@@ -269,6 +269,17 @@ func TestCompletedASMTaskQueuesLinkedAgentWhileActive(t *testing.T) {
 
 func TestCompletedASMTaskUsesIdlePromptWhenAgentAlreadyStopped(t *testing.T) {
 	service, _ := newTaskHistoryTestService(t)
+	conversation, err := service.db.CreateConversation("restart fallback", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.db.AddMessage(conversation.ID, "user", "authorized target", nil); err != nil {
+		t.Fatal(err)
+	}
+	pendingAssistant, err := service.db.AddMessage(conversation.ID, "assistant", "处理中...", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	resource, err := service.CreateResource(CreateResourceInput{
 		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
 		Username: "admin", Credential: "secret", AuthType: "password",
@@ -281,7 +292,7 @@ func TestCompletedASMTaskUsesIdlePromptWhenAgentAlreadyStopped(t *testing.T) {
 	}
 	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{
 		Name: "authorized", Target: "192.0.2.20", Options: map[string]interface{}{"task_mode": "direct"},
-		ConversationID: "conversation-idle", OwnerUserID: "user-idle",
+		ConversationID: conversation.ID, OwnerUserID: "user-idle",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -305,11 +316,13 @@ func TestCompletedASMTaskUsesIdlePromptWhenAgentAlreadyStopped(t *testing.T) {
 	}
 
 	prompts := make(chan string, 1)
+	continuations := make(chan database.ASMAgentContinuation, 1)
 	service.workerCtx = context.Background()
 	service.SetAgentContinuationHooks(
 		func(string) (bool, time.Time) { return false, time.Time{} },
-		func(_ context.Context, _ *database.ASMAgentContinuation, prompt string) error {
+		func(_ context.Context, item *database.ASMAgentContinuation, prompt string) error {
 			prompts <- prompt
+			continuations <- *item
 			return nil
 		},
 	)
@@ -321,6 +334,14 @@ func TestCompletedASMTaskUsesIdlePromptWhenAgentAlreadyStopped(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("idle Agent conversation was not resumed")
+	}
+	select {
+	case item := <-continuations:
+		if item.AgentWasRunning || item.AgentStartedAt == nil || !item.AgentStartedAt.Equal(pendingAssistant.CreatedAt) {
+			t.Fatalf("restart fallback did not preserve pending turn start: %#v", item)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("missing persisted restart fallback metadata")
 	}
 }
 
@@ -450,4 +471,91 @@ func TestLegacyUserStopWithoutNotificationStaysStopped(t *testing.T) {
 	if err != nil || stored.Status != "user_stopped" {
 		t.Fatalf("never-delivered continuation was incorrectly promoted: %#v err=%v", stored, err)
 	}
+}
+
+func TestRepairMissingASMContinuationTurnTiming(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	conversation, err := service.db.CreateConversation("repair continuation timing", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.db.AddMessage(conversation.ID, "user", "authorized target", nil); err != nil {
+		t.Fatal(err)
+	}
+	original, err := service.db.AddMessage(conversation.ID, "assistant", "处理中...", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.db.AddMessage(conversation.ID, "user", "ASM 扫描结果已完成。\n任务 ID：asmtask_repair_timing", nil); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.db.AddMessage(conversation.ID, "assistant", "continuation complete", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repaired, err := service.db.RepairMissingASMContinuationTurnTimings(10)
+	if err != nil || repaired != 1 {
+		t.Fatalf("repair timing: repaired=%d err=%v", repaired, err)
+	}
+	messages, err := service.db.GetMessagesLite(conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := make(map[string]database.Message, len(messages))
+	for _, message := range messages {
+		byID[message.ID] = message
+	}
+	repairedOriginal := byID[original.ID]
+	if repairedOriginal.Content == "处理中..." || repairedOriginal.UpdatedAt.Before(repairedOriginal.CreatedAt) {
+		t.Fatalf("stale foreground timer was not finalized: %#v", repairedOriginal)
+	}
+	repairedResumed := byID[resumed.ID]
+	if repairedResumed.TurnStartedAt == nil || !repairedResumed.TurnStartedAt.Equal(original.CreatedAt) {
+		t.Fatalf("resumed turn did not inherit original start: %#v", repairedResumed)
+	}
+	summary, err := service.db.GetProcessDetailsSummary(resumed.ID)
+	if err != nil || summary.StartedAt == nil || !summary.StartedAt.Equal(original.CreatedAt) {
+		t.Fatalf("summary did not use repaired cumulative start: %#v err=%v", summary, err)
+	}
+}
+
+func TestRepairRestartInterruptedASMContinuationTurnTiming(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	conversation, err := service.db.CreateConversation("repair restarted timing", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.db.AddMessage(conversation.ID, "user", "authorized target", nil); err != nil {
+		t.Fatal(err)
+	}
+	original, err := service.db.AddMessage(conversation.ID, "assistant", "任务因服务重启已中断。", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.db.AddMessage(conversation.ID, "user", "ASM 扫描结果已完成。\n任务 ID：asmtask_restart_timing", nil); err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := service.db.AddMessage(conversation.ID, "assistant", "continuation complete", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repaired, err := service.db.RepairMissingASMContinuationTurnTimings(10)
+	if err != nil || repaired != 1 {
+		t.Fatalf("repair restarted timing: repaired=%d err=%v", repaired, err)
+	}
+	messages, err := service.db.GetMessagesLite(conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range messages {
+		if message.ID == resumed.ID {
+			if message.TurnStartedAt == nil || !message.TurnStartedAt.Equal(original.CreatedAt) {
+				t.Fatalf("restart-interrupted turn did not inherit original start: %#v", message)
+			}
+			return
+		}
+	}
+	t.Fatal("resumed message not found")
 }

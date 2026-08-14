@@ -5201,7 +5201,7 @@ async function reconcileConversationAfterTaskReplay(conversationId, keepFollowin
         applyBackendMessageIdToAssistantDom(assistantEl.id, finalMessage.id);
     }
     if (typeof window.setAssistantTurnTiming === 'function') {
-        const startedAt = finalMessage.createdAt || null;
+        const startedAt = finalMessage.turnStartedAt || finalMessage.createdAt || null;
         const completedAt = finalMessage.updatedAt || startedAt;
         window.setAssistantTurnTiming(assistantEl, {
             startedAt: startedAt,

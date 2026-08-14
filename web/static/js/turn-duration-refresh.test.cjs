@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const chat = fs.readFileSync('web/static/js/chat.js', 'utf8');
+const monitor = fs.readFileSync('web/static/js/monitor.js', 'utf8');
 
 function timingSource(source) {
     const start = source.indexOf('function formatAssistantTurnDuration(');
@@ -120,4 +121,5 @@ test('历史占位消息存在取消事件时不会再判定为运行中', () =>
 test('ASM 续跑优先使用持久化逻辑开始时间', () => {
     assert.match(chat, /const startedAt = msg && msg\.turnStartedAt/);
     assert.match(chat, /\? msg\.turnStartedAt/);
+    assert.match(monitor, /finalMessage\.turnStartedAt \|\| finalMessage\.createdAt/);
 });

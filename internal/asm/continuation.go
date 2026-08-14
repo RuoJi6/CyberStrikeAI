@@ -457,6 +457,18 @@ func (s *Service) reconcileAgentContinuations(ctx context.Context) {
 					item.AgentStartedAt = &startedAt
 				}
 			}
+			// A service restart clears the in-memory task registry. Fall back to
+			// the durable assistant placeholder so the resumed turn still inherits
+			// the original elapsed-time origin without pretending Agent is active.
+			if item.Behavior == ContinuationAuto && item.AgentStartedAt == nil {
+				persistedStart, persistedErr := s.db.GetPendingAssistantTurnStartedAt(item.ConversationID)
+				if persistedErr != nil {
+					s.logger.Warn("读取 ASM 续跑持久化起点失败", zap.String("continuation_id", item.ID), zap.Error(persistedErr))
+				} else if !persistedStart.IsZero() {
+					persistedStart = persistedStart.UTC()
+					item.AgentStartedAt = &persistedStart
+				}
+			}
 			if item.Behavior == ContinuationNotifyOnly {
 				item.Status, item.CompletedAt = "completed", &now
 			}
@@ -469,6 +481,11 @@ func (s *Service) reconcileAgentContinuations(ctx context.Context) {
 }
 
 func (s *Service) reconcileDeliveredAgentContinuations() {
+	if repaired, err := s.db.RepairMissingASMContinuationTurnTimings(500); err != nil {
+		s.logger.Warn("修复 ASM 续跑累计时间失败", zap.Error(err))
+	} else if repaired > 0 {
+		s.logger.Info("已修复 ASM 续跑累计时间", zap.Int("count", repaired))
+	}
 	items, err := s.db.ListUserStoppedStartedASMAgentContinuations(200)
 	if err != nil {
 		s.logger.Warn("核验历史 ASM Agent 联动状态失败", zap.Error(err))

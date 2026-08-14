@@ -7,6 +7,8 @@ import (
 	"time"
 )
 
+const asmContinuationRecoveredMessage = "原任务已在 ASM 扫描完成后转入自动续跑。"
+
 // ASMAgentContinuation records the durable hand-off from a completed ASM scan
 // back to the Agent conversation that created it.
 type ASMAgentContinuation struct {
@@ -204,6 +206,187 @@ func (db *DB) PromoteDeliveredASMAgentContinuation(id string, deliveredAt time.T
 		return fmt.Errorf("修复已送达 ASM Agent 联动状态失败: %w", err)
 	}
 	return nil
+}
+
+// GetPendingAssistantTurnStartedAt returns the persisted start of the latest
+// unfinished assistant turn. This is the process-restart fallback for ASM: the
+// in-memory task registry may be empty even though the database still contains
+// the foreground "处理中..." placeholder.
+func (db *DB) GetPendingAssistantTurnStartedAt(conversationID string) (time.Time, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return time.Time{}, nil
+	}
+	var raw string
+	err := db.QueryRow(`
+		SELECT m.created_at
+		FROM messages m
+		WHERE m.rowid = (
+			SELECT latest.rowid FROM messages latest
+			WHERE latest.conversation_id = ? AND latest.role = 'assistant'
+			ORDER BY latest.rowid DESC LIMIT 1
+		)
+		AND TRIM(m.content) IN ('处理中...', 'Processing...')
+		AND NOT EXISTS (
+			SELECT 1 FROM process_details pd
+			WHERE pd.message_id = m.id AND pd.event_type IN ('cancelled', 'timeout', 'error')
+		)`, conversationID).Scan(&raw)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return time.Time{}, nil
+		}
+		return time.Time{}, fmt.Errorf("查询待续接 Agent 起始时间失败: %w", err)
+	}
+	return parseDBTime(raw), nil
+}
+
+// FinalizePendingAssistantForASMContinuation closes a stale foreground
+// placeholder immediately before the ASM notification is injected. The next
+// assistant turn inherits expectedStartedAt, while the old clock stops at the
+// hand-off instead of continuing forever after a process restart.
+func (db *DB) FinalizePendingAssistantForASMContinuation(conversationID string, expectedStartedAt, completedAt time.Time) (bool, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || expectedStartedAt.IsZero() {
+		return false, nil
+	}
+	if completedAt.IsZero() {
+		completedAt = time.Now().UTC()
+	}
+	var messageID, rawCreatedAt string
+	err := db.QueryRow(`
+		SELECT m.id, m.created_at
+		FROM messages m
+		WHERE m.rowid = (
+			SELECT latest.rowid FROM messages latest
+			WHERE latest.conversation_id = ? AND latest.role = 'assistant'
+			ORDER BY latest.rowid DESC LIMIT 1
+		)
+		AND TRIM(m.content) IN ('处理中...', 'Processing...')
+		AND NOT EXISTS (
+			SELECT 1 FROM process_details pd
+			WHERE pd.message_id = m.id AND pd.event_type IN ('cancelled', 'timeout', 'error')
+		)`, conversationID).Scan(&messageID, &rawCreatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, fmt.Errorf("查询待结束 Agent 占位消息失败: %w", err)
+	}
+	startedAt := parseDBTime(rawCreatedAt)
+	if startedAt.IsZero() || !startedAt.Equal(expectedStartedAt) || completedAt.Before(startedAt) {
+		return false, nil
+	}
+	result, err := db.Exec(`UPDATE messages
+		SET content = ?, updated_at = ?
+		WHERE id = ? AND TRIM(content) IN ('处理中...', 'Processing...')`,
+		asmContinuationRecoveredMessage, completedAt.UTC(), messageID)
+	if err != nil {
+		return false, fmt.Errorf("结束待续接 Agent 占位消息失败: %w", err)
+	}
+	updated, _ := result.RowsAffected()
+	return updated > 0, nil
+}
+
+// RepairMissingASMContinuationTurnTimings repairs records created before the
+// persisted fallback was available. It recognizes the durable message order:
+// unfinished assistant -> ASM completion notification -> resumed assistant.
+func (db *DB) RepairMissingASMContinuationTurnTimings(limit int) (int, error) {
+	if limit < 1 || limit > 1000 {
+		limit = 200
+	}
+	type notification struct {
+		rowID          int64
+		conversationID string
+		createdAt      time.Time
+	}
+	rows, err := db.Query(`SELECT rowid, conversation_id, created_at FROM messages
+		WHERE role = 'user' AND TRIM(content) LIKE 'ASM 扫描结果已完成。%'
+		ORDER BY rowid DESC LIMIT ?`, limit)
+	if err != nil {
+		return 0, fmt.Errorf("查询 ASM 续跑通知失败: %w", err)
+	}
+	items := make([]notification, 0)
+	for rows.Next() {
+		var item notification
+		var rawCreatedAt string
+		if scanErr := rows.Scan(&item.rowID, &item.conversationID, &rawCreatedAt); scanErr != nil {
+			rows.Close()
+			return 0, fmt.Errorf("读取 ASM 续跑通知失败: %w", scanErr)
+		}
+		item.createdAt = parseDBTime(rawCreatedAt)
+		items = append(items, item)
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return 0, closeErr
+	}
+
+	repaired := 0
+	for _, item := range items {
+		if item.createdAt.IsZero() {
+			continue
+		}
+		var previousID, previousContent, rawStartedAt string
+		if readErr := db.QueryRow(`SELECT id, content, created_at FROM messages
+			WHERE conversation_id = ? AND role = 'assistant' AND rowid < ?
+			ORDER BY rowid DESC LIMIT 1`, item.conversationID, item.rowID).
+			Scan(&previousID, &previousContent, &rawStartedAt); readErr != nil {
+			if readErr == sql.ErrNoRows {
+				continue
+			}
+			return repaired, fmt.Errorf("查询 ASM 续跑前置消息失败: %w", readErr)
+		}
+		content := strings.TrimSpace(previousContent)
+		pendingPlaceholder := content == "处理中..." || content == "Processing..."
+		restartInterrupted := content == "任务因服务重启已中断。" || content == "任务因服务重启已中断，审批已取消。"
+		if !pendingPlaceholder && !restartInterrupted {
+			continue
+		}
+		if pendingPlaceholder {
+			var terminalCount int
+			if readErr := db.QueryRow(`SELECT COUNT(*) FROM process_details
+				WHERE message_id = ? AND event_type IN ('cancelled', 'timeout', 'error')`, previousID).Scan(&terminalCount); readErr != nil {
+				return repaired, fmt.Errorf("核验 ASM 续跑前置消息失败: %w", readErr)
+			}
+			if terminalCount > 0 {
+				continue
+			}
+		}
+		startedAt := parseDBTime(rawStartedAt)
+		if startedAt.IsZero() || item.createdAt.Before(startedAt) {
+			continue
+		}
+		var resumedID string
+		if readErr := db.QueryRow(`SELECT id FROM messages
+			WHERE conversation_id = ? AND role = 'assistant' AND rowid > ? AND turn_started_at IS NULL
+			ORDER BY rowid ASC LIMIT 1`, item.conversationID, item.rowID).Scan(&resumedID); readErr != nil {
+			if readErr == sql.ErrNoRows {
+				continue
+			}
+			return repaired, fmt.Errorf("查询 ASM 续跑助手消息失败: %w", readErr)
+		}
+		tx, beginErr := db.Begin()
+		if beginErr != nil {
+			return repaired, beginErr
+		}
+		if pendingPlaceholder {
+			if _, updateErr := tx.Exec(`UPDATE messages SET content = ?, updated_at = ?
+				WHERE id = ? AND TRIM(content) IN ('处理中...', 'Processing...')`,
+				asmContinuationRecoveredMessage, item.createdAt.UTC(), previousID); updateErr != nil {
+				tx.Rollback()
+				return repaired, fmt.Errorf("修复 ASM 前置消息终态失败: %w", updateErr)
+			}
+		}
+		if _, updateErr := tx.Exec(`UPDATE messages SET turn_started_at = ?
+			WHERE id = ? AND turn_started_at IS NULL`, startedAt.UTC(), resumedID); updateErr != nil {
+			tx.Rollback()
+			return repaired, fmt.Errorf("修复 ASM 续跑累计时间失败: %w", updateErr)
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return repaired, commitErr
+		}
+		repaired++
+	}
+	return repaired, nil
 }
 
 var validASMAgentContinuationStatuses = map[string]bool{
