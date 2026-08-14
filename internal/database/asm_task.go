@@ -213,7 +213,7 @@ func (db *DB) ListASMTasks(filter ASMTaskFilter) ([]*ASMTask, int, error) {
 		return nil, 0, fmt.Errorf("统计 ASM 任务失败: %w", err)
 	}
 	queryArgs := append(append([]interface{}{}, args...), pageSize, (page-1)*pageSize)
-	rows, err := db.Query(`SELECT `+asmTaskColumns+` FROM asm_tasks WHERE `+clause+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
+	rows, err := db.Query(`SELECT `+asmTaskColumns+` FROM asm_tasks WHERE `+clause+` ORDER BY julianday(created_at) DESC, rowid DESC LIMIT ? OFFSET ?`, queryArgs...)
 	if err != nil {
 		return nil, 0, fmt.Errorf("查询 ASM 任务失败: %w", err)
 	}

@@ -39,6 +39,15 @@ const asmPageState = {
     templateUpstreamDetail: null,
     templateUpstreamDetailLoading: false,
     templateUpstreamDetailError: '',
+    continuations: [],
+    continuationStatusCounts: {},
+    continuationTotal: 0,
+    continuationFilter: 'all',
+    continuationPage: 1,
+    continuationPageSize: 10,
+    continuationLoading: false,
+    continuationRequestSeq: 0,
+    continuationPollTimer: null,
 };
 
 const asmDefaultRunningPrompt = `ASM 扫描结果已完成。
@@ -380,6 +389,149 @@ function loadASMAgentContinuationSettings() {
     if (typeof window.refreshSettingsCustomSelects === 'function') window.refreshSettingsCustomSelects();
 }
 
+const asmContinuationPhaseMeta = Object.freeze({
+    waiting_scan: { label: '等待扫描', group: 'scanning', tone: 'pending', description: '任务已绑定，等待 ASM 开始扫描' },
+    scanning: { label: '正在扫描', group: 'scanning', tone: 'running', description: 'ASM 扫描尚未完成' },
+    localizing: { label: '结果本地化中', group: 'scanning', tone: 'syncing', description: '扫描已完成，正在同步结果或缓存截图' },
+    awaiting_agent: { label: '等待发起', group: 'waiting', tone: 'ready', description: '结果已就绪，等待来源 Agent 空闲' },
+    retry_wait: { label: '等待重试', group: 'waiting', tone: 'warning', description: '上次恢复失败，系统将自动重试' },
+    resuming: { label: '正在恢复', group: 'running', tone: 'running', description: '系统正在向来源对话发起 Agent 续跑' },
+    success: { label: '恢复成功', group: 'success', tone: 'success', description: 'Agent 已接收联动消息并完成本次续跑' },
+    recorded: { label: '仅记录完成', group: 'success', tone: 'neutral', description: '扫描结果已就绪，策略配置为不自动续跑' },
+    user_stopped: { label: '用户停止', group: 'stopped', tone: 'stopped', description: '用户主动停止来源对话，系统不会重新启动 Agent' },
+    scan_cancelled: { label: '扫描未完成', group: 'failed', tone: 'failed', description: '关联 ASM 任务失败或被停止，联动已取消' },
+    failed: { label: '联动失败', group: 'failed', tone: 'failed', description: '达到重试上限或联动记录异常' },
+});
+
+function asmContinuationMeta(item) {
+    return asmContinuationPhaseMeta[item?.phase] || asmContinuationPhaseMeta.failed;
+}
+
+function asmContinuationSummaryCounts() {
+    const counts = asmPageState.continuationStatusCounts || {};
+    const value = key => Number(counts[key]) || 0;
+    return {
+        all: Object.values(counts).reduce((total, count) => total + (Number(count) || 0), 0),
+        scanning: value('waiting'),
+        waiting: value('ready') + value('retry'),
+        running: value('running'),
+        success: value('completed'),
+        stopped: value('user_stopped'),
+        failed: value('failed') + value('cancelled'),
+    };
+}
+
+function setASMContinuationFilter(filter) {
+    asmPageState.continuationFilter = filter || 'all';
+    asmPageState.continuationPage = 1;
+    void loadASMAgentContinuations();
+}
+
+function asmContinuationFilterStatuses() {
+    return {
+        scanning: 'waiting',
+        waiting: 'ready,retry',
+        running: 'running',
+        success: 'completed',
+        stopped: 'user_stopped',
+        failed: 'failed,cancelled',
+    }[asmPageState.continuationFilter] || '';
+}
+
+function changeASMContinuationPage(delta) {
+    const pages = Math.max(1, Math.ceil(asmPageState.continuationTotal / asmPageState.continuationPageSize));
+    asmPageState.continuationPage = Math.max(1, Math.min(pages, asmPageState.continuationPage + Number(delta || 0)));
+    void loadASMAgentContinuations();
+}
+
+function changeASMContinuationPageSize(value) {
+    const size = Number(value);
+    if (![5, 10, 20, 50].includes(size)) return;
+    asmPageState.continuationPageSize = size;
+    asmPageState.continuationPage = 1;
+    void loadASMAgentContinuations();
+}
+
+function renderASMAgentContinuations() {
+    const summary = document.getElementById('asm-continuation-summary');
+    const root = document.getElementById('asm-continuation-list');
+    const pagination = document.getElementById('asm-continuation-pagination');
+    if (!summary || !root || !pagination) return;
+    const counts = asmContinuationSummaryCounts();
+    const cards = [
+        ['all', '全部'], ['scanning', '扫描中'], ['waiting', '等待发起'], ['running', '恢复中'],
+        ['success', '成功'], ['stopped', '用户停止'], ['failed', '异常'],
+    ];
+    summary.innerHTML = cards.map(([key, label]) => `<button type="button" class="asm-continuation-summary-card ${key}${asmPageState.continuationFilter === key ? ' active' : ''}" aria-pressed="${asmPageState.continuationFilter === key}" onclick="setASMContinuationFilter('${key}')"><strong>${counts[key] || 0}</strong><span>${label}</span></button>`).join('');
+    const items = asmPageState.continuations;
+    if (!items.length) {
+        root.innerHTML = `<div class="asm-continuation-empty"><strong>当前分类暂无联动记录</strong><span>Agent/MCP 下发并成功绑定来源对话后，会在这里持续更新状态。</span></div>`;
+    } else root.innerHTML = items.map(item => {
+        const meta = asmContinuationMeta(item);
+        const tasks = Array.isArray(item.tasks) ? item.tasks : [];
+        const first = tasks[0] || {};
+        const title = first.name || (tasks.length > 1 ? `${tasks.length} 个 ASM 子任务` : item.id);
+        const provider = first.provider ? asmProviderLabel(first.provider) : 'ASM';
+        const resource = first.resource_name || '资源已删除或不可用';
+        const targets = [...new Set(tasks.map(task => task.target).filter(Boolean))];
+        const progress = tasks.length ? Math.round(tasks.reduce((total, task) => total + (Number(task.progress) || 0), 0) / tasks.length) : 0;
+        const taskStatus = tasks.length ? [...new Set(tasks.map(task => asmTaskStatusLabel(task.status)).filter(Boolean))].join('、') : '等待任务记录';
+        const taskIDs = tasks.map(task => task.id).filter(Boolean);
+        const error = item.last_error ? `<p class="asm-continuation-error">${asmEscape(item.last_error)}</p>` : '';
+        const action = taskIDs.length ? `<button type="button" class="btn-secondary btn-small" onclick="openASMContinuationTask('${asmEscape(taskIDs[0])}')">查看扫描任务</button>` : '';
+        return `<article class="asm-continuation-item ${meta.tone}">
+            <header><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
+            <p class="asm-continuation-description">${asmEscape(meta.description)}</p>
+            <div class="asm-continuation-task-line"><span>${asmEscape(provider)} · ${asmEscape(resource)}</span><span>${asmEscape(taskStatus)} · ${progress}%</span></div>
+            <div class="asm-continuation-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>
+            <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>来源对话</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
+            ${error}<footer><span>${item.agent_was_running ? '扫描完成时 Agent 正在运行' : '扫描完成时 Agent 已停止或空闲'}</span>${action}</footer>
+        </article>`;
+    }).join('');
+    const pages = Math.max(1, Math.ceil(asmPageState.continuationTotal / asmPageState.continuationPageSize));
+    const start = asmPageState.continuationTotal ? (asmPageState.continuationPage - 1) * asmPageState.continuationPageSize + 1 : 0;
+    const end = Math.min(asmPageState.continuationTotal, asmPageState.continuationPage * asmPageState.continuationPageSize);
+    pagination.innerHTML = `<span>显示 ${start}-${end} · 共 ${asmPageState.continuationTotal} 条</span>
+        <label><span>每页</span><select aria-label="每页联动记录数" onchange="changeASMContinuationPageSize(this.value)">
+            ${[5, 10, 20, 50].map(size => `<option value="${size}"${asmPageState.continuationPageSize === size ? ' selected' : ''}>${size} 条</option>`).join('')}
+        </select></label>
+        <button type="button" class="btn-secondary btn-small" ${asmPageState.continuationPage <= 1 ? 'disabled' : ''} onclick="changeASMContinuationPage(-1)">上一页</button>
+        <b>${asmPageState.continuationPage} / ${pages}</b>
+        <button type="button" class="btn-secondary btn-small" ${asmPageState.continuationPage >= pages ? 'disabled' : ''} onclick="changeASMContinuationPage(1)">下一页</button>`;
+}
+
+async function loadASMAgentContinuations(silent) {
+    if (asmPageState.continuationLoading) return;
+    asmPageState.continuationLoading = true;
+    const requestSeq = ++asmPageState.continuationRequestSeq;
+    const root = document.getElementById('asm-continuation-list');
+    if (!silent && root && !asmPageState.continuations.length) root.innerHTML = `<div class="asm-task-loading"><span class="asm-spinner" aria-hidden="true"></span><span>正在读取联动状态…</span></div>`;
+    try {
+        const params = new URLSearchParams({
+            page: String(asmPageState.continuationPage),
+            page_size: String(asmPageState.continuationPageSize),
+        });
+        const statuses = asmContinuationFilterStatuses();
+        if (statuses) params.set('status', statuses);
+        const payload = await asmApi(`/api/asm/agent-continuations?${params.toString()}`);
+        if (requestSeq !== asmPageState.continuationRequestSeq) return;
+        asmPageState.continuations = Array.isArray(payload.items) ? payload.items : [];
+        asmPageState.continuationStatusCounts = payload.status_counts || {};
+        asmPageState.continuationTotal = Number(payload.total) || 0;
+        asmPageState.continuationPage = Number(payload.page) || asmPageState.continuationPage;
+        renderASMAgentContinuations();
+    } catch (error) {
+        if (root) root.innerHTML = `<div class="asm-continuation-empty error"><strong>联动状态读取失败</strong><span>${asmEscape(error.message)}</span></div>`;
+    } finally {
+        asmPageState.continuationLoading = false;
+    }
+}
+
+function openASMContinuationTask(taskID) {
+    closeASMAgentContinuationModal();
+    void openASMTaskModal(taskID);
+}
+
 async function openASMAgentContinuationModal() {
     if (!asmPageState.resources.length) await loadASMResources();
     if (!asmPageState.resources.length) {
@@ -398,9 +550,16 @@ async function openASMAgentContinuationModal() {
     if (form && typeof window.initSettingsCustomSelects === 'function') window.initSettingsCustomSelects(form);
     if (typeof openAppModal === 'function') openAppModal('asm-agent-continuation-modal');
     else document.getElementById('asm-agent-continuation-modal').style.display = 'flex';
+    void loadASMAgentContinuations();
+    if (asmPageState.continuationPollTimer) window.clearInterval(asmPageState.continuationPollTimer);
+    asmPageState.continuationPollTimer = window.setInterval(() => void loadASMAgentContinuations(true), 5000);
 }
 
 function closeASMAgentContinuationModal() {
+    if (asmPageState.continuationPollTimer) {
+        window.clearInterval(asmPageState.continuationPollTimer);
+        asmPageState.continuationPollTimer = null;
+    }
     if (typeof window.closeAllSettingsCustomSelects === 'function') window.closeAllSettingsCustomSelects();
     if (typeof closeAppModal === 'function') closeAppModal('asm-agent-continuation-modal');
     else document.getElementById('asm-agent-continuation-modal').style.display = 'none';
@@ -864,25 +1023,39 @@ function asmTaskProgress(value) {
     return Math.max(0, Math.min(100, Math.round(parsed)));
 }
 
+function asmTaskTimestamp(task) {
+    const timestamp = Date.parse(task?.created_at || '');
+    return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
 function asmTaskGroups(tasks) {
     const groups = [];
     const byKey = new Map();
-    (Array.isArray(tasks) ? tasks : []).forEach(task => {
+    const orderedTasks = (Array.isArray(tasks) ? tasks.slice() : []).sort((left, right) => {
+        const difference = asmTaskTimestamp(right) - asmTaskTimestamp(left);
+        return difference || String(right.id || '').localeCompare(String(left.id || ''));
+    });
+    orderedTasks.forEach(task => {
         const batchSize = Math.max(1, Number(task.batch_size) || 1);
         const batchID = String(task.batch_id || '');
         const grouped = Boolean(batchID) && batchSize > 1;
         const key = grouped ? `batch:${batchID}` : `task:${task.id}`;
         let group = byKey.get(key);
         if (!group) {
-            group = { key, batchID, grouped, expected: batchSize, tasks: [] };
+            group = { key, batchID, grouped, expected: batchSize, tasks: [], createdAt: 0, createdAtValue: '' };
             byKey.set(key, group);
             groups.push(group);
         }
         group.expected = Math.max(group.expected, batchSize);
         group.tasks.push(task);
+        const createdAt = asmTaskTimestamp(task);
+        if (createdAt >= group.createdAt) {
+            group.createdAt = createdAt;
+            group.createdAtValue = task.created_at;
+        }
     });
     groups.forEach(group => group.tasks.sort((left, right) => (Number(left.batch_index) || 0) - (Number(right.batch_index) || 0)));
-    return groups;
+    return groups.sort((left, right) => (right.createdAt - left.createdAt) || right.key.localeCompare(left.key));
 }
 
 function asmBatchState(group) {
@@ -958,7 +1131,7 @@ function renderASMBatch(group) {
             <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span>${renderASMTaskExecutionChip(first)}</div>
             <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></div>
             <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(state.status))}</span><small>${state.completed}/${state.expected} 个子任务完成</small></div><div class="asm-progress-track"><span style="width:${state.progress}%"></span></div><b>${state.progress}%</b></div>
-            <time>${asmEscape(formatASMTime(first.created_at))}</time>
+            <time>${asmEscape(formatASMTime(group.createdAtValue || first.created_at))}</time>
             <button type="button" class="btn-secondary btn-small" aria-expanded="${expanded}" onclick="event.stopPropagation();toggleASMBatch('${asmEscape(group.batchID)}')">${expanded ? '收起' : '展开'} ${expanded ? '↑' : '↓'}</button>
         </article>${children}
     </section>`;
@@ -980,7 +1153,7 @@ function renderASMTasks() {
         root.innerHTML = `<div class="asm-task-empty"><strong>暂无任务记录</strong><span>Agent 或 MCP 创建任务后会自动出现在这里。</span></div>`;
     } else {
         const groups = asmTaskGroups(asmPageState.tasks);
-        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间</span><span></span></div>${groups.map(group => group.grouped ? renderASMBatch(group) : renderASMTaskRow(group.tasks[0], false)).join('')}`;
+        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间（最新优先）</span><span></span></div>${groups.map(group => group.grouped ? renderASMBatch(group) : renderASMTaskRow(group.tasks[0], false)).join('')}`;
     }
     const pages = Math.max(1, Math.ceil(asmPageState.taskTotal / asmPageState.taskPageSize));
     if (pagination) pagination.innerHTML = asmPageState.taskTotal > asmPageState.taskPageSize

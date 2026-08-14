@@ -34,7 +34,7 @@ Agent 当前看到的是以下 11 个内置工具，而不是直接看到三套�
 | `asm_test_connection` | 验证地址与凭据并更新连接状态 | 仅更新本地连接状态 |
 | `asm_get_task_profile` | 读取平台版本、任务模式、字段、默认值和依赖 | 否 |
 | `asm_list_task_options` | 实时查询单类策略、引擎、字典、节点、模板、插件、POC 和弱口令插件；`kind=template_presets` 读取本地内置预设；`kind=all` 聚合所有列表型类别 | 否 |
-| `asm_create_template` | 按 `preset_id` 创建或校准 ARL 策略、ScopeSentry 模板；ScopeSentry 也支持克隆基模板并设置受控参数 | 是 |
+| `asm_create_template` | 按 `preset_id` 创建或校准 ARL 策略、ScopeSentry 模板；两者均支持平台原生的受控自定义参数 | 是 |
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
@@ -90,7 +90,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 - `task_mode=direct`：调用 `/api/task/`，支持下表直接任务开关。`port_scan_type` 为 `test|top100|top1000|all`。
 - `task_mode=policy`：调用 `/api/task/policy/`，必须提供从 `policies` 实时查询的 `policy_id`；可选 `task_tag=task|risk_cruising` 和 `result_set_id`。
 - ASM 任务中心与 MCP 使用相同语义：界面的“直接自定义扫描”提交 `task_mode=direct`，“使用策略模板”提交 `task_mode=policy + policy_id`；切换模式时不会把另一模式的字段混入请求。
-- `asm_create_template`：在 ARL 中表示创建“策略”，新建使用 `/api/policy/add/`，同名内置策略校准使用 `/api/policy/edit/`；内置预设只使用类型化且受控的策略字段。
+- `asm_create_template`：在 ARL 中表示创建“策略”，新建使用 `/api/policy/add/`，同名内置策略校准使用 `/api/policy/edit/`；自定义字段由 `asm_get_task_profile.template_create_options` 声明，指定端口使用 `port_scan_type=custom + port_custom`，并发使用 `port_parallelism`，不能混用 ScopeSentry 的 `ports/concurrency/enabled_capabilities`。
+- 创建或校准 ARL 策略后会立即从 `/api/policy/` 回读实际配置，响应的 `effective_policy` 是最终依据；只有请求字段与回读一致时才返回 `template_verified=true`。Agent 不得在字段错误时通过删除用户要求的选项静默降级。
 - 自定义端口、排除端口、宿主超时、端口并发/速率、POC 和弱口令字典属于策略本身；policy 任务 API 不接受任务级覆盖，因此 MCP 不会伪装成可直接传入。
 - `asm_list_task_options(kind=pocs)` 只读取 `plugin_type=poc`，`kind=brute_plugins` 只读取 `plugin_type=brute`。漏洞巡检选择全部实时 POC；全量扫描同时选择全部实时 POC 与弱口令插件，并在响应 `plugin_summary` 中返回实际数量。
 

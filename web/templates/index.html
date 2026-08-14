@@ -2528,6 +2528,15 @@
 									</div>
 									<p class="asm-continuation-variables">可用变量：<code>&#123;&#123;provider&#125;&#125;</code> <code>&#123;&#123;task_type&#125;&#125;</code> <code>&#123;&#123;task_id&#125;&#125;</code> <code>&#123;&#123;task_name&#125;&#125;</code> <code>&#123;&#123;targets&#125;&#125;</code> <code>&#123;&#123;sync_status&#125;&#125;</code></p>
 								</section>
+								<section class="asm-continuation-monitor" aria-labelledby="asm-continuation-monitor-title">
+									<div class="asm-continuation-monitor-head">
+										<div><strong id="asm-continuation-monitor-title">联动执行状态</strong><small>读取 CyberStrikeAI 本地持久化记录，不会为查看状态重复请求 ASM 上游。</small></div>
+										<button type="button" class="btn-secondary btn-small" onclick="loadASMAgentContinuations()">刷新状态</button>
+									</div>
+									<div id="asm-continuation-summary" class="asm-continuation-summary" aria-label="联动状态统计"></div>
+									<div id="asm-continuation-list" class="asm-continuation-list"><div class="asm-task-loading"><span class="asm-spinner" aria-hidden="true"></span><span>正在读取联动状态…</span></div></div>
+									<div id="asm-continuation-pagination" class="asm-continuation-pagination"></div>
+								</section>
 							</div>
 							<div class="modal-footer"><button type="button" class="btn-secondary" onclick="closeASMAgentContinuationModal()">取消</button><button id="asm-agent-continuation-save" type="submit" class="btn-primary" data-require-permission="mcp:write">保存设置</button></div>
 						</form>

@@ -45,6 +45,52 @@ type AgentContinuationSettings struct {
 	IdlePrompt    string `json:"idle_prompt"`
 }
 
+type AgentContinuationHistoryFilter struct {
+	Statuses []string
+	Query    string
+	Page     int
+	PageSize int
+	Access   database.RBACListAccess
+}
+
+type AgentContinuationTaskView struct {
+	ID           string `json:"id"`
+	RemoteTaskID string `json:"remote_task_id,omitempty"`
+	ResourceID   string `json:"resource_id"`
+	ResourceName string `json:"resource_name"`
+	Provider     string `json:"provider"`
+	Name         string `json:"name"`
+	Target       string `json:"target"`
+	Status       string `json:"status"`
+	Progress     int    `json:"progress"`
+	Stage        string `json:"stage,omitempty"`
+}
+
+type AgentContinuationHistoryItem struct {
+	ID                string                      `json:"id"`
+	ConversationID    string                      `json:"conversation_id"`
+	ConversationTitle string                      `json:"conversation_title,omitempty"`
+	Behavior          string                      `json:"behavior"`
+	Status            string                      `json:"status"`
+	Phase             string                      `json:"phase"`
+	AgentWasRunning   bool                        `json:"agent_was_running"`
+	Attempts          int                         `json:"attempts"`
+	LastError         string                      `json:"last_error,omitempty"`
+	ReadyAt           *time.Time                  `json:"ready_at,omitempty"`
+	CompletedAt       *time.Time                  `json:"completed_at,omitempty"`
+	CreatedAt         time.Time                   `json:"created_at"`
+	UpdatedAt         time.Time                   `json:"updated_at"`
+	Tasks             []AgentContinuationTaskView `json:"tasks"`
+}
+
+type AgentContinuationHistoryPage struct {
+	Items        []AgentContinuationHistoryItem `json:"items"`
+	Total        int                            `json:"total"`
+	Page         int                            `json:"page"`
+	PageSize     int                            `json:"page_size"`
+	StatusCounts map[string]int                 `json:"status_counts"`
+}
+
 func DefaultAgentContinuationSettings() AgentContinuationSettings {
 	return AgentContinuationSettings{Behavior: ContinuationAuto, RunningPrompt: defaultRunningPrompt, IdlePrompt: defaultIdlePrompt}
 }
@@ -277,6 +323,106 @@ func renderContinuationPrompt(template string, tasks []*database.ASMTask, syncSt
 		"{{targets}}", strings.Join(targets, ", "),
 		"{{sync_status}}", syncStatus,
 	).Replace(template)
+}
+
+func continuationHistoryPhase(item *database.ASMAgentContinuation, tasks []AgentContinuationTaskView) string {
+	if item == nil {
+		return "failed"
+	}
+	switch item.Status {
+	case "ready":
+		return "awaiting_agent"
+	case "retry":
+		return "retry_wait"
+	case "running":
+		return "resuming"
+	case "completed":
+		if item.Behavior == ContinuationNotifyOnly {
+			return "recorded"
+		}
+		return "success"
+	case "user_stopped":
+		return "user_stopped"
+	case "cancelled":
+		return "scan_cancelled"
+	case "failed":
+		return "failed"
+	case "waiting":
+		if len(tasks) == 0 {
+			return "waiting_scan"
+		}
+		allCompleted := true
+		for _, task := range tasks {
+			switch task.Status {
+			case "completed":
+				// The continuation worker still needs local result and screenshot
+				// synchronization before it can advance to ready.
+			case "failed", "stopped":
+				return "scan_cancelled"
+			default:
+				allCompleted = false
+			}
+		}
+		if allCompleted {
+			return "localizing"
+		}
+		return "scanning"
+	default:
+		return "failed"
+	}
+}
+
+// ListAgentContinuations exposes the durable worker state used by the Agent
+// linkage diagnostics UI. Prompts and owner identifiers are intentionally not
+// returned because the page only needs execution state and task context.
+func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) (AgentContinuationHistoryPage, error) {
+	page, pageSize := filter.Page, filter.PageSize
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 50
+	}
+	rows, total, err := s.db.ListASMAgentContinuations(database.ASMAgentContinuationFilter{
+		Statuses: filter.Statuses, Query: filter.Query, Page: page, PageSize: pageSize, Access: filter.Access,
+	})
+	if err != nil {
+		return AgentContinuationHistoryPage{}, err
+	}
+	counts, err := s.db.CountASMAgentContinuationsByStatus(filter.Access)
+	if err != nil {
+		return AgentContinuationHistoryPage{}, err
+	}
+	result := AgentContinuationHistoryPage{
+		Items: make([]AgentContinuationHistoryItem, 0, len(rows)), Total: total,
+		Page: page, PageSize: pageSize, StatusCounts: counts,
+	}
+	for _, row := range rows {
+		view := AgentContinuationHistoryItem{
+			ID: row.ID, ConversationID: row.ConversationID, Behavior: row.Behavior,
+			Status: row.Status, AgentWasRunning: row.AgentWasRunning, Attempts: row.Attempts,
+			LastError: row.LastError, ReadyAt: row.ReadyAt, CompletedAt: row.CompletedAt,
+			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+			Tasks: make([]AgentContinuationTaskView, 0),
+		}
+		if conversation, readErr := s.db.GetConversation(row.ConversationID); readErr == nil {
+			view.ConversationTitle = conversation.Title
+		}
+		for _, taskID := range continuationTasks(row.TaskIDsJSON) {
+			task, readErr := s.db.GetASMTask(taskID)
+			if readErr != nil {
+				continue
+			}
+			view.Tasks = append(view.Tasks, AgentContinuationTaskView{
+				ID: task.ID, RemoteTaskID: task.RemoteTaskID, ResourceID: task.ResourceID,
+				ResourceName: task.ResourceName, Provider: task.Provider, Name: task.Name,
+				Target: task.Target, Status: task.Status, Progress: task.Progress, Stage: task.Stage,
+			})
+		}
+		view.Phase = continuationHistoryPhase(row, view.Tasks)
+		result.Items = append(result.Items, view)
+	}
+	return result, nil
 }
 
 func (s *Service) reconcileAgentContinuations(ctx context.Context) {

@@ -46,6 +46,41 @@ func TestASMTaskPersistenceAndFilters(t *testing.T) {
 	}
 }
 
+func TestListASMTasksOrdersByCreationTimeNewestFirst(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "asm-task-order.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	earlierWithLaterClock := time.Date(2026, 8, 14, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60))
+	laterUTC := time.Date(2026, 8, 14, 2, 0, 0, 0, time.UTC)
+	for _, item := range []*ASMTask{
+		{ID: "earlier-offset", ResourceID: "resource", ResourceName: "ASM", Provider: "arl", RemoteTaskID: "remote-earlier", OptionsJSON: "{}", SummaryJSON: "{}", DetailJSON: "{}", CreatedAt: earlierWithLaterClock},
+		{ID: "later-utc", ResourceID: "resource", ResourceName: "ASM", Provider: "arl", RemoteTaskID: "remote-later", OptionsJSON: "{}", SummaryJSON: "{}", DetailJSON: "{}", CreatedAt: laterUTC},
+		{ID: "same-time-older", ResourceID: "resource", ResourceName: "ASM", Provider: "arl", RemoteTaskID: "remote-same-older", OptionsJSON: "{}", SummaryJSON: "{}", DetailJSON: "{}", CreatedAt: laterUTC},
+		{ID: "same-time-newer", ResourceID: "resource", ResourceName: "ASM", Provider: "arl", RemoteTaskID: "remote-same-newer", OptionsJSON: "{}", SummaryJSON: "{}", DetailJSON: "{}", CreatedAt: laterUTC},
+	} {
+		if err := db.CreateASMTask(item); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items, total, err := db.ListASMTasks(ASMTaskFilter{Page: 1, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || len(items) != 4 {
+		t.Fatalf("unexpected tasks: total=%d items=%d", total, len(items))
+	}
+	want := []string{"same-time-newer", "same-time-older", "later-utc", "earlier-offset"}
+	for index, id := range want {
+		if items[index].ID != id {
+			t.Fatalf("task %d = %q, want %q; order=%v", index, items[index].ID, id, []string{items[0].ID, items[1].ID, items[2].ID, items[3].ID})
+		}
+	}
+}
+
 func TestASMResultItemsPaginationSearchAndSyncState(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "asm-result-items.db"), zap.NewNop())
 	if err != nil {

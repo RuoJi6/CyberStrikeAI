@@ -7,6 +7,8 @@ import (
 
 	"cyberstrike-ai/internal/asm"
 	"cyberstrike-ai/internal/audit"
+	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/security"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -223,6 +225,29 @@ func (h *ASMHandler) ListTaskHistory(c *gin.Context) {
 		Page: asmQueryInt(c, "page", 1), PageSize: asmQueryInt(c, "page_size", 20),
 	})
 	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, page)
+}
+
+func (h *ASMHandler) ListAgentContinuations(c *gin.Context) {
+	access := database.RBACListAccess{}
+	if session, ok := security.CurrentSession(c); ok {
+		access = database.RBACListAccess{UserID: session.UserID, Scope: session.Scope}
+	}
+	statuses := make([]string, 0)
+	for _, value := range strings.Split(c.Query("status"), ",") {
+		if status := strings.TrimSpace(value); status != "" {
+			statuses = append(statuses, status)
+		}
+	}
+	page, err := h.service.ListAgentContinuations(asm.AgentContinuationHistoryFilter{
+		Statuses: statuses, Query: c.Query("query"),
+		Page: asmQueryInt(c, "page", 1), PageSize: asmQueryInt(c, "page_size", 50), Access: access,
+	})
+	if err != nil {
+		h.logger.Error("查询 ASM Agent 联动状态失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}

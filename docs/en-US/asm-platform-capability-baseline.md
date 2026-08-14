@@ -70,7 +70,8 @@ Names are fixed as `CyberStrikeAI · <preset name>`. A repeat call finds the exa
 - `task_mode=direct` maps to `/api/task/` and exposes typed domain, port/service, Web, correlation, and vulnerability switches.
 - `task_mode=policy` maps to `/api/task/policy/` and requires a live `policy_id`.
 - The ASM task center and MCP use the same semantics: “direct custom scan” submits `task_mode=direct`, while “use policy template” submits `task_mode=policy + policy_id`; fields from the inactive mode are not mixed into the request.
-- `asm_create_template` creates native ARL policies at `/api/policy/add/` and reconciles existing built-ins through `/api/policy/edit/`; built-ins use only typed, controlled policy fields.
+- `asm_create_template` creates native ARL policies at `/api/policy/add/` and reconciles existing built-ins through `/api/policy/edit/`. Custom fields come from `asm_get_task_profile.template_create_options`: custom ports use `port_scan_type=custom` plus `port_custom`, and ARL concurrency uses `port_parallelism`; ScopeSentry-only `ports`, `concurrency`, and `enabled_capabilities` must not be mixed in.
+- After creation or reconciliation, CyberStrikeAI reads the policy back from `/api/policy/`. `effective_policy` is the final authority and `template_verified=true` is returned only when the requested policy fields match the upstream result. An Agent must not silently drop user-requested fields after a validation error.
 - Custom ports, excluded ports, rate/parallelism, POCs, and brute-force dictionaries belong to an upstream policy. They are not accepted as fake per-task overrides.
 - `kind=pocs` reads only `plugin_type=poc`; `kind=brute_plugins` reads only `plugin_type=brute`. Vulnerability assessment selects all live POCs, while full scan selects all live POCs and brute plugins and reports the actual counts in `plugin_summary`.
 - Lifecycle actions: restart, delete, and result synchronization.

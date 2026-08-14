@@ -129,6 +129,44 @@ func TestManagedASMTaskResumeCreatesAgentContinuation(t *testing.T) {
 	}
 }
 
+func TestAgentContinuationHistoryExplainsScanningAndReadyPhases(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{
+		Name: "diagnostic", Target: "192.0.2.40", ConversationID: "conversation-diagnostic", OwnerUserID: "user-diagnostic",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	continuationID := meaningfulString(valueMap(valueMap(created)["agent_continuation"])["id"])
+	page, err := service.ListAgentContinuations(AgentContinuationHistoryFilter{
+		Page: 1, PageSize: 20, Access: database.RBACListAccess{Scope: database.RBACScopeAll},
+	})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Phase != "scanning" {
+		t.Fatalf("unexpected scanning diagnostic: page=%#v err=%v", page, err)
+	}
+	item, err := service.db.GetASMAgentContinuation(continuationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.Status = "ready"
+	if err := service.db.UpdateASMAgentContinuation(item); err != nil {
+		t.Fatal(err)
+	}
+	page, err = service.ListAgentContinuations(AgentContinuationHistoryFilter{
+		Page: 1, PageSize: 20, Access: database.RBACListAccess{Scope: database.RBACScopeAll},
+	})
+	if err != nil || page.Items[0].Phase != "awaiting_agent" || page.StatusCounts["ready"] != 1 {
+		t.Fatalf("unexpected ready diagnostic: page=%#v err=%v", page, err)
+	}
+}
+
 func TestCompletedASMTaskResumesLinkedAgentAfterActiveTaskFinishes(t *testing.T) {
 	service, _ := newTaskHistoryTestService(t)
 	resource, err := service.CreateResource(CreateResourceInput{

@@ -3,6 +3,7 @@ package asm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,7 +24,15 @@ var arlTaskIDPattern = regexp.MustCompile(`^[a-fA-F0-9]{24}$`)
 
 var arlPolicyPortPattern = regexp.MustCompile(`^[0-9,\-\s]*$`)
 
-type ARLAdapter struct{}
+type arlTokenEntry struct {
+	token       string
+	fingerprint [32]byte
+}
+
+type ARLAdapter struct {
+	tokenMu    sync.Mutex
+	tokenCache map[string]arlTokenEntry
+}
 
 type arlAPIError struct {
 	Code    string
@@ -31,7 +41,7 @@ type arlAPIError struct {
 
 func (e *arlAPIError) Error() string { return fmt.Sprintf("%s (code=%s)", e.Message, e.Code) }
 
-func NewARLAdapter() *ARLAdapter { return &ARLAdapter{} }
+func NewARLAdapter() *ARLAdapter { return &ARLAdapter{tokenCache: make(map[string]arlTokenEntry)} }
 
 func (a *ARLAdapter) Provider() string { return ProviderARL }
 
@@ -143,6 +153,18 @@ func (a *ARLAdapter) token(ctx context.Context, conn *Connection) (string, error
 	if strings.TrimSpace(conn.Resource.Username) == "" || conn.Secret == "" {
 		return "", fmt.Errorf("ARL 用户名或密码为空")
 	}
+	key := strings.TrimSpace(conn.Resource.ID)
+	if key == "" {
+		key = strings.TrimSpace(conn.Resource.BaseURL)
+	}
+	fingerprint := sha256.Sum256([]byte(strings.Join([]string{
+		conn.Resource.BaseURL, conn.Resource.Username, conn.Resource.AuthType, conn.Secret,
+	}, "\x00")))
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	if cached, ok := a.tokenCache[key]; ok && cached.fingerprint == fingerprint && cached.token != "" {
+		return cached.token, nil
+	}
 	payload, err := a.request(ctx, conn, http.MethodPost, "/api/user/login", nil, map[string]string{
 		"username": conn.Resource.Username,
 		"password": conn.Secret,
@@ -155,11 +177,44 @@ func (a *ARLAdapter) token(ctx context.Context, conn *Connection) (string, error
 	if token == "" || token == "<nil>" {
 		return "", fmt.Errorf("ARL 登录成功但未返回 Token")
 	}
+	if a.tokenCache == nil {
+		a.tokenCache = make(map[string]arlTokenEntry)
+	}
+	a.tokenCache[key] = arlTokenEntry{token: token, fingerprint: fingerprint}
 	return token, nil
+}
+
+func (a *ARLAdapter) invalidateToken(conn *Connection, token string) {
+	if conn == nil || conn.Resource == nil || conn.Resource.AuthType == "api_key" {
+		return
+	}
+	key := strings.TrimSpace(conn.Resource.ID)
+	if key == "" {
+		key = strings.TrimSpace(conn.Resource.BaseURL)
+	}
+	a.tokenMu.Lock()
+	defer a.tokenMu.Unlock()
+	if cached, ok := a.tokenCache[key]; ok && cached.token == token {
+		delete(a.tokenCache, key)
+	}
+}
+
+func arlUnauthorized(err error) bool {
+	var apiErr *arlAPIError
+	return (errors.As(err, &apiErr) && apiErr.Code == "401") || strings.Contains(fmt.Sprint(err), "ARL HTTP 401")
 }
 
 func (a *ARLAdapter) authenticatedRequest(ctx context.Context, conn *Connection, method, apiPath string, query url.Values, body interface{}) (map[string]interface{}, error) {
 	token, err := a.token(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := a.request(ctx, conn, method, apiPath, query, body, token)
+	if err == nil || !arlUnauthorized(err) || conn.Resource.AuthType == "api_key" {
+		return payload, err
+	}
+	a.invalidateToken(conn, token)
+	token, err = a.token(ctx, conn)
 	if err != nil {
 		return nil, err
 	}
@@ -396,13 +451,14 @@ func (a *ARLAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interf
 		"notes": []string{
 			"direct 模式对应 /api/task/，仅支持 ARL 直接任务字段",
 			"policy 模式对应 /api/task/policy/，自定义端口、排除端口、速率、POC 和弱口令插件由 policy_id 指向的上游策略决定，不支持任务级覆盖",
+			"自定义策略使用 template_create_options 中的 ARL 原生字段；不要传 ScopeSentry 的 ports、concurrency、enabled_capabilities 或 poc_ids",
 			"内置漏洞巡检会实时选择全部已安装 POC；内置全量扫描还会实时选择全部已安装弱口令插件，并在复用旧策略时校准配置",
 		},
 		"create_options": map[string]interface{}{
 			"task_mode":         map[string]interface{}{"type": "string", "enum": []string{"direct", "policy"}, "default": "direct"},
-			"policy_id":         map[string]interface{}{"type": "string", "description": "policy 模式使用的 ARL 策略 ID"},
-			"task_tag":          map[string]interface{}{"type": "string", "enum": []string{"task", "risk_cruising"}, "default": "task"},
-			"result_set_id":     map[string]interface{}{"type": "string", "description": "风险巡航可选结果集 ID"},
+			"policy_id":         map[string]interface{}{"type": "string", "description": "policy 模式使用的 ARL 策略 ID", "mode": "policy"},
+			"task_tag":          map[string]interface{}{"type": "string", "enum": []string{"task", "risk_cruising"}, "default": "task", "mode": "policy"},
+			"result_set_id":     map[string]interface{}{"type": "string", "description": "风险巡航可选结果集 ID", "mode": "policy"},
 			"domain_brute":      map[string]interface{}{"type": "boolean", "default": false},
 			"domain_brute_type": map[string]interface{}{"type": "string", "enum": []string{"big", "test"}, "default": "test"},
 			"port_scan":         map[string]interface{}{"type": "boolean", "default": false},
@@ -415,6 +471,36 @@ func (a *ARLAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interf
 			"ssl_cert": map[string]interface{}{"type": "boolean"}, "dns_query_plugin": map[string]interface{}{"type": "boolean"},
 			"skip_scan_cdn_ip": map[string]interface{}{"type": "boolean"}, "nuclei_scan": map[string]interface{}{"type": "boolean"},
 			"findvhost": map[string]interface{}{"type": "boolean"}, "web_info_hunter": map[string]interface{}{"type": "boolean"},
+		},
+		"template_create_options": map[string]interface{}{
+			"domain_brute":           map[string]interface{}{"type": "boolean", "default": false},
+			"domain_brute_type":      map[string]interface{}{"type": "string", "enum": []string{"test", "big"}, "default": "test"},
+			"alt_dns":                map[string]interface{}{"type": "boolean", "default": false},
+			"arl_search":             map[string]interface{}{"type": "boolean", "default": false},
+			"dns_query_plugin":       map[string]interface{}{"type": "boolean", "default": false},
+			"port_scan":              map[string]interface{}{"type": "boolean", "default": true},
+			"port_scan_type":         map[string]interface{}{"type": "string", "enum": []string{"test", "top100", "top1000", "all", "custom"}, "default": "top100"},
+			"port_custom":            map[string]interface{}{"type": "string", "default": "80,443", "requires": map[string]interface{}{"port_scan_type": "custom"}},
+			"exclude_ports":          map[string]interface{}{"type": "string", "default": ""},
+			"host_timeout_type":      map[string]interface{}{"type": "string", "enum": []string{"default", "custom"}, "default": "default"},
+			"host_timeout":           map[string]interface{}{"type": "integer", "minimum": 60, "maximum": 7200, "default": 900},
+			"port_parallelism":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 512, "default": 32},
+			"port_min_rate":          map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 10000, "default": 60},
+			"service_detection":      map[string]interface{}{"type": "boolean", "default": true},
+			"os_detection":           map[string]interface{}{"type": "boolean", "default": false},
+			"ssl_cert":               map[string]interface{}{"type": "boolean", "default": true},
+			"skip_scan_cdn_ip":       map[string]interface{}{"type": "boolean", "default": true},
+			"site_identify":          map[string]interface{}{"type": "boolean", "default": true},
+			"site_capture":           map[string]interface{}{"type": "boolean", "default": false},
+			"search_engines":         map[string]interface{}{"type": "boolean", "default": false},
+			"site_spider":            map[string]interface{}{"type": "boolean", "default": false},
+			"nuclei_scan":            map[string]interface{}{"type": "boolean", "default": false},
+			"web_info_hunter":        map[string]interface{}{"type": "boolean", "default": false},
+			"file_leak":              map[string]interface{}{"type": "boolean", "default": false},
+			"npoc_service_detection": map[string]interface{}{"type": "boolean", "default": false},
+			"scope_id":               map[string]interface{}{"type": "string", "dynamic_kind": "scopes"},
+			"poc_selection":          map[string]interface{}{"type": "string", "enum": []string{"none", "all"}, "default": "none", "dynamic_kind": "pocs"},
+			"brute_selection":        map[string]interface{}{"type": "string", "enum": []string{"none", "all"}, "default": "none", "dynamic_kind": "brute_plugins"},
 		},
 		"policy_fields": map[string]interface{}{
 			"port_scan_type": []string{"test", "top100", "top1000", "all", "custom"},
@@ -646,6 +732,79 @@ func (a *ARLAdapter) resolvePolicyPlugins(ctx context.Context, conn *Connection,
 	}, nil
 }
 
+func arlPolicySubsetEqual(expected, actual interface{}) bool {
+	switch value := expected.(type) {
+	case map[string]interface{}:
+		actualMap := valueMap(actual)
+		if actualMap == nil {
+			return false
+		}
+		for key, expectedValue := range value {
+			actualValue, exists := actualMap[key]
+			if !exists || !arlPolicySubsetEqual(expectedValue, actualValue) {
+				return false
+			}
+		}
+		return true
+	case []interface{}:
+		actualValues, ok := actual.([]interface{})
+		if !ok || len(actualValues) != len(value) {
+			return false
+		}
+		for index := range value {
+			if !arlPolicySubsetEqual(value[index], actualValues[index]) {
+				return false
+			}
+		}
+		return true
+	default:
+		expectedJSON, expectedErr := json.Marshal(expected)
+		actualJSON, actualErr := json.Marshal(actual)
+		return expectedErr == nil && actualErr == nil && bytes.Equal(expectedJSON, actualJSON)
+	}
+}
+
+func (a *ARLAdapter) readPolicyDetail(ctx context.Context, conn *Connection, policyID string) (map[string]interface{}, error) {
+	query := url.Values{
+		"page": {"1"}, "size": {"1"}, "order": {"-_id"}, "_id": {policyID},
+	}
+	payload, err := a.authenticatedRequest(ctx, conn, http.MethodGet, "/api/policy/", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	items, _ := payload["items"].([]interface{})
+	for _, raw := range items {
+		item := valueMap(raw)
+		if item != nil && strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["_id"])), policyID) {
+			return item, nil
+		}
+	}
+	if data := valueMap(payload["data"]); data != nil && strings.EqualFold(strings.TrimSpace(fmt.Sprint(data["_id"])), policyID) {
+		return data, nil
+	}
+	return nil, fmt.Errorf("ARL 未返回新建策略 %s 的详情", policyID)
+}
+
+func (a *ARLAdapter) attachPolicyVerification(ctx context.Context, conn *Connection, policyID string, requested map[string]interface{}, result map[string]interface{}) {
+	detail, err := a.readPolicyDetail(ctx, conn, policyID)
+	if err != nil {
+		result["template_verified"] = false
+		result["verification_warning"] = fmt.Sprintf("策略已创建，但上游详情回读失败: %v", err)
+		return
+	}
+	effectivePolicy := valueMap(detail["policy"])
+	if effectivePolicy == nil {
+		result["template_verified"] = false
+		result["verification_warning"] = "策略已创建，但上游详情未返回 policy 字段"
+		return
+	}
+	result["effective_policy"] = effectivePolicy
+	result["template_verified"] = arlPolicySubsetEqual(valueMap(requested["policy"]), effectivePolicy)
+	if result["template_verified"] != true {
+		result["verification_warning"] = "上游实际策略与请求配置不一致；请以 effective_policy 为准，不得宣称全部请求字段已生效"
+	}
+}
+
 func (a *ARLAdapter) CreateTemplate(ctx context.Context, conn *Connection, req TemplateRequest) (interface{}, error) {
 	body, err := buildARLPolicyRequest(req)
 	if err != nil {
@@ -677,12 +836,14 @@ func (a *ARLAdapter) CreateTemplate(ctx context.Context, conn *Connection, req T
 			if err != nil {
 				return nil, fmt.Errorf("校准已有 ARL 内置策略失败: %w", err)
 			}
-			return map[string]interface{}{
+			result := map[string]interface{}{
 				"provider": ProviderARL, "resource_id": conn.Resource.ID, "template_kind": "policy",
 				"template_id": policyID, "policy_id": policyID, "template_name": name,
 				"preset_id": req.PresetID, "reused": true, "updated": true, "policy": updated,
 				"plugin_summary": pluginSummary,
-			}, nil
+			}
+			a.attachPolicyVerification(ctx, conn, policyID, body, result)
+			return result, nil
 		}
 	}
 	created, err := a.authenticatedRequest(ctx, conn, http.MethodPost, "/api/policy/add/", nil, body)
@@ -694,12 +855,14 @@ func (a *ARLAdapter) CreateTemplate(ctx context.Context, conn *Connection, req T
 	if !arlTaskIDPattern.MatchString(policyID) {
 		return nil, fmt.Errorf("ARL 策略已创建但未返回有效 policy_id")
 	}
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"provider": ProviderARL, "resource_id": conn.Resource.ID, "template_kind": "policy",
 		"template_id": policyID, "policy_id": policyID, "template_name": name,
 		"preset_id": req.PresetID, "reused": false, "updated": false, "response": created,
 		"plugin_summary": pluginSummary,
-	}, nil
+	}
+	a.attachPolicyVerification(ctx, conn, policyID, body, result)
+	return result, nil
 }
 
 func (a *ARLAdapter) ManageTask(ctx context.Context, conn *Connection, req TaskManageRequest) (interface{}, error) {

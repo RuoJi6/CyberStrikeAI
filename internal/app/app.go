@@ -540,6 +540,10 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		return nil
 	}
 	configHandler.SetBatchTaskToolRegistrar(batchTaskToolRegistrar)
+	configHandler.SetASMToolRegistrar(func() error {
+		registerASMTools(mcpServer, asmService, log.Logger)
+		return nil
+	})
 
 	// 设置知识库初始化器（用于动态初始化，需要在 App 创建后设置）
 	configHandler.SetKnowledgeInitializer(func() (*handler.KnowledgeHandler, error) {
@@ -1144,6 +1148,7 @@ func setupRoutes(
 		protected.GET("/asm/resources/:id/task-options", security.RequirePermission("mcp:read"), asmHandler.TaskOptions)
 		protected.POST("/asm/resources/:id/templates", security.RequirePermission("mcp:write"), asmHandler.CreateTemplate)
 		protected.POST("/asm/resources/:id/tasks", security.RequirePermission("mcp:write"), asmHandler.CreateTask)
+		protected.GET("/asm/agent-continuations", security.RequirePermission("mcp:read"), asmHandler.ListAgentContinuations)
 		protected.GET("/asm/tasks", asmHandler.ListTaskHistory)
 		protected.GET("/asm/tasks/:id", asmHandler.GetTaskHistory)
 		protected.POST("/asm/tasks/:id/sync", asmHandler.SyncTaskHistory)

@@ -50,6 +50,140 @@ func TestBuildARLTaskRequestModes(t *testing.T) {
 	}
 }
 
+func TestARLTaskProfileMarksPolicyOnlyFields(t *testing.T) {
+	profileValue, err := NewARLAdapter().GetTaskProfile(context.Background(), &Connection{Resource: &database.ASMResource{ID: "arl-profile"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := profileValue.(map[string]interface{})
+	options := profile["create_options"].(map[string]interface{})
+	for _, field := range []string{"policy_id", "task_tag", "result_set_id"} {
+		definition := options[field].(map[string]interface{})
+		if definition["mode"] != "policy" {
+			t.Fatalf("%s should be marked policy-only: %#v", field, definition)
+		}
+	}
+	if definition := options["port_scan"].(map[string]interface{}); definition["mode"] == "policy" {
+		t.Fatalf("direct option port_scan must not be marked policy-only: %#v", definition)
+	}
+	templateOptions := profile["template_create_options"].(map[string]interface{})
+	for _, field := range []string{"port_scan_type", "port_custom", "port_parallelism", "poc_selection", "brute_selection"} {
+		if _, exists := templateOptions[field]; !exists {
+			t.Fatalf("ARL profile omits template field %q: %#v", field, templateOptions)
+		}
+	}
+	if _, exists := templateOptions["ports"]; exists {
+		t.Fatal("ARL profile must not advertise ScopeSentry's ports alias")
+	}
+}
+
+func TestARLFetchScreenshotUsesAPINamespace(t *testing.T) {
+	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/user/login":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "test-token"}})
+		case "/api/image/task-one/site.jpg":
+			if r.Header.Get("Token") != "test-token" {
+				t.Errorf("missing ARL token: %q", r.Header.Get("Token"))
+			}
+			w.Header().Set("Content-Type", "image/jpg")
+			_, _ = w.Write(jpeg)
+		default:
+			t.Errorf("unexpected screenshot path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	data, contentType, err := NewARLAdapter().FetchScreenshot(context.Background(), &Connection{
+		Resource: &database.ASMResource{ID: "asm_arl_screenshot", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}, "/image/task-one/site.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contentType != "image/jpeg" || !reflect.DeepEqual(data, jpeg) {
+		t.Fatalf("unexpected screenshot: type=%q data=%x", contentType, data)
+	}
+}
+
+func TestARLReusesTokenAcrossAuthenticatedRequests(t *testing.T) {
+	loginCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/login":
+			loginCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "stable-token"}})
+		case "/api/console/info":
+			if r.Header.Get("Token") != "stable-token" {
+				t.Errorf("unexpected console token: %q", r.Header.Get("Token"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"version": "2.6.3"}})
+		case "/api/task/":
+			if r.Header.Get("Token") != "stable-token" {
+				t.Errorf("unexpected task token: %q", r.Header.Get("Token"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{}, "total": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	connection := &Connection{
+		Resource: &database.ASMResource{ID: "asm_arl_token", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}
+	adapter := NewARLAdapter()
+	if _, err := adapter.Test(context.Background(), connection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := adapter.ListTasks(context.Background(), connection, TaskFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if loginCalls != 1 {
+		t.Fatalf("expected one shared ARL login, got %d", loginCalls)
+	}
+}
+
+func TestARLRefreshesRejectedCachedTokenOnce(t *testing.T) {
+	loginCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/login":
+			loginCalls++
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": fmt.Sprintf("token-%d", loginCalls)}})
+		case "/api/task/":
+			if r.Header.Get("Token") == "token-1" {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 401, "message": "not login"})
+				return
+			}
+			if r.Header.Get("Token") != "token-2" {
+				t.Errorf("unexpected refreshed token: %q", r.Header.Get("Token"))
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{}, "total": 0})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	connection := &Connection{
+		Resource: &database.ASMResource{ID: "asm_arl_retry", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}
+	if _, err := NewARLAdapter().ListTasks(context.Background(), connection, TaskFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	if loginCalls != 2 {
+		t.Fatalf("expected one token refresh after 401, got %d logins", loginCalls)
+	}
+}
+
 func TestARLAlreadyFinishedStopErrorIsTyped(t *testing.T) {
 	err := arlResponseError(map[string]interface{}{"code": 105, "message": "任务已经完成"})
 	var apiErr *arlAPIError
@@ -108,14 +242,22 @@ func TestARLCreateBuiltInPolicyIsUpstreamAndIdempotent(t *testing.T) {
 	created := false
 	addCalls := 0
 	editCalls := 0
+	var storedPolicy map[string]interface{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/user/login":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "test-token"}})
 		case "/api/policy/":
-			if r.Header.Get("Token") != "test-token" || r.URL.Query().Get("name") != "CyberStrikeAI · 快速探测" {
+			if r.Header.Get("Token") != "test-token" {
 				t.Errorf("unexpected policy query: header=%q query=%s", r.Header.Get("Token"), r.URL.RawQuery)
+			}
+			if r.URL.Query().Get("_id") == policyID {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{map[string]interface{}{"_id": policyID, "name": "CyberStrikeAI · 快速探测", "policy": storedPolicy}}, "total": 1})
+				return
+			}
+			if r.URL.Query().Get("name") != "CyberStrikeAI · 快速探测" {
+				t.Errorf("unexpected policy name query: %s", r.URL.RawQuery)
 			}
 			items := []interface{}{}
 			if created {
@@ -133,6 +275,7 @@ func TestARLCreateBuiltInPolicyIsUpstreamAndIdempotent(t *testing.T) {
 			if ip["port_scan_type"] != "top100" {
 				t.Errorf("unexpected policy body: %#v", body)
 			}
+			storedPolicy = policy
 			created = true
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"policy_id": policyID}})
 		case "/api/policy/edit/":
@@ -144,6 +287,7 @@ func TestARLCreateBuiltInPolicyIsUpstreamAndIdempotent(t *testing.T) {
 			if body["policy_id"] != policyID {
 				t.Errorf("unexpected edit body: %#v", body)
 			}
+			storedPolicy = valueMap(valueMap(body["policy_data"])["policy"])
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": body["policy_data"]})
 		default:
 			http.NotFound(w, r)
@@ -167,12 +311,63 @@ func TestARLCreateBuiltInPolicyIsUpstreamAndIdempotent(t *testing.T) {
 	if valueMap(first)["reused"] != false {
 		t.Fatalf("first create should not reuse: %#v", first)
 	}
+	if valueMap(first)["template_verified"] != true || valueMap(valueMap(first)["effective_policy"])["ip_config"] == nil {
+		t.Fatalf("first create must return verified upstream policy: %#v", first)
+	}
 	second, err := adapter.CreateTemplate(context.Background(), connection, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if valueMap(second)["reused"] != true || valueMap(second)["updated"] != true || addCalls != 1 || editCalls != 1 {
+	if valueMap(second)["reused"] != true || valueMap(second)["updated"] != true || valueMap(second)["template_verified"] != true || addCalls != 1 || editCalls != 1 {
 		t.Fatalf("second create should reuse and calibrate upstream policy: result=%#v add_calls=%d edit_calls=%d", second, addCalls, editCalls)
+	}
+}
+
+func TestARLCreateCustomPolicyReturnsVerifiedEffectiveConfiguration(t *testing.T) {
+	const policyID = "64b00000000000000000000b"
+	var storedPolicy map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "test-token"}})
+		case "/api/policy/":
+			if r.URL.Query().Get("_id") == policyID {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{map[string]interface{}{"_id": policyID, "name": "CyberStrike 自定义端口", "policy": storedPolicy}}, "total": 1})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{}, "total": 0})
+		case "/api/policy/add/":
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Error(err)
+			}
+			storedPolicy = valueMap(body["policy"])
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"policy_id": policyID}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewARLAdapter().CreateTemplate(context.Background(), &Connection{
+		Resource: &database.ASMResource{ID: "asm_arl_custom", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}, TemplateRequest{
+		Name: "CyberStrike 自定义端口",
+		Options: map[string]interface{}{
+			"port_scan_type": "custom", "port_custom": "80,443,7001,8080-8090",
+			"port_parallelism": 50, "site_capture": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effective := valueMap(valueMap(result)["effective_policy"])
+	ipConfig := valueMap(effective["ip_config"])
+	siteConfig := valueMap(effective["site_config"])
+	if valueMap(result)["template_verified"] != true || ipConfig["port_scan_type"] != "custom" || ipConfig["port_custom"] != "80,443,7001,8080-8090" || fmt.Sprint(ipConfig["port_parallelism"]) != "50" || siteConfig["site_capture"] != true {
+		t.Fatalf("custom ARL policy was truncated or not verified: %#v", result)
 	}
 }
 
@@ -199,6 +394,10 @@ func TestARLFullScanPresetSelectsAllPOCAndBrutePlugins(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": items, "total": len(items)})
 		case "/api/policy/":
+			if r.URL.Query().Get("_id") == policyID {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{map[string]interface{}{"_id": policyID, "name": "CyberStrikeAI · 全量扫描", "policy": createdPolicy}}, "total": 1})
+				return
+			}
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{}, "total": 0})
 		case "/api/policy/add/":
 			var body map[string]interface{}
@@ -241,6 +440,9 @@ func TestARLFullScanPresetSelectsAllPOCAndBrutePlugins(t *testing.T) {
 	summary := valueMap(valueMap(result)["plugin_summary"])
 	if summary["poc_count"] != 2 || summary["brute_count"] != 1 {
 		t.Fatalf("unexpected plugin summary: %#v", summary)
+	}
+	if valueMap(result)["template_verified"] != true || valueMap(valueMap(result)["effective_policy"])["poc_config"] == nil {
+		t.Fatalf("full scan policy must be verified from upstream: %#v", result)
 	}
 }
 

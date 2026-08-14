@@ -87,4 +87,22 @@ test('ASM task center exposes standalone durable Agent continuation settings', (
     assert.match(source, /renderASMTaskExecutionPanel\(task\)/);
     assert.match(css, /\.asm-task-profile-chip/);
     assert.match(css, /\.asm-task-execution-panel/);
+    assert.match(template, /id="asm-continuation-summary"/);
+    assert.match(template, /id="asm-continuation-list"/);
+    assert.match(template, /id="asm-continuation-pagination"/);
+    assert.match(source, /\/api\/asm\/agent-continuations/);
+    assert.match(source, /user_stopped/);
+    assert.match(source, /等待发起/);
+    assert.match(source, /changeASMContinuationPageSize/);
+    assert.match(source, /page_size: String\(asmPageState\.continuationPageSize\)/);
+    assert.match(css, /\.asm-continuation-summary-card/);
+    assert.match(css, /\.asm-continuation-item/);
+    assert.match(css, /\.asm-continuation-pagination/);
+});
+
+test('ASM task center keeps task groups in newest-first creation order', () => {
+    assert.match(source, /function asmTaskTimestamp\(task\)/);
+    assert.match(source, /asmTaskTimestamp\(right\) - asmTaskTimestamp\(left\)/);
+    assert.match(source, /right\.createdAt - left\.createdAt/);
+    assert.match(source, /创建时间（最新优先）/);
 });

@@ -36,6 +36,47 @@ func TestASMCreateTemplateMCPExposesBuiltInPresets(t *testing.T) {
 	}
 }
 
+func TestASMCreateTemplateMCPExposesProviderNativeOptions(t *testing.T) {
+	server := mcp.NewServer(zap.NewNop())
+	registerASMTools(server, &asm.Service{}, zap.NewNop())
+	var toolDefinition *mcp.Tool
+	for _, tool := range server.GetAllTools() {
+		if tool.Name == builtin.ToolASMCreateTemplate {
+			copy := tool
+			toolDefinition = &copy
+			break
+		}
+	}
+	if toolDefinition == nil {
+		t.Fatal("asm_create_template is not registered")
+	}
+	properties, _ := toolDefinition.InputSchema["properties"].(map[string]interface{})
+	options, _ := properties["options"].(map[string]interface{})
+	optionProperties, _ := options["properties"].(map[string]interface{})
+	for _, name := range []string{
+		"port_scan_type", "port_custom", "exclude_ports", "host_timeout_type", "host_timeout",
+		"port_parallelism", "port_min_rate", "poc_selection", "brute_selection", "scope_id",
+	} {
+		if _, exists := optionProperties[name]; !exists {
+			t.Fatalf("ARL template option %q is missing from MCP schema", name)
+		}
+	}
+	for _, name := range []string{"enabled_capabilities", "ports", "concurrency", "tls_probe", "poc_ids"} {
+		if _, exists := optionProperties[name]; !exists {
+			t.Fatalf("ScopeSentry template option %q is missing from MCP schema", name)
+		}
+	}
+	portScanType := optionProperties["port_scan_type"].(map[string]interface{})
+	if !reflect.DeepEqual(portScanType["enum"], []string{"test", "top100", "top1000", "all", "custom"}) {
+		t.Fatalf("ARL custom port mode is not exposed: %#v", portScanType)
+	}
+	for _, expected := range []string{"template_create_options", "ARL 不得使用 ScopeSentry", "禁止通过删除用户要求的选项来静默降级", "effective_policy"} {
+		if !strings.Contains(toolDefinition.Description, expected) {
+			t.Fatalf("asm_create_template description does not contain %q: %s", expected, toolDefinition.Description)
+		}
+	}
+}
+
 func TestASMCreateTaskMCPExposesARLDirectAndPolicyModes(t *testing.T) {
 	server := mcp.NewServer(zap.NewNop())
 	registerASMTools(server, &asm.Service{}, zap.NewNop())

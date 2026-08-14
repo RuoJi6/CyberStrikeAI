@@ -27,6 +27,17 @@ type ASMAgentContinuation struct {
 	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
+// ASMAgentContinuationFilter limits durable Agent continuation diagnostics.
+// Access is applied to the source conversation so non-admin users cannot read
+// another user's continuation history.
+type ASMAgentContinuationFilter struct {
+	Statuses []string
+	Query    string
+	Page     int
+	PageSize int
+	Access   RBACListAccess
+}
+
 const asmAgentContinuationColumns = `id, task_ids_json, conversation_id, owner_user_id,
 	behavior, running_prompt, idle_prompt, status, agent_was_running, attempts,
 	last_error, ready_at, completed_at, created_at, updated_at`
@@ -141,6 +152,121 @@ func (db *DB) ListPendingASMAgentContinuations(limit int) ([]*ASMAgentContinuati
 		items = append(items, item)
 	}
 	return items, rows.Err()
+}
+
+var validASMAgentContinuationStatuses = map[string]bool{
+	"waiting": true, "ready": true, "retry": true, "running": true,
+	"completed": true, "failed": true, "cancelled": true, "user_stopped": true,
+}
+
+func normalizeASMAgentContinuationPagination(page, pageSize int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 100 {
+		pageSize = 50
+	}
+	return page, pageSize
+}
+
+func asmAgentContinuationWhere(filter ASMAgentContinuationFilter) (string, []interface{}) {
+	where := []string{"1=1"}
+	args := make([]interface{}, 0)
+	statuses := make([]string, 0, len(filter.Statuses))
+	for _, raw := range filter.Statuses {
+		status := strings.ToLower(strings.TrimSpace(raw))
+		if validASMAgentContinuationStatuses[status] {
+			statuses = append(statuses, status)
+		}
+	}
+	if len(statuses) > 0 {
+		placeholders := make([]string, len(statuses))
+		for index, status := range statuses {
+			placeholders[index] = "?"
+			args = append(args, status)
+		}
+		where = append(where, "status IN ("+strings.Join(placeholders, ",")+")")
+	}
+	if query := strings.ToLower(strings.TrimSpace(filter.Query)); query != "" {
+		like := "%" + query + "%"
+		where = append(where, `(LOWER(id) LIKE ? OR LOWER(conversation_id) LIKE ? OR LOWER(task_ids_json) LIKE ? OR LOWER(last_error) LIKE ?)`)
+		args = append(args, like, like, like, like)
+	}
+	userID := strings.TrimSpace(filter.Access.UserID)
+	switch filter.Access.Scope {
+	case RBACScopeAll:
+		// Administrators can inspect all continuation jobs.
+	case RBACScopeAssigned:
+		if userID == "" {
+			where = append(where, "1=0")
+		} else {
+			where = append(where, `(owner_user_id = ? OR EXISTS (
+				SELECT 1 FROM rbac_resource_assignments ra
+				WHERE ra.user_id = ? AND ra.resource_type = 'conversation'
+				AND ra.resource_id = asm_agent_continuations.conversation_id
+			))`)
+			args = append(args, userID, userID)
+		}
+	default:
+		if userID == "" {
+			where = append(where, "1=0")
+		} else {
+			where = append(where, "owner_user_id = ?")
+			args = append(args, userID)
+		}
+	}
+	return strings.Join(where, " AND "), args
+}
+
+// ListASMAgentContinuations returns historical and active continuation jobs.
+func (db *DB) ListASMAgentContinuations(filter ASMAgentContinuationFilter) ([]*ASMAgentContinuation, int, error) {
+	page, pageSize := normalizeASMAgentContinuationPagination(filter.Page, filter.PageSize)
+	clause, args := asmAgentContinuationWhere(filter)
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM asm_agent_continuations WHERE `+clause, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("统计 ASM Agent 联动记录失败: %w", err)
+	}
+	queryArgs := append(append([]interface{}{}, args...), pageSize, (page-1)*pageSize)
+	rows, err := db.Query(`SELECT `+asmAgentContinuationColumns+` FROM asm_agent_continuations
+		WHERE `+clause+` ORDER BY created_at DESC LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("查询 ASM Agent 联动记录失败: %w", err)
+	}
+	defer rows.Close()
+	items := make([]*ASMAgentContinuation, 0, pageSize)
+	for rows.Next() {
+		item, scanErr := scanASMAgentContinuation(rows)
+		if scanErr != nil {
+			return nil, 0, fmt.Errorf("读取 ASM Agent 联动记录失败: %w", scanErr)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("读取 ASM Agent 联动记录失败: %w", err)
+	}
+	return items, total, nil
+}
+
+// CountASMAgentContinuationsByStatus powers the diagnostics summary and uses
+// the same conversation visibility boundary as the history list.
+func (db *DB) CountASMAgentContinuationsByStatus(access RBACListAccess) (map[string]int, error) {
+	clause, args := asmAgentContinuationWhere(ASMAgentContinuationFilter{Access: access})
+	rows, err := db.Query(`SELECT status, COUNT(*) FROM asm_agent_continuations
+		WHERE `+clause+` GROUP BY status`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("统计 ASM Agent 联动状态失败: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]int)
+	for rows.Next() {
+		var status string
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return nil, fmt.Errorf("读取 ASM Agent 联动状态失败: %w", err)
+		}
+		result[status] = count
+	}
+	return result, rows.Err()
 }
 
 func (db *DB) UpdateASMAgentContinuation(item *ASMAgentContinuation) error {

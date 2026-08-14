@@ -64,6 +64,24 @@ func resolveScreenshotURL(baseURL, reference string) (string, error) {
 	return resolved.String(), nil
 }
 
+func resolveARLScreenshotURL(baseURL, reference string) (string, error) {
+	endpoint, err := resolveScreenshotURL(baseURL, reference)
+	if err != nil {
+		return "", err
+	}
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("解析 ARL 截图地址失败: %w", err)
+	}
+	// ARL 2.6.x stores screenshot references as /image/<task>/<file>, while
+	// nginx only proxies its Flask image namespace below /api/. Requesting the
+	// stored path directly returns the SPA index instead of image bytes.
+	if strings.HasPrefix(parsed.Path, "/image/") {
+		parsed.Path = "/api" + parsed.Path
+	}
+	return parsed.String(), nil
+}
+
 func imageContentType(data []byte) (string, string, error) {
 	switch {
 	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
@@ -115,7 +133,7 @@ func downloadScreenshot(ctx context.Context, client *http.Client, endpoint strin
 }
 
 func (a *ARLAdapter) FetchScreenshot(ctx context.Context, conn *Connection, reference string) ([]byte, string, error) {
-	endpoint, err := resolveScreenshotURL(conn.Resource.BaseURL, reference)
+	endpoint, err := resolveARLScreenshotURL(conn.Resource.BaseURL, reference)
 	if err != nil {
 		return nil, "", err
 	}
@@ -350,7 +368,10 @@ func (s *Service) enqueueTaskScreenshotCache(id string, payload interface{}) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 		defer cancel()
-		_, err := s.cacheTaskScreenshotPayload(ctx, id, payload)
+		result, err := s.cacheTaskScreenshotPayload(ctx, id, payload)
+		if err == nil && len(result.Errors) > 0 {
+			err = fmt.Errorf("%d 张 ASM 截图缓存失败: %s", len(result.Errors), strings.Join(result.Errors, "; "))
+		}
 		s.screenshotMu.Lock()
 		delete(s.screenshotJobs, id)
 		if err != nil {

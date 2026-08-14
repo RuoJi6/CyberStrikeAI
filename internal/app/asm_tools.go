@@ -83,30 +83,59 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMCreateTemplate, ShortDescription: "创建 ASM 扫描模板或策略",
-		Description: "在 ARL 上游创建扫描策略，或在 ScopeSentry 上游创建扫描模板。推荐先用 asm_list_task_options(kind=template_presets) 获取四级内置预设，再只传 preset_id；内置预设是固定、可审计且可重复校准的，不允许同时覆盖 options。ARL 漏洞巡检会实时选择全部已安装 POC；全量扫描还会选择全部已安装弱口令插件，重复调用会修复同名旧策略的配置漂移。ScopeSentry 自定义模板必须先调用 asm_get_task_profile，并只使用 available_template_capabilities；已安装但基模板未启用的插件会自动补齐。仍不接受任意插件命令行。成功后统一返回 template_id；ScopeSentry 另返回 capability_summary 和 verification_token。XingRin 暂无原生模板创建能力。",
+		Description: "在 ARL 上游创建扫描策略，或在 ScopeSentry 上游创建扫描模板。自定义创建前必须调用 asm_get_task_profile，并严格使用当前 provider 返回的 template_create_options；ARL 不得使用 ScopeSentry 的 ports、concurrency、enabled_capabilities 或 poc_ids，应分别使用 port_scan_type/port_custom、port_parallelism、原生能力开关和 poc_selection/brute_selection。推荐先用 asm_list_task_options(kind=template_presets) 获取四级内置预设，再只传 preset_id；内置预设是固定、可审计且可重复校准的，不允许同时覆盖 options。ARL 漏洞巡检会实时选择全部已安装 POC；全量扫描还会选择全部已安装弱口令插件，重复调用会修复同名旧策略的配置漂移。ScopeSentry 自定义模板只使用 available_template_capabilities；已安装但基模板未启用的插件会自动补齐，仍不接受任意插件命令行。若上游拒绝字段，必须重新读取 profile 并修正字段，禁止通过删除用户要求的选项来静默降级。成功后统一返回 template_id；ARL 返回 effective_policy 和 template_verified，ScopeSentry 返回 capability_summary 和 verification_token。XingRin 暂无原生模板创建能力。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"preset_id": map[string]interface{}{
 				"type": "string", "enum": []string{"quick_discovery", "information_collection", "vulnerability_assessment", "full_scan"},
 				"description": "内置扫描预设；使用时 name 可省略，且不得同时传 options/base_template_id",
 			},
-			"name":             map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 150, "description": "自定义 ScopeSentry 模板必填；使用 preset_id 时必须省略"},
-			"base_template_id": map[string]interface{}{"type": "string", "description": "由 templates 返回的基模板 ID；留空克隆 default"},
+			"name":             map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 150, "description": "自定义 ARL 策略或 ScopeSentry 模板必填；使用 preset_id 时必须省略"},
+			"base_template_id": map[string]interface{}{"type": "string", "description": "仅 ScopeSentry：由 templates 返回的基模板 ID；留空克隆 default。ARL 不得传入"},
 			"options": map[string]interface{}{
 				"type": "object", "additionalProperties": false,
+				"description": "平台原生模板字段的受控并集；必须依据 asm_get_task_profile.template_create_options 只传当前 ASM 支持的字段",
 				"properties": map[string]interface{}{
 					"enabled_capabilities": map[string]interface{}{
-						"type": "array", "description": "启用指定能力；必须来自 asm_get_task_profile.available_template_capabilities，已安装但基模板未启用的插件会自动补齐",
+						"type": "array", "description": "仅 ScopeSentry：启用指定能力；ARL 必须改用 domain_brute、port_scan、service_detection、site_identify 等原生布尔字段",
 						"items": map[string]interface{}{"type": "string", "enum": []string{
 							"subdomain_discovery", "subdomain_takeover", "port_scan", "service_fingerprint", "site_identify",
 							"site_capture", "tls_probe", "url_scan", "web_crawler", "sensitive_scan", "directory_scan",
 							"vulnerability_scan", "passive_scan", "asset_handle",
 						}}, "uniqueItems": true,
 					},
-					"ports":        map[string]interface{}{"type": "string", "description": "端口表达式，例如 1-65535 或 80,443,8080-8090"},
-					"concurrency":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200},
-					"site_capture": map[string]interface{}{"type": "boolean"},
-					"tls_probe":    map[string]interface{}{"type": "boolean"},
-					"poc_ids":      map[string]interface{}{"type": "array", "maxItems": 500, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
+					"ports":        map[string]interface{}{"type": "string", "description": "仅 ScopeSentry：端口表达式，例如 1-65535。ARL 必须使用 port_scan_type=custom 与 port_custom"},
+					"concurrency":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "description": "仅 ScopeSentry：端口扫描并发。ARL 必须使用 port_parallelism"},
+					"site_capture": map[string]interface{}{"type": "boolean", "description": "ARL/ScopeSentry：是否执行站点截图"},
+					"tls_probe":    map[string]interface{}{"type": "boolean", "description": "仅 ScopeSentry：是否执行 TLS 探测；ARL 对应能力由 ssl_cert 控制"},
+					"poc_ids":      map[string]interface{}{"type": "array", "description": "仅 ScopeSentry：选用的上游 POC ID；ARL 使用 poc_selection=all 选择全部已安装 POC", "maxItems": 500, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
+
+					"domain_brute":           map[string]interface{}{"type": "boolean", "description": "仅 ARL：启用子域名爆破"},
+					"domain_brute_type":      map[string]interface{}{"type": "string", "enum": []string{"test", "big"}, "description": "仅 ARL：子域名字典级别"},
+					"alt_dns":                map[string]interface{}{"type": "boolean", "description": "仅 ARL：DNS 字典智能生成"},
+					"arl_search":             map[string]interface{}{"type": "boolean", "description": "仅 ARL：ARL 历史查询"},
+					"dns_query_plugin":       map[string]interface{}{"type": "boolean", "description": "仅 ARL：域名查询插件"},
+					"port_scan":              map[string]interface{}{"type": "boolean", "description": "仅 ARL：启用端口扫描"},
+					"port_scan_type":         map[string]interface{}{"type": "string", "enum": []string{"test", "top100", "top1000", "all", "custom"}, "description": "仅 ARL：端口范围档位；指定端口时使用 custom 并填写 port_custom"},
+					"port_custom":            map[string]interface{}{"type": "string", "maxLength": 500, "description": "仅 ARL：custom 端口表达式，只允许数字、逗号、连字符和空白"},
+					"exclude_ports":          map[string]interface{}{"type": "string", "maxLength": 500, "description": "仅 ARL：排除端口表达式"},
+					"host_timeout_type":      map[string]interface{}{"type": "string", "enum": []string{"default", "custom"}, "description": "仅 ARL：主机超时模式"},
+					"host_timeout":           map[string]interface{}{"type": "integer", "minimum": 60, "maximum": 7200, "description": "仅 ARL：主机超时秒数"},
+					"port_parallelism":       map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 512, "description": "仅 ARL：端口扫描并发"},
+					"port_min_rate":          map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 10000, "description": "仅 ARL：端口扫描最小发包速率"},
+					"service_detection":      map[string]interface{}{"type": "boolean", "description": "仅 ARL：服务识别"},
+					"os_detection":           map[string]interface{}{"type": "boolean", "description": "仅 ARL：操作系统识别"},
+					"ssl_cert":               map[string]interface{}{"type": "boolean", "description": "仅 ARL：SSL 证书获取"},
+					"skip_scan_cdn_ip":       map[string]interface{}{"type": "boolean", "description": "仅 ARL：跳过 CDN IP"},
+					"site_identify":          map[string]interface{}{"type": "boolean", "description": "仅 ARL：站点识别"},
+					"search_engines":         map[string]interface{}{"type": "boolean", "description": "仅 ARL：搜索引擎调用"},
+					"site_spider":            map[string]interface{}{"type": "boolean", "description": "仅 ARL：站点爬虫"},
+					"nuclei_scan":            map[string]interface{}{"type": "boolean", "description": "仅 ARL：nuclei 调用"},
+					"web_info_hunter":        map[string]interface{}{"type": "boolean", "description": "仅 ARL：WIH 调用"},
+					"file_leak":              map[string]interface{}{"type": "boolean", "description": "仅 ARL：文件泄露检测"},
+					"npoc_service_detection": map[string]interface{}{"type": "boolean", "description": "仅 ARL：NPoC 服务探测"},
+					"scope_id":               map[string]interface{}{"type": "string", "description": "仅 ARL：关联的资产范围 ID"},
+					"poc_selection":          map[string]interface{}{"type": "string", "enum": []string{"none", "all"}, "description": "仅 ARL：是否选择全部已安装 POC"},
+					"brute_selection":        map[string]interface{}{"type": "string", "enum": []string{"none", "all"}, "description": "仅 ARL：是否选择全部已安装弱口令插件"},
 				},
 			},
 		}),
@@ -129,8 +158,13 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	}
 	optionProperties["task_mode"] = map[string]interface{}{"type": "string", "enum": []string{"direct", "policy"}, "description": "ARL 下发方式：direct=直接自定义扫描，policy=使用已有 ARL 策略模板"}
 	optionProperties["policy_id"] = map[string]interface{}{"type": "string", "description": "ARL policy 模式必填；由 asm_list_task_options(kind=policies) 返回的策略模板 ID"}
-	optionProperties["task_tag"] = map[string]interface{}{"type": "string", "enum": []string{"task", "risk_cruising"}}
-	optionProperties["result_set_id"] = map[string]interface{}{"type": "string"}
+	optionProperties["task_tag"] = map[string]interface{}{
+		"type": "string", "enum": []string{"task", "risk_cruising"},
+		"description": "仅 ARL policy 模式可用；direct 模式不得传入",
+	}
+	optionProperties["result_set_id"] = map[string]interface{}{
+		"type": "string", "description": "仅 ARL policy 风险巡航可用；direct 模式不得传入",
+	}
 	optionProperties["domain_brute_type"] = map[string]interface{}{"type": "string", "enum": []string{"test", "big"}}
 	optionProperties["port_scan_type"] = map[string]interface{}{"type": "string", "enum": []string{"test", "top100", "top1000", "all"}}
 	optionProperties["engine_ids"] = map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer"}, "maxItems": 20}

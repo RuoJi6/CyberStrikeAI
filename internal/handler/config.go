@@ -43,6 +43,9 @@ type SkillsToolRegistrar func() error
 // BatchTaskToolRegistrar 批量任务 MCP 工具注册器（ApplyConfig 时重新注册）
 type BatchTaskToolRegistrar func() error
 
+// ASMToolRegistrar ASM MCP 工具注册器（ApplyConfig 时重新注册）
+type ASMToolRegistrar func() error
+
 // C2ToolRegistrar C2 MCP 工具注册器（ApplyConfig 时 ClearTools 之后调用）
 type C2ToolRegistrar func() error
 
@@ -83,6 +86,7 @@ type ConfigHandler struct {
 	webshellToolRegistrar      WebshellToolRegistrar      // WebShell 工具注册器（可选）
 	skillsToolRegistrar        SkillsToolRegistrar        // Skills工具注册器（可选）
 	batchTaskToolRegistrar     BatchTaskToolRegistrar     // 批量任务 MCP 工具（可选）
+	asmToolRegistrar           ASMToolRegistrar           // ASM MCP 工具（可选）
 	c2ToolRegistrar            C2ToolRegistrar            // C2 MCP 工具（可选）
 	c2Runtime                  C2Runtime                  // C2 启停（可选）
 	retrieverUpdater           RetrieverUpdater           // 检索器更新器（可选）
@@ -186,6 +190,13 @@ func (h *ConfigHandler) SetBatchTaskToolRegistrar(registrar BatchTaskToolRegistr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.batchTaskToolRegistrar = registrar
+}
+
+// SetASMToolRegistrar 设置 ASM MCP 工具注册器
+func (h *ConfigHandler) SetASMToolRegistrar(registrar ASMToolRegistrar) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.asmToolRegistrar = registrar
 }
 
 // SetC2ToolRegistrar 设置 C2 MCP 工具注册器
@@ -1574,6 +1585,17 @@ func (h *ConfigHandler) ApplyConfig(c *gin.Context) {
 		}
 	}
 
+	// ASM 工具在启动阶段直接注册，但配置应用会先 ClearTools；这里必须
+	// 同步恢复，否则保存 MCP 工具配置后 asm_* 会从 Agent 和管理页消失。
+	if h.asmToolRegistrar != nil {
+		h.logger.Info("重新注册 ASM MCP 工具")
+		if err := h.asmToolRegistrar(); err != nil {
+			h.logger.Error("重新注册 ASM MCP 工具失败", zap.Error(err))
+		} else {
+			h.logger.Info("ASM MCP 工具已重新注册")
+		}
+	}
+
 	// 重新注册 C2 MCP 工具（仅当 C2 已启动）
 	if h.c2ToolRegistrar != nil {
 		h.logger.Info("重新注册 C2 MCP 工具")
@@ -1954,6 +1976,7 @@ func updateAIConfig(doc *yaml.Node, cfg config.AIConfig) {
 			removeKeyFromMap(channelNode, "reasoning")
 		}
 	}
+
 }
 
 func updateFOFAConfig(doc *yaml.Node, cfg config.FofaConfig) {
