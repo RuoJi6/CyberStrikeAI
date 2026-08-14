@@ -45329,6 +45329,12 @@ html[data-theme="dark"] .conversation-sidebar .recent-conversations-section {
     container-type: inline-size;
 }
 
+/* The composer is an isolated stacking context. Lift that whole context while the
+   settings popover is open so the turn rail and its preview cannot paint above it. */
+.chat-input-container.is-session-settings-open {
+    z-index: 121;
+}
+
 .chat-composer-context {
     position: relative;
     z-index: 1;

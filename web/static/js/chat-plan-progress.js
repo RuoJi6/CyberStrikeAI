@@ -71,6 +71,46 @@
     const host = root.document && root.document.getElementById('agent-plan-progress');
     if (!host) return;
 
+    let passiveHoverAnchor = null;
+
+    function clearPassiveHoverVisual() {
+        host.classList.remove('is-hover-active');
+    }
+
+    function resetPassiveHover() {
+        clearPassiveHoverVisual();
+        passiveHoverAnchor = null;
+    }
+
+    function disarmPassiveHover(event) {
+        clearPassiveHoverVisual();
+        if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+        passiveHoverAnchor = { x: event.clientX, y: event.clientY };
+    }
+
+    function armHoverAfterPointerMove(event) {
+        if (event && event.pointerType && event.pointerType !== 'mouse') return;
+        if (passiveHoverAnchor) {
+            if (!event || !Number.isFinite(event.clientX) || !Number.isFinite(event.clientY)) return;
+            // Smooth scrolling and layout shifts may emit pointermove without the
+            // physical pointer moving. Keep the panel locked until coordinates change.
+            if (event.clientX === passiveHoverAnchor.x && event.clientY === passiveHoverAnchor.y) return;
+            passiveHoverAnchor = null;
+        }
+        host.classList.add('is-hover-active');
+    }
+
+    host.addEventListener('pointermove', armHoverAfterPointerMove);
+    host.addEventListener('pointerleave', clearPassiveHoverVisual);
+    const returnLatestButton = root.document.getElementById('chat-return-latest');
+    if (returnLatestButton) {
+        // Clicking the return-to-latest control moves this plan chip downward.
+        // Clear the hover gate before that layout shift so a stationary pointer
+        // cannot accidentally reveal the plan panel underneath it.
+        returnLatestButton.addEventListener('pointerdown', disarmPassiveHover);
+        returnLatestButton.addEventListener('click', disarmPassiveHover);
+    }
+
     function translate(key, fallback, params) {
         if (typeof root.t === 'function') {
             const value = root.t(key, params || {});
@@ -118,6 +158,7 @@
         host.replaceChildren();
         if (!progress.total) {
             host.hidden = true;
+            resetPassiveHover();
             return;
         }
         host.hidden = false;
@@ -176,6 +217,7 @@
         state.expanded = false;
         state.finalHoldUntil = 0;
         state.taskCalls.clear();
+        resetPassiveHover();
         state.requestSequence += 1;
         if (state.abortController) state.abortController.abort();
         state.abortController = null;

@@ -44,6 +44,29 @@ test('任务进度样式跟随系统主题变量而非固定深色', () => {
     assert.doesNotMatch(css, /background:\s*#(?:292929|2b2b2b|303030)/i);
 });
 
+test('回到最新按钮与任务进度同时显示时采用上下避让布局', () => {
+    const css = fs.readFileSync('web/static/css/chat-plan-progress.css', 'utf8');
+    const template = fs.readFileSync('web/templates/index.html', 'utf8');
+    assert.match(css, /\.chat-return-latest:not\(\[hidden\]\)\s*\+\s*\.agent-plan-progress:not\(\[hidden\]\)/);
+    assert.match(css, /--agent-plan-trigger-bottom:\s*64px/);
+    assert.match(css, /--agent-plan-panel-bottom:\s*120px/);
+    assert.match(css, /bottom:\s*var\(--agent-plan-trigger-bottom\)/);
+    assert.match(css, /bottom:\s*var\(--agent-plan-panel-bottom\)/);
+    assert.match(template, /<button[^>]+id="chat-return-latest"[\s\S]*?<\/button>\s*<div id="agent-plan-progress"/);
+});
+
+test('计划详情只在真实鼠标移动或主动操作后展开', () => {
+    const css = fs.readFileSync('web/static/css/chat-plan-progress.css', 'utf8');
+    const source = fs.readFileSync('web/static/js/chat-plan-progress.js', 'utf8');
+    assert.doesNotMatch(css, /\.agent-plan-progress:hover\s+\.agent-plan-progress-panel/);
+    assert.match(css, /\.agent-plan-progress\.is-hover-active\s+\.agent-plan-progress-panel/);
+    assert.match(source, /host\.addEventListener\('pointermove',\s*armHoverAfterPointerMove\)/);
+    assert.match(source, /returnLatestButton\.addEventListener\('pointerdown',\s*disarmPassiveHover\)/);
+    assert.match(source, /passiveHoverAnchor = \{ x: event\.clientX, y: event\.clientY \}/);
+    assert.match(source, /event\.clientX === passiveHoverAnchor\.x && event\.clientY === passiveHoverAnchor\.y/);
+    assert.match(source, /host\.classList\.remove\('is-hover-active'\)/);
+});
+
 test('服务端判定任务停止后立即清空旧任务卡片', () => {
     const source = fs.readFileSync('web/static/js/chat-plan-progress.js', 'utf8');
     assert.match(source, /payload && payload\.running === false/);
