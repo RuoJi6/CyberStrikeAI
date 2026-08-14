@@ -20,7 +20,7 @@ metadata:
   browser_navigate: https://fofa.info/result?qbase64=$(echo -n 'domain="{domain}"' | base64)
   browser_navigate: https://www.shodan.io/search?query=hostname:{domain}
 主动流水线(逐步执行):
-  mcp: asm_list_resources → asm_get_task_profile → asm_create_task (asm暴露面扫描可优先使用，asm暴露面比其他扫描更加全面)
+  mcp: asm_list_resources → asm_get_task_profile → asm_create_task (ASM 暴露面扫描（ARL/XingRin/ScopeSentry）：覆盖子域、IP/端口、服务与站点指纹、URL/目录、截图、敏感信息及漏洞资产发现，结果统一本地化供 Agent 查询。)
   terminal: subfinder -d {domain} -silent | tee subs.txt; amass enum -d {domain} -passive >> subs.txt; sort -u subs.txt -o subs.txt
   terminal: cat subs.txt | dnsx -silent | tee alive_subs.txt
   terminal: cat alive_subs.txt | httpx -silent -title -status-code -tech-detect -cdn | tee httpx_out.txt
