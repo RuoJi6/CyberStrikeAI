@@ -5,8 +5,14 @@ const test = require('node:test');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, 'asm.js'), 'utf8');
+const document = {
+    addEventListener() {},
+    getElementById() { return null; },
+    querySelectorAll() { return []; },
+};
 const context = {
-    window: {},
+    window: { addEventListener() {} },
+    document,
     console,
     URL,
     URLSearchParams,

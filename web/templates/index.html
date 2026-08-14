@@ -32,7 +32,7 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/style.css?v=20260813-6">
-    <link rel="stylesheet" href="/static/css/asm.css?v=20260814-4">
+    <link rel="stylesheet" href="/static/css/asm.css?v=20260814-5">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -2405,6 +2405,10 @@
 							<p data-i18n="asm.taskCenterSubtitle">统一查看 Agent 与 MCP 创建的 ASM 任务、扫描进度、结果和站点截图。</p>
 						</div>
 						<div class="page-header-actions">
+							<button type="button" class="btn-secondary btn-icon-text" data-require-permission="mcp:write" onclick="openASMAgentContinuationModal()">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 2a7 7 0 0 0-7 7v3.2c0 .8-.3 1.6-.9 2.2L3 15.5h18l-1.1-1.1a3.1 3.1 0 0 1-.9-2.2V9a7 7 0 0 0-7-7Z"/><path d="M9.5 19a2.7 2.7 0 0 0 5 0"/></svg>
+								<span>Agent 联动设置</span>
+							</button>
 							<button type="button" class="btn-primary btn-icon-text" data-require-permission="mcp:write" onclick="openASMTaskCreateModal()">
 								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
 								<span>创建扫描任务</span>
@@ -2491,7 +2495,44 @@
 							<div class="modal-footer"><button type="button" class="btn-secondary" onclick="closeASMTaskCreateModal()">取消</button><button id="asm-create-submit" type="submit" class="btn-primary" data-require-permission="mcp:write">确认下发</button></div>
 						</form>
 					</div>
-                </div>
+
+					<div id="asm-agent-continuation-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="asm-agent-continuation-title">
+						<form id="asm-agent-continuation-form" class="modal-content asm-agent-continuation-content" onsubmit="saveASMAgentContinuation(event)">
+							<div class="modal-header">
+								<div><div class="asm-modal-kicker">AGENT CONTINUATION</div><h3 id="asm-agent-continuation-title">Agent 联动设置</h3></div>
+								<button type="button" class="modal-close" onclick="closeASMAgentContinuationModal()" aria-label="关闭">&times;</button>
+							</div>
+							<div class="modal-body asm-form-body asm-agent-continuation-body">
+								<div class="asm-continuation-intro"><strong>扫描结果完成后恢复原 Agent 对话</strong><span>仅 Agent/MCP 下发的任务会自动绑定来源对话；任务中心手工下发不会触发续跑。</span></div>
+								<div id="asm-agent-continuation-error" class="form-error" hidden></div>
+								<section class="asm-continuation-config" aria-labelledby="asm-continuation-config-title">
+									<div class="asm-continuation-head">
+										<div><strong id="asm-continuation-config-title">资源联动策略</strong><small>不同 ASM 可分别配置，保存后由系统自动执行，Agent 不能在单次任务中覆盖。</small></div>
+										<button type="button" class="btn-secondary btn-small" onclick="resetASMAgentContinuationPrompts()">恢复默认提示词</button>
+									</div>
+									<label class="form-group"><span>ASM 资源</span><select id="asm-agent-continuation-resource" required onchange="loadASMAgentContinuationSettings()"></select></label>
+									<label class="form-group"><span>扫描完成动作</span>
+										<select id="asm-agent-continuation-behavior" onchange="syncASMAgentContinuationForm()">
+											<option value="auto">自动恢复来源 Agent 对话</option>
+											<option value="notify_only">仅记录完成，不续跑</option>
+											<option value="none">关闭联动</option>
+										</select>
+									</label>
+									<div id="asm-agent-continuation-prompts" class="asm-continuation-prompts">
+										<label><span>Agent 仍在运行时</span><textarea id="asm-agent-continuation-running-prompt" rows="8" maxlength="8000"></textarea></label>
+										<label><span>Agent 已停止时</span><textarea id="asm-agent-continuation-idle-prompt" rows="8" maxlength="8000"></textarea></label>
+									</div>
+									<div class="asm-continuation-stop-rule">
+										<div><strong>用户主动停止对话</strong><span>立即取消该来源对话尚未触发的 ASM 联动；即使扫描之后完成，也不会自动重新启动 Agent。</span></div>
+										<em>不自动恢复</em>
+									</div>
+									<p class="asm-continuation-variables">可用变量：<code>&#123;&#123;provider&#125;&#125;</code> <code>&#123;&#123;task_type&#125;&#125;</code> <code>&#123;&#123;task_id&#125;&#125;</code> <code>&#123;&#123;task_name&#125;&#125;</code> <code>&#123;&#123;targets&#125;&#125;</code> <code>&#123;&#123;sync_status&#125;&#125;</code></p>
+								</section>
+							</div>
+							<div class="modal-footer"><button type="button" class="btn-secondary" onclick="closeASMAgentContinuationModal()">取消</button><button id="asm-agent-continuation-save" type="submit" class="btn-primary" data-require-permission="mcp:write">保存设置</button></div>
+						</form>
+					</div>
+				</div>
 
                 <!-- 项目管理页面 -->
                 <div id="page-projects" class="page projects-page">
@@ -7079,7 +7120,7 @@
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
     <script src="/static/js/assets.js?v=20260717-7"></script>
-	<script src="/static/js/asm.js?v=20260814-7"></script>
+	<script src="/static/js/asm.js?v=20260814-8"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260813-6"></script>

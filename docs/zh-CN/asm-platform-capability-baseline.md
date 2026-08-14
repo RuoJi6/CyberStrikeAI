@@ -1,6 +1,6 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：2.6
+> 文档版本：2.9
 > 基线日期：2026-08-14
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
@@ -163,6 +163,8 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 上游仅在以下场景请求：运行中任务的周期性进度同步、检测到完成后的首次全量结果同步、本地缺少某结果类型时 MCP 的首次兜底同步，以及用户显式点击“重新同步结果”或调用 `asm_manage_task(action=sync_results)`。任务中心分开显示“扫描进度”和“结果本地化进度”，包含已同步类型数、本地记录数、当前类型、最后时间和错误。
 
+ASM 任务中心通过独立的“Agent 联动设置”按钮按资源配置扫描完成动作，默认在全部关联子任务完成且结果、截图本地化结束后，恢复创建扫描任务的对话。设置窗口分别保存“Agent 当时仍在运行”和“Agent 已停止”两套可编辑提示词；如果用户主动点击停止来源对话，则对应待处理联动会持久化为 `user_stopped`，即使扫描之后完成也不会重新启动 Agent。该策略不属于扫描参数，任务中心手工下发不会绑定当前聊天，Agent 也不能通过 `asm_create_task` 在单次任务中覆盖用户设置。MCP 创建任务以及通过 `asm_manage_task` 重跑或恢复已有任务时，系统自动绑定当前 MCP 对话。`asm_list_resources`、`asm_create_task` 和 `asm_manage_task` 的 MCP 描述会明确告知 Agent 当前已有资源级联动；创建、重跑或恢复响应也返回 `agent_continuation.wait_strategy` 与操作说明。任务开始后 Agent 不应调用 `sleep` 或循环轮询，只有用户明确要求即时查看进度时才进行一次有界状态查询。XingRin 多目标下发只创建一条批次联动，必须等全部远程子任务及本地结果同步完成才触发。联动状态持久化在本地数据库，服务重启后可恢复；权限按原任务所属用户重新校验，未关联对话的任务不会自动新建 Agent 对话。
+
 截图二进制也由同步流程自动认证拉取到 CyberStrikeAI，无需人工点击缓存；界面将截图放在对应站点记录旁边，同时保留“已缓存截图”总览。
 
 ASM 任务中心也复用同一 provider profile：手动创建时先读取 `create_options`，再从上游动态加载 ARL 策略、XingRin 引擎/字典以及 ScopeSentry 模板/节点/项目。ScopeSentry 模板在界面选中后会自动读取 `template_detail`、显示实际能力并携带校验令牌。任务详情可直接调用上游停止动作；ScopeSentry 即时任务可后续恢复，ARL 需重跑，XingRin 停止后需新建任务。
@@ -199,6 +201,9 @@ XingRin 截图只在 `site_capture=true` 或选中的上游引擎包含 screensh
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 2.9 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 用户主动停止来源对话会持久化取消待处理联动；任务历史统一返回并展示 ScopeSentry 模板、ARL 策略或 XingRin 引擎执行配置 |
+| 2.8 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | MCP 资源与任务描述显式声明系统托管等待，创建响应返回等待策略，禁止 Agent 以 `sleep` 或循环轮询代替后台联动 |
+| 2.7 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ASM 任务中心新增独立 Agent 联动设置；MCP 任务自动绑定来源对话，结果本地化后按运行/空闲状态使用可编辑提示词恢复，并持久化等待、重试与重启恢复状态 |
 | 2.6 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 内置模板按平台返回并展示精确 `provider_config` 与 `mcp_usage`；资源页新增内置及上游模板点击详情，Agent 可据真实 ARL 策略或 ScopeSentry 插件配置选型 |
 | 2.5 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ARL 漏洞巡检实时选择全部 POC，全量扫描同时选择全部 POC 与弱口令插件；同名内置策略可通过 UI/MCP 原位校准，修复旧策略空 `poc_config`/`brute_config` |
 | 2.4 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 改为插件级能力识别；`sensitive_scan` 精确对应 sensitive；任务面板与 MCP 按实时已安装插件统一可用能力，已安装但基模板未启用的能力可自动补齐 |

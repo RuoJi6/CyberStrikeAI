@@ -36,6 +36,7 @@ type TaskHistoryView struct {
 	Name              string                    `json:"name"`
 	Target            string                    `json:"target"`
 	Options           map[string]interface{}    `json:"options"`
+	ExecutionProfile  map[string]interface{}    `json:"execution_profile,omitempty"`
 	Status            string                    `json:"status"`
 	Progress          int                       `json:"progress"`
 	Stage             string                    `json:"stage"`
@@ -92,13 +93,15 @@ func jsonValue(raw string) interface{} {
 }
 
 func taskHistoryView(item *database.ASMTask) TaskHistoryView {
+	options := jsonObject(item.OptionsJSON)
+	detail := jsonValue(item.DetailJSON)
 	return TaskHistoryView{
 		ID: item.ID, BatchID: item.BatchID, BatchIndex: item.BatchIndex, BatchSize: item.BatchSize,
 		ResourceID: item.ResourceID, ResourceName: item.ResourceName,
 		Provider: item.Provider, RemoteTaskID: item.RemoteTaskID, Name: item.Name,
-		Target: item.Target, Options: jsonObject(item.OptionsJSON), Status: item.Status,
+		Target: item.Target, Options: options, ExecutionProfile: taskExecutionProfile(item.Provider, options, detail), Status: item.Status,
 		Progress: item.Progress, Stage: item.Stage, Summary: jsonObject(item.SummaryJSON),
-		Detail: jsonValue(item.DetailJSON), LastError: item.LastError,
+		Detail: detail, LastError: item.LastError,
 		ResultTypes:  providerResultTypes(item.Provider),
 		LastSyncedAt: item.LastSyncedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
@@ -151,6 +154,115 @@ func meaningfulString(value interface{}) string {
 		return ""
 	}
 	return result
+}
+
+func historyStringSlice(value interface{}) []string {
+	items := make([]string, 0)
+	switch raw := value.(type) {
+	case []string:
+		items = append(items, raw...)
+	case []int:
+		for _, item := range raw {
+			items = append(items, strconv.Itoa(item))
+		}
+	case []interface{}:
+		for _, item := range raw {
+			if text := meaningfulString(item); text != "" {
+				items = append(items, text)
+			}
+		}
+	}
+	return items
+}
+
+func firstTaskHistoryValue(value interface{}, paths ...[]interface{}) interface{} {
+	for _, path := range paths {
+		if result := pathValue(value, path...); result != nil {
+			return result
+		}
+	}
+	return nil
+}
+
+func taskExecutionProfile(provider string, options map[string]interface{}, detail interface{}) map[string]interface{} {
+	if stored := valueMap(options["_execution_profile"]); len(stored) > 0 {
+		return stored
+	}
+	profile := map[string]interface{}{}
+	switch normalizeProvider(provider) {
+	case ProviderScopeSentry:
+		effective := valueMap(firstTaskHistoryValue(detail,
+			[]interface{}{"effective_template"},
+			[]interface{}{"creation_response", "effective_template"},
+			[]interface{}{"response", "effective_template"},
+		))
+		id := meaningfulString(options["template_id"])
+		if id == "" && effective != nil {
+			id = meaningfulString(effective["template_id"])
+		}
+		if id == "" {
+			id = meaningfulString(firstTaskHistoryValue(detail,
+				[]interface{}{"template_id"},
+				[]interface{}{"task", "data", "template"},
+				[]interface{}{"task", "template"},
+			))
+		}
+		name := ""
+		if effective != nil {
+			name = meaningfulString(effective["template_name"])
+			for _, key := range []string{"port_scope", "port_expression", "full_ports", "enabled_capabilities", "selected_poc_count"} {
+				if value, exists := effective[key]; exists {
+					profile[key] = value
+				}
+			}
+		}
+		if id == "" && name == "" {
+			return nil
+		}
+		profile["kind"], profile["label"], profile["id"], profile["name"] = "template", "ScopeSentry 模板", id, name
+	case ProviderARL:
+		id := meaningfulString(options["policy_id"])
+		if id == "" {
+			return nil
+		}
+		profile["kind"], profile["label"], profile["id"] = "policy", "ARL 策略", id
+		profile["name"] = meaningfulString(firstTaskHistoryValue(detail,
+			[]interface{}{"policy_name"},
+			[]interface{}{"response", "policy_name"},
+		))
+	case ProviderXingRin:
+		ids := historyStringSlice(options["engine_ids"])
+		if len(ids) == 0 {
+			ids = historyStringSlice(firstTaskHistoryValue(detail,
+				[]interface{}{"execution_profile", "ids"},
+				[]interface{}{"tasks", "results", 0, "engineIds"},
+				[]interface{}{"response", "scans", 0, "engineIds"},
+			))
+		}
+		names := historyStringSlice(firstTaskHistoryValue(detail,
+			[]interface{}{"execution_profile", "names"},
+			[]interface{}{"tasks", "results", 0, "engineNames"},
+			[]interface{}{"response", "scans", 0, "engineNames"},
+		))
+		if len(ids) == 0 && len(names) == 0 {
+			return nil
+		}
+		profile["kind"], profile["label"], profile["ids"], profile["names"] = "engine", "XingRin 引擎", ids, names
+	default:
+		return nil
+	}
+	return profile
+}
+
+func taskHistoryOptions(provider string, input map[string]interface{}, result interface{}) map[string]interface{} {
+	options := make(map[string]interface{}, len(input)+1)
+	for key, value := range input {
+		options[key] = value
+	}
+	if profile := taskExecutionProfile(provider, options, result); len(profile) > 0 {
+		options["_execution_profile"] = profile
+	}
+	return options
 }
 
 func remoteTaskID(provider string, result interface{}) string {
@@ -341,7 +453,8 @@ func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result in
 		return withHistoryMetadata(result, "", 0, nil, []string{warning})
 	}
 	batchID := "asmbatch_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20]
-	optionsJSON, _ := json.Marshal(req.Options)
+	historyOptions := taskHistoryOptions(conn.Resource.Provider, req.Options, result)
+	optionsJSON, _ := json.Marshal(historyOptions)
 	if string(optionsJSON) == "" || string(optionsJSON) == "null" {
 		optionsJSON = []byte("{}")
 	}
@@ -350,6 +463,7 @@ func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result in
 	for index, entry := range entries {
 		if existing, err := s.db.FindASMTask(conn.Resource.ID, entry.RemoteID); err == nil && existing != nil {
 			existing.BatchID, existing.BatchIndex, existing.BatchSize = batchID, index, len(entries)
+			existing.OptionsJSON = string(optionsJSON)
 			if existing.Target == "" {
 				existing.Target = entry.Target
 			}

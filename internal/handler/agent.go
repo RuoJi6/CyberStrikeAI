@@ -223,10 +223,25 @@ func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
 	}
 	h.cancelRunningMCPToolsForConversation(conversationID)
 	h.tasks.AbortActiveEinoExecute(conversationID, "")
+	h.stopASMAgentContinuation(conversationID)
 	if ok, err := h.tasks.CancelTask(conversationID, ErrTaskCancelled); ok {
 		h.logger.Info("已取消会话运行中任务", zap.String("conversationId", conversationID))
 	} else if err != nil {
 		h.logger.Warn("取消会话运行中任务失败", zap.String("conversationId", conversationID), zap.Error(err))
+	}
+}
+
+func (h *AgentHandler) stopASMAgentContinuation(conversationID string) {
+	if h == nil || h.db == nil || strings.TrimSpace(conversationID) == "" {
+		return
+	}
+	count, err := h.db.StopASMAgentContinuationsForConversation(conversationID, "用户主动停止来源 Agent 对话，不再自动恢复")
+	if err != nil {
+		h.logger.Warn("停止 ASM Agent 联动失败", zap.String("conversationId", conversationID), zap.Error(err))
+		return
+	}
+	if count > 0 {
+		h.logger.Info("用户停止对话，已取消 ASM Agent 自动恢复", zap.String("conversationId", conversationID), zap.Int64("count", count))
 	}
 }
 
@@ -1647,6 +1662,7 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
 		return
 	}
+	h.stopASMAgentContinuation(req.ConversationID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":            "cancelling",

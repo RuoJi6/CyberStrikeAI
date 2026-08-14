@@ -359,6 +359,9 @@ func (s *Service) StartResultSyncWorker(ctx context.Context, interval time.Durat
 		interval = 30 * time.Second
 	}
 	s.workerCtx = ctx
+	// A process restart means no previous in-memory Agent runner can still own a
+	// persisted "running" continuation; make those rows retryable immediately.
+	_ = s.db.RecoverStaleASMAgentContinuations(time.Now().UTC().Add(time.Minute))
 	go func() {
 		timer := time.NewTimer(2 * time.Second)
 		defer timer.Stop()
@@ -398,4 +401,5 @@ func (s *Service) reconcileTaskResults(ctx context.Context) {
 			s.enqueueTaskResultSync(item.ID)
 		}
 	}
+	s.reconcileAgentContinuations(ctx)
 }

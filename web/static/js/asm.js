@@ -41,6 +41,26 @@ const asmPageState = {
     templateUpstreamDetailError: '',
 };
 
+const asmDefaultRunningPrompt = `ASM 扫描结果已完成。
+平台：{{provider}}
+类型：{{task_type}}
+任务 ID：{{task_id}}
+任务名称：{{task_name}}
+目标：{{targets}}
+结果同步状态：{{sync_status}}
+
+你收到本消息时该对话仍有任务在运行。请先完成正在进行的工作，完成之后调用 ASM MCP，使用上述任务 ID 读取已本地化的扫描结果并继续分析。`;
+
+const asmDefaultIdlePrompt = `ASM 扫描结果已完成。
+平台：{{provider}}
+类型：{{task_type}}
+任务 ID：{{task_id}}
+任务名称：{{task_name}}
+目标：{{targets}}
+结果同步状态：{{sync_status}}
+
+继续原任务。请调用 ASM MCP，使用上述任务 ID 读取已本地化的扫描结果并继续分析。`;
+
 function asmT(key, fallback, options) {
     if (window.i18next && typeof window.i18next.t === 'function') {
         const value = window.i18next.t(key, options || {});
@@ -317,6 +337,102 @@ async function saveASMResource(event) {
         await loadASMResources();
     } catch (error) {
         setASMFormError(error.message);
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+
+function selectedASMAgentContinuationResource() {
+    const id = document.getElementById('asm-agent-continuation-resource')?.value || '';
+    return asmPageState.resources.find(resource => resource.id === id) || null;
+}
+
+function setASMAgentContinuationError(message) {
+    const node = document.getElementById('asm-agent-continuation-error');
+    if (!node) return;
+    node.textContent = message || '';
+    node.hidden = !message;
+}
+
+function resetASMAgentContinuationPrompts() {
+    const running = document.getElementById('asm-agent-continuation-running-prompt');
+    const idle = document.getElementById('asm-agent-continuation-idle-prompt');
+    if (running) running.value = asmDefaultRunningPrompt;
+    if (idle) idle.value = asmDefaultIdlePrompt;
+}
+
+function syncASMAgentContinuationForm() {
+    const behavior = document.getElementById('asm-agent-continuation-behavior')?.value || 'auto';
+    const prompts = document.getElementById('asm-agent-continuation-prompts');
+    if (prompts) prompts.hidden = behavior !== 'auto';
+}
+
+function loadASMAgentContinuationSettings() {
+    const resource = selectedASMAgentContinuationResource();
+    const settings = resource?.agent_continuation || {};
+    const behavior = document.getElementById('asm-agent-continuation-behavior');
+    const running = document.getElementById('asm-agent-continuation-running-prompt');
+    const idle = document.getElementById('asm-agent-continuation-idle-prompt');
+    if (behavior) behavior.value = settings.behavior || 'auto';
+    if (running) running.value = settings.running_prompt || asmDefaultRunningPrompt;
+    if (idle) idle.value = settings.idle_prompt || asmDefaultIdlePrompt;
+    syncASMAgentContinuationForm();
+    if (typeof window.refreshSettingsCustomSelects === 'function') window.refreshSettingsCustomSelects();
+}
+
+async function openASMAgentContinuationModal() {
+    if (!asmPageState.resources.length) await loadASMResources();
+    if (!asmPageState.resources.length) {
+        if (typeof showNotification === 'function') showNotification('请先添加 ASM 资源', 'warning');
+        return;
+    }
+    const select = document.getElementById('asm-agent-continuation-resource');
+    const previous = select?.value || '';
+    if (select) {
+        select.innerHTML = asmPageState.resources.map(resource => `<option value="${asmEscape(resource.id)}">${asmEscape(resource.name)} · ${asmEscape(asmProviderLabel(resource.provider))}</option>`).join('');
+        select.value = asmPageState.resources.some(resource => resource.id === previous) ? previous : asmPageState.resources[0].id;
+    }
+    setASMAgentContinuationError('');
+    loadASMAgentContinuationSettings();
+    const form = document.getElementById('asm-agent-continuation-form');
+    if (form && typeof window.initSettingsCustomSelects === 'function') window.initSettingsCustomSelects(form);
+    if (typeof openAppModal === 'function') openAppModal('asm-agent-continuation-modal');
+    else document.getElementById('asm-agent-continuation-modal').style.display = 'flex';
+}
+
+function closeASMAgentContinuationModal() {
+    if (typeof window.closeAllSettingsCustomSelects === 'function') window.closeAllSettingsCustomSelects();
+    if (typeof closeAppModal === 'function') closeAppModal('asm-agent-continuation-modal');
+    else document.getElementById('asm-agent-continuation-modal').style.display = 'none';
+}
+
+async function saveASMAgentContinuation(event) {
+    if (event) event.preventDefault();
+    const resource = selectedASMAgentContinuationResource();
+    if (!resource) {
+        setASMAgentContinuationError('请选择 ASM 资源');
+        return;
+    }
+    const button = document.getElementById('asm-agent-continuation-save');
+    const payload = {
+        agent_continuation: {
+            behavior: document.getElementById('asm-agent-continuation-behavior')?.value || 'auto',
+            running_prompt: document.getElementById('asm-agent-continuation-running-prompt')?.value.trim() || asmDefaultRunningPrompt,
+            idle_prompt: document.getElementById('asm-agent-continuation-idle-prompt')?.value.trim() || asmDefaultIdlePrompt,
+        },
+    };
+    setASMAgentContinuationError('');
+    if (button) button.disabled = true;
+    try {
+        const updated = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+        });
+        const index = asmPageState.resources.findIndex(item => item.id === resource.id);
+        if (index >= 0) asmPageState.resources[index] = updated;
+        closeASMAgentContinuationModal();
+        if (typeof showNotification === 'function') showNotification('Agent 联动设置已保存', 'success');
+    } catch (error) {
+        setASMAgentContinuationError(error.message);
     } finally {
         if (button) button.disabled = false;
     }
@@ -783,11 +899,45 @@ function asmBatchState(group) {
     return { expected, completed, progress, status };
 }
 
+function asmTaskExecutionProfile(task) {
+    const profile = task?.execution_profile;
+    return profile && typeof profile === 'object' ? profile : null;
+}
+
+function asmTaskExecutionName(profile) {
+    if (!profile) return '';
+    const names = Array.isArray(profile.names) ? profile.names.map(String).filter(Boolean) : [];
+    return String(profile.name || names.join('、') || profile.id || (Array.isArray(profile.ids) ? profile.ids.join(', ') : '') || '').trim();
+}
+
+function renderASMTaskExecutionChip(task) {
+    const profile = asmTaskExecutionProfile(task);
+    const name = asmTaskExecutionName(profile);
+    if (!profile || !name) return '';
+    const label = String(profile.label || '扫描配置');
+    return `<em class="asm-task-profile-chip" title="${asmEscape(`${label}：${name}`)}">${asmEscape(label)} · ${asmEscape(name)}</em>`;
+}
+
+function renderASMTaskExecutionPanel(task) {
+    const profile = asmTaskExecutionProfile(task);
+    const name = asmTaskExecutionName(profile);
+    if (!profile || !name) return '';
+    const ids = String(profile.id || (Array.isArray(profile.ids) ? profile.ids.join(', ') : '') || '').trim();
+    const port = String(profile.port_expression || profile.port_scope || '').trim();
+    const capabilities = Array.isArray(profile.enabled_capabilities) ? profile.enabled_capabilities.map(String).filter(Boolean) : [];
+    return `<section class="asm-task-execution-panel" aria-label="任务扫描配置">
+        <div><span>${asmEscape(profile.label || '扫描配置')}</span><strong>${asmEscape(name)}</strong></div>
+        <div><span>上游配置 ID</span><strong>${asmEscape(ids || '上游未返回')}</strong></div>
+        <div><span>端口范围</span><strong>${asmEscape(port || '由该配置决定')}</strong></div>
+        ${capabilities.length ? `<div class="asm-task-execution-capabilities"><span>已启用能力</span><p>${capabilities.map(asmEscape).join(' · ')}</p></div>` : ''}
+    </section>`;
+}
+
 function renderASMTaskRow(task, child) {
     const progress = asmTaskProgress(task.progress);
     const status = asmTaskStatusClass(task.status);
     return `<article class="asm-task-row${child ? ' asm-task-child' : ''}" onclick="openASMTaskModal('${asmEscape(task.id)}')">
-        <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
+        <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span>${renderASMTaskExecutionChip(task)}</div>
         <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></div>
         <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
         <time>${asmEscape(formatASMTime(task.created_at))}</time>
@@ -805,7 +955,7 @@ function renderASMBatch(group) {
     const children = expanded ? group.tasks.map(task => renderASMTaskRow(task, true)).join('') : '';
     return `<section class="asm-task-batch${expanded ? ' expanded' : ''}" data-batch-id="${asmEscape(group.batchID)}">
         <article class="asm-task-row asm-task-batch-row" onclick="toggleASMBatch('${asmEscape(group.batchID)}')">
-            <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span></div>
+            <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span>${renderASMTaskExecutionChip(first)}</div>
             <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></div>
             <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(state.status))}</span><small>${state.completed}/${state.expected} 个子任务完成</small></div><div class="asm-progress-track"><span style="width:${state.progress}%"></span></div><b>${state.progress}%</b></div>
             <time>${asmEscape(formatASMTime(first.created_at))}</time>
@@ -895,6 +1045,7 @@ function renderASMTaskDetail() {
     </div>
     <div class="asm-detail-progress-track"><span style="width:${progress}%"></span></div>
     <div class="asm-task-meta-grid"><div><span>远程任务 ID</span><strong>${asmEscape(task.remote_task_id)}</strong></div><div><span>创建时间</span><strong>${asmEscape(formatASMTime(task.created_at))}</strong></div><div><span>最后同步</span><strong>${asmEscape(formatASMTime(task.last_synced_at))}</strong></div><div><span>本地记录 ID</span><strong>${asmEscape(task.id)}</strong></div></div>
+    ${renderASMTaskExecutionPanel(task)}
     <section class="asm-result-sync-panel ${asmResultSyncClass(resultSync)}"><div><span class="asm-result-sync-badge ${asmResultSyncClass(resultSync)}">${asmEscape(asmResultSyncLabel(resultSync))}</span><strong>${Number(resultSync.completed_types) || 0} / ${Number(resultSync.total_types) || 0} 类型</strong><small>${Number(resultSync.item_count) || 0} 条本地结果${resultSync.current_type ? ` · 正在同步 ${asmEscape(resultSync.current_type)}` : ''}${resultSync.synced_at ? ` · ${asmEscape(formatASMTime(resultSync.synced_at))}` : ''}</small></div><div class="asm-result-sync-track"><span style="width:${syncProgress}%"></span></div>${resultSync.last_error ? `<p>${asmEscape(resultSync.last_error)}</p>` : ''}</section>
     ${summaries.length ? `<div class="asm-summary-grid">${summaries.map(([key, value]) => `<div><strong>${asmEscape(value)}</strong><span>${asmEscape(key)}</span></div>`).join('')}</div>` : ''}
     ${task.last_error ? `<div class="asm-task-detail-error">${asmEscape(task.last_error)}</div>` : ''}`;
@@ -2314,6 +2465,12 @@ window.initASMTaskCenterPage = initASMTaskCenterPage;
 window.loadASMResources = loadASMResources;
 window.openASMResourceModal = openASMResourceModal;
 window.closeASMResourceModal = closeASMResourceModal;
+window.openASMAgentContinuationModal = openASMAgentContinuationModal;
+window.closeASMAgentContinuationModal = closeASMAgentContinuationModal;
+window.loadASMAgentContinuationSettings = loadASMAgentContinuationSettings;
+window.syncASMAgentContinuationForm = syncASMAgentContinuationForm;
+window.resetASMAgentContinuationPrompts = resetASMAgentContinuationPrompts;
+window.saveASMAgentContinuation = saveASMAgentContinuation;
 window.openASMTemplateLibrary = openASMTemplateLibrary;
 window.closeASMTemplateLibrary = closeASMTemplateLibrary;
 window.loadASMTemplateLibrary = loadASMTemplateLibrary;

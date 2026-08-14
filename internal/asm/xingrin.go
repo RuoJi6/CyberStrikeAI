@@ -626,7 +626,12 @@ func (a *XingRinAdapter) CreateTask(ctx context.Context, conn *Connection, req T
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"provider": ProviderXingRin, "resource_id": conn.Resource.ID, "response": payload}, nil
+	return map[string]interface{}{
+		"provider": ProviderXingRin, "resource_id": conn.Resource.ID, "response": payload,
+		"execution_profile": map[string]interface{}{
+			"kind": "engine", "label": "XingRin 引擎", "ids": engineIDs, "names": engineNames,
+		},
+	}, nil
 }
 
 func normalizeXingRinTaskID(value string) (string, error) {

@@ -6,11 +6,14 @@ import (
 	"strings"
 
 	"cyberstrike-ai/internal/asm"
+	"cyberstrike-ai/internal/authctx"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 
 	"go.uber.org/zap"
 )
+
+const asmAgentContinuationMCPGuidance = "每个 ASM 资源都已由用户在 ASM 任务中心配置 Agent 联动策略；asm_list_resources 返回的 agent_continuation 是当前生效设置。Agent/MCP 下发任务后，系统会在后台跟踪扫描，并在结果与截图本地化完成后按该策略恢复来源对话。若用户主动停止来源对话，系统会永久取消该对话尚未触发的 ASM 联动，不得重新启动 Agent。任务创建成功后不要调用 sleep 等待，也不要为了等待完成而循环轮询任务状态；只有用户明确要求立即查看当前进度时，才进行一次有界状态查询。"
 
 func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logger) {
 	if server == nil || service == nil {
@@ -29,8 +32,8 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	}
 
 	register(mcp.Tool{
-		Name: builtin.ToolASMListResources, ShortDescription: "列出可用 ASM 连接",
-		Description: "列出当前已启用、凭据已脱敏的 ASM 资源及其类型、连接状态和能力。下发 ASM 任务前先调用本工具选择 resource_id。",
+		Name: builtin.ToolASMListResources, ShortDescription: "列出可用 ASM 连接及 Agent 联动设置",
+		Description: "列出当前已启用、凭据已脱敏的 ASM 资源及其类型、连接状态、能力和 Agent 联动设置。下发 ASM 任务前先调用本工具选择 resource_id。" + asmAgentContinuationMCPGuidance,
 		InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
 	}, func(_ context.Context, _ map[string]interface{}) (interface{}, error) {
 		return service.ListResources(true)
@@ -164,8 +167,8 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	optionProperties["concurrency"] = map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200}
 
 	register(mcp.Tool{
-		Name: builtin.ToolASMCreateTask, ShortDescription: "向 ASM 下发资产发现任务",
-		Description: "向指定 ASM 创建资产发现任务。仅当用户明确授权目标并要求扫描时调用；先调用 asm_get_task_profile，再查询所需实时选项。ARL 支持 task_mode=direct 直接自定义扫描，或 task_mode=policy 配合从 policies 实时取得的 policy_id 使用策略模板；两种模式不可混传配置。XingRin 多目标会返回多个远程子任务，成功响应的 history_records、local_task_ids 和 remote_task_ids 是完整落库清单，local_task_id 仅保留为旧调用兼容字段。ScopeSentry 使用 template_id 时，必须先单独查询 template_detail 并传回 template_verification_token；用户要求全端口时传 required_port_scope=all，要求的功能逐项写入 required_capabilities。MCP 会在上游创建前校验，成功响应中的 effective_template 才是最终配置依据；不得仅根据任务名或模板名宣称“全功能”。",
+		Name: builtin.ToolASMCreateTask, ShortDescription: "向 ASM 下发扫描任务；系统按资源联动设置后台等待，禁止 sleep 或循环轮询",
+		Description: "向指定 ASM 创建资产发现任务。仅当用户明确授权目标并要求扫描时调用；先调用 asm_get_task_profile，再查询所需实时选项。" + asmAgentContinuationMCPGuidance + "成功响应的 agent_continuation 会说明本次任务是否已绑定、当前策略以及后续等待方式。ARL 支持 task_mode=direct 直接自定义扫描，或 task_mode=policy 配合从 policies 实时取得的 policy_id 使用策略模板；两种模式不可混传配置。XingRin 多目标会返回多个远程子任务，成功响应的 history_records、local_task_ids 和 remote_task_ids 是完整落库清单，local_task_id 仅保留为旧调用兼容字段。ScopeSentry 使用 template_id 时，必须先单独查询 template_detail 并传回 template_verification_token；用户要求全端口时传 required_port_scope=all，要求的功能逐项写入 required_capabilities。MCP 会在上游创建前校验，成功响应中的 effective_template 才是最终配置依据；不得仅根据任务名或模板名宣称“全功能”。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"name":    map[string]interface{}{"type": "string", "description": "任务名称"},
 			"target":  map[string]interface{}{"type": "string", "description": "已获授权的域名、IP 或 CIDR；多个目标按 ASM 支持的空格/换行格式传递"},
@@ -173,12 +176,19 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 		}, "target"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		options, _ := args["options"].(map[string]interface{})
-		return service.CreateTask(ctx, asmStringArg(args, "resource_id"), asm.TaskRequest{Name: asmStringArg(args, "name"), Target: asmStringArg(args, "target"), Options: options})
+		conversationID, ownerUserID := mcp.MCPConversationIDFromContext(ctx), ""
+		if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+			ownerUserID = principal.UserID
+		}
+		return service.CreateTask(ctx, asmStringArg(args, "resource_id"), asm.TaskRequest{
+			Name: asmStringArg(args, "name"), Target: asmStringArg(args, "target"), Options: options,
+			ConversationID: conversationID, OwnerUserID: ownerUserID,
+		})
 	})
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMListTasks, ShortDescription: "分页查询 ASM 任务",
-		Description: "分页查询指定 ASM 上的扫描任务，可按任务 ID、名称、目标和状态筛选。",
+		Description: "分页查询指定 ASM 上的扫描任务，可按任务 ID、名称、目标和状态筛选。用于用户主动查询或恢复对话后的结果定位；任务刚创建时不要用本工具循环轮询，也不要配合 sleep 等待。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"task_id": map[string]interface{}{"type": "string"}, "name": map[string]interface{}{"type": "string"},
 			"target": map[string]interface{}{"type": "string"}, "status": map[string]interface{}{"type": "string"},
@@ -193,7 +203,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMGetTask, ShortDescription: "读取 ASM 任务详情",
-		Description: "按 provider 的任务 ID 读取扫描状态、统计与任务选项。",
+		Description: "按 provider 的任务 ID 读取扫描状态、统计与任务选项。用于用户明确要求的即时进度查询；任务刚创建时不要循环调用或配合 sleep 等待，后台联动会在结果本地化后恢复来源对话。",
 		InputSchema: resourceSchema(map[string]interface{}{"task_id": map[string]interface{}{"type": "string"}}, "task_id"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		return service.GetTask(ctx, asmStringArg(args, "resource_id"), asmStringArg(args, "task_id"))
@@ -224,8 +234,8 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	})
 
 	register(mcp.Tool{
-		Name: builtin.ToolASMManageTask, ShortDescription: "执行 ASM 扩展任务动作",
-		Description: "执行平台支持的重跑、恢复、删除或结果同步动作。sync_results 会从上游全量拉取所有支持的结果类型并替换 CyberStrikeAI 本地快照；其他动作会改变远端任务状态。",
+		Name: builtin.ToolASMManageTask, ShortDescription: "管理 ASM 任务；重跑/恢复由系统后台等待，禁止 sleep 或循环轮询",
+		Description: "执行平台支持的重跑、恢复、删除或结果同步动作。restart/resume 会按资源级 Agent 联动设置绑定当前 MCP 对话，系统在后台等待结果本地化完成；成功后不要调用 sleep 或循环轮询。sync_results 会从上游全量拉取所有支持的结果类型并替换 CyberStrikeAI 本地快照；其他动作会改变远端任务状态。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"action":  map[string]interface{}{"type": "string", "enum": []string{"restart", "resume", "delete", "sync_results"}},
 			"task_id": map[string]interface{}{"type": "string"},
@@ -240,8 +250,13 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 		}, "action", "task_id"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		options, _ := args["options"].(map[string]interface{})
+		conversationID, ownerUserID := mcp.MCPConversationIDFromContext(ctx), ""
+		if principal, ok := authctx.PrincipalFromContext(ctx); ok {
+			ownerUserID = principal.UserID
+		}
 		return service.ManageTask(ctx, asmStringArg(args, "resource_id"), asm.TaskManageRequest{
 			Action: asmStringArg(args, "action"), TaskID: asmStringArg(args, "task_id"), Options: options,
+			ConversationID: conversationID, OwnerUserID: ownerUserID,
 		})
 	})
 }

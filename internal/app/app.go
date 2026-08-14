@@ -490,6 +490,27 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	go robotHandler.RunVulnerabilityAlertWorker(alertCtx)
 	asmWorkerCtx, asmWorkerCancel := context.WithCancel(context.Background())
 	app.asmResultSyncCancel = asmWorkerCancel
+	asmService.SetAgentContinuationHooks(
+		func(conversationID string) bool {
+			return agentHandler.TaskManager() != nil && agentHandler.TaskManager().GetTask(conversationID) != nil
+		},
+		func(ctx context.Context, continuation *database.ASMAgentContinuation, prompt string) error {
+			access, err := db.ResolveRBACAccess(continuation.OwnerUserID)
+			if err != nil {
+				return fmt.Errorf("恢复 ASM 对话权限失败: %w", err)
+			}
+			if !access.User.Enabled {
+				return fmt.Errorf("ASM 对话所属用户已停用")
+			}
+			conversation, err := db.GetConversation(continuation.ConversationID)
+			if err != nil {
+				return err
+			}
+			principal := authctx.NewPrincipalWithScopes(access.User.ID, access.User.Username, access.Scope, access.Permissions, access.PermissionScopes)
+			_, _, err = agentHandler.ProcessMessageForRobot(ctx, "asm-auto-resume", principal, continuation.ConversationID, prompt, conversation.RoleName, conversation.AgentMode)
+			return err
+		},
+	)
 	asmService.StartResultSyncWorker(asmWorkerCtx, 30*time.Second)
 
 	// 设置漏洞工具注册器（内置工具，必须设置）

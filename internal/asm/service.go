@@ -31,50 +31,55 @@ type ProviderInfo struct {
 }
 
 type ResourceView struct {
-	ID            string     `json:"id"`
-	Name          string     `json:"name"`
-	Provider      string     `json:"provider"`
-	BaseURL       string     `json:"base_url"`
-	Username      string     `json:"username,omitempty"`
-	AuthType      string     `json:"auth_type"`
-	VerifyTLS     bool       `json:"verify_tls"`
-	Enabled       bool       `json:"enabled"`
-	Status        string     `json:"status"`
-	LastError     string     `json:"last_error,omitempty"`
-	LastTestAt    *time.Time `json:"last_test_at,omitempty"`
-	HasCredential bool       `json:"has_credential"`
-	Capabilities  []string   `json:"capabilities"`
-	ProviderReady bool       `json:"provider_ready"`
-	CreatedAt     time.Time  `json:"created_at"`
-	UpdatedAt     time.Time  `json:"updated_at"`
+	ID                string                    `json:"id"`
+	Name              string                    `json:"name"`
+	Provider          string                    `json:"provider"`
+	BaseURL           string                    `json:"base_url"`
+	Username          string                    `json:"username,omitempty"`
+	AuthType          string                    `json:"auth_type"`
+	VerifyTLS         bool                      `json:"verify_tls"`
+	Enabled           bool                      `json:"enabled"`
+	Status            string                    `json:"status"`
+	LastError         string                    `json:"last_error,omitempty"`
+	LastTestAt        *time.Time                `json:"last_test_at,omitempty"`
+	HasCredential     bool                      `json:"has_credential"`
+	Capabilities      []string                  `json:"capabilities"`
+	ProviderReady     bool                      `json:"provider_ready"`
+	AgentContinuation AgentContinuationSettings `json:"agent_continuation"`
+	CreatedAt         time.Time                 `json:"created_at"`
+	UpdatedAt         time.Time                 `json:"updated_at"`
 }
 
 type CreateResourceInput struct {
-	Name       string
-	Provider   string
-	BaseURL    string
-	Username   string
-	Credential string
-	AuthType   string
-	VerifyTLS  *bool
-	Enabled    *bool
+	Name              string
+	Provider          string
+	BaseURL           string
+	Username          string
+	Credential        string
+	AuthType          string
+	VerifyTLS         *bool
+	Enabled           *bool
+	AgentContinuation *AgentContinuationSettings
 }
 
 type UpdateResourceInput struct {
-	Name       *string
-	Provider   *string
-	BaseURL    *string
-	Username   *string
-	Credential *string
-	AuthType   *string
-	VerifyTLS  *bool
-	Enabled    *bool
+	Name              *string
+	Provider          *string
+	BaseURL           *string
+	Username          *string
+	Credential        *string
+	AuthType          *string
+	VerifyTLS         *bool
+	Enabled           *bool
+	AgentContinuation *AgentContinuationSettings
 }
 
 type TaskRequest struct {
-	Name    string                 `json:"name"`
-	Target  string                 `json:"target"`
-	Options map[string]interface{} `json:"options,omitempty"`
+	Name           string                 `json:"name"`
+	Target         string                 `json:"target"`
+	Options        map[string]interface{} `json:"options,omitempty"`
+	ConversationID string                 `json:"-"`
+	OwnerUserID    string                 `json:"-"`
 }
 
 // TemplateRequest describes a provider-native scan template created through
@@ -195,9 +200,11 @@ type AllTaskOptionsResult struct {
 }
 
 type TaskManageRequest struct {
-	Action  string
-	TaskID  string
-	Options map[string]interface{}
+	Action         string
+	TaskID         string
+	Options        map[string]interface{}
+	ConversationID string `json:"-"`
+	OwnerUserID    string `json:"-"`
 }
 
 type Connection struct {
@@ -242,18 +249,22 @@ type AssetDetailAdapter interface {
 }
 
 type Service struct {
-	db               *database.DB
-	cipher           *credentialCipher
-	logger           *zap.Logger
-	adapters         map[string]Adapter
-	screenshotDir    string
-	screenshotMu     sync.Mutex
-	screenshotJobs   map[string]bool
-	screenshotErrors map[string]string
-	resultSyncMu     sync.Mutex
-	resultSyncJobs   map[string]bool
-	resultSyncSem    chan struct{}
-	workerCtx        context.Context
+	db                 *database.DB
+	cipher             *credentialCipher
+	logger             *zap.Logger
+	adapters           map[string]Adapter
+	screenshotDir      string
+	screenshotMu       sync.Mutex
+	screenshotJobs     map[string]bool
+	screenshotErrors   map[string]string
+	resultSyncMu       sync.Mutex
+	resultSyncJobs     map[string]bool
+	resultSyncSem      chan struct{}
+	continuationMu     sync.Mutex
+	continuationJobs   map[string]bool
+	agentRunning       func(string) bool
+	continuationRunner func(context.Context, *database.ASMAgentContinuation, string) error
+	workerCtx          context.Context
 }
 
 func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Service, error) {
@@ -272,7 +283,8 @@ func NewService(db *database.DB, databasePath string, logger *zap.Logger) (*Serv
 		screenshotDir:  filepath.Join(filepath.Dir(databasePath), "asm_screenshots"),
 		screenshotJobs: make(map[string]bool), screenshotErrors: make(map[string]string),
 		resultSyncJobs: make(map[string]bool), resultSyncSem: make(chan struct{}, 1),
-		workerCtx: context.Background(),
+		continuationJobs: make(map[string]bool),
+		workerCtx:        context.Background(),
 	}
 	service.RegisterAdapter(NewARLAdapter())
 	service.RegisterAdapter(NewXingRinAdapter())
@@ -364,7 +376,8 @@ func (s *Service) resourceView(item *database.ASMResource) ResourceView {
 		Enabled: item.Enabled, Status: item.Status, LastError: item.LastError,
 		LastTestAt: item.LastTestAt, HasCredential: item.SecretCiphertext != "",
 		Capabilities: capabilities, ProviderReady: ready,
-		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		AgentContinuation: resourceAgentContinuation(item),
+		CreatedAt:         item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 }
 
@@ -431,7 +444,7 @@ func (s *Service) CreateResource(input CreateResourceInput) (ResourceView, error
 	item := &database.ASMResource{
 		ID: id, Name: name, Provider: provider, BaseURL: baseURL, Username: username,
 		SecretCiphertext: ciphertext, AuthType: authType, VerifyTLS: verifyTLS,
-		Enabled: enabled, Status: "unknown", MetadataJSON: "{}",
+		Enabled: enabled, Status: "unknown", MetadataJSON: encodeResourceAgentContinuation(input.AgentContinuation, "{}"),
 	}
 	if err := s.db.CreateASMResource(item); err != nil {
 		return ResourceView{}, err
@@ -473,6 +486,9 @@ func (s *Service) UpdateResource(id string, input UpdateResourceInput) (Resource
 	}
 	if input.Enabled != nil {
 		item.Enabled = *input.Enabled
+	}
+	if input.AgentContinuation != nil {
+		item.MetadataJSON = encodeResourceAgentContinuation(input.AgentContinuation, item.MetadataJSON)
 	}
 	if input.Credential != nil && *input.Credential != "" {
 		if len(*input.Credential) > 8192 {
@@ -762,14 +778,32 @@ func (s *Service) ManageTask(ctx context.Context, resourceID string, req TaskMan
 		return nil, err
 	}
 	updated := false
+	var managedTask *database.ASMTask
 	switch req.Action {
 	case "restart", "resume":
 		updated = s.recordTaskLifecycle(conn.Resource.ID, req.TaskID, "running", req.Action, true)
+		if updated {
+			managedTask, _ = s.db.FindASMTask(conn.Resource.ID, req.TaskID)
+		}
 	case "delete":
 		updated = s.recordTaskLifecycle(conn.Resource.ID, req.TaskID, "stopped", "deleted", false)
 	}
-	if object := valueMap(result); object != nil {
+	object := valueMap(result)
+	if object == nil && (req.Action == "restart" || req.Action == "resume") {
+		object = map[string]interface{}{"provider_response": result}
+	}
+	if object != nil {
 		object["local_history_updated"] = updated
+		if req.Action == "restart" || req.Action == "resume" {
+			if managedTask != nil {
+				object["local_task_id"] = managedTask.ID
+				object["local_task_ids"] = []string{managedTask.ID}
+			}
+			s.attachAgentContinuation(conn, TaskRequest{
+				ConversationID: req.ConversationID,
+				OwnerUserID:    req.OwnerUserID,
+			}, object)
+		}
 		return object, nil
 	}
 	return result, nil
@@ -784,7 +818,9 @@ func (s *Service) CreateTask(ctx context.Context, resourceID string, req TaskReq
 	if err != nil {
 		return nil, err
 	}
-	return s.recordCreatedTask(conn, req, result), nil
+	recorded := s.recordCreatedTask(conn, req, result)
+	s.attachAgentContinuation(conn, req, recorded)
+	return recorded, nil
 }
 
 func (s *Service) CreateTemplate(ctx context.Context, resourceID string, req TemplateRequest) (interface{}, error) {

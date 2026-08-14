@@ -25,25 +25,27 @@ func NewASMHandler(service *asm.Service, logger *zap.Logger) *ASMHandler {
 func (h *ASMHandler) SetAudit(service *audit.Service) { h.audit = service }
 
 type asmResourceRequest struct {
-	Name       string `json:"name" binding:"required"`
-	Provider   string `json:"provider" binding:"required"`
-	BaseURL    string `json:"base_url" binding:"required"`
-	Username   string `json:"username"`
-	Credential string `json:"credential"`
-	AuthType   string `json:"auth_type"`
-	VerifyTLS  *bool  `json:"verify_tls"`
-	Enabled    *bool  `json:"enabled"`
+	Name              string                         `json:"name" binding:"required"`
+	Provider          string                         `json:"provider" binding:"required"`
+	BaseURL           string                         `json:"base_url" binding:"required"`
+	Username          string                         `json:"username"`
+	Credential        string                         `json:"credential"`
+	AuthType          string                         `json:"auth_type"`
+	VerifyTLS         *bool                          `json:"verify_tls"`
+	Enabled           *bool                          `json:"enabled"`
+	AgentContinuation *asm.AgentContinuationSettings `json:"agent_continuation"`
 }
 
 type asmResourcePatchRequest struct {
-	Name       *string `json:"name"`
-	Provider   *string `json:"provider"`
-	BaseURL    *string `json:"base_url"`
-	Username   *string `json:"username"`
-	Credential *string `json:"credential"`
-	AuthType   *string `json:"auth_type"`
-	VerifyTLS  *bool   `json:"verify_tls"`
-	Enabled    *bool   `json:"enabled"`
+	Name              *string                        `json:"name"`
+	Provider          *string                        `json:"provider"`
+	BaseURL           *string                        `json:"base_url"`
+	Username          *string                        `json:"username"`
+	Credential        *string                        `json:"credential"`
+	AuthType          *string                        `json:"auth_type"`
+	VerifyTLS         *bool                          `json:"verify_tls"`
+	Enabled           *bool                          `json:"enabled"`
+	AgentContinuation *asm.AgentContinuationSettings `json:"agent_continuation"`
 }
 
 type asmTaskRequest struct {
@@ -78,7 +80,7 @@ func (h *ASMHandler) Create(c *gin.Context) {
 	item, err := h.service.CreateResource(asm.CreateResourceInput{
 		Name: req.Name, Provider: req.Provider, BaseURL: req.BaseURL,
 		Username: req.Username, Credential: req.Credential, AuthType: req.AuthType,
-		VerifyTLS: req.VerifyTLS, Enabled: req.Enabled,
+		VerifyTLS: req.VerifyTLS, Enabled: req.Enabled, AgentContinuation: req.AgentContinuation,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -99,7 +101,7 @@ func (h *ASMHandler) Update(c *gin.Context) {
 	item, err := h.service.UpdateResource(c.Param("id"), asm.UpdateResourceInput{
 		Name: req.Name, Provider: req.Provider, BaseURL: req.BaseURL,
 		Username: req.Username, Credential: req.Credential, AuthType: req.AuthType,
-		VerifyTLS: req.VerifyTLS, Enabled: req.Enabled,
+		VerifyTLS: req.VerifyTLS, Enabled: req.Enabled, AgentContinuation: req.AgentContinuation,
 	})
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})

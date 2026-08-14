@@ -560,6 +560,25 @@ func (db *DB) initTables() error {
 		updated_at DATETIME NOT NULL
 	);`
 
+	createASMAgentContinuationsTable := `
+	CREATE TABLE IF NOT EXISTS asm_agent_continuations (
+		id TEXT PRIMARY KEY,
+		task_ids_json TEXT NOT NULL DEFAULT '[]',
+		conversation_id TEXT NOT NULL,
+		owner_user_id TEXT NOT NULL,
+		behavior TEXT NOT NULL DEFAULT 'auto',
+		running_prompt TEXT NOT NULL DEFAULT '',
+		idle_prompt TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'waiting',
+		agent_was_running INTEGER NOT NULL DEFAULT 0,
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		ready_at DATETIME,
+		completed_at DATETIME,
+		created_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL
+	);`
+
 	createASMTaskResultsTable := `
 	CREATE TABLE IF NOT EXISTS asm_task_results (
 		task_id TEXT NOT NULL,
@@ -995,6 +1014,12 @@ func (db *DB) initTables() error {
 	}
 	if err := db.migrateASMTasksTable(); err != nil {
 		return fmt.Errorf("迁移asm_tasks表失败: %w", err)
+	}
+	if _, err := db.Exec(createASMAgentContinuationsTable); err != nil {
+		return fmt.Errorf("创建asm_agent_continuations表失败: %w", err)
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_asm_agent_continuations_status ON asm_agent_continuations(status, updated_at)`); err != nil {
+		return fmt.Errorf("创建 ASM Agent 联动索引失败: %w", err)
 	}
 	if _, err := db.Exec(createASMTaskResultsTable); err != nil {
 		return fmt.Errorf("创建asm_task_results表失败: %w", err)

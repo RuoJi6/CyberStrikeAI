@@ -224,6 +224,28 @@ func TestTaskHistoryRecordsEveryXingRinChildInOneBatch(t *testing.T) {
 	}
 }
 
+func TestTaskHistoryExposesProviderExecutionProfile(t *testing.T) {
+	item := &database.ASMTask{
+		ID: "scope-profile", Provider: ProviderScopeSentry,
+		OptionsJSON: `{"template_id":"template-1","_execution_profile":{"kind":"template","label":"ScopeSentry 模板","id":"template-1","name":"CyberStrikeAI · 全量扫描","port_scope":"all","enabled_capabilities":["port_scan","vulnerability_scan"]}}`,
+		DetailJSON:  `{}`,
+	}
+	view := taskHistoryView(item)
+	if meaningfulString(view.ExecutionProfile["id"]) != "template-1" || meaningfulString(view.ExecutionProfile["name"]) != "CyberStrikeAI · 全量扫描" {
+		t.Fatalf("template profile was not exposed: %#v", view.ExecutionProfile)
+	}
+
+	legacy := &database.ASMTask{
+		ID: "scope-legacy", Provider: ProviderScopeSentry,
+		OptionsJSON: `{"template_id":"legacy-template"}`,
+		DetailJSON:  `{"task":{"data":{"template":"legacy-template"}}}`,
+	}
+	legacyView := taskHistoryView(legacy)
+	if meaningfulString(legacyView.ExecutionProfile["id"]) != "legacy-template" {
+		t.Fatalf("legacy template id was not recovered: %#v", legacyView.ExecutionProfile)
+	}
+}
+
 func TestCreatedTaskEntriesIncludesEveryARLItem(t *testing.T) {
 	entries := createdTaskEntries(ProviderARL, TaskRequest{Target: "192.0.2.41 192.0.2.42"}, map[string]interface{}{
 		"response": map[string]interface{}{"items": []interface{}{

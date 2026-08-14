@@ -1,6 +1,6 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 2.6
+> Document version: 2.9
 > Baseline date: 2026-08-14
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
@@ -107,6 +107,8 @@ XingRin produces screenshots only when `site_capture=true` or the selected upstr
 
 Upstream result requests are limited to the initial completion sync, a first-read fallback when a completed type is missing locally, and explicit refresh through the task center or `asm_manage_task(action=sync_results)`. Scan progress and local-result synchronization are shown independently, including completed type count, local row count, current type, last synchronization time, and errors.
 
+The ASM task center exposes a standalone Agent Continuation Settings action whose policy is stored per resource. By default, the conversation that created the scan resumes only after every related child task has completed and all results and screenshots have been localized. The settings dialog stores separate editable prompts for cases where the Agent was still running or had already stopped. If the user explicitly stops the source conversation, pending continuations are durably marked `user_stopped` and the Agent is never restarted when the scan later completes. This policy is not a scan option: manual task-center submissions do not bind the currently open chat, and an agent cannot override the user setting through a one-off `asm_create_task` argument. MCP task creation and `asm_manage_task` restart/resume actions bind their current conversation automatically. The `asm_list_resources`, `asm_create_task`, and `asm_manage_task` descriptions explicitly tell the Agent that this resource-level continuation already exists, and create/restart/resume responses return `agent_continuation.wait_strategy` plus action guidance. Once a task starts, an Agent must not call `sleep` or repeatedly poll merely to wait; a single bounded status read is appropriate only when the user explicitly asks for the current progress. A XingRin multi-target request creates one batch continuation and waits for every upstream child. Continuation state and retries are durable across service restarts, authorization is re-evaluated as the original owner, and an unlinked task never creates a new Agent conversation implicitly.
+
 ## Live MCP validation
 
 On 2026-08-12, all three adapters were tested through the same MCP registrations, authorization policy, database, and encrypted credentials used by the application, against explicitly authorized company IPs:
@@ -135,6 +137,9 @@ On 2026-08-13, ScopeSentry v1.9.3 received an additional template-creation valid
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 2.9 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | A manual user stop durably cancels pending Agent continuation; task history now exposes and renders the ScopeSentry template, ARL policy, or XingRin engines used for execution |
+| 2.8 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | MCP resource/task descriptions now declare system-managed waiting, task creation returns its wait strategy, and Agents are instructed not to replace background continuation with `sleep` or polling loops |
+| 2.7 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added standalone task-center Agent continuation settings; MCP tasks bind their source conversation automatically and resume with editable running/idle prompts after localization, with durable wait, retry, and restart recovery state |
 | 2.6 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Built-in presets now expose and render exact provider-specific `provider_config` and `mcp_usage`; the resource page adds click-through details for built-in and upstream profiles so agents can select from real ARL policy or ScopeSentry plugin settings |
 | 2.5 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ARL vulnerability assessment now selects every live POC and full scan selects every live POC plus brute plugin; UI/MCP repeat calls reconcile existing built-ins and repair empty `poc_config`/`brute_config` arrays |
 | 2.4 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added plugin-level ScopeSentry capability checks; mapped `sensitive_scan` to the concrete sensitive plugin; unified task-center and MCP availability with the live installed-plugin catalog |

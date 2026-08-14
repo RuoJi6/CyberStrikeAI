@@ -67,3 +67,24 @@ test('ARL task center exposes MCP-compatible direct and policy modes', () => {
     assert.match(source, /mode === 'policy' && !result\.policy_id/);
     assert.match(source, /\['task_mode', 'policy_id', 'task_tag', 'result_set_id'\]/);
 });
+
+test('ASM task center exposes standalone durable Agent continuation settings', () => {
+    assert.match(template, /onclick="openASMAgentContinuationModal\(\)"/);
+    assert.match(template, /id="asm-agent-continuation-modal"/);
+    assert.match(template, /id="asm-agent-continuation-resource"/);
+    assert.match(template, /id="asm-agent-continuation-behavior"/);
+    assert.match(template, /id="asm-agent-continuation-running-prompt"/);
+    assert.match(template, /id="asm-agent-continuation-idle-prompt"/);
+    assert.doesNotMatch(template, /id="asm-create-continuation"/);
+    assert.match(source, /agent_continuation:/);
+    assert.doesNotMatch(source, /completion_behavior: completionBehavior/);
+    assert.doesNotMatch(source, /conversation_id: conversationId/);
+    assert.match(css, /\.asm-continuation-config/);
+    assert.match(css, /\.asm-agent-continuation-content/);
+    assert.match(template, /用户主动停止对话/);
+    assert.match(template, /不会自动重新启动 Agent/);
+    assert.match(source, /renderASMTaskExecutionChip\(task\)/);
+    assert.match(source, /renderASMTaskExecutionPanel\(task\)/);
+    assert.match(css, /\.asm-task-profile-chip/);
+    assert.match(css, /\.asm-task-execution-panel/);
+});
