@@ -64,6 +64,7 @@ type AgentContinuationTaskView struct {
 	Status       string `json:"status"`
 	Progress     int    `json:"progress"`
 	Stage        string `json:"stage,omitempty"`
+	Consumed     bool   `json:"consumed_by_agent,omitempty"`
 }
 
 type AgentContinuationHistoryItem struct {
@@ -80,7 +81,18 @@ type AgentContinuationHistoryItem struct {
 	CompletedAt       *time.Time                  `json:"completed_at,omitempty"`
 	CreatedAt         time.Time                   `json:"created_at"`
 	UpdatedAt         time.Time                   `json:"updated_at"`
+	ConsumedTaskIDs   []string                    `json:"consumed_task_ids,omitempty"`
+	ConsumedAt        *time.Time                  `json:"consumed_at,omitempty"`
+	ConsumedTool      string                      `json:"consumed_tool,omitempty"`
 	Tasks             []AgentContinuationTaskView `json:"tasks"`
+}
+
+type AgentResultConsumptionView struct {
+	Consumed                  bool     `json:"consumed"`
+	TaskID                    string   `json:"task_id"`
+	MatchedContinuationIDs    []string `json:"matched_continuation_ids,omitempty"`
+	SuppressedContinuationIDs []string `json:"suppressed_continuation_ids,omitempty"`
+	Message                   string   `json:"message,omitempty"`
 }
 
 type AgentContinuationHistoryPage struct {
@@ -261,6 +273,80 @@ func continuationTasks(raw string) []string {
 	return result
 }
 
+func continuationTaskSet(raw string) map[string]bool {
+	result := make(map[string]bool)
+	for _, taskID := range continuationTasks(raw) {
+		if taskID = strings.TrimSpace(taskID); taskID != "" {
+			result[taskID] = true
+		}
+	}
+	return result
+}
+
+// MarkAgentTaskResultConsumed suppresses a redundant automatic continuation
+// only after the source Agent has successfully read a completed, localized
+// result page for the same task. Progress-only reads never call this method.
+func (s *Service) MarkAgentTaskResultConsumed(conversationID, resourceID, taskID, toolName string, result TaskResultsView) (AgentResultConsumptionView, error) {
+	view := AgentResultConsumptionView{TaskID: strings.TrimSpace(taskID)}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || view.TaskID == "" || result.Stale {
+		return view, nil
+	}
+	_, task, err := s.resolveProviderTaskID(resourceID, view.TaskID)
+	if err != nil {
+		return view, err
+	}
+	if task == nil || task.Status != "completed" {
+		return view, nil
+	}
+	view.TaskID = task.ID
+	consumed, err := s.db.ConsumeASMAgentContinuationTask(conversationID, task.ID, toolName)
+	if err != nil {
+		return view, err
+	}
+	view.MatchedContinuationIDs = consumed.MatchedContinuationIDs
+	view.SuppressedContinuationIDs = consumed.CompletedContinuationIDs
+	view.Consumed = len(consumed.MatchedContinuationIDs) > 0
+	if len(view.SuppressedContinuationIDs) > 0 {
+		view.Message = "Agent 已主动读取全部关联扫描结果，系统不会重复插入 ASM 完成通知"
+	} else if view.Consumed {
+		view.Message = "Agent 已主动读取该扫描结果；多任务联动仅保留尚未读取的任务"
+	}
+	return view, nil
+}
+
+// PrepareAgentContinuationPrompt recomputes the prompt after the queued turn
+// owns the conversation. This removes tasks consumed while the foreground
+// Agent was still running, so a multi-task continuation only mentions unread
+// results.
+func (s *Service) PrepareAgentContinuationPrompt(item *database.ASMAgentContinuation) (string, bool, error) {
+	if item == nil {
+		return "", false, fmt.Errorf("ASM Agent 联动记录不能为空")
+	}
+	consumed := continuationTaskSet(item.ConsumedTaskIDsJSON)
+	tasks := make([]*database.ASMTask, 0)
+	syncStates := make([]string, 0)
+	for _, taskID := range continuationTasks(item.TaskIDsJSON) {
+		if consumed[taskID] {
+			continue
+		}
+		task, err := s.db.GetASMTask(taskID)
+		if err != nil {
+			return "", false, err
+		}
+		tasks = append(tasks, task)
+		syncStates = append(syncStates, s.resultSyncView(task).Status)
+	}
+	if len(tasks) == 0 {
+		return "", false, nil
+	}
+	template := item.IdlePrompt
+	if item.AgentWasRunning {
+		template = item.RunningPrompt
+	}
+	return renderContinuationPrompt(template, tasks, strings.Join(syncStates, ",")), true, nil
+}
+
 func (s *Service) continuationReady(item *database.ASMAgentContinuation) (bool, bool, []*database.ASMTask, string) {
 	tasks := make([]*database.ASMTask, 0)
 	syncStates := make([]string, 0)
@@ -343,6 +429,8 @@ func continuationHistoryPhase(item *database.ASMAgentContinuation, tasks []Agent
 			return "recorded"
 		}
 		return "success"
+	case "agent_consumed":
+		return "agent_consumed"
 	case "user_stopped":
 		return "user_stopped"
 	case "cancelled":
@@ -405,8 +493,10 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 			Status: row.Status, AgentWasRunning: row.AgentWasRunning, Attempts: row.Attempts,
 			LastError: row.LastError, ReadyAt: row.ReadyAt, CompletedAt: row.CompletedAt,
 			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
+			ConsumedTaskIDs: continuationTasks(row.ConsumedTaskIDsJSON), ConsumedAt: row.ConsumedAt, ConsumedTool: row.ConsumedTool,
 			Tasks: make([]AgentContinuationTaskView, 0),
 		}
+		consumedTaskIDs := continuationTaskSet(row.ConsumedTaskIDsJSON)
 		if conversation, readErr := s.db.GetConversation(row.ConversationID); readErr == nil {
 			view.ConversationTitle = conversation.Title
 		}
@@ -419,6 +509,7 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 				ID: task.ID, RemoteTaskID: task.RemoteTaskID, ResourceID: task.ResourceID,
 				ResourceName: task.ResourceName, Provider: task.Provider, Name: task.Name,
 				Target: task.Target, Status: task.Status, Progress: task.Progress, Stage: task.Stage,
+				Consumed: consumedTaskIDs[task.ID],
 			})
 		}
 		view.Phase = continuationHistoryPhase(row, view.Tasks)
@@ -561,15 +652,17 @@ func (s *Service) startAgentContinuation(item *database.ASMAgentContinuation, ta
 		}()
 		ctx, cancel := context.WithTimeout(s.workerCtx, 4*time.Hour)
 		defer cancel()
-		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil && current.Status == "user_stopped" {
-			return
+		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil {
+			if current.Status == "user_stopped" || current.Status == "agent_consumed" {
+				return
+			}
 		}
 		err := runner(ctx, item, prompt)
 		now := time.Now().UTC()
 		// The user may stop the restored or original conversation while the
 		// runner is unwinding. Never overwrite that durable opt-out with retry.
 		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil {
-			if current.Status == "user_stopped" || current.Status == "completed" {
+			if current.Status == "user_stopped" || current.Status == "agent_consumed" || current.Status == "completed" {
 				return
 			}
 		}

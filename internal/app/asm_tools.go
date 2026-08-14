@@ -253,10 +253,28 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 			"page":       map[string]interface{}{"type": "integer", "minimum": 1}, "page_size": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100},
 		}, "task_id"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-		return service.ListAssets(ctx, asmStringArg(args, "resource_id"), asm.AssetFilter{
+		resourceID, taskID := asmStringArg(args, "resource_id"), asmStringArg(args, "task_id")
+		result, err := service.ListAssets(ctx, resourceID, asm.AssetFilter{
 			TaskID: asmStringArg(args, "task_id"), Type: asmStringArg(args, "asset_type"), Query: asmStringArg(args, "query"),
 			Page: asmIntArg(args, "page"), PageSize: asmIntArg(args, "page_size"),
 		})
+		if err != nil {
+			return nil, err
+		}
+		view, ok := result.(asm.TaskResultsView)
+		if !ok {
+			return result, nil
+		}
+		conversationID := mcp.MCPConversationIDFromContext(ctx)
+		consumption, consumeErr := service.MarkAgentTaskResultConsumed(conversationID, resourceID, taskID, builtin.ToolASMListAssets, view)
+		if consumeErr != nil {
+			if logger != nil {
+				logger.Warn("记录 Agent 主动读取 ASM 结果失败", zap.String("conversation_id", conversationID), zap.String("task_id", taskID), zap.Error(consumeErr))
+			}
+		} else if consumption.Consumed {
+			view.AgentContinuation = &consumption
+		}
+		return view, nil
 	})
 
 	register(mcp.Tool{

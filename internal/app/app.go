@@ -495,26 +495,32 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		func(conversationID string) (bool, time.Time) {
 			return agentHandler.ConversationTaskRuntimeState(conversationID)
 		},
-		func(ctx context.Context, continuation *database.ASMAgentContinuation, prompt string) error {
+		func(ctx context.Context, continuation *database.ASMAgentContinuation, _ string) error {
 			return agentTurnLoops.EnqueueAndWait(ctx, continuation.ConversationID, continuation.ID, func(turnCtx context.Context) error {
-				current, err := db.GetASMAgentContinuation(continuation.ID)
+				claimed, accepted, err := db.ClaimASMAgentContinuationForDelivery(continuation.ID)
 				if err != nil {
 					return err
 				}
-				if current.Status == "user_stopped" {
-					return fmt.Errorf("用户已停止来源 Agent 对话")
+				if !accepted {
+					if claimed.Status == "agent_consumed" {
+						return nil
+					}
+					if claimed.Status == "user_stopped" {
+						return fmt.Errorf("用户已停止来源 Agent 对话")
+					}
+					return fmt.Errorf("ASM Agent 联动当前状态不可执行: %s", claimed.Status)
 				}
-				continuation.Status = "running"
-				continuation.Attempts++
-				continuation.LastError = ""
-				if err = db.UpdateASMAgentContinuation(continuation); err != nil {
-					return err
+				// Keep the same pointer passed to the outer continuation worker so
+				// retry handling observes the atomically incremented attempt count.
+				*continuation = *claimed
+				prompt, hasPendingResults, err := asmService.PrepareAgentContinuationPrompt(continuation)
+				if err != nil {
+					return fmt.Errorf("生成 ASM Agent 联动提示词失败: %w", err)
 				}
-				// UpdateASMAgentContinuation deliberately treats a concurrent
-				// user_stopped row as a no-op. Re-read it before starting Agent.
-				if current, err = db.GetASMAgentContinuation(continuation.ID); err != nil {
-					return err
-				} else if current.Status == "user_stopped" {
+				if !hasPendingResults {
+					return nil
+				}
+				if continuation.Status == "user_stopped" {
 					return fmt.Errorf("用户已停止来源 Agent 对话")
 				}
 

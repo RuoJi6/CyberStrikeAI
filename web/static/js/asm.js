@@ -398,6 +398,7 @@ const asmContinuationPhaseMeta = Object.freeze({
     queued_active: { label: '已排队', group: 'waiting', tone: 'ready', description: '来源 Agent 仍在运行；已进入 Eino TurnLoop，将在当前任务结束后自动续跑' },
     resuming: { label: '正在恢复', group: 'running', tone: 'running', description: '系统正在向来源对话发起 Agent 续跑' },
     success: { label: '成功', group: 'success', tone: 'success', description: '联动消息已送达，并已成功启动一次 Agent 续跑' },
+    agent_consumed: { label: 'Agent 已读取', group: 'success', tone: 'success', description: '来源 Agent 已主动读取全部关联扫描结果，系统已取消重复插入' },
     recorded: { label: '仅记录完成', group: 'success', tone: 'neutral', description: '扫描结果已就绪，策略配置为不自动续跑' },
     user_stopped: { label: '用户停止', group: 'stopped', tone: 'stopped', description: '用户主动停止来源对话，系统不会重新启动 Agent' },
     scan_cancelled: { label: '扫描未完成', group: 'failed', tone: 'failed', description: '关联 ASM 任务失败或被停止，联动已取消' },
@@ -416,7 +417,7 @@ function asmContinuationSummaryCounts() {
         scanning: value('waiting'),
         waiting: value('ready') + value('retry') + value('queued'),
         running: value('running'),
-        success: value('completed'),
+        success: value('completed') + value('agent_consumed'),
         stopped: value('user_stopped'),
         failed: value('failed') + value('cancelled'),
     };
@@ -433,7 +434,7 @@ function asmContinuationFilterStatuses() {
         scanning: 'waiting',
         waiting: 'ready,retry,queued',
         running: 'running',
-        success: 'completed',
+        success: 'completed,agent_consumed',
         stopped: 'user_stopped',
         failed: 'failed,cancelled',
     }[asmPageState.continuationFilter] || '';
@@ -478,15 +479,19 @@ function renderASMAgentContinuations() {
         const progress = tasks.length ? Math.round(tasks.reduce((total, task) => total + (Number(task.progress) || 0), 0) / tasks.length) : 0;
         const taskStatus = tasks.length ? [...new Set(tasks.map(task => asmTaskStatusLabel(task.status)).filter(Boolean))].join('、') : '等待任务记录';
         const taskIDs = tasks.map(task => task.id).filter(Boolean);
+        const consumedCount = tasks.filter(task => task.consumed_by_agent).length;
         const error = item.last_error ? `<p class="asm-continuation-error">${asmEscape(item.last_error)}</p>` : '';
         const action = taskIDs.length ? `<button type="button" class="btn-secondary btn-small" onclick="openASMContinuationTask('${asmEscape(taskIDs[0])}')">查看扫描任务</button>` : '';
+        const footerStatus = item.phase === 'agent_consumed'
+            ? `Agent 已主动读取 ${consumedCount}/${tasks.length} 个关联任务结果`
+            : (item.agent_was_running ? '扫描完成时 Agent 正在运行' : '扫描完成时 Agent 已停止或空闲');
         return `<article class="asm-continuation-item ${meta.tone}">
             <header><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
             <p class="asm-continuation-description">${asmEscape(meta.description)}</p>
             <div class="asm-continuation-task-line"><span>${asmEscape(provider)} · ${asmEscape(resource)}</span><span>${asmEscape(taskStatus)} · ${progress}%</span></div>
             <div class="asm-continuation-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>
             <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>来源对话</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
-            ${error}<footer><span>${item.agent_was_running ? '扫描完成时 Agent 正在运行' : '扫描完成时 Agent 已停止或空闲'}</span>${action}</footer>
+            ${error}<footer><span>${asmEscape(footerStatus)}</span>${action}</footer>
         </article>`;
     }).join('');
     const pages = Math.max(1, Math.ceil(asmPageState.continuationTotal / asmPageState.continuationPageSize));

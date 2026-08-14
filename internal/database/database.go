@@ -573,6 +573,9 @@ func (db *DB) initTables() error {
 		status TEXT NOT NULL DEFAULT 'waiting',
 		agent_was_running INTEGER NOT NULL DEFAULT 0,
 		agent_started_at DATETIME,
+		consumed_task_ids_json TEXT NOT NULL DEFAULT '[]',
+		consumed_at DATETIME,
+		consumed_tool TEXT NOT NULL DEFAULT '',
 		attempts INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT NOT NULL DEFAULT '',
 		ready_at DATETIME,
@@ -1268,12 +1271,24 @@ func (db *DB) migrateMessagesTable() error {
 }
 
 func (db *DB) migrateASMAgentContinuationsTable() error {
-	var count int
-	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('asm_agent_continuations') WHERE name='agent_started_at'").Scan(&count); err != nil || count == 0 {
-		if _, addErr := db.Exec("ALTER TABLE asm_agent_continuations ADD COLUMN agent_started_at DATETIME"); addErr != nil {
+	columns := []struct {
+		name       string
+		definition string
+	}{
+		{name: "agent_started_at", definition: "DATETIME"},
+		{name: "consumed_task_ids_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
+		{name: "consumed_at", definition: "DATETIME"},
+		{name: "consumed_tool", definition: "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, column := range columns {
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('asm_agent_continuations') WHERE name=?", column.name).Scan(&count); err == nil && count > 0 {
+			continue
+		}
+		if _, addErr := db.Exec("ALTER TABLE asm_agent_continuations ADD COLUMN " + column.name + " " + column.definition); addErr != nil {
 			errMsg := strings.ToLower(addErr.Error())
 			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
-				return fmt.Errorf("添加 asm_agent_continuations.agent_started_at 字段失败: %w", addErr)
+				return fmt.Errorf("添加 asm_agent_continuations.%s 字段失败: %w", column.name, addErr)
 			}
 		}
 	}

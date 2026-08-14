@@ -61,16 +61,17 @@ type TaskHistoryPage struct {
 }
 
 type TaskResultsView struct {
-	TaskID            string                    `json:"task_id"`
-	AssetType         string                    `json:"asset_type"`
-	Payload           interface{}               `json:"payload"`
-	Stale             bool                      `json:"stale"`
-	CachedAt          *time.Time                `json:"cached_at,omitempty"`
-	Screenshots       []*database.ASMScreenshot `json:"screenshots,omitempty"`
-	ScreenshotCaching bool                      `json:"screenshot_caching,omitempty"`
-	ScreenshotError   string                    `json:"screenshot_error,omitempty"`
-	Source            string                    `json:"source"`
-	Sync              ResultSyncView            `json:"sync"`
+	TaskID            string                      `json:"task_id"`
+	AssetType         string                      `json:"asset_type"`
+	Payload           interface{}                 `json:"payload"`
+	Stale             bool                        `json:"stale"`
+	CachedAt          *time.Time                  `json:"cached_at,omitempty"`
+	Screenshots       []*database.ASMScreenshot   `json:"screenshots,omitempty"`
+	ScreenshotCaching bool                        `json:"screenshot_caching,omitempty"`
+	ScreenshotError   string                      `json:"screenshot_error,omitempty"`
+	Source            string                      `json:"source"`
+	Sync              ResultSyncView              `json:"sync"`
+	AgentContinuation *AgentResultConsumptionView `json:"agent_continuation,omitempty"`
 }
 
 func jsonObject(raw string) map[string]interface{} {

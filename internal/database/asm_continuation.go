@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,22 +13,34 @@ const asmContinuationRecoveredMessage = "原任务已在 ASM 扫描完成后转�
 // ASMAgentContinuation records the durable hand-off from a completed ASM scan
 // back to the Agent conversation that created it.
 type ASMAgentContinuation struct {
-	ID              string     `json:"id"`
-	TaskIDsJSON     string     `json:"task_ids_json"`
-	ConversationID  string     `json:"conversation_id"`
-	OwnerUserID     string     `json:"owner_user_id"`
-	Behavior        string     `json:"behavior"`
-	RunningPrompt   string     `json:"running_prompt"`
-	IdlePrompt      string     `json:"idle_prompt"`
-	Status          string     `json:"status"`
-	AgentWasRunning bool       `json:"agent_was_running"`
-	AgentStartedAt  *time.Time `json:"agent_started_at,omitempty"`
-	Attempts        int        `json:"attempts"`
-	LastError       string     `json:"last_error,omitempty"`
-	ReadyAt         *time.Time `json:"ready_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	ID                  string     `json:"id"`
+	TaskIDsJSON         string     `json:"task_ids_json"`
+	ConversationID      string     `json:"conversation_id"`
+	OwnerUserID         string     `json:"owner_user_id"`
+	Behavior            string     `json:"behavior"`
+	RunningPrompt       string     `json:"running_prompt"`
+	IdlePrompt          string     `json:"idle_prompt"`
+	Status              string     `json:"status"`
+	AgentWasRunning     bool       `json:"agent_was_running"`
+	AgentStartedAt      *time.Time `json:"agent_started_at,omitempty"`
+	ConsumedTaskIDsJSON string     `json:"consumed_task_ids_json"`
+	ConsumedAt          *time.Time `json:"consumed_at,omitempty"`
+	ConsumedTool        string     `json:"consumed_tool,omitempty"`
+	Attempts            int        `json:"attempts"`
+	LastError           string     `json:"last_error,omitempty"`
+	ReadyAt             *time.Time `json:"ready_at,omitempty"`
+	CompletedAt         *time.Time `json:"completed_at,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// ASMAgentContinuationConsumption describes result reads that suppressed one
+// or more queued Agent continuation notifications. A task is only consumed by
+// the source conversation that originally created the continuation.
+type ASMAgentContinuationConsumption struct {
+	TaskID                   string   `json:"task_id"`
+	MatchedContinuationIDs   []string `json:"matched_continuation_ids,omitempty"`
+	CompletedContinuationIDs []string `json:"completed_continuation_ids,omitempty"`
 }
 
 // ASMAgentContinuationFilter limits durable Agent continuation diagnostics.
@@ -43,17 +56,18 @@ type ASMAgentContinuationFilter struct {
 
 const asmAgentContinuationColumns = `id, task_ids_json, conversation_id, owner_user_id,
 	behavior, running_prompt, idle_prompt, status, agent_was_running, agent_started_at, attempts,
-	last_error, ready_at, completed_at, created_at, updated_at`
+	consumed_task_ids_json, consumed_at, consumed_tool, last_error, ready_at, completed_at, created_at, updated_at`
 
 func scanASMAgentContinuation(scanner interface{ Scan(...interface{}) error }) (*ASMAgentContinuation, error) {
 	var item ASMAgentContinuation
 	var wasRunning int
-	var agentStartedAt, readyAt, completedAt sql.NullString
+	var agentStartedAt, consumedAt, readyAt, completedAt sql.NullString
 	var createdAt, updatedAt string
 	if err := scanner.Scan(
 		&item.ID, &item.TaskIDsJSON, &item.ConversationID, &item.OwnerUserID,
 		&item.Behavior, &item.RunningPrompt, &item.IdlePrompt, &item.Status,
-		&wasRunning, &agentStartedAt, &item.Attempts, &item.LastError, &readyAt, &completedAt,
+		&wasRunning, &agentStartedAt, &item.Attempts, &item.ConsumedTaskIDsJSON, &consumedAt,
+		&item.ConsumedTool, &item.LastError, &readyAt, &completedAt,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, err
@@ -63,6 +77,15 @@ func scanASMAgentContinuation(scanner interface{ Scan(...interface{}) error }) (
 		value := parseDBTime(agentStartedAt.String)
 		if !value.IsZero() {
 			item.AgentStartedAt = &value
+		}
+	}
+	if strings.TrimSpace(item.ConsumedTaskIDsJSON) == "" {
+		item.ConsumedTaskIDsJSON = "[]"
+	}
+	if consumedAt.Valid && strings.TrimSpace(consumedAt.String) != "" {
+		value := parseDBTime(consumedAt.String)
+		if !value.IsZero() {
+			item.ConsumedAt = &value
 		}
 	}
 	item.CreatedAt = parseDBTime(createdAt)
@@ -86,20 +109,162 @@ func (db *DB) CreateASMAgentContinuation(item *ASMAgentContinuation) error {
 	if item.CreatedAt.IsZero() {
 		item.CreatedAt = now
 	}
+	if strings.TrimSpace(item.ConsumedTaskIDsJSON) == "" {
+		item.ConsumedTaskIDsJSON = "[]"
+	}
 	item.UpdatedAt = now
 	_, err := db.Exec(`INSERT INTO asm_agent_continuations (
 		id, task_ids_json, conversation_id, owner_user_id, behavior, running_prompt,
-		idle_prompt, status, agent_was_running, agent_started_at, attempts, last_error, ready_at,
+		idle_prompt, status, agent_was_running, agent_started_at, attempts,
+		consumed_task_ids_json, consumed_at, consumed_tool, last_error, ready_at,
 		completed_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.TaskIDsJSON, item.ConversationID, item.OwnerUserID, item.Behavior,
 		item.RunningPrompt, item.IdlePrompt, item.Status, boolToInt(item.AgentWasRunning),
-		item.AgentStartedAt, item.Attempts, item.LastError, item.ReadyAt, item.CompletedAt, item.CreatedAt, item.UpdatedAt,
+		item.AgentStartedAt, item.Attempts, item.ConsumedTaskIDsJSON, item.ConsumedAt, item.ConsumedTool,
+		item.LastError, item.ReadyAt, item.CompletedAt, item.CreatedAt, item.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("创建 ASM Agent 联动记录失败: %w", err)
 	}
 	return nil
+}
+
+func decodeASMAgentContinuationTaskIDs(raw string) []string {
+	var values []string
+	_ = json.Unmarshal([]byte(raw), &values)
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func containsASMAgentContinuationTask(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+// ConsumeASMAgentContinuationTask records a successful Agent-side result read.
+// Only not-yet-delivered jobs are eligible. When every task in a continuation
+// has been consumed, agent_consumed becomes a protected terminal state and the
+// queued worker must not insert another completion prompt.
+func (db *DB) ConsumeASMAgentContinuationTask(conversationID, taskID, toolName string) (ASMAgentContinuationConsumption, error) {
+	result := ASMAgentContinuationConsumption{TaskID: strings.TrimSpace(taskID)}
+	conversationID = strings.TrimSpace(conversationID)
+	toolName = strings.TrimSpace(toolName)
+	if conversationID == "" || result.TaskID == "" {
+		return result, nil
+	}
+	if toolName == "" {
+		toolName = "asm_list_assets"
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return result, fmt.Errorf("开始记录 ASM 结果消费失败: %w", err)
+	}
+	defer tx.Rollback()
+	type candidate struct {
+		id, taskIDsJSON, consumedJSON, status string
+	}
+	rows, err := tx.Query(`SELECT id, task_ids_json, consumed_task_ids_json, status
+		FROM asm_agent_continuations
+		WHERE conversation_id = ? AND status IN ('waiting','ready','retry','queued')
+		ORDER BY created_at ASC`, conversationID)
+	if err != nil {
+		return result, fmt.Errorf("查询待去重 ASM 联动失败: %w", err)
+	}
+	candidates := make([]candidate, 0)
+	for rows.Next() {
+		var item candidate
+		if scanErr := rows.Scan(&item.id, &item.taskIDsJSON, &item.consumedJSON, &item.status); scanErr != nil {
+			rows.Close()
+			return result, fmt.Errorf("读取待去重 ASM 联动失败: %w", scanErr)
+		}
+		candidates = append(candidates, item)
+	}
+	if rowsErr := rows.Close(); rowsErr != nil {
+		return result, rowsErr
+	}
+
+	now := time.Now().UTC()
+	for _, item := range candidates {
+		taskIDs := decodeASMAgentContinuationTaskIDs(item.taskIDsJSON)
+		if !containsASMAgentContinuationTask(taskIDs, result.TaskID) {
+			continue
+		}
+		consumed := decodeASMAgentContinuationTaskIDs(item.consumedJSON)
+		if !containsASMAgentContinuationTask(consumed, result.TaskID) {
+			consumed = append(consumed, result.TaskID)
+		}
+		orderedConsumed := make([]string, 0, len(consumed))
+		for _, candidateTaskID := range taskIDs {
+			if containsASMAgentContinuationTask(consumed, candidateTaskID) {
+				orderedConsumed = append(orderedConsumed, candidateTaskID)
+			}
+		}
+		consumedJSON, _ := json.Marshal(orderedConsumed)
+		fullyConsumed := len(taskIDs) > 0 && len(orderedConsumed) == len(taskIDs)
+		nextStatus := item.status
+		if fullyConsumed {
+			nextStatus = "agent_consumed"
+		}
+		update, updateErr := tx.Exec(`UPDATE asm_agent_continuations
+			SET consumed_task_ids_json = ?, consumed_at = ?, consumed_tool = ?, status = ?,
+				completed_at = CASE WHEN ? = 'agent_consumed' THEN ? ELSE completed_at END,
+				last_error = '', updated_at = ?
+			WHERE id = ? AND status = ?`,
+			string(consumedJSON), now, toolName, nextStatus, nextStatus, now, now, item.id, item.status)
+		if updateErr != nil {
+			return result, fmt.Errorf("记录 ASM 结果消费失败: %w", updateErr)
+		}
+		affected, _ := update.RowsAffected()
+		if affected == 0 {
+			continue
+		}
+		result.MatchedContinuationIDs = append(result.MatchedContinuationIDs, item.id)
+		if fullyConsumed {
+			result.CompletedContinuationIDs = append(result.CompletedContinuationIDs, item.id)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return result, fmt.Errorf("提交 ASM 结果消费失败: %w", err)
+	}
+	return result, nil
+}
+
+// ClaimASMAgentContinuationForDelivery is the atomic boundary between an
+// Agent reading results itself and the system inserting an automatic prompt.
+// Whichever transition wins first suppresses the other path.
+func (db *DB) ClaimASMAgentContinuationForDelivery(id string) (*ASMAgentContinuation, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, false, fmt.Errorf("ASM Agent 联动 ID 不能为空")
+	}
+	now := time.Now().UTC()
+	update, err := db.Exec(`UPDATE asm_agent_continuations
+		SET status = 'running', attempts = attempts + 1, last_error = '', updated_at = ?
+		WHERE id = ? AND status IN ('ready','retry','queued')`, now, id)
+	if err != nil {
+		return nil, false, fmt.Errorf("领取 ASM Agent 联动失败: %w", err)
+	}
+	affected, _ := update.RowsAffected()
+	item, readErr := db.GetASMAgentContinuation(id)
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	return item, affected > 0, nil
 }
 
 func (db *DB) GetASMAgentContinuation(id string) (*ASMAgentContinuation, error) {
@@ -391,7 +556,7 @@ func (db *DB) RepairMissingASMContinuationTurnTimings(limit int) (int, error) {
 
 var validASMAgentContinuationStatuses = map[string]bool{
 	"waiting": true, "ready": true, "retry": true, "queued": true, "running": true,
-	"completed": true, "failed": true, "cancelled": true, "user_stopped": true,
+	"completed": true, "agent_consumed": true, "failed": true, "cancelled": true, "user_stopped": true,
 }
 
 func normalizeASMAgentContinuationPagination(page, pageSize int) (int, int) {
@@ -511,7 +676,7 @@ func (db *DB) UpdateASMAgentContinuation(item *ASMAgentContinuation) error {
 	item.UpdatedAt = time.Now().UTC()
 	result, err := db.Exec(`UPDATE asm_agent_continuations SET status = ?, agent_was_running = ?,
 		agent_started_at = ?, attempts = ?, last_error = ?, ready_at = ?, completed_at = ?, updated_at = ?
-		WHERE id = ? AND status <> 'user_stopped'`,
+		WHERE id = ? AND status NOT IN ('user_stopped','agent_consumed')`,
 		item.Status, boolToInt(item.AgentWasRunning), item.AgentStartedAt, item.Attempts, item.LastError,
 		item.ReadyAt, item.CompletedAt, item.UpdatedAt, item.ID)
 	if err != nil {
@@ -519,9 +684,9 @@ func (db *DB) UpdateASMAgentContinuation(item *ASMAgentContinuation) error {
 	}
 	if affected, rowsErr := result.RowsAffected(); rowsErr == nil && affected == 0 {
 		var currentStatus string
-		if readErr := db.QueryRow(`SELECT status FROM asm_agent_continuations WHERE id = ?`, item.ID).Scan(&currentStatus); readErr == nil && currentStatus == "user_stopped" {
-			// A manual user stop is a durable terminal state. A concurrent worker
-			// completing or retrying must never overwrite that explicit choice.
+		if readErr := db.QueryRow(`SELECT status FROM asm_agent_continuations WHERE id = ?`, item.ID).Scan(&currentStatus); readErr == nil && (currentStatus == "user_stopped" || currentStatus == "agent_consumed") {
+			// Manual stop and Agent-side result consumption are durable terminal
+			// states. Concurrent workers must never overwrite either decision.
 			return nil
 		}
 		return fmt.Errorf("ASM Agent 联动记录不存在")

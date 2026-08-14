@@ -398,6 +398,101 @@ func TestUserStoppedConversationNeverResumesAfterASMCompletes(t *testing.T) {
 	}
 }
 
+func TestAgentResultReadConsumesOnlyMatchingPendingContinuationTasks(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	adapter.createScans = []interface{}{
+		map[string]interface{}{"id": 71, "status": "initiated", "targetName": "192.0.2.71"},
+		map[string]interface{}{"id": 72, "status": "initiated", "targetName": "192.0.2.72"},
+	}
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+		AgentContinuation: &AgentContinuationSettings{
+			Behavior: ContinuationAuto, RunningPrompt: "running {{task_id}}", IdlePrompt: "resume {{task_id}}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{
+		Name: "two results", Target: "192.0.2.71 192.0.2.72",
+		ConversationID: "conversation-result-reader", OwnerUserID: "user-result-reader",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := valueMap(created)
+	localIDs, _ := metadata["local_task_ids"].([]string)
+	continuationID := meaningfulString(valueMap(metadata["agent_continuation"])["id"])
+	if len(localIDs) != 2 || continuationID == "" {
+		t.Fatalf("missing multi-task continuation metadata: %#v", metadata)
+	}
+
+	// Stale pages and results from a task that is not complete must not consume
+	// the future completion notification.
+	consumption, err := service.MarkAgentTaskResultConsumed(
+		"conversation-result-reader", resource.ID, localIDs[0], "asm_list_assets", TaskResultsView{Stale: true},
+	)
+	if err != nil || consumption.Consumed {
+		t.Fatalf("stale result incorrectly consumed continuation: %#v err=%v", consumption, err)
+	}
+	consumption, err = service.MarkAgentTaskResultConsumed(
+		"conversation-result-reader", resource.ID, localIDs[0], "asm_list_assets", TaskResultsView{},
+	)
+	if err != nil || consumption.Consumed {
+		t.Fatalf("unfinished task incorrectly consumed continuation: %#v err=%v", consumption, err)
+	}
+
+	for _, taskID := range localIDs {
+		task, readErr := service.db.GetASMTask(taskID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		task.Status, task.Progress = "completed", 100
+		if updateErr := service.db.UpdateASMTask(task); updateErr != nil {
+			t.Fatal(updateErr)
+		}
+	}
+	consumption, err = service.MarkAgentTaskResultConsumed(
+		"another-conversation", resource.ID, localIDs[0], "asm_list_assets", TaskResultsView{},
+	)
+	if err != nil || consumption.Consumed {
+		t.Fatalf("another conversation incorrectly consumed continuation: %#v err=%v", consumption, err)
+	}
+
+	first, err := service.MarkAgentTaskResultConsumed(
+		"conversation-result-reader", resource.ID, localIDs[0], "asm_list_assets", TaskResultsView{},
+	)
+	if err != nil || !first.Consumed || len(first.SuppressedContinuationIDs) != 0 {
+		t.Fatalf("first result was not recorded as a partial consumption: %#v err=%v", first, err)
+	}
+	stored, err := service.db.GetASMAgentContinuation(continuationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "waiting" || !strings.Contains(stored.ConsumedTaskIDsJSON, localIDs[0]) {
+		t.Fatalf("partial consumption changed terminal state incorrectly: %#v", stored)
+	}
+	prompt, pending, err := service.PrepareAgentContinuationPrompt(stored)
+	if err != nil || !pending || strings.Contains(prompt, localIDs[0]) || !strings.Contains(prompt, localIDs[1]) {
+		t.Fatalf("partial continuation prompt did not retain only unread task: prompt=%q pending=%v err=%v", prompt, pending, err)
+	}
+
+	second, err := service.MarkAgentTaskResultConsumed(
+		"conversation-result-reader", resource.ID, localIDs[1], "asm_list_assets", TaskResultsView{},
+	)
+	if err != nil || !second.Consumed || len(second.SuppressedContinuationIDs) != 1 || second.SuppressedContinuationIDs[0] != continuationID {
+		t.Fatalf("all-read continuation was not suppressed: %#v err=%v", second, err)
+	}
+	stored, err = service.db.GetASMAgentContinuation(continuationID)
+	if err != nil || stored.Status != "agent_consumed" || stored.CompletedAt == nil || continuationHistoryPhase(stored, nil) != "agent_consumed" {
+		t.Fatalf("unexpected fully consumed continuation state: %#v err=%v", stored, err)
+	}
+	if claimed, accepted, claimErr := service.db.ClaimASMAgentContinuationForDelivery(continuationID); claimErr != nil || accepted || claimed.Status != "agent_consumed" {
+		t.Fatalf("consumed continuation was claimed for duplicate delivery: claimed=%#v accepted=%v err=%v", claimed, accepted, claimErr)
+	}
+}
+
 func TestUserStopAfterContinuationDeliveryKeepsSuccess(t *testing.T) {
 	service, _ := newTaskHistoryTestService(t)
 	now := time.Now().UTC()

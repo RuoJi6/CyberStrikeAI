@@ -62,3 +62,10 @@ test('路由和页面初始化同时支持 ASM 两个子页面', () => {
     assert.match(asm, /async function initASMTaskCenterPage\(\)[\s\S]{0,220}await loadASMResources\(\)[\s\S]{0,160}await loadASMTasks\(true\)/);
     assert.match(asm, /window\.initASMTaskCenterPage = initASMTaskCenterPage/);
 });
+
+test('Agent 主动读取扫描结果后以成功状态展示并进入成功筛选', () => {
+    assert.match(asm, /agent_consumed:\s*\{\s*label:\s*'Agent 已读取',[^}]*tone:\s*'success'/);
+    assert.match(asm, /success:\s*value\('completed'\)\s*\+\s*value\('agent_consumed'\)/);
+    assert.match(asm, /success:\s*'completed,agent_consumed'/);
+    assert.match(asm, /task\.consumed_by_agent/);
+});
