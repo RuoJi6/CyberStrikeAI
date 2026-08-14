@@ -802,6 +802,13 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 
 // ProcessMessageForRobot 供机器人（企业微信/钉钉/飞书）调用：Eino 单/多代理执行路径（含 progressCallback、过程详情），仅不发送 SSE，最后返回完整回复
 func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform string, principal authctx.Principal, conversationID, message, role, agentMode string) (response string, convID string, err error) {
+	return h.ProcessMessageForRobotAt(ctx, platform, principal, conversationID, message, role, agentMode, time.Time{})
+}
+
+// ProcessMessageForRobotAt executes a system/robot turn while preserving the
+// logical beginning of the foreground turn that scheduled it. Ordinary robot
+// calls pass a zero time through ProcessMessageForRobot.
+func (h *AgentHandler) ProcessMessageForRobotAt(ctx context.Context, platform string, principal authctx.Principal, conversationID, message, role, agentMode string, logicalStartedAt time.Time, acceptedCallbacks ...func() error) (response string, convID string, err error) {
 	ownerUserID := strings.TrimSpace(principal.UserID)
 	if ownerUserID == "" {
 		return "", "", fmt.Errorf("authenticated robot principal is required")
@@ -832,6 +839,23 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 			return "", "", fmt.Errorf("对话不存在")
 		}
 	}
+
+	// Claim the conversation before persisting this turn. This makes deferred
+	// TurnLoop retries race-safe: a losing turn returns without creating
+	// duplicate user messages or assistant placeholders.
+	taskCtx, cancelWithCause := context.WithCancelCause(ctx)
+	if _, err = h.tasks.StartTaskAt(conversationID, message, cancelWithCause, logicalStartedAt); err != nil {
+		cancelWithCause(nil)
+		if errors.Is(err, ErrTaskAlreadyRunning) {
+			return "", conversationID, fmt.Errorf("%w: 当前会话已有任务正在执行中，请稍后再试", ErrTaskAlreadyRunning)
+		}
+		return "", conversationID, fmt.Errorf("无法启动任务: %w", err)
+	}
+	defer cancelWithCause(nil)
+	taskStatus := "failed"
+	defer func() {
+		h.tasks.FinishTask(conversationID, taskStatus)
+	}()
 
 	agentHistoryMessages, err := h.loadHistoryFromAgentTrace(conversationID)
 	if err != nil {
@@ -869,22 +893,29 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 	var assistantMessageID string
 	if assistantMsg != nil {
 		assistantMessageID = assistantMsg.ID
+		if !logicalStartedAt.IsZero() {
+			if timingErr := h.db.SetMessageTurnStartedAt(assistantMessageID, logicalStartedAt); timingErr != nil {
+				h.logger.Warn("机器人：保存续跑逻辑开始时间失败", zap.Error(timingErr), zap.String("messageId", assistantMessageID))
+			}
+		}
+	}
+	// The durable continuation becomes successful once its notification and
+	// assistant turn have both been created. A later manual stop terminates the
+	// Agent work, but must not make this already-delivered notification retry or
+	// change it to a yellow user-stopped record.
+	for _, accepted := range acceptedCallbacks {
+		if accepted == nil {
+			continue
+		}
+		if acceptedErr := accepted(); acceptedErr != nil {
+			taskStatus = "failed"
+			return "", conversationID, acceptedErr
+		}
 	}
 
-	// 注册运行中任务并向 taskEventBus 镜像进度事件，供 Web 端 task-events 补流。
-	taskCtx, cancelWithCause := context.WithCancelCause(ctx)
-	defer cancelWithCause(nil)
-	taskStatus := "completed"
-	defer func() {
-		h.tasks.FinishTask(conversationID, taskStatus)
-	}()
-	if _, err := h.tasks.StartTask(conversationID, message, cancelWithCause); err != nil {
-		if errors.Is(err, ErrTaskAlreadyRunning) {
-			return "", conversationID, fmt.Errorf("当前会话已有任务正在执行中，请稍后再试")
-		}
-		return "", conversationID, fmt.Errorf("无法启动任务: %w", err)
-	}
+	// 向 taskEventBus 镜像进度事件，供 Web 端 task-events 补流。
 	progressCallback := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, nil)
+	taskStatus = "completed"
 
 	robotMode := config.NormalizeAgentMode(agentMode)
 	if err := h.db.SetConversationAgentMode(conversationID, robotMode); err != nil {

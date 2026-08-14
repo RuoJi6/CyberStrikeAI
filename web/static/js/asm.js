@@ -395,8 +395,9 @@ const asmContinuationPhaseMeta = Object.freeze({
     localizing: { label: '结果本地化中', group: 'scanning', tone: 'syncing', description: '扫描已完成，正在同步结果或缓存截图' },
     awaiting_agent: { label: '等待发起', group: 'waiting', tone: 'ready', description: '结果已就绪，等待来源 Agent 空闲' },
     retry_wait: { label: '等待重试', group: 'waiting', tone: 'warning', description: '上次恢复失败，系统将自动重试' },
+    queued_active: { label: '已排队', group: 'waiting', tone: 'ready', description: '来源 Agent 仍在运行；已进入 Eino TurnLoop，将在当前任务结束后自动续跑' },
     resuming: { label: '正在恢复', group: 'running', tone: 'running', description: '系统正在向来源对话发起 Agent 续跑' },
-    success: { label: '恢复成功', group: 'success', tone: 'success', description: 'Agent 已接收联动消息并完成本次续跑' },
+    success: { label: '成功', group: 'success', tone: 'success', description: '联动消息已送达，并已成功启动一次 Agent 续跑' },
     recorded: { label: '仅记录完成', group: 'success', tone: 'neutral', description: '扫描结果已就绪，策略配置为不自动续跑' },
     user_stopped: { label: '用户停止', group: 'stopped', tone: 'stopped', description: '用户主动停止来源对话，系统不会重新启动 Agent' },
     scan_cancelled: { label: '扫描未完成', group: 'failed', tone: 'failed', description: '关联 ASM 任务失败或被停止，联动已取消' },
@@ -413,7 +414,7 @@ function asmContinuationSummaryCounts() {
     return {
         all: Object.values(counts).reduce((total, count) => total + (Number(count) || 0), 0),
         scanning: value('waiting'),
-        waiting: value('ready') + value('retry'),
+        waiting: value('ready') + value('retry') + value('queued'),
         running: value('running'),
         success: value('completed'),
         stopped: value('user_stopped'),
@@ -430,7 +431,7 @@ function setASMContinuationFilter(filter) {
 function asmContinuationFilterStatuses() {
     return {
         scanning: 'waiting',
-        waiting: 'ready,retry',
+        waiting: 'ready,retry,queued',
         running: 'running',
         success: 'completed',
         stopped: 'user_stopped',

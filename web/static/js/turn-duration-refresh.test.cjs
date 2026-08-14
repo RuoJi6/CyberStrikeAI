@@ -116,3 +116,8 @@ test('历史占位消息存在取消事件时不会再判定为运行中', () =>
     assert.match(chat, /const isRunning = isAssistantPlaceholder && !terminalState/);
     assert.match(chat, /status: status/);
 });
+
+test('ASM 续跑优先使用持久化逻辑开始时间', () => {
+    assert.match(chat, /const startedAt = msg && msg\.turnStartedAt/);
+    assert.match(chat, /\? msg\.turnStartedAt/);
+});

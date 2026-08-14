@@ -175,10 +175,10 @@ func encodeResourceAgentContinuation(input *AgentContinuationSettings, existing 
 
 // SetAgentContinuationHooks wires the ASM worker to the Agent runtime without
 // importing the handler package into asm.
-func (s *Service) SetAgentContinuationHooks(running func(string) bool, runner func(context.Context, *database.ASMAgentContinuation, string) error) {
+func (s *Service) SetAgentContinuationHooks(runtime func(string) (bool, time.Time), runner func(context.Context, *database.ASMAgentContinuation, string) error) {
 	s.continuationMu.Lock()
 	defer s.continuationMu.Unlock()
-	s.agentRunning = running
+	s.agentRuntime = runtime
 	s.continuationRunner = runner
 }
 
@@ -334,6 +334,8 @@ func continuationHistoryPhase(item *database.ASMAgentContinuation, tasks []Agent
 		return "awaiting_agent"
 	case "retry":
 		return "retry_wait"
+	case "queued":
+		return "queued_active"
 	case "running":
 		return "resuming"
 	case "completed":
@@ -426,6 +428,7 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 }
 
 func (s *Service) reconcileAgentContinuations(ctx context.Context) {
+	s.reconcileDeliveredAgentContinuations()
 	_ = s.db.RecoverStaleASMAgentContinuations(time.Now().UTC().Add(-5 * time.Hour))
 	items, err := s.db.ListPendingASMAgentContinuations(50)
 	if err != nil {
@@ -446,8 +449,13 @@ func (s *Service) reconcileAgentContinuations(ctx context.Context) {
 		if item.Status == "waiting" {
 			now := time.Now().UTC()
 			item.Status, item.ReadyAt = "ready", &now
-			if s.agentRunning != nil {
-				item.AgentWasRunning = s.agentRunning(item.ConversationID)
+			if s.agentRuntime != nil {
+				var startedAt time.Time
+				item.AgentWasRunning, startedAt = s.agentRuntime(item.ConversationID)
+				if item.AgentWasRunning && !startedAt.IsZero() {
+					startedAt = startedAt.UTC()
+					item.AgentStartedAt = &startedAt
+				}
 			}
 			if item.Behavior == ContinuationNotifyOnly {
 				item.Status, item.CompletedAt = "completed", &now
@@ -456,10 +464,49 @@ func (s *Service) reconcileAgentContinuations(ctx context.Context) {
 				continue
 			}
 		}
-		if s.agentRunning != nil && s.agentRunning(item.ConversationID) {
+		s.startAgentContinuation(item, tasks, syncStatus)
+	}
+}
+
+func (s *Service) reconcileDeliveredAgentContinuations() {
+	items, err := s.db.ListUserStoppedStartedASMAgentContinuations(200)
+	if err != nil {
+		s.logger.Warn("核验历史 ASM Agent 联动状态失败", zap.Error(err))
+		return
+	}
+	for _, item := range items {
+		taskIDs := continuationTasks(item.TaskIDsJSON)
+		if len(taskIDs) == 0 {
 			continue
 		}
-		s.startAgentContinuation(item, tasks, syncStatus)
+		messages, readErr := s.db.GetMessagesLite(item.ConversationID)
+		if readErr != nil {
+			continue
+		}
+		var deliveredAt time.Time
+		for _, message := range messages {
+			content := strings.TrimSpace(message.Content)
+			if message.Role != "user" || !strings.HasPrefix(content, "ASM 扫描结果已完成。") {
+				continue
+			}
+			matched := true
+			for _, taskID := range taskIDs {
+				if !strings.Contains(content, taskID) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				deliveredAt = message.CreatedAt
+				break
+			}
+		}
+		if deliveredAt.IsZero() {
+			continue
+		}
+		if promoteErr := s.db.PromoteDeliveredASMAgentContinuation(item.ID, deliveredAt); promoteErr != nil {
+			s.logger.Warn("修复已送达 ASM Agent 联动状态失败", zap.String("continuation_id", item.ID), zap.Error(promoteErr))
+		}
 	}
 }
 
@@ -473,8 +520,10 @@ func (s *Service) startAgentContinuation(item *database.ASMAgentContinuation, ta
 	runner := s.continuationRunner
 	s.continuationMu.Unlock()
 
-	item.Status = "running"
-	item.Attempts++
+	// Persist queue admission before handing the work to the process-local
+	// Eino TurnLoop. Attempts are incremented only when the queued turn really
+	// starts, not while it is waiting for a foreground Agent to finish.
+	item.Status = "queued"
 	item.LastError = ""
 	if err := s.db.UpdateASMAgentContinuation(item); err != nil {
 		s.continuationMu.Lock()
@@ -502,8 +551,10 @@ func (s *Service) startAgentContinuation(item *database.ASMAgentContinuation, ta
 		now := time.Now().UTC()
 		// The user may stop the restored or original conversation while the
 		// runner is unwinding. Never overwrite that durable opt-out with retry.
-		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil && current.Status == "user_stopped" {
-			return
+		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil {
+			if current.Status == "user_stopped" || current.Status == "completed" {
+				return
+			}
 		}
 		if err == nil {
 			item.Status, item.CompletedAt, item.LastError = "completed", &now, ""

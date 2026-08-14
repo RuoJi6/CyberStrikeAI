@@ -19,6 +19,7 @@ type ASMAgentContinuation struct {
 	IdlePrompt      string     `json:"idle_prompt"`
 	Status          string     `json:"status"`
 	AgentWasRunning bool       `json:"agent_was_running"`
+	AgentStartedAt  *time.Time `json:"agent_started_at,omitempty"`
 	Attempts        int        `json:"attempts"`
 	LastError       string     `json:"last_error,omitempty"`
 	ReadyAt         *time.Time `json:"ready_at,omitempty"`
@@ -39,23 +40,29 @@ type ASMAgentContinuationFilter struct {
 }
 
 const asmAgentContinuationColumns = `id, task_ids_json, conversation_id, owner_user_id,
-	behavior, running_prompt, idle_prompt, status, agent_was_running, attempts,
+	behavior, running_prompt, idle_prompt, status, agent_was_running, agent_started_at, attempts,
 	last_error, ready_at, completed_at, created_at, updated_at`
 
 func scanASMAgentContinuation(scanner interface{ Scan(...interface{}) error }) (*ASMAgentContinuation, error) {
 	var item ASMAgentContinuation
 	var wasRunning int
-	var readyAt, completedAt sql.NullString
+	var agentStartedAt, readyAt, completedAt sql.NullString
 	var createdAt, updatedAt string
 	if err := scanner.Scan(
 		&item.ID, &item.TaskIDsJSON, &item.ConversationID, &item.OwnerUserID,
 		&item.Behavior, &item.RunningPrompt, &item.IdlePrompt, &item.Status,
-		&wasRunning, &item.Attempts, &item.LastError, &readyAt, &completedAt,
+		&wasRunning, &agentStartedAt, &item.Attempts, &item.LastError, &readyAt, &completedAt,
 		&createdAt, &updatedAt,
 	); err != nil {
 		return nil, err
 	}
 	item.AgentWasRunning = wasRunning != 0
+	if agentStartedAt.Valid && strings.TrimSpace(agentStartedAt.String) != "" {
+		value := parseDBTime(agentStartedAt.String)
+		if !value.IsZero() {
+			item.AgentStartedAt = &value
+		}
+	}
 	item.CreatedAt = parseDBTime(createdAt)
 	item.UpdatedAt = parseDBTime(updatedAt)
 	if readyAt.Valid && strings.TrimSpace(readyAt.String) != "" {
@@ -80,12 +87,12 @@ func (db *DB) CreateASMAgentContinuation(item *ASMAgentContinuation) error {
 	item.UpdatedAt = now
 	_, err := db.Exec(`INSERT INTO asm_agent_continuations (
 		id, task_ids_json, conversation_id, owner_user_id, behavior, running_prompt,
-		idle_prompt, status, agent_was_running, attempts, last_error, ready_at,
+		idle_prompt, status, agent_was_running, agent_started_at, attempts, last_error, ready_at,
 		completed_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.TaskIDsJSON, item.ConversationID, item.OwnerUserID, item.Behavior,
 		item.RunningPrompt, item.IdlePrompt, item.Status, boolToInt(item.AgentWasRunning),
-		item.Attempts, item.LastError, item.ReadyAt, item.CompletedAt, item.CreatedAt, item.UpdatedAt,
+		item.AgentStartedAt, item.Attempts, item.LastError, item.ReadyAt, item.CompletedAt, item.CreatedAt, item.UpdatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("创建 ASM Agent 联动记录失败: %w", err)
@@ -121,7 +128,7 @@ func (db *DB) StopASMAgentContinuationsForConversation(conversationID, reason st
 	now := time.Now().UTC()
 	result, err := db.Exec(`UPDATE asm_agent_continuations
 		SET status = 'user_stopped', last_error = ?, completed_at = ?, updated_at = ?
-		WHERE conversation_id = ? AND status IN ('waiting','ready','retry','running')`,
+		WHERE conversation_id = ? AND status IN ('waiting','ready','retry','queued','running')`,
 		reason, now, now, conversationID)
 	if err != nil {
 		return 0, fmt.Errorf("停止 ASM Agent 联动失败: %w", err)
@@ -138,7 +145,7 @@ func (db *DB) ListPendingASMAgentContinuations(limit int) ([]*ASMAgentContinuati
 		limit = 50
 	}
 	rows, err := db.Query(`SELECT `+asmAgentContinuationColumns+` FROM asm_agent_continuations
-		WHERE status IN ('waiting','ready','retry') ORDER BY created_at ASC LIMIT ?`, limit)
+		WHERE status IN ('waiting','ready','retry','queued') ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("查询 ASM Agent 联动记录失败: %w", err)
 	}
@@ -154,8 +161,53 @@ func (db *DB) ListPendingASMAgentContinuations(limit int) ([]*ASMAgentContinuati
 	return items, rows.Err()
 }
 
+// ListUserStoppedStartedASMAgentContinuations returns legacy rows that may
+// already have delivered their notification before a later manual stop. The
+// service verifies the persisted conversation message before promoting them.
+func (db *DB) ListUserStoppedStartedASMAgentContinuations(limit int) ([]*ASMAgentContinuation, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.Query(`SELECT `+asmAgentContinuationColumns+` FROM asm_agent_continuations
+		WHERE status = 'user_stopped' AND attempts > 0 ORDER BY updated_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("查询待核验 ASM Agent 联动记录失败: %w", err)
+	}
+	defer rows.Close()
+	items := make([]*ASMAgentContinuation, 0)
+	for rows.Next() {
+		item, scanErr := scanASMAgentContinuation(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("读取待核验 ASM Agent 联动记录失败: %w", scanErr)
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+// PromoteDeliveredASMAgentContinuation repairs legacy rows only after the
+// service has proved that the completion notification exists in the source
+// conversation. It intentionally cannot promote a never-started stop.
+func (db *DB) PromoteDeliveredASMAgentContinuation(id string, deliveredAt time.Time) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	if deliveredAt.IsZero() {
+		deliveredAt = time.Now().UTC()
+	}
+	_, err := db.Exec(`UPDATE asm_agent_continuations
+		SET status = 'completed', last_error = '', completed_at = ?, updated_at = ?
+		WHERE id = ? AND status = 'user_stopped' AND attempts > 0`,
+		deliveredAt.UTC(), time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("修复已送达 ASM Agent 联动状态失败: %w", err)
+	}
+	return nil
+}
+
 var validASMAgentContinuationStatuses = map[string]bool{
-	"waiting": true, "ready": true, "retry": true, "running": true,
+	"waiting": true, "ready": true, "retry": true, "queued": true, "running": true,
 	"completed": true, "failed": true, "cancelled": true, "user_stopped": true,
 }
 
@@ -275,9 +327,9 @@ func (db *DB) UpdateASMAgentContinuation(item *ASMAgentContinuation) error {
 	}
 	item.UpdatedAt = time.Now().UTC()
 	result, err := db.Exec(`UPDATE asm_agent_continuations SET status = ?, agent_was_running = ?,
-		attempts = ?, last_error = ?, ready_at = ?, completed_at = ?, updated_at = ?
+		agent_started_at = ?, attempts = ?, last_error = ?, ready_at = ?, completed_at = ?, updated_at = ?
 		WHERE id = ? AND status <> 'user_stopped'`,
-		item.Status, boolToInt(item.AgentWasRunning), item.Attempts, item.LastError,
+		item.Status, boolToInt(item.AgentWasRunning), item.AgentStartedAt, item.Attempts, item.LastError,
 		item.ReadyAt, item.CompletedAt, item.UpdatedAt, item.ID)
 	if err != nil {
 		return fmt.Errorf("更新 ASM Agent 联动记录失败: %w", err)

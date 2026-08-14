@@ -20,6 +20,7 @@ type taskHistoryTestAdapter struct {
 	assetCalls  int
 	detailCalls int
 	createScans []interface{}
+	gotTaskID   string
 	stoppedID   string
 }
 
@@ -45,7 +46,8 @@ func (a *taskHistoryTestAdapter) ListTasks(context.Context, *Connection, TaskFil
 		map[string]interface{}{"id": 8, "status": "completed", "progress": 100, "targetName": "192.0.2.11", "createdAt": "2026-08-11T12:00:00Z"},
 	}}}, nil
 }
-func (a *taskHistoryTestAdapter) GetTask(context.Context, *Connection, string) (interface{}, error) {
+func (a *taskHistoryTestAdapter) GetTask(_ context.Context, _ *Connection, taskID string) (interface{}, error) {
+	a.gotTaskID = taskID
 	return map[string]interface{}{"tasks": map[string]interface{}{"results": []interface{}{map[string]interface{}{
 		"id": 7, "status": "running", "progress": 42, "currentStage": "site_scan",
 		"summary": map[string]interface{}{"websites": 1},
@@ -349,6 +351,37 @@ func TestStopTaskHistoryResolvesRemoteTaskID(t *testing.T) {
 	}
 	if adapter.stoppedID != "7" || view.Status != "stopped" {
 		t.Fatalf("unexpected stop mapping: remote=%q view=%#v", adapter.stoppedID, view)
+	}
+}
+
+func TestMCPTaskToolsResolveLocalTaskID(t *testing.T) {
+	service, adapter := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{Target: "192.0.2.10"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	localID := meaningfulString(valueMap(created)["local_task_id"])
+	if _, err := service.GetTask(context.Background(), resource.ID, localID); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.gotTaskID != "7" {
+		t.Fatalf("get task received %q instead of provider ID", adapter.gotTaskID)
+	}
+	if _, err := service.ListAssets(context.Background(), resource.ID, AssetFilter{TaskID: localID, Type: "site"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.StopTask(context.Background(), resource.ID, localID); err != nil {
+		t.Fatal(err)
+	}
+	if adapter.stoppedID != "7" {
+		t.Fatalf("stop task received %q instead of provider ID", adapter.stoppedID)
 	}
 }
 

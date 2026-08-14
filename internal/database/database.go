@@ -197,6 +197,7 @@ func (db *DB) initTables() error {
 		role TEXT NOT NULL,
 		content TEXT NOT NULL,
 		mcp_execution_ids TEXT,
+		turn_started_at DATETIME,
 		created_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL,
 		FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
@@ -571,6 +572,7 @@ func (db *DB) initTables() error {
 		idle_prompt TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'waiting',
 		agent_was_running INTEGER NOT NULL DEFAULT 0,
+		agent_started_at DATETIME,
 		attempts INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT NOT NULL DEFAULT '',
 		ready_at DATETIME,
@@ -1018,6 +1020,9 @@ func (db *DB) initTables() error {
 	if _, err := db.Exec(createASMAgentContinuationsTable); err != nil {
 		return fmt.Errorf("创建asm_agent_continuations表失败: %w", err)
 	}
+	if err := db.migrateASMAgentContinuationsTable(); err != nil {
+		return fmt.Errorf("迁移asm_agent_continuations表失败: %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_asm_agent_continuations_status ON asm_agent_continuations(status, updated_at)`); err != nil {
 		return fmt.Errorf("创建 ASM Agent 联动索引失败: %w", err)
 	}
@@ -1246,6 +1251,29 @@ func (db *DB) migrateMessagesTable() error {
 			errMsg := strings.ToLower(err.Error())
 			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
 				return fmt.Errorf("添加 messages.reasoning_content 字段失败: %w", err)
+			}
+		}
+	}
+
+	var turnStartCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('messages') WHERE name='turn_started_at'").Scan(&turnStartCount); err != nil || turnStartCount == 0 {
+		if _, addErr := db.Exec("ALTER TABLE messages ADD COLUMN turn_started_at DATETIME"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 messages.turn_started_at 字段失败: %w", addErr)
+			}
+		}
+	}
+	return nil
+}
+
+func (db *DB) migrateASMAgentContinuationsTable() error {
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('asm_agent_continuations') WHERE name='agent_started_at'").Scan(&count); err != nil || count == 0 {
+		if _, addErr := db.Exec("ALTER TABLE asm_agent_continuations ADD COLUMN agent_started_at DATETIME"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 asm_agent_continuations.agent_started_at 字段失败: %w", addErr)
 			}
 		}
 	}

@@ -47,6 +47,7 @@ type AgentTask struct {
 	hitlCognition *hitlCognitionState
 
 	cancel func(error)
+	done   chan struct{}
 }
 
 // RegisterRunningTool 实现 mcp.ToolRunRegistry：工具开始时登记本会话当前 executionId。
@@ -349,6 +350,13 @@ func (m *AgentTaskManager) cleanupStuckCancelling() {
 
 // StartTask 注册并开始一个新的任务
 func (m *AgentTaskManager) StartTask(conversationID, message string, cancel context.CancelCauseFunc) (*AgentTask, error) {
+	return m.StartTaskAt(conversationID, message, cancel, time.Time{})
+}
+
+// StartTaskAt starts a turn using an earlier logical start time when the turn
+// is a system continuation of work that was already running. The value affects
+// elapsed-time presentation and task history; it does not change message order.
+func (m *AgentTaskManager) StartTaskAt(conversationID, message string, cancel context.CancelCauseFunc, logicalStartedAt time.Time) (*AgentTask, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -356,11 +364,16 @@ func (m *AgentTaskManager) StartTask(conversationID, message string, cancel cont
 		return nil, ErrTaskAlreadyRunning
 	}
 
+	startedAt := time.Now()
+	if !logicalStartedAt.IsZero() && logicalStartedAt.Before(startedAt) {
+		startedAt = logicalStartedAt
+	}
 	task := &AgentTask{
 		ConversationID: conversationID,
 		Message:        message,
-		StartedAt:      time.Now(),
+		StartedAt:      startedAt,
 		Status:         "running",
+		done:           make(chan struct{}),
 		cancel: func(err error) {
 			if cancel != nil {
 				cancel(err)
@@ -371,6 +384,46 @@ func (m *AgentTaskManager) StartTask(conversationID, message string, cancel cont
 	m.tasks[conversationID] = task
 	task.hitlCognition = &hitlCognitionState{UserMessage: strings.TrimSpace(message)}
 	return task, nil
+}
+
+// WaitForConversationIdle waits until the currently running turn finishes.
+// The wait is event-driven: FinishTask closes the per-turn channel, so callers
+// do not need to poll or sleep while an Agent is still working.
+func (m *AgentTaskManager) WaitForConversationIdle(ctx context.Context, conversationID string) error {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return nil
+	}
+	for {
+		m.mu.RLock()
+		task := m.tasks[conversationID]
+		if task == nil {
+			m.mu.RUnlock()
+			return nil
+		}
+		done := task.done
+		m.mu.RUnlock()
+
+		// Legacy tests or callers may construct an AgentTask directly. Keep a
+		// bounded fallback for those values; production tasks always have done.
+		if done == nil {
+			timer := time.NewTimer(10 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+				continue
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			// A new turn may have started between the close and this wake-up.
+			// Re-check the map before reporting the conversation as idle.
+		}
+	}
 }
 
 // CancelTask 取消指定会话的任务。若任务已在取消中，仍返回 (true, nil) 以便接口幂等、前端不报错。
@@ -464,6 +517,9 @@ func (m *AgentTaskManager) FinishTask(conversationID string, finalStatus string)
 
 	// 从运行任务中移除
 	delete(m.tasks, conversationID)
+	if task.done != nil {
+		close(task.done)
+	}
 	bus := m.eventBus
 	m.mu.Unlock()
 	if toolCanceler != nil {

@@ -6056,7 +6056,11 @@ async function loadConversation(conversationId) {
                 }
                 if (msg.role === 'assistant') {
                     if (messageEl && typeof window.setAssistantTurnTiming === 'function') {
-                        const startedAt = msg && msg.createdAt ? msg.createdAt : null;
+                        // ASM 自动续跑仍属于原始 Agent 执行链。消息保持真实的
+                        // 插入时间，但处理时长从后端持久化的逻辑开始时间累计。
+                        const startedAt = msg && msg.turnStartedAt
+                            ? msg.turnStartedAt
+                            : (msg && msg.createdAt ? msg.createdAt : null);
                         const completedAt = terminalState && terminalState.completedAt
                             ? terminalState.completedAt
                             : (msg && msg.updatedAt ? msg.updatedAt : startedAt);

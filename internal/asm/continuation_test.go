@@ -2,6 +2,7 @@ package asm
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -167,7 +168,7 @@ func TestAgentContinuationHistoryExplainsScanningAndReadyPhases(t *testing.T) {
 	}
 }
 
-func TestCompletedASMTaskResumesLinkedAgentAfterActiveTaskFinishes(t *testing.T) {
+func TestCompletedASMTaskQueuesLinkedAgentWhileActive(t *testing.T) {
 	service, _ := newTaskHistoryTestService(t)
 	resource, err := service.CreateResource(CreateResourceInput{
 		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
@@ -214,26 +215,21 @@ func TestCompletedASMTaskResumesLinkedAgentAfterActiveTaskFinishes(t *testing.T)
 	}
 
 	agentActive := true
+	agentStartedAt := time.Now().UTC().Add(-3 * time.Minute).Truncate(time.Millisecond)
 	prompts := make(chan string, 1)
+	release := make(chan struct{})
 	service.workerCtx = context.Background()
 	service.SetAgentContinuationHooks(
-		func(string) bool { return agentActive },
+		func(string) (bool, time.Time) { return agentActive, agentStartedAt },
 		func(_ context.Context, item *database.ASMAgentContinuation, prompt string) error {
 			if item.ConversationID != "conversation-1" || item.OwnerUserID != "user-1" {
 				t.Fatalf("unexpected continuation origin: %#v", item)
 			}
 			prompts <- prompt
+			<-release
 			return nil
 		},
 	)
-	service.reconcileAgentContinuations(context.Background())
-	select {
-	case prompt := <-prompts:
-		t.Fatalf("continuation ran while Agent was active: %q", prompt)
-	default:
-	}
-
-	agentActive = false
 	service.reconcileAgentContinuations(context.Background())
 	select {
 	case prompt := <-prompts:
@@ -241,7 +237,33 @@ func TestCompletedASMTaskResumesLinkedAgentAfterActiveTaskFinishes(t *testing.T)
 			t.Fatalf("running prompt variables were not rendered: %q", prompt)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("linked Agent conversation was not resumed")
+		t.Fatal("linked Agent continuation was not admitted to the TurnLoop queue")
+	}
+	item, err := service.db.GetASMAgentContinuation(meaningfulString(continuation["id"]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Status != "queued" || !item.AgentWasRunning || item.Attempts != 0 || item.AgentStartedAt == nil || !item.AgentStartedAt.Equal(agentStartedAt) {
+		t.Fatalf("unexpected queued continuation state: %#v", item)
+	}
+	agentActive = false
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		completed, readErr := service.db.GetASMAgentContinuation(item.ID)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if completed.Status == "completed" {
+			if completed.CompletedAt == nil || continuationHistoryPhase(completed, nil) != "success" {
+				t.Fatalf("completed continuation did not become green success: %#v", completed)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("continuation stayed %q instead of completed", completed.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -285,7 +307,7 @@ func TestCompletedASMTaskUsesIdlePromptWhenAgentAlreadyStopped(t *testing.T) {
 	prompts := make(chan string, 1)
 	service.workerCtx = context.Background()
 	service.SetAgentContinuationHooks(
-		func(string) bool { return false },
+		func(string) (bool, time.Time) { return false, time.Time{} },
 		func(_ context.Context, _ *database.ASMAgentContinuation, prompt string) error {
 			prompts <- prompt
 			return nil
@@ -329,7 +351,7 @@ func TestUserStoppedConversationNeverResumesAfterASMCompletes(t *testing.T) {
 
 	ran := make(chan struct{}, 1)
 	service.workerCtx = context.Background()
-	service.SetAgentContinuationHooks(func(string) bool { return false }, func(context.Context, *database.ASMAgentContinuation, string) error {
+	service.SetAgentContinuationHooks(func(string) (bool, time.Time) { return false, time.Time{} }, func(context.Context, *database.ASMAgentContinuation, string) error {
 		ran <- struct{}{}
 		return nil
 	})
@@ -352,5 +374,80 @@ func TestUserStoppedConversationNeverResumesAfterASMCompletes(t *testing.T) {
 	stored, err = service.db.GetASMAgentContinuation(continuationID)
 	if err != nil || stored.Status != "user_stopped" {
 		t.Fatalf("stale worker overwrote durable user stop: %#v err=%v", stored, err)
+	}
+}
+
+func TestUserStopAfterContinuationDeliveryKeepsSuccess(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	now := time.Now().UTC()
+	item := &database.ASMAgentContinuation{
+		ID: "asmcont-delivered", TaskIDsJSON: "[]", ConversationID: "conversation-delivered",
+		OwnerUserID: "user-delivered", Behavior: ContinuationAuto, Status: "completed",
+		AgentWasRunning: true, Attempts: 1, CompletedAt: &now,
+	}
+	if err := service.db.CreateASMAgentContinuation(item); err != nil {
+		t.Fatal(err)
+	}
+	affected, err := service.db.StopASMAgentContinuationsForConversation(item.ConversationID, "user stopped later Agent work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if affected != 0 {
+		t.Fatalf("delivered continuation was incorrectly changed by later stop: affected=%d", affected)
+	}
+	stored, err := service.db.GetASMAgentContinuation(item.ID)
+	if err != nil || stored.Status != "completed" || continuationHistoryPhase(stored, nil) != "success" {
+		t.Fatalf("delivered continuation lost success: %#v err=%v", stored, err)
+	}
+	if pending, err := service.db.ListPendingASMAgentContinuations(10); err != nil || len(pending) != 0 {
+		t.Fatalf("delivered notification would be sent again: pending=%#v err=%v", pending, err)
+	}
+}
+
+func TestLegacyUserStopWithPersistedNotificationSelfHealsToSuccess(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	conversation, err := service.db.CreateConversation("legacy delivered", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const taskID = "asmtask_legacy_delivered"
+	if _, err := service.db.AddMessage(conversation.ID, "user", "ASM 扫描结果已完成。\n任务 ID："+taskID, nil); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	rawTaskIDs, _ := json.Marshal([]string{taskID})
+	item := &database.ASMAgentContinuation{
+		ID: "asmcont-legacy-delivered", TaskIDsJSON: string(rawTaskIDs), ConversationID: conversation.ID,
+		OwnerUserID: "legacy-user", Behavior: ContinuationAuto, Status: "user_stopped",
+		AgentWasRunning: true, Attempts: 1, CompletedAt: &now,
+	}
+	if err := service.db.CreateASMAgentContinuation(item); err != nil {
+		t.Fatal(err)
+	}
+	service.reconcileDeliveredAgentContinuations()
+	stored, err := service.db.GetASMAgentContinuation(item.ID)
+	if err != nil || stored.Status != "completed" {
+		t.Fatalf("legacy delivered continuation was not repaired: %#v err=%v", stored, err)
+	}
+}
+
+func TestLegacyUserStopWithoutNotificationStaysStopped(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	conversation, err := service.db.CreateConversation("legacy never delivered", database.ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawTaskIDs, _ := json.Marshal([]string{"asmtask_never_delivered"})
+	item := &database.ASMAgentContinuation{
+		ID: "asmcont-never-delivered", TaskIDsJSON: string(rawTaskIDs), ConversationID: conversation.ID,
+		OwnerUserID: "legacy-user", Behavior: ContinuationAuto, Status: "user_stopped", Attempts: 1,
+	}
+	if err := service.db.CreateASMAgentContinuation(item); err != nil {
+		t.Fatal(err)
+	}
+	service.reconcileDeliveredAgentContinuations()
+	stored, err := service.db.GetASMAgentContinuation(item.ID)
+	if err != nil || stored.Status != "user_stopped" {
+		t.Fatalf("never-delivered continuation was incorrectly promoted: %#v err=%v", stored, err)
 	}
 }

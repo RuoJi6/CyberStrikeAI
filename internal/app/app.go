@@ -490,25 +490,76 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	go robotHandler.RunVulnerabilityAlertWorker(alertCtx)
 	asmWorkerCtx, asmWorkerCancel := context.WithCancel(context.Background())
 	app.asmResultSyncCancel = asmWorkerCancel
+	agentTurnLoops := handler.NewAgentTurnLoopManager(asmWorkerCtx, agentHandler.TaskManager(), log.Logger)
 	asmService.SetAgentContinuationHooks(
-		func(conversationID string) bool {
-			return agentHandler.TaskManager() != nil && agentHandler.TaskManager().GetTask(conversationID) != nil
+		func(conversationID string) (bool, time.Time) {
+			return agentHandler.ConversationTaskRuntimeState(conversationID)
 		},
 		func(ctx context.Context, continuation *database.ASMAgentContinuation, prompt string) error {
-			access, err := db.ResolveRBACAccess(continuation.OwnerUserID)
-			if err != nil {
-				return fmt.Errorf("恢复 ASM 对话权限失败: %w", err)
-			}
-			if !access.User.Enabled {
-				return fmt.Errorf("ASM 对话所属用户已停用")
-			}
-			conversation, err := db.GetConversation(continuation.ConversationID)
-			if err != nil {
+			return agentTurnLoops.EnqueueAndWait(ctx, continuation.ConversationID, continuation.ID, func(turnCtx context.Context) error {
+				current, err := db.GetASMAgentContinuation(continuation.ID)
+				if err != nil {
+					return err
+				}
+				if current.Status == "user_stopped" {
+					return fmt.Errorf("用户已停止来源 Agent 对话")
+				}
+				continuation.Status = "running"
+				continuation.Attempts++
+				continuation.LastError = ""
+				if err = db.UpdateASMAgentContinuation(continuation); err != nil {
+					return err
+				}
+				// UpdateASMAgentContinuation deliberately treats a concurrent
+				// user_stopped row as a no-op. Re-read it before starting Agent.
+				if current, err = db.GetASMAgentContinuation(continuation.ID); err != nil {
+					return err
+				} else if current.Status == "user_stopped" {
+					return fmt.Errorf("用户已停止来源 Agent 对话")
+				}
+
+				access, err := db.ResolveRBACAccess(continuation.OwnerUserID)
+				if err != nil {
+					return fmt.Errorf("恢复 ASM 对话权限失败: %w", err)
+				}
+				if !access.User.Enabled {
+					return fmt.Errorf("ASM 对话所属用户已停用")
+				}
+				conversation, err := db.GetConversation(continuation.ConversationID)
+				if err != nil {
+					return err
+				}
+				principal := authctx.NewPrincipalWithScopes(access.User.ID, access.User.Username, access.Scope, access.Permissions, access.PermissionScopes)
+				logicalStartedAt := time.Time{}
+				if continuation.AgentWasRunning && continuation.AgentStartedAt != nil {
+					logicalStartedAt = *continuation.AgentStartedAt
+				}
+				_, _, err = agentHandler.ProcessMessageForRobotAt(turnCtx, "asm-auto-resume", principal, continuation.ConversationID, prompt, conversation.RoleName, conversation.AgentMode, logicalStartedAt, func() error {
+					latest, readErr := db.GetASMAgentContinuation(continuation.ID)
+					if readErr != nil {
+						return readErr
+					}
+					if latest.Status == "user_stopped" {
+						return fmt.Errorf("用户已停止来源 Agent 对话")
+					}
+					now := time.Now().UTC()
+					continuation.Status = "completed"
+					continuation.CompletedAt = &now
+					continuation.LastError = ""
+					if updateErr := db.UpdateASMAgentContinuation(continuation); updateErr != nil {
+						return updateErr
+					}
+					latest, readErr = db.GetASMAgentContinuation(continuation.ID)
+					if readErr != nil {
+						return readErr
+					}
+					if latest.Status == "user_stopped" {
+						return fmt.Errorf("用户已停止来源 Agent 对话")
+					}
+					return nil
+				})
 				return err
-			}
-			principal := authctx.NewPrincipalWithScopes(access.User.ID, access.User.Username, access.Scope, access.Permissions, access.PermissionScopes)
-			_, _, err = agentHandler.ProcessMessageForRobot(ctx, "asm-auto-resume", principal, continuation.ConversationID, prompt, conversation.RoleName, conversation.AgentMode)
-			return err
+			})
 		},
 	)
 	asmService.StartResultSyncWorker(asmWorkerCtx, 30*time.Second)

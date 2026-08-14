@@ -262,7 +262,7 @@ type Service struct {
 	resultSyncSem      chan struct{}
 	continuationMu     sync.Mutex
 	continuationJobs   map[string]bool
-	agentRunning       func(string) bool
+	agentRuntime       func(string) (bool, time.Time)
 	continuationRunner func(context.Context, *database.ASMAgentContinuation, string) error
 	workerCtx          context.Context
 }
@@ -855,17 +855,46 @@ func (s *Service) ListTasks(ctx context.Context, resourceID string, filter TaskF
 	return result, nil
 }
 
+// resolveProviderTaskID accepts either CyberStrikeAI's durable local history ID
+// or the provider-native task ID. MCP task creation returns both identifiers,
+// while Agent continuation intentionally carries the local ID so result reads
+// remain stable even if an upstream task is later re-imported.
+func (s *Service) resolveProviderTaskID(resourceID, taskID string) (string, *database.ASMTask, error) {
+	taskID = strings.TrimSpace(taskID)
+	if taskID == "" {
+		return "", nil, fmt.Errorf("ASM 任务 ID 不能为空")
+	}
+	if strings.HasPrefix(taskID, "asmtask_") {
+		item, err := s.db.GetASMTask(taskID)
+		if err != nil {
+			return "", nil, err
+		}
+		if item.ResourceID != strings.TrimSpace(resourceID) {
+			return "", nil, fmt.Errorf("ASM 本地任务不属于指定资源")
+		}
+		return strings.TrimSpace(item.RemoteTaskID), item, nil
+	}
+	item, err := s.db.FindASMTask(resourceID, taskID)
+	if err != nil {
+		return "", nil, err
+	}
+	return taskID, item, nil
+}
+
 func (s *Service) GetTask(ctx context.Context, resourceID, taskID string) (interface{}, error) {
 	conn, adapter, err := s.connection(resourceID, true)
 	if err != nil {
 		return nil, err
 	}
-	taskID = strings.TrimSpace(taskID)
-	result, err := adapter.GetTask(ctx, conn, taskID)
+	providerTaskID, _, err := s.resolveProviderTaskID(resourceID, taskID)
 	if err != nil {
 		return nil, err
 	}
-	s.recordTaskDetail(conn, taskID, result)
+	result, err := adapter.GetTask(ctx, conn, providerTaskID)
+	if err != nil {
+		return nil, err
+	}
+	s.recordTaskDetail(conn, providerTaskID, result)
 	return result, nil
 }
 
@@ -880,7 +909,7 @@ func (s *Service) ListAssets(ctx context.Context, resourceID string, filter Asse
 	if strings.TrimSpace(filter.TaskID) == "" {
 		return nil, fmt.Errorf("本地结果查询必须提供 task_id")
 	}
-	task, err := s.db.FindASMTask(resourceID, filter.TaskID)
+	_, task, err := s.resolveProviderTaskID(resourceID, filter.TaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -902,12 +931,15 @@ func (s *Service) StopTask(ctx context.Context, resourceID, taskID string) (inte
 	if err != nil {
 		return nil, err
 	}
-	taskID = strings.TrimSpace(taskID)
-	result, err := adapter.StopTask(ctx, conn, taskID)
+	providerTaskID, _, err := s.resolveProviderTaskID(resourceID, taskID)
 	if err != nil {
 		return nil, err
 	}
-	updated := s.recordTaskLifecycle(conn.Resource.ID, taskID, "stopped", "stopped", false)
+	result, err := adapter.StopTask(ctx, conn, providerTaskID)
+	if err != nil {
+		return nil, err
+	}
+	updated := s.recordTaskLifecycle(conn.Resource.ID, providerTaskID, "stopped", "stopped", false)
 	if object := valueMap(result); object != nil {
 		object["local_history_updated"] = updated
 		return object, nil

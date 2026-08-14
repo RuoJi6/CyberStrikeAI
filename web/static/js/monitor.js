@@ -5262,10 +5262,10 @@ async function attachRunningTaskEventStream(conversationId) {
             const check = await apiFetch('/api/agent-loop/tasks', { signal: abortController.signal });
             if (!check.ok) return false;
             const j = await check.json().catch(function () { return {}; });
-            const active = (j.tasks || []).some(function (t) {
+            const activeTask = (j.tasks || []).find(function (t) {
                 return t && t.conversationId === conversationId && (t.status === 'running' || t.status === 'cancelling');
             });
-            if (!active) {
+            if (!activeTask) {
                 const staleAssistant = findLastAssistantMessageElInChat();
                 if (assistantMessageNeedsTaskReplayReconcile(staleAssistant)) {
                     await reconcileConversationAfterTaskReplay(conversationId, true);
@@ -5275,6 +5275,12 @@ async function attachRunningTaskEventStream(conversationId) {
 
             const asEl = findLastAssistantMessageElInChat();
             if (!asEl || !asEl.id) return false;
+            if (activeTask.startedAt && typeof window.setAssistantTurnTiming === 'function') {
+                window.setAssistantTurnTiming(asEl, {
+                    startedAt: activeTask.startedAt,
+                    status: 'running'
+                });
+            }
             // 先发起 SSE 请求，再加载长过程详情，避免详情分页期间产生的增量完全错过。
             const url = '/api/agent-loop/task-events?conversationId=' + encodeURIComponent(conversationId);
             const eventStreamResponsePromise = apiFetch(url, {

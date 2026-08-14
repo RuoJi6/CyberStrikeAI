@@ -39,8 +39,12 @@ type Message struct {
 	ReasoningContent string                   `json:"reasoningContent,omitempty"`
 	MCPExecutionIDs  []string                 `json:"mcpExecutionIds,omitempty"`
 	ProcessDetails   []map[string]interface{} `json:"processDetails,omitempty"`
-	CreatedAt        time.Time                `json:"createdAt"`
-	UpdatedAt        time.Time                `json:"updatedAt"`
+	// TurnStartedAt is the logical start of a chained Agent turn. It differs
+	// from CreatedAt only for system continuations (for example an ASM result
+	// arriving while the original Agent turn is still running).
+	TurnStartedAt *time.Time `json:"turnStartedAt,omitempty"`
+	CreatedAt     time.Time  `json:"createdAt"`
+	UpdatedAt     time.Time  `json:"updatedAt"`
 }
 
 // CreateConversation 创建新对话
@@ -980,8 +984,8 @@ func (db *DB) AddMessage(conversationID, role, content string, mcpExecutionIDs [
 	}
 
 	_, err := db.Exec(
-		"INSERT INTO messages (id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-		id, conversationID, role, content, "", mcpIDsJSON, now, now,
+		"INSERT INTO messages (id, conversation_id, role, content, reasoning_content, mcp_execution_ids, turn_started_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		id, conversationID, role, content, "", mcpIDsJSON, nil, now, now,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("添加消息失败: %w", err)
@@ -1003,6 +1007,21 @@ func (db *DB) AddMessage(conversationID, role, content string, mcpExecutionIDs [
 	}
 
 	return message, nil
+}
+
+// SetMessageTurnStartedAt persists the logical beginning of a chained Agent
+// execution without changing message chronology. The chat keeps displaying the
+// injected ASM notification at its real time while its elapsed clock continues
+// from the foreground turn that scheduled it.
+func (db *DB) SetMessageTurnStartedAt(messageID string, startedAt time.Time) error {
+	messageID = strings.TrimSpace(messageID)
+	if messageID == "" || startedAt.IsZero() {
+		return nil
+	}
+	if _, err := db.Exec("UPDATE messages SET turn_started_at = ? WHERE id = ?", startedAt.UTC(), messageID); err != nil {
+		return fmt.Errorf("更新消息逻辑开始时间失败: %w", err)
+	}
+	return nil
 }
 
 // UpdateAssistantMessageFinalize 更新助手消息终态（正文、MCP id、思考链聚合文本，供无轨迹回退时回放）。
@@ -1028,7 +1047,7 @@ func (db *DB) UpdateAssistantMessageFinalize(messageID, content string, mcpExecu
 // GetMessages 获取对话的所有消息
 func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 	rows, err := db.Query(
-		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+		"SELECT id, conversation_id, role, content, reasoning_content, mcp_execution_ids, turn_started_at, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {
@@ -1041,10 +1060,11 @@ func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 		var msg Message
 		var reasoning sql.NullString
 		var mcpIDsJSON sql.NullString
+		var turnStartedAt sql.NullString
 		var createdAt string
 		var updatedAt sql.NullString
 
-		if err := rows.Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &reasoning, &mcpIDsJSON, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &reasoning, &mcpIDsJSON, &turnStartedAt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("扫描消息失败: %w", err)
 		}
 		if reasoning.Valid {
@@ -1074,6 +1094,11 @@ func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 		if msg.UpdatedAt.IsZero() {
 			msg.UpdatedAt = msg.CreatedAt
 		}
+		if turnStartedAt.Valid && strings.TrimSpace(turnStartedAt.String) != "" {
+			if parsed := parseDBTime(turnStartedAt.String); !parsed.IsZero() {
+				msg.TurnStartedAt = &parsed
+			}
+		}
 
 		// 解析MCP执行ID
 		if mcpIDsJSON.Valid && mcpIDsJSON.String != "" {
@@ -1091,7 +1116,7 @@ func (db *DB) GetMessages(conversationID string) ([]Message, error) {
 // GetMessagesLite 获取对话消息（不含 reasoning_content），用于历史会话快速切换。
 func (db *DB) GetMessagesLite(conversationID string) ([]Message, error) {
 	rows, err := db.Query(
-		"SELECT id, conversation_id, role, content, mcp_execution_ids, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
+		"SELECT id, conversation_id, role, content, mcp_execution_ids, turn_started_at, created_at, updated_at FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, rowid ASC",
 		conversationID,
 	)
 	if err != nil {
@@ -1103,10 +1128,11 @@ func (db *DB) GetMessagesLite(conversationID string) ([]Message, error) {
 	for rows.Next() {
 		var msg Message
 		var mcpIDsJSON sql.NullString
+		var turnStartedAt sql.NullString
 		var createdAt string
 		var updatedAt sql.NullString
 
-		if err := rows.Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &mcpIDsJSON, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.ConversationID, &msg.Role, &msg.Content, &mcpIDsJSON, &turnStartedAt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("扫描消息失败: %w", err)
 		}
 
@@ -1130,6 +1156,11 @@ func (db *DB) GetMessagesLite(conversationID string) ([]Message, error) {
 		}
 		if msg.UpdatedAt.IsZero() {
 			msg.UpdatedAt = msg.CreatedAt
+		}
+		if turnStartedAt.Valid && strings.TrimSpace(turnStartedAt.String) != "" {
+			if parsed := parseDBTime(turnStartedAt.String); !parsed.IsZero() {
+				msg.TurnStartedAt = &parsed
+			}
 		}
 
 		if mcpIDsJSON.Valid && mcpIDsJSON.String != "" {
@@ -1482,7 +1513,7 @@ func (db *DB) GetProcessDetailsSummary(messageID string) (*ProcessDetailsSummary
 	var messageCreatedAt, messageUpdatedAt sql.NullString
 	var messageContent string
 	if err := db.QueryRow(
-		"SELECT created_at, updated_at, content FROM messages WHERE id = ?",
+		"SELECT COALESCE(turn_started_at, created_at), updated_at, content FROM messages WHERE id = ?",
 		messageID,
 	).Scan(&messageCreatedAt, &messageUpdatedAt, &messageContent); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("查询过程详情耗时失败: %w", err)

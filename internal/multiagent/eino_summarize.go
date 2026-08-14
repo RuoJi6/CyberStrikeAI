@@ -124,11 +124,6 @@ func newEinoSummarizationMiddleware(
 			trigger = 4096
 		}
 	}
-	preserveMax := trigger / 3
-	if preserveMax < 2048 {
-		preserveMax = 2048
-	}
-
 	modelName := strings.TrimSpace(appCfg.OpenAI.Model)
 	if modelName == "" {
 		modelName = "gpt-4o"
@@ -238,10 +233,6 @@ func newEinoSummarizationMiddleware(
 		UserInstruction:    einoSummarizeUserInstruction,
 		EmitInternalEvents: emitInternalEvents,
 		TranscriptFilePath: transcriptPath,
-		PreserveUserMessages: &summarization.PreserveUserMessages{
-			Enabled:   true,
-			MaxTokens: preserveMax,
-		},
 		Retry: &summarization.RetryConfig{
 			MaxRetries: &retryMax,
 			ShouldRetry: func(_ context.Context, _ adk.Message, err error) bool {

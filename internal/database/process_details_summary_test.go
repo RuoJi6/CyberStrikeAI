@@ -132,6 +132,37 @@ func TestProcessDetailsSummaryIncludesPersistedTurnTiming(t *testing.T) {
 	}
 }
 
+func TestProcessDetailsSummaryUsesChainedTurnStartWithoutReorderingMessage(t *testing.T) {
+	db, conversationID, messageID := setupProcessDetailsSummaryTest(t)
+	logicalStartedAt := "2026-08-10T08:00:00Z"
+	messageCreatedAt := "2026-08-10T08:05:27Z"
+	completedAt := "2026-08-10T08:06:51Z"
+	if _, err := db.Exec(
+		"UPDATE messages SET content = ?, turn_started_at = ?, created_at = ?, updated_at = ? WHERE id = ?",
+		"done", logicalStartedAt, messageCreatedAt, completedAt, messageID,
+	); err != nil {
+		t.Fatalf("update chained message timing: %v", err)
+	}
+
+	summary, err := db.GetProcessDetailsSummary(messageID)
+	if err != nil {
+		t.Fatalf("GetProcessDetailsSummary: %v", err)
+	}
+	if summary.StartedAt == nil || summary.CompletedAt == nil {
+		t.Fatalf("timing missing: %#v", summary)
+	}
+	if want := int64((6*time.Minute + 51*time.Second) / time.Millisecond); summary.DurationMs != want {
+		t.Fatalf("durationMs = %d, want inherited %d", summary.DurationMs, want)
+	}
+	message, err := db.GetMessages(conversationID)
+	if err != nil || len(message) == 0 || message[0].TurnStartedAt == nil {
+		t.Fatalf("logical start not returned on message: %#v err=%v", message, err)
+	}
+	if !message[0].CreatedAt.Equal(parseDBTime(messageCreatedAt)) {
+		t.Fatalf("message chronology changed: createdAt=%s", message[0].CreatedAt)
+	}
+}
+
 func TestProcessDetailsSummaryTreatsCancelledPlaceholderAsTerminal(t *testing.T) {
 	db, conversationID, messageID := setupProcessDetailsSummaryTest(t)
 	startedAt := "2026-08-10T08:00:00Z"

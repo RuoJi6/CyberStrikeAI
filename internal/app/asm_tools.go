@@ -237,7 +237,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMGetTask, ShortDescription: "读取 ASM 任务详情",
-		Description: "按 provider 的任务 ID 读取扫描状态、统计与任务选项。用于用户明确要求的即时进度查询；任务刚创建时不要循环调用或配合 sleep 等待，后台联动会在结果本地化后恢复来源对话。",
+		Description: "按 CyberStrikeAI 本地任务 ID（asmtask_...）或 provider 远程任务 ID 读取扫描状态、统计与任务选项。用于用户明确要求的即时进度查询；任务刚创建时不要循环调用或配合 sleep 等待，后台联动会在结果本地化后恢复来源对话。",
 		InputSchema: resourceSchema(map[string]interface{}{"task_id": map[string]interface{}{"type": "string"}}, "task_id"),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		return service.GetTask(ctx, asmStringArg(args, "resource_id"), asmStringArg(args, "task_id"))
@@ -245,7 +245,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMListAssets, ShortDescription: "分页读取 ASM 发现结果",
-		Description: "按结果类型分页读取 CyberStrikeAI 本地数据库中的 ASM 发现结果。任务完成后会自动从上游全量同步；本地缺少所请类型时，首次调用会先同步该类型。必须传 task_id；先调用 asm_get_task_profile 读取 provider-specific result_types。",
+		Description: "按结果类型分页读取 CyberStrikeAI 本地数据库中的 ASM 发现结果，task_id 可使用本地任务 ID（asmtask_...）或 provider 远程任务 ID。任务完成后会自动从上游全量同步；本地缺少所请类型时，首次调用会先同步该类型。必须传 task_id；先调用 asm_get_task_profile 读取 provider-specific result_types。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"task_id":    map[string]interface{}{"type": "string"},
 			"asset_type": map[string]interface{}{"type": "string", "enum": []string{"site", "domain", "ip", "cert", "service", "fileleak", "url", "vulnerability", "npoc_service", "cip", "nuclei_result", "stat_finger", "wih", "directory", "screenshot", "crawler", "sensitive", "takeover"}, "description": "必须使用 asm_get_task_profile.result_types 中当前平台支持的 ID"},
