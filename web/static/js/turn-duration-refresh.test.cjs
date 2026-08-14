@@ -14,6 +14,14 @@ function timingSource(source) {
     return source.slice(start, end);
 }
 
+function processDetailFilterSource(source) {
+    const start = source.indexOf('function isEinoAgentHeartbeatProgress(');
+    const end = source.indexOf('function dedupeConsecutiveProcessDetailRows(', start);
+    assert.notEqual(start, -1, 'process detail filter should exist');
+    assert.notEqual(end, -1, 'dedupe boundary should exist');
+    return source.slice(start, end);
+}
+
 function createClassList() {
     return {
         toggle() {},
@@ -122,4 +130,63 @@ test('ASM 续跑优先使用持久化逻辑开始时间', () => {
     assert.match(chat, /const startedAt = msg && msg\.turnStartedAt/);
     assert.match(chat, /\? msg\.turnStartedAt/);
     assert.match(monitor, /finalMessage\.turnStartedAt \|\| finalMessage\.createdAt/);
+});
+
+test('过程详情隐藏 Eino 内部诊断但保留真实工具调用', () => {
+    const context = {};
+    vm.runInNewContext(
+        `${processDetailFilterSource(chat)}; this.filterNoiseProcessDetails = filterNoiseProcessDetails;`,
+        context
+    );
+
+    const filtered = context.filterNoiseProcessDetails([
+        {
+            eventType: 'tool_call',
+            data: {
+                toolName: 'task',
+                argumentsObj: {
+                    _cyberstrike_model_output_recovery: {
+                        reason: 'invalid_tool_arguments_json',
+                        repair_attempt: 1,
+                    },
+                },
+            },
+        },
+        {
+            eventType: 'model_output_rejected',
+            message: '模型工具调用不完整或参数不安全，已阻止执行并要求重写。',
+            data: { reason: 'invalid_tool_arguments_json' },
+        },
+        {
+            eventType: 'progress',
+            message: 'Eino TurnLoop 常驻多轮 runtime 已接管本轮会话。',
+            data: { kind: 'turn_loop_takeover' },
+        },
+        {
+            eventType: 'tool_call',
+            data: {
+                toolName: 'task',
+                argumentsObj: { _raw: 'command' },
+                arguments: 'command',
+            },
+        },
+        {
+            eventType: 'tool_call',
+            data: {
+                toolName: 'task',
+                argumentsObj: { _raw: '"' },
+                arguments: '"',
+            },
+        },
+        {
+            eventType: 'tool_call',
+            data: {
+                toolName: 'exec',
+                arguments: '{"command":"ls"}',
+            },
+        },
+    ]);
+
+    assert.equal(filtered.length, 1);
+    assert.equal(filtered[0].data.toolName, 'exec');
 });

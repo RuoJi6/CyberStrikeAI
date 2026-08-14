@@ -256,9 +256,17 @@ func newEinoSummarizationMiddleware(
 			},
 		},
 		Finalize: func(ctx context.Context, originalMessages []adk.Message, summary adk.Message) ([]adk.Message, error) {
+			compactionMessages := stripOriginalUserIntentLedgerFromMessages(originalMessages)
+			defaultFinalized, derr := summarization.DefaultFinalize(ctx, compactionMessages, summary)
+			if derr != nil {
+				return nil, derr
+			}
+			if len(defaultFinalized) == 0 {
+				return nil, fmt.Errorf("summarization default finalize returned no messages")
+			}
+			summary = appendTranscriptPathToSummarizationMessage(defaultFinalized[len(defaultFinalized)-1], transcriptPath)
 			summary = stripAnalysisFromSummarizationMessage(summary)
 			userLedger := buildOriginalUserIntentLedgerMessage(originalMessages, userLedgerMaxRunes, userLedgerEntryMaxRunes)
-			compactionMessages := stripOriginalUserIntentLedgerFromMessages(originalMessages)
 			out, ferr := summarizeFinalizeWithRecentAssistantToolTrail(ctx, compactionMessages, summary, tokenCounter, recentTrailMax)
 			if ferr != nil {
 				return nil, ferr
