@@ -218,12 +218,15 @@ func (h *AgentHandler) TaskManager() *AgentTaskManager {
 
 // CancelRunningTaskForConversation stops any in-flight agent work for the conversation (idempotent).
 func (h *AgentHandler) CancelRunningTaskForConversation(conversationID string) {
-	if h == nil || conversationID == "" || h.tasks == nil {
+	if h == nil || strings.TrimSpace(conversationID) == "" {
+		return
+	}
+	h.stopASMAgentContinuation(conversationID)
+	if h.tasks == nil {
 		return
 	}
 	h.cancelRunningMCPToolsForConversation(conversationID)
 	h.tasks.AbortActiveEinoExecute(conversationID, "")
-	h.stopASMAgentContinuation(conversationID)
 	if ok, err := h.tasks.CancelTask(conversationID, ErrTaskCancelled); ok {
 		h.logger.Info("已取消会话运行中任务", zap.String("conversationId", conversationID))
 	} else if err != nil {
@@ -1649,6 +1652,10 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 
 	var cause error = ErrTaskCancelled
 	msg := "已提交取消请求，任务将在当前步骤完成后停止。"
+	// Persist the user's opt-out before cancelling the current Agent task. If
+	// an ASM continuation is concurrently preparing to start, it will observe
+	// this state; if it already started, the cancellation below catches it.
+	h.stopASMAgentContinuation(req.ConversationID)
 	h.cancelRunningMCPToolsForConversation(req.ConversationID)
 	h.tasks.AbortActiveEinoExecute(req.ConversationID, "")
 	ok, err := h.tasks.CancelTask(req.ConversationID, cause)
@@ -1662,8 +1669,6 @@ func (h *AgentHandler) CancelAgentLoop(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "未找到正在执行的任务"})
 		return
 	}
-	h.stopASMAgentContinuation(req.ConversationID)
-
 	c.JSON(http.StatusOK, gin.H{
 		"status":            "cancelling",
 		"conversationId":    req.ConversationID,

@@ -349,6 +349,9 @@ func (s *Service) startAgentContinuation(item *database.ASMAgentContinuation, ta
 		}()
 		ctx, cancel := context.WithTimeout(s.workerCtx, 4*time.Hour)
 		defer cancel()
+		if current, readErr := s.db.GetASMAgentContinuation(item.ID); readErr == nil && current.Status == "user_stopped" {
+			return
+		}
 		err := runner(ctx, item, prompt)
 		now := time.Now().UTC()
 		// The user may stop the restored or original conversation while the

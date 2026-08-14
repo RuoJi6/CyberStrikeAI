@@ -62,3 +62,24 @@ func TestUserStoppingConversationSuppressesPendingASMContinuation(t *testing.T) 
 		t.Fatal("task context was not cancelled")
 	}
 }
+
+func TestConversationStopSuppressesPendingASMContinuationWithoutRuntimeTaskManager(t *testing.T) {
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "agent-stop-no-runtime.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	item := &database.ASMAgentContinuation{
+		ID: "continuation-stop-no-runtime", TaskIDsJSON: `[]`, ConversationID: "conv-no-runtime", OwnerUserID: "user-1",
+		Behavior: "auto", RunningPrompt: "running", IdlePrompt: "idle", Status: "waiting",
+	}
+	if err := db.CreateASMAgentContinuation(item); err != nil {
+		t.Fatal(err)
+	}
+	h := &AgentHandler{db: db, logger: zap.NewNop()}
+	h.CancelRunningTaskForConversation("conv-no-runtime")
+	stored, err := db.GetASMAgentContinuation(item.ID)
+	if err != nil || stored.Status != "user_stopped" {
+		t.Fatalf("pending continuation was not suppressed without a runtime task manager: %#v err=%v", stored, err)
+	}
+}
