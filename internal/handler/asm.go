@@ -53,7 +53,8 @@ type asmTaskRequest struct {
 }
 
 type asmTemplateRequest struct {
-	Name           string                 `json:"name" binding:"required"`
+	Name           string                 `json:"name"`
+	PresetID       string                 `json:"preset_id"`
 	BaseTemplateID string                 `json:"base_template_id"`
 	Options        map[string]interface{} `json:"options"`
 }
@@ -190,17 +191,17 @@ func (h *ASMHandler) CreateTemplate(c *gin.Context) {
 	}
 	resourceID := strings.TrimSpace(c.Param("id"))
 	result, err := h.service.CreateTemplate(c.Request.Context(), resourceID, asm.TemplateRequest{
-		Name: req.Name, BaseTemplateID: req.BaseTemplateID, Options: req.Options,
+		Name: req.Name, PresetID: req.PresetID, BaseTemplateID: req.BaseTemplateID, Options: req.Options,
 	})
 	if err != nil {
 		if h.audit != nil {
-			h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "failure", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板失败", Detail: map[string]interface{}{"name": req.Name, "error": err.Error()}})
+			h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "failure", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板失败", Detail: map[string]interface{}{"name": req.Name, "preset_id": req.PresetID, "error": err.Error()}})
 		}
 		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error()})
 		return
 	}
 	if h.audit != nil {
-		h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "success", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板", Detail: map[string]interface{}{"name": req.Name, "base_template_id": req.BaseTemplateID}})
+		h.audit.Record(c, audit.Entry{Category: "asm", Action: "create_template", Result: "success", ResourceType: "asm_resource", ResourceID: resourceID, Message: "创建 ASM 扫描模板", Detail: map[string]interface{}{"name": req.Name, "preset_id": req.PresetID, "base_template_id": req.BaseTemplateID}})
 	}
 	c.JSON(http.StatusCreated, result)
 }

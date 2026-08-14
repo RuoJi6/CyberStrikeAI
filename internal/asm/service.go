@@ -82,6 +82,7 @@ type TaskRequest struct {
 // upstream command lines.
 type TemplateRequest struct {
 	Name           string                 `json:"name"`
+	PresetID       string                 `json:"preset_id,omitempty"`
 	BaseTemplateID string                 `json:"base_template_id,omitempty"`
 	Options        map[string]interface{} `json:"options,omitempty"`
 }
@@ -558,6 +559,30 @@ func (s *Service) GetTaskProfile(ctx context.Context, resourceID string) (interf
 		return nil, err
 	}
 	if object := valueMap(profile); object != nil {
+		presets := templatePresetsForProvider(conn.Resource.Provider)
+		if len(presets) > 0 {
+			object["template_presets"] = presets
+			object["template_preset_query"] = "asm_list_task_options(kind=template_presets)"
+			templateKind := "task_template"
+			if normalizeProvider(conn.Resource.Provider) == ProviderARL {
+				templateKind = "policy"
+			}
+			object["template_creation"] = map[string]interface{}{
+				"tool": "asm_create_template", "provider_kind": templateKind,
+				"recommended_mode": "preset_id", "idempotent_presets": true,
+			}
+			kinds := taskOptionKinds(object)
+			found := false
+			for _, kind := range kinds {
+				if kind == "template_presets" {
+					found = true
+					break
+				}
+			}
+			if !found {
+				object["dynamic_option_kinds"] = append(kinds, "template_presets")
+			}
+		}
 		object["task_option_query_modes"] = []string{"single", "all"}
 		object["task_option_all_note"] = "kind=all 会按当前分页批量读取所有列表型动态选项；*_detail 类型需要 id，必须单独查询"
 		return object, nil
@@ -617,6 +642,18 @@ func (s *Service) listAllTaskOptions(ctx context.Context, conn *Connection, prof
 		return AllTaskOptionsResult{}, err
 	}
 	kinds := taskOptionKinds(profile)
+	if len(templatePresetsForProvider(conn.Resource.Provider)) > 0 {
+		found := false
+		for _, kind := range kinds {
+			if kind == "template_presets" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			kinds = append(kinds, "template_presets")
+		}
+	}
 	if len(kinds) == 0 {
 		return AllTaskOptionsResult{}, fmt.Errorf("%s 未声明可查询的动态选项类别", providerDisplayName(conn.Resource.Provider))
 	}
@@ -640,7 +677,17 @@ func (s *Service) listAllTaskOptions(ctx context.Context, conn *Connection, prof
 		child.Kind = kind
 		child.ID = ""
 		result.QueriedKinds = append(result.QueriedKinds, kind)
-		value, optionErr := profiler.ListTaskOptions(ctx, conn, child)
+		var value interface{}
+		var optionErr error
+		if kind == "template_presets" {
+			presets := templatePresetsForProvider(conn.Resource.Provider)
+			value = map[string]interface{}{
+				"provider": normalizeProvider(conn.Resource.Provider), "resource_id": conn.Resource.ID,
+				"kind": kind, "options": map[string]interface{}{"items": presets, "total": len(presets)},
+			}
+		} else {
+			value, optionErr = profiler.ListTaskOptions(ctx, conn, child)
+		}
 		if optionErr != nil {
 			result.Errors[kind] = truncateError(optionErr)
 			continue
@@ -667,6 +714,16 @@ func (s *Service) ListTaskOptions(ctx context.Context, resourceID string, filter
 	filter.Query = strings.TrimSpace(filter.Query)
 	filter.ID = strings.TrimSpace(filter.ID)
 	filter.Page, filter.PageSize = normalizePagination(filter.Page, filter.PageSize)
+	if filter.Kind == "template_presets" {
+		presets := templatePresetsForProvider(conn.Resource.Provider)
+		if len(presets) == 0 {
+			return nil, fmt.Errorf("%s 暂未提供内置扫描模板", providerDisplayName(conn.Resource.Provider))
+		}
+		return map[string]interface{}{
+			"provider": normalizeProvider(conn.Resource.Provider), "resource_id": conn.Resource.ID,
+			"kind": filter.Kind, "options": map[string]interface{}{"items": presets, "total": len(presets)},
+		}, nil
+	}
 	if filter.Kind == "all" {
 		return s.listAllTaskOptions(ctx, conn, profiler, filter)
 	}
@@ -741,6 +798,10 @@ func (s *Service) CreateTemplate(ctx context.Context, resourceID string, req Tem
 	}
 	if req.Options == nil {
 		req.Options = map[string]interface{}{}
+	}
+	req, err = applyTemplatePreset(conn.Resource.Provider, req)
+	if err != nil {
+		return nil, err
 	}
 	return creator.CreateTemplate(ctx, conn, req)
 }

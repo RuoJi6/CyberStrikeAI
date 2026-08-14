@@ -1,7 +1,7 @@
 # ASM Platform Capability and Adapter Baseline
 
-> Document version: 2.1
-> Baseline date: 2026-08-13
+> Document version: 2.6
+> Baseline date: 2026-08-14
 > Scope: CyberStrikeAI built-in adapters for ARL, XingRin, and ScopeSentry
 
 This document distinguishes upstream platform capabilities from actions currently exposed to agents by CyberStrikeAI. Update it before changing MCP schemas, adapters, or UI after an upstream release.
@@ -23,17 +23,32 @@ Agents use eleven normalized tools:
 | `asm_list_resources` | List enabled resources, state, and capabilities |
 | `asm_test_connection` | Verify the address and server-side credential |
 | `asm_get_task_profile` | Read the provider version, modes, typed fields, defaults, and dependencies |
-| `asm_list_task_options` | Query one live option kind, or aggregate every list-style kind with `kind=all` |
-| `asm_create_template` | Clone a ScopeSentry base template and configure typed capabilities, ports, concurrency, screenshots, TLS, and POCs |
+| `asm_list_task_options` | Query live policies, plugins, POCs, and ARL brute-force plugins; read local built-ins with `kind=template_presets`; or aggregate every list-style kind with `kind=all` |
+| `asm_create_template` | Create or reconcile an ARL policy or ScopeSentry template from `preset_id`; ScopeSentry also supports controlled base-template cloning |
 | `asm_create_task` | Create a task for an explicitly authorized target |
 | `asm_list_tasks` / `asm_get_task` | Read task lists, progress, stages, statistics, and configuration |
 | `asm_list_assets` | Page through a provider-specific result type from the CyberStrikeAI local snapshot; discover valid IDs from profile `result_types` |
 | `asm_stop_task` | Stop a remote task |
 | `asm_manage_task` | Restart, resume, delete, or synchronize results when supported |
 
-The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> optionally `asm_list_task_options` -> `asm_create_task`. Credentials remain on the server and are never placed in model context.
+The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> optionally `asm_list_task_options` -> optionally `asm_create_template` for ARL or ScopeSentry -> `asm_create_task`. Credentials remain on the server and are never placed in model context.
 
 `asm_list_task_options(kind=all)` queries every list-style dynamic option kind declared by the selected resource. It does not scan all targets or retrieve an unbounded option corpus: `page` and `page_size` apply independently to every kind (defaulting to the first 20 records of each). Detail kinds such as `policy_detail` and `template_detail` are skipped because they require a specific `id`. A per-kind failure produces `partial=true` and a categorized error while preserving successful results.
+
+### Built-in tiered templates
+
+The ASM resource page and MCP share one server-side preset catalog. `template_presets` reads local metadata without contacting upstream; `asm_create_template` creates the native ARL policy or ScopeSentry task template.
+
+Each `template_presets` entry is specialized for the selected resource and includes `provider`, `provider_kind`, exact `provider_config`, and `mcp_usage`. ARL entries expose policy switches, port tier, dictionaries, POC/brute selection, and concurrency controls; ScopeSentry entries expose the port expression, concurrency, and enabled plugin capabilities. The resource page renders the same structure through “view exact configuration”, while existing upstream profiles are read through `policy_detail` or `template_detail`.
+
+| `preset_id` | Tier | Purpose | ARL ports | ScopeSentry ports |
+| --- | --- | --- | --- | --- |
+| `quick_discovery` | Low | Common ports, services, sites, and TLS | TOP100 | Curated common-service ports |
+| `information_collection` | Medium | Subdomains, broader ports, screenshots, URLs, and crawling without active vulnerability POCs | TOP1000 | `1-10000` |
+| `vulnerability_assessment` | Medium-high | Asset identification followed by leak and vulnerability checks; ARL selects every installed POC | TOP1000 | `1-10000` |
+| `full_scan` | High | Broad subdomain, all-port, site/crawler/sensitive-data, vulnerability POCs, plus every installed ARL brute plugin | All ports | `1-65535` |
+
+Names are fixed as `CyberStrikeAI · <preset name>`. A repeat call finds the exact upstream record and reconciles it with the current preset, so old policies need not be deleted after a preset upgrade. ARL vulnerability assessment pages through every live `plugin_type=poc`; full scan additionally selects every `plugin_type=brute` plugin. Creation fails if an asserted live catalog is empty rather than producing a misleading policy. Presets cannot be overridden per request. Creation no longer opens an extra vulnerability-scan confirmation dialog. If a ScopeSentry base template has not enabled a declared capability, the adapter automatically copies installed upstream plugin hashes and upstream-owned default parameters, then verifies the saved template. Capability checks include concrete plugin identity: `sensitive_scan`, for example, requires `URLSecurity/sensitive` and is not satisfied by `trufflehog` merely sharing the module. The v1.9.3 default plugin catalog has no `PassiveScan` implementation, so the full built-in does not declare that empty module. XingRin has no native template-creation API and therefore does not advertise this feature.
 
 ## Upstream action matrix
 
@@ -46,7 +61,7 @@ The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> 
 | Vulnerability scanning | Nuclei and WebInfoHunter | Nuclei and Dalfox | Vulnerability plugins and imported POCs |
 | Screenshots | Supported | Playwright | Asset-mapping/plugin dependent |
 | Scheduling/distribution | Scheduled monitors | Cron and Workers | Scheduled tasks and multi-node execution |
-| Weak-password brute force | `service_brute` | Not a core stage | Still listed as TODO in v1.9.3 |
+| Weak-password brute force | Policy `brute_config` selects installed plugins; direct tasks also expose `service_brute` | Not a core stage | Still listed as TODO in v1.9.3 |
 
 ## Provider task profiles
 
@@ -54,7 +69,10 @@ The expected call sequence is `asm_list_resources` -> `asm_get_task_profile` -> 
 
 - `task_mode=direct` maps to `/api/task/` and exposes typed domain, port/service, Web, correlation, and vulnerability switches.
 - `task_mode=policy` maps to `/api/task/policy/` and requires a live `policy_id`.
+- The ASM task center and MCP use the same semantics: “direct custom scan” submits `task_mode=direct`, while “use policy template” submits `task_mode=policy + policy_id`; fields from the inactive mode are not mixed into the request.
+- `asm_create_template` creates native ARL policies at `/api/policy/add/` and reconciles existing built-ins through `/api/policy/edit/`; built-ins use only typed, controlled policy fields.
 - Custom ports, excluded ports, rate/parallelism, POCs, and brute-force dictionaries belong to an upstream policy. They are not accepted as fake per-task overrides.
+- `kind=pocs` reads only `plugin_type=poc`; `kind=brute_plugins` reads only `plugin_type=brute`. Vulnerability assessment selects all live POCs, while full scan selects all live POCs and brute plugins and reports the actual counts in `plugin_summary`.
 - Lifecycle actions: restart, delete, and result synchronization.
 
 ### XingRin v1.5.8
@@ -67,7 +85,7 @@ Live choices include engines, Workers, wordlists, and Nuclei repositories. Engin
 
 With `template_id`, the adapter reuses an upstream-reviewed template and all of its configured modules, dictionaries, plugins, and POCs. Without it, CyberStrikeAI generates a controlled low-load template whose name includes a fingerprint of ports, concurrency, site identification, screenshots, and TLS settings, preventing one task profile from overwriting another.
 
-`asm_create_template` and the task-center form can also clone a selected upstream template, retain a typed `enabled_capabilities` set, and adjust `ports`, `concurrency`, `site_capture`, `tls_probe`, and `poc_ids`. The adapter can only retain plugins already present in the base template; it rejects missing requested capabilities and never accepts arbitrary plugin command lines. The response includes the new `template_id`, inspected `capability_summary`, and `verification_token`, so the new template can be used immediately by `asm_create_task`.
+`asm_create_template` and the task-center form can also clone a selected upstream template, enable a typed `enabled_capabilities` set, and adjust `ports`, `concurrency`, `site_capture`, `tls_probe`, and `poc_ids`. `asm_get_task_profile` returns live `available_template_capabilities` and `unavailable_template_capabilities`; the UI disables only capabilities whose plugins are genuinely absent. Installed capabilities missing from the base template remain selectable and are merged with upstream-owned default parameters. Arbitrary plugin command lines remain forbidden. The response includes the new `template_id`, plugin-aware `capability_summary`, and `verification_token`, so the new template can be used immediately by `asm_create_task`.
 
 Node selection, ignore/duplicate rules, target sources, projects, structured asset filters, scheduling, resume, restart, and delete are mapped. Scheduled creation resolves the new remote ID through `/api/task/scheduled`, records it in the local task center, and reads it through `/api/task/scheduled/detail`. A scheduled definition cannot be stopped/resumed/restarted as an immediate scan; only explicit deletion is supported. Arbitrary plugin command lines are not exposed. POCs use the paginated `/api/poc` endpoint; template, dictionary, plugin, and POC lists are compacted so large upstream payloads do not consume the agent context.
 
@@ -77,7 +95,7 @@ Upstream `template_id` creation now requires a preflight inspection. The agent m
 
 | Platform | Authentication/connectivity | Tasks/options | Assets |
 | --- | --- | --- | --- |
-| ARL | `/api/user/login`, `/api/console/info` | `/api/task/`, `/api/task/policy/`, stop/restart/delete/sync; policy/POC/scope lists | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
+| ARL | `/api/user/login`, `/api/console/info` | `/api/task/`, `/api/task/policy/`, stop/restart/delete/sync; `/api/policy/`, `/api/policy/add/`, POC/scope lists | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
 | XingRin | `/api/auth/login/`, `/api/auth/me/` | `/api/scans/quick/`, scans/detail/stop; engines/Workers/wordlists/Nuclei repositories | `/api/assets/:type/`, `/api/scans/:id/:type/` |
 | ScopeSentry | `/api/user/login`, `/api/node/online` | task templates, immediate/scheduled task creation and lifecycle; dictionary/plugin/POC/project choices | site/domain/IP/URL plus crawler, sensitive, directory, takeover, vulnerability list and vulnerability detail APIs |
 
@@ -117,6 +135,11 @@ On 2026-08-13, ScopeSentry v1.9.3 received an additional template-creation valid
 
 | Version | Date | Platform baseline | Change |
 | --- | --- | --- | --- |
+| 2.6 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Built-in presets now expose and render exact provider-specific `provider_config` and `mcp_usage`; the resource page adds click-through details for built-in and upstream profiles so agents can select from real ARL policy or ScopeSentry plugin settings |
+| 2.5 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ARL vulnerability assessment now selects every live POC and full scan selects every live POC plus brute plugin; UI/MCP repeat calls reconcile existing built-ins and repair empty `poc_config`/`brute_config` arrays |
+| 2.4 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added plugin-level ScopeSentry capability checks; mapped `sensitive_scan` to the concrete sensitive plugin; unified task-center and MCP availability with the live installed-plugin catalog |
+| 2.3 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry built-ins now auto-enable installed plugins missing from the base template, repair an existing preset in place, and create vulnerability/full presets without an extra UI confirmation dialog |
+| 2.2 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added the tiered template library and upstream-template view to ASM resources; MCP now exposes `template_presets` and idempotent `preset_id` creation; ARL policies and ScopeSentry templates share four controlled built-ins |
 | 2.1 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added `asm_create_template`; agents and the task center can clone a ScopeSentry base template, configure controlled capabilities/ports/concurrency/POCs, and immediately create a task with it |
 | 2.0 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Added provider-native manual creation and stop actions to the task center, and made first-time XingRin screenshot caching reuse localized result indexes |
 | 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | Persisted every XingRin multi-target child, returned complete local/remote ID lists from MCP, and grouped children from one request under a collapsible `batch_id` in the task center |

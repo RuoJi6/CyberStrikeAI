@@ -207,6 +207,22 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			_, _ = w.Write([]byte(`{"code":200}`))
 		case "/api/dictionary/port/data":
 			_, _ = w.Write([]byte(`{"code":200,"data":{"list":[{"id":"top100","name":"TOP100","value":"1-65535"}]}}`))
+		case "/api/plugin":
+			plugins := []map[string]interface{}{
+				{"name": "subfinder", "module": "SubdomainScan", "hash": "sub-hash", "isSystem": true},
+				{"name": "SubdomainTakeover", "module": "SubdomainSecurity", "hash": "takeover-hash", "isSystem": true},
+				{"name": "RustScan", "module": "PortScan", "hash": portHash, "parameter": "-port {port.top1000} -b 500", "isSystem": true},
+				{"name": "fingerprintx", "module": "PortFingerprint", "hash": fingerHash, "isSystem": true},
+				{"name": "httpx", "module": "AssetMapping", "hash": mapHash, "parameter": "-screenshot true", "isSystem": true},
+				{"name": "katana", "module": "URLScan", "hash": "url-hash", "isSystem": true},
+				{"name": "rad", "module": "WebCrawler", "hash": "crawler-hash", "isSystem": true},
+				{"name": "sensitive", "module": "URLSecurity", "hash": "sensitive-hash", "isSystem": true},
+				{"name": "trufflehog", "module": "URLSecurity", "hash": "trufflehog-hash", "isSystem": true},
+				{"name": "SentryDir", "module": "DirScan", "hash": "dir-hash", "isSystem": true},
+				{"name": "nuclei", "module": "VulnerabilityScan", "hash": "vuln-hash", "isSystem": true},
+				{"name": "AssetHandle", "module": "AssetHandle", "hash": handleHash, "isSystem": true},
+			}
+			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": plugins, "total": len(plugins)}})
 		case "/api/poc":
 			_, _ = w.Write([]byte(`{"code":200,"data":{"list":[{"id":"64b000000000000000000009","name":"Safe POC","content":"very large yaml","tags":["safe"]}],"total":1}}`))
 		default:
@@ -258,6 +274,10 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	createdSummary := scopeSentryMap(createdTemplateMap["capability_summary"])
 	if err != nil || createdTemplateMap["template_id"] != customID || createdSummary["full_ports"] != true {
 		t.Fatalf("CreateTemplate result=%#v err=%v", createdTemplate, err)
+	}
+	reusedTemplate, err := adapter.CreateTemplate(ctx, connection, TemplateRequest{Name: customName, PresetID: "full_scan"})
+	if err != nil || scopeSentryMap(reusedTemplate)["reused"] != true || scopeSentryMap(reusedTemplate)["template_id"] != customID {
+		t.Fatalf("built-in template should reuse an exact upstream name: result=%#v err=%v", reusedTemplate, err)
 	}
 	if _, err := adapter.CreateTask(ctx, connection, TaskRequest{
 		Name: "must inspect", Target: "192.0.2.11", Options: map[string]interface{}{"template_id": defaultID},
@@ -351,6 +371,96 @@ func scopeSentryTestDefaultTemplate(id, portHash, handleHash, mapHash, fingerHas
 			"PortScan":     map[string]interface{}{portHash: "-port {port.top1000} -b 500 -t 5000"},
 			"AssetMapping": map[string]interface{}{mapHash: "-screenshot true"},
 		},
+	}
+}
+
+func TestScopeSentryEnableInstalledPlugins(t *testing.T) {
+	template := map[string]interface{}{
+		"WebCrawler":        []interface{}{},
+		"VulnerabilityScan": []interface{}{},
+		"Parameters":        map[string]interface{}{},
+		"ParameterLists":    map[string]interface{}{},
+	}
+	options := map[string]interface{}{
+		"enabled_capabilities": []interface{}{"web_crawler", "vulnerability_scan"},
+	}
+	plugins := map[string]interface{}{"data": map[string]interface{}{"list": []interface{}{
+		map[string]interface{}{
+			"name": "katana", "module": "WebCrawler", "hash": "crawler-system", "parameter": "-depth 3",
+			"parameterList": `[{"name":"depth","type":"string","defaultValue":"3"}]`, "isSystem": true,
+		},
+		map[string]interface{}{
+			"name": "custom crawler", "module": "WebCrawler", "hash": "crawler-custom", "parameter": "-depth 9", "isSystem": false,
+		},
+		map[string]interface{}{
+			"name": "nuclei", "module": "VulnerabilityScan", "hash": "nuclei-system", "parameter": "-rl 150", "isSystem": true,
+		},
+	}}}
+
+	autoEnabled, err := scopeSentryEnableInstalledPlugins(template, options, plugins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(autoEnabled) != 2 {
+		t.Fatalf("auto enabled=%#v", autoEnabled)
+	}
+	if got := fmt.Sprint(template["WebCrawler"]); !strings.Contains(got, "crawler-system") || strings.Contains(got, "crawler-custom") {
+		t.Fatalf("built-in plugin preference failed: %s", got)
+	}
+	if got := fmt.Sprint(scopeSentryMap(scopeSentryMap(template["Parameters"])["VulnerabilityScan"])["nuclei-system"]); got != "-rl 150" {
+		t.Fatalf("nuclei default parameter=%q", got)
+	}
+	if got := fmt.Sprint(scopeSentryMap(scopeSentryMap(template["ParameterLists"])["WebCrawler"])["crawler-system"]); !strings.Contains(got, "defaultValue") {
+		t.Fatalf("crawler parameter list=%q", got)
+	}
+}
+
+func TestScopeSentryEnableInstalledPluginsReportsMissingModule(t *testing.T) {
+	template := map[string]interface{}{"PassiveScan": []interface{}{}}
+	_, err := scopeSentryEnableInstalledPlugins(template, map[string]interface{}{
+		"enabled_capabilities": []interface{}{"passive_scan"},
+	}, map[string]interface{}{"data": map[string]interface{}{"list": []interface{}{}}})
+	if err == nil || !strings.Contains(err.Error(), "passive_scan (PassiveScan)") {
+		t.Fatalf("missing plugin error=%v", err)
+	}
+}
+
+func TestScopeSentrySensitiveCapabilityRequiresSensitivePlugin(t *testing.T) {
+	template := map[string]interface{}{
+		"URLSecurity": []interface{}{"trufflehog-hash"},
+		"Parameters": map[string]interface{}{"URLSecurity": map[string]interface{}{
+			"trufflehog-hash": "-pdf false -verify false",
+		}},
+		"ParameterLists": map[string]interface{}{"URLSecurity": map[string]interface{}{}},
+	}
+	plugins := map[string]interface{}{"data": map[string]interface{}{"list": []interface{}{
+		map[string]interface{}{"name": "sensitive", "module": "URLSecurity", "hash": "sensitive-hash", "parameter": "-t 10", "isSystem": true},
+		map[string]interface{}{"name": "trufflehog", "module": "URLSecurity", "hash": "trufflehog-hash", "parameter": "-pdf false -verify false", "isSystem": true},
+	}}}
+
+	before := scopeSentryTemplateCapabilitySummary(template, plugins)
+	if capabilities, _ := before["capabilities"].(map[string]bool); capabilities["sensitive_scan"] != false {
+		t.Fatalf("trufflehog alone must not satisfy sensitive_scan: %#v", before)
+	}
+	autoEnabled, err := scopeSentryEnableInstalledPlugins(template, map[string]interface{}{
+		"enabled_capabilities": []interface{}{"sensitive_scan"},
+	}, plugins)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(autoEnabled) != 1 || autoEnabled[0]["plugin"] != "sensitive" {
+		t.Fatalf("auto enabled=%#v", autoEnabled)
+	}
+	selected := fmt.Sprint(template["URLSecurity"])
+	if !strings.Contains(selected, "sensitive-hash") || !strings.Contains(selected, "trufflehog-hash") {
+		t.Fatalf("URLSecurity selection must merge sensitive with existing plugins: %s", selected)
+	}
+	after := scopeSentryTemplateCapabilitySummary(template, plugins)
+	if capabilities, _ := after["capabilities"].(map[string]bool); capabilities["sensitive_scan"] != true {
+		t.Fatalf("sensitive plugin was not recognized: %#v", after)
+	}
+	if available := fmt.Sprint(after["available_capabilities"]); !strings.Contains(available, "sensitive_scan") {
+		t.Fatalf("available capabilities=%s", available)
 	}
 }
 

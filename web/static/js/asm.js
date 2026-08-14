@@ -27,6 +27,18 @@ const asmPageState = {
     createTemplateToken: '',
     createTemplateBaseSummary: null,
     createLoading: false,
+    templateResource: null,
+    templatePresets: [],
+    upstreamTemplates: [],
+    templateLoading: false,
+    templateBusyPreset: '',
+    templateBulkCreating: false,
+    templateError: '',
+    templateSelectedPreset: '',
+    templateUpstreamDetailID: '',
+    templateUpstreamDetail: null,
+    templateUpstreamDetailLoading: false,
+    templateUpstreamDetailError: '',
 };
 
 function asmT(key, fallback, options) {
@@ -140,6 +152,7 @@ function renderASMResources() {
         const enabledLabel = item.enabled ? asmT('asm.enabledShort', 'Agent 已启用') : asmT('asm.disabledShort', 'Agent 已停用');
         const testText = busy ? asmT('asm.testing', '测试中') : asmT('asm.test', '测试连接');
         const toggleText = item.enabled ? asmT('asm.disable', '停用') : asmT('asm.enable', '启用');
+        const canCreateTemplate = Array.isArray(item.capabilities) && item.capabilities.includes('create_template');
         return `<article class="asm-resource-card" data-asm-resource-id="${asmEscape(item.id)}">
             <div class="asm-card-head">
                 <div class="asm-card-title-row">
@@ -153,6 +166,7 @@ function renderASMResources() {
             ${item.last_error ? `<div class="asm-card-error" title="${asmEscape(item.last_error)}">${asmEscape(item.last_error)}</div>` : ''}
             <div class="asm-card-actions">
                 <button type="button" class="btn-secondary" data-require-permission="mcp:write" data-asm-action="test" ${busy ? 'disabled' : ''}>${asmEscape(testText)}</button>
+                ${canCreateTemplate ? `<button type="button" class="btn-secondary asm-template-button" data-require-permission="mcp:write" data-asm-action="templates">${asmEscape(asmT('asm.scanTemplates', '扫描模板'))}</button>` : ''}
                 <button type="button" class="btn-secondary" data-require-permission="mcp:write" data-asm-action="edit">${asmEscape(asmT('common.edit', '编辑'))}</button>
                 <button type="button" class="btn-secondary" data-require-permission="mcp:write" data-asm-action="toggle">${asmEscape(toggleText)}</button>
                 <button type="button" class="btn-secondary asm-delete-button" data-require-permission="mcp:write" data-asm-action="delete">${asmEscape(asmT('common.delete', '删除'))}</button>
@@ -345,6 +359,341 @@ async function deleteASMResource(id) {
         await loadASMResources();
     } catch (error) {
         if (typeof showNotification === 'function') showNotification(error.message, 'error');
+    }
+}
+
+function asmTemplateItems(payload) {
+    const root = payload?.options ?? payload ?? {};
+    if (Array.isArray(root)) return root;
+    const candidates = [root.items, root.list, root.results, root.data?.items, root.data?.list, root.data?.results, root.data];
+    return candidates.find(Array.isArray) || [];
+}
+
+function asmUpstreamTemplateID(item) {
+    return String(item?._id || item?.id || item?.policy_id || item?.template_id || '').trim();
+}
+
+function asmUpstreamTemplateName(item) {
+    return String(item?.name || item?.template_name || item?.policy_name || '').trim();
+}
+
+function asmTemplateProviderKind(provider) {
+    return provider === 'arl' ? asmT('asm.policyKind', 'ARL 策略') : asmT('asm.templateKind', 'ScopeSentry 模板');
+}
+
+const asmTemplateConfigLabels = Object.freeze({
+    domain_brute: '子域名爆破', domain_brute_type: '域名字典', alt_dns: 'DNS 智能字典', arl_search: 'ARL 历史查询', dns_query_plugin: 'DNS 查询插件',
+    port_scan: '端口扫描', port_scan_type: '端口范围', service_detection: '服务识别', os_detection: '操作系统识别', ssl_cert: 'SSL 证书', skip_scan_cdn_ip: '跳过 CDN IP',
+    site_identify: '站点识别', site_capture: '站点截图', search_engines: '搜索引擎', site_spider: '站点爬虫', nuclei_scan: 'Nuclei 扫描', web_info_hunter: 'WIH 调用',
+    file_leak: '文件泄露', npoc_service_detection: 'NPoC 服务检测', host_timeout_type: '主机超时方式', host_timeout: '主机超时（秒）', port_parallelism: '端口并发', port_min_rate: '端口最小速率',
+    poc_selection: '漏洞 POC', brute_selection: '弱口令插件', enabled_capabilities: '启用能力', ports: '端口表达式', concurrency: '扫描并发', tls_probe: 'TLS 探测',
+});
+
+const asmTemplateCapabilityLabels = Object.freeze({
+    subdomain_discovery: '子域名发现', subdomain_takeover: '子域接管', port_scan: '端口扫描', service_fingerprint: '服务指纹', site_identify: '站点识别',
+    site_capture: '站点截图', tls_probe: 'TLS 探测', url_scan: 'URL 扫描', web_crawler: 'Web 爬虫', sensitive_scan: '敏感信息', directory_scan: '目录扫描',
+    vulnerability_scan: '漏洞扫描', passive_scan: '被动扫描', asset_handle: '资产处理',
+});
+
+function asmTemplateConfigValue(value) {
+    if (typeof value === 'boolean') return value ? '开启' : '关闭';
+    if (Array.isArray(value)) {
+        if (!value.length) return '无';
+        if (value.every(item => item == null || ['string', 'number', 'boolean'].includes(typeof item))) return value.map(item => asmTemplateCapabilityLabels[item] || item).join('、');
+        return `${value.length} 项`;
+    }
+    if (typeof value === 'object' && value) return `${Object.keys(value).length} 个配置字段`;
+    if (value === 'all') return '全部';
+    if (value === 'none') return '不启用';
+    if (value == null || value === '') return '未设置';
+    return String(value);
+}
+
+function asmTemplatePresetCardSummary(preset, provider) {
+    const config = preset?.provider_config || {};
+    if (provider === 'arl') {
+        const port = String(config.port_scan_type || 'test').toUpperCase();
+        return {
+            meta: [`ARL ${port}`, preset.estimated_duration || ''],
+            chips: [
+                config.domain_brute ? `子域字典：${config.domain_brute_type === 'big' ? '大字典' : '测试'}` : '子域爆破：关闭',
+                config.site_capture ? '站点截图：开启' : '站点截图：关闭',
+                `漏洞 POC：${asmTemplateConfigValue(config.poc_selection)}`,
+                `弱口令：${asmTemplateConfigValue(config.brute_selection)}`,
+            ],
+        };
+    }
+    const capabilities = Array.isArray(config.enabled_capabilities) ? config.enabled_capabilities : [];
+    const ports = String(config.ports || '');
+    const portSummary = ports.includes(',') ? `${ports.split(',').filter(Boolean).length} 个常用端口` : (ports || '默认端口');
+    return {
+        meta: [`Scope ${portSummary}`, `并发 ${config.concurrency || '默认'}`],
+        chips: capabilities.slice(0, 5).map(item => asmTemplateCapabilityLabels[item] || item).concat(capabilities.length > 5 ? [`另 ${capabilities.length - 5} 项能力`] : []),
+    };
+}
+
+function asmTemplateConfigRows(config) {
+    return Object.entries(config || {}).map(([key, value]) => `<div><span>${asmEscape(asmTemplateConfigLabels[key] || key)}</span><strong>${asmEscape(asmTemplateConfigValue(value))}</strong><code>${asmEscape(key)}</code></div>`).join('');
+}
+
+function renderASMTemplatePresetDetail() {
+    const root = document.getElementById('asm-template-preset-detail');
+    const resource = asmPageState.templateResource;
+    const preset = asmPageState.templatePresets.find(item => item.id === asmPageState.templateSelectedPreset);
+    if (!root || !resource || !preset) {
+        if (root) { root.hidden = true; root.innerHTML = ''; }
+        return;
+    }
+    const config = preset.provider_config || {};
+    const providerKind = resource.provider === 'arl' ? 'ARL 策略参数' : 'ScopeSentry 模板参数';
+    const capabilities = Array.isArray(config.enabled_capabilities) ? config.enabled_capabilities : [];
+    const configWithoutCapabilities = Object.fromEntries(Object.entries(config).filter(([key]) => key !== 'enabled_capabilities'));
+    root.hidden = false;
+    root.innerHTML = `<div class="asm-template-detail-head">
+        <div><span>${asmEscape(resource.provider === 'arl' ? 'ARL POLICY' : 'SCOPESENTRY TEMPLATE')}</span><h5>${asmEscape(preset.name)} · ${asmEscape(providerKind)}</h5><p>${asmEscape(preset.description || '')}</p></div>
+        <button type="button" class="modal-close" onclick="closeASMTemplatePresetDetail()" aria-label="关闭模板详情">&times;</button>
+    </div>
+    ${capabilities.length ? `<section class="asm-template-detail-capabilities"><strong>启用的 ScopeSentry 插件能力（${capabilities.length}）</strong><div>${capabilities.map(item => `<span><b>${asmEscape(asmTemplateCapabilityLabels[item] || item)}</b><code>${asmEscape(item)}</code></span>`).join('')}</div></section>` : ''}
+    <section class="asm-template-detail-settings"><strong>${asmEscape(providerKind)}</strong><div class="asm-template-detail-grid">${asmTemplateConfigRows(configWithoutCapabilities)}</div></section>
+    <details class="asm-template-detail-json"><summary>MCP 可读取的结构化配置</summary><pre>${asmEscape(JSON.stringify({ provider: preset.provider, provider_kind: preset.provider_kind, provider_config: config, mcp_usage: preset.mcp_usage }, null, 2))}</pre></details>`;
+}
+
+function showASMTemplatePresetDetail(presetID) {
+    asmPageState.templateSelectedPreset = presetID;
+    renderASMTemplateLibrary();
+    document.getElementById('asm-template-preset-detail')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeASMTemplatePresetDetail() {
+    asmPageState.templateSelectedPreset = '';
+    renderASMTemplateLibrary();
+}
+
+function renderASMUpstreamTemplateDetail() {
+    const root = document.getElementById('asm-template-upstream-detail');
+    const resource = asmPageState.templateResource;
+    if (!root || !resource || !asmPageState.templateUpstreamDetailID) {
+        if (root) { root.hidden = true; root.innerHTML = ''; }
+        return;
+    }
+    root.hidden = false;
+    if (asmPageState.templateUpstreamDetailLoading) {
+        root.innerHTML = '<div class="asm-template-loading"><span class="asm-spinner"></span><span>正在读取上游具体设置…</span></div>';
+        return;
+    }
+    if (asmPageState.templateUpstreamDetailError) {
+        root.innerHTML = `<div class="asm-template-detail-head"><div><h5>上游设置读取失败</h5><p>${asmEscape(asmPageState.templateUpstreamDetailError)}</p></div><button type="button" class="modal-close" onclick="closeASMUpstreamTemplateDetail()" aria-label="关闭详情">&times;</button></div>`;
+        return;
+    }
+    const item = asmPageState.upstreamTemplates.find(entry => asmUpstreamTemplateID(entry) === asmPageState.templateUpstreamDetailID);
+    const payload = asmPageState.templateUpstreamDetail?.options ?? asmPageState.templateUpstreamDetail ?? {};
+    const summary = payload.capability_summary || {};
+    const arlItem = resource.provider === 'arl' ? (payload.items?.[0] || payload.results?.[0] || payload.data?.items?.[0] || payload.data?.results?.[0] || payload) : null;
+    const readable = resource.provider === 'arl' ? (arlItem?.policy || arlItem || {}) : (Object.keys(summary).length ? summary : payload);
+    root.innerHTML = `<div class="asm-template-detail-head">
+        <div><span>UPSTREAM DETAIL</span><h5>${asmEscape(asmUpstreamTemplateName(item) || asmTemplateProviderKind(resource.provider))}</h5><p>${asmEscape(resource.provider === 'arl' ? 'ARL policy_detail 实时返回' : 'ScopeSentry template_detail 实时回读并校验')}</p></div>
+        <button type="button" class="modal-close" onclick="closeASMUpstreamTemplateDetail()" aria-label="关闭详情">&times;</button>
+    </div>
+    <section class="asm-template-detail-settings"><strong>具体设置摘要</strong><div class="asm-template-detail-grid">${asmTemplateConfigRows(readable)}</div></section>
+    <details class="asm-template-detail-json" open><summary>上游原始结构化响应</summary><pre>${asmEscape(JSON.stringify(payload, null, 2))}</pre></details>`;
+}
+
+async function showASMUpstreamTemplateDetail(templateID) {
+    const resource = asmPageState.templateResource;
+    if (!resource || !templateID || asmPageState.templateUpstreamDetailLoading) return;
+    asmPageState.templateUpstreamDetailID = templateID;
+    asmPageState.templateUpstreamDetail = null;
+    asmPageState.templateUpstreamDetailError = '';
+    asmPageState.templateUpstreamDetailLoading = true;
+    renderASMUpstreamTemplateDetail();
+    document.getElementById('asm-template-upstream-detail')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    try {
+        const kind = resource.provider === 'arl' ? 'policy_detail' : 'template_detail';
+        asmPageState.templateUpstreamDetail = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=${encodeURIComponent(kind)}&option_id=${encodeURIComponent(templateID)}&page=1&page_size=1`);
+    } catch (error) {
+        asmPageState.templateUpstreamDetailError = error.message;
+    } finally {
+        asmPageState.templateUpstreamDetailLoading = false;
+        renderASMUpstreamTemplateDetail();
+    }
+}
+
+function closeASMUpstreamTemplateDetail() {
+    asmPageState.templateUpstreamDetailID = '';
+    asmPageState.templateUpstreamDetail = null;
+    asmPageState.templateUpstreamDetailError = '';
+    renderASMUpstreamTemplateDetail();
+}
+
+function renderASMTemplateLibrary() {
+    const resource = asmPageState.templateResource;
+    const subtitle = document.getElementById('asm-template-library-subtitle');
+    const error = document.getElementById('asm-template-library-error');
+    const presetRoot = document.getElementById('asm-template-preset-grid');
+    const listRoot = document.getElementById('asm-template-upstream-list');
+    const countRoot = document.getElementById('asm-template-upstream-count');
+    const createAll = document.getElementById('asm-template-create-all');
+    if (!resource || !presetRoot || !listRoot) return;
+
+    if (subtitle) subtitle.textContent = `${resource.name} · ${asmTemplateProviderKind(resource.provider)}`;
+    if (error) {
+        error.hidden = !asmPageState.templateError;
+        error.textContent = asmPageState.templateError;
+    }
+    const existingNames = new Set(asmPageState.upstreamTemplates.map(asmUpstreamTemplateName).filter(Boolean));
+    const loading = asmPageState.templateLoading;
+    if (createAll) {
+        const allCreated = asmPageState.templatePresets.length > 0 && asmPageState.templatePresets.every(item => existingNames.has(`CyberStrikeAI · ${item.name}`));
+        createAll.disabled = loading || asmPageState.templateBulkCreating;
+        createAll.textContent = asmPageState.templateBulkCreating
+            ? asmT('asm.creatingTemplates', '正在创建…')
+            : (allCreated ? asmT('asm.syncAllTemplates', '校准全部配置') : asmT('asm.createAllTemplates', '一键创建全部'));
+    }
+    if (loading && !asmPageState.templatePresets.length) {
+        presetRoot.innerHTML = `<div class="asm-template-loading"><span class="asm-spinner" aria-hidden="true"></span>${asmEscape(asmT('asm.loadingTemplates', '正在读取模板…'))}</div>`;
+    } else {
+        presetRoot.innerHTML = asmPageState.templatePresets.map((preset, index) => {
+            const expectedName = `CyberStrikeAI · ${preset.name}`;
+            const exists = existingNames.has(expectedName);
+            const busy = asmPageState.templateBusyPreset === preset.id || asmPageState.templateBulkCreating;
+            const providerSummary = asmTemplatePresetCardSummary(preset, resource.provider);
+            const selected = asmPageState.templateSelectedPreset === preset.id;
+            return `<article class="asm-template-preset-card level-${asmEscape(preset.id)}${selected ? ' is-selected' : ''}">
+                <div class="asm-template-preset-head">
+                    <span class="asm-template-index">0${index + 1}</span>
+                    <span class="asm-template-level">${asmEscape(asmT('asm.scanLevel', '等级'))} · ${asmEscape(preset.level || '')}</span>
+                </div>
+                <h4>${asmEscape(preset.name)}</h4>
+                <p>${asmEscape(preset.description || '')}</p>
+                <div class="asm-template-meta">${providerSummary.meta.filter(Boolean).map(item => `<span>${asmEscape(item)}</span>`).join('')}</div>
+                <div class="asm-template-capabilities">${providerSummary.chips.map(item => `<span>${asmEscape(item)}</span>`).join('')}</div>
+                ${preset.warning ? `<div class="asm-template-warning">${asmEscape(preset.warning)}</div>` : ''}
+                <div class="asm-template-preset-actions">
+                    <button type="button" class="btn-secondary asm-template-preset-detail-button" onclick="showASMTemplatePresetDetail('${asmEscape(preset.id)}')" aria-expanded="${selected}">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M10 17H4m10 0h6M8 4v6m8 4v6"/></svg>
+                        <span>查看配置</span>
+                    </button>
+                    <button type="button" class="${exists ? 'btn-secondary' : 'btn-primary'} asm-template-preset-create-button${exists ? ' is-calibrate' : ''}" data-require-permission="mcp:write" onclick="createASMTemplatePreset('${asmEscape(preset.id)}')" ${busy ? 'disabled' : ''}>
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${exists ? 'M20 12a8 8 0 0 1-14.9 4M4 12A8 8 0 0 1 18.9 8M5 16H2v3M19 8h3V5' : 'M12 5v14M5 12h14'}"/></svg>
+                        ${busy && !asmPageState.templateBulkCreating ? asmEscape(asmT('asm.creatingTemplate', '创建中…')) : (exists ? asmEscape(asmT('asm.syncTemplate', '校准配置')) : asmEscape(asmT('asm.createTemplate', '一键创建')))}
+                    </button>
+                </div>
+            </article>`;
+        }).join('') || `<div class="asm-template-loading">${asmEscape(asmT('asm.noTemplatePresets', '该平台暂无内置模板预设'))}</div>`;
+    }
+    renderASMTemplatePresetDetail();
+
+    if (countRoot) countRoot.textContent = asmT('asm.upstreamTemplateCount', `${asmPageState.upstreamTemplates.length} 个上游模板`, { count: asmPageState.upstreamTemplates.length });
+    if (loading && !asmPageState.upstreamTemplates.length) {
+        listRoot.innerHTML = `<div class="asm-template-list-empty">${asmEscape(asmT('asm.loadingUpstreamTemplates', '正在读取上游模板…'))}</div>`;
+    } else {
+        listRoot.innerHTML = asmPageState.upstreamTemplates.map(item => {
+            const name = asmUpstreamTemplateName(item) || asmT('asm.unnamedTemplate', '未命名模板');
+            const id = asmUpstreamTemplateID(item);
+            const managed = name.startsWith('CyberStrikeAI ·');
+            const description = String(item?.desc || item?.description || '').trim();
+            return `<div class="asm-template-upstream-item">
+                <div class="asm-template-upstream-icon">${managed ? 'CS' : (resource.provider === 'arl' ? 'P' : 'T')}</div>
+                <div class="asm-template-upstream-copy"><strong>${asmEscape(name)}</strong>${description ? `<p>${asmEscape(description)}</p>` : ''}<code>${asmEscape(id || '—')}</code></div>
+                <div class="asm-template-upstream-actions"><span class="asm-template-origin${managed ? ' managed' : ''}">${asmEscape(managed ? asmT('asm.builtInTemplate', '内置') : asmT('asm.upstreamTemplate', '上游'))}</span>${id ? `<button type="button" class="btn-secondary btn-small" onclick="showASMUpstreamTemplateDetail('${asmEscape(id)}')">查看设置</button>` : ''}</div>
+            </div>`;
+        }).join('') || `<div class="asm-template-list-empty">${asmEscape(asmT('asm.noUpstreamTemplates', '上游暂无可见模板'))}</div>`;
+    }
+    renderASMUpstreamTemplateDetail();
+    if (typeof applyRBACToUI === 'function') applyRBACToUI(document.getElementById('asm-template-library-modal'));
+}
+
+async function loadASMTemplateLibrary() {
+    const resource = asmPageState.templateResource;
+    if (!resource || asmPageState.templateLoading) return;
+    asmPageState.templateLoading = true;
+    asmPageState.templateError = '';
+    renderASMTemplateLibrary();
+    const upstreamKind = resource.provider === 'arl' ? 'policies' : 'templates';
+    try {
+        const [presets, upstream] = await Promise.all([
+            asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=template_presets&page=1&page_size=100`),
+            asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/task-options?kind=${encodeURIComponent(upstreamKind)}&page=1&page_size=100`),
+        ]);
+        asmPageState.templatePresets = asmTemplateItems(presets);
+        asmPageState.upstreamTemplates = asmTemplateItems(upstream);
+    } catch (error) {
+        asmPageState.templateError = error.message;
+    } finally {
+        asmPageState.templateLoading = false;
+        renderASMTemplateLibrary();
+    }
+}
+
+function openASMTemplateLibrary(id) {
+    const resource = asmPageState.resources.find(item => item.id === id);
+    if (!resource || !Array.isArray(resource.capabilities) || !resource.capabilities.includes('create_template')) return;
+    asmPageState.templateResource = resource;
+    asmPageState.templatePresets = [];
+    asmPageState.upstreamTemplates = [];
+    asmPageState.templateError = '';
+    asmPageState.templateSelectedPreset = '';
+    asmPageState.templateUpstreamDetailID = '';
+    asmPageState.templateUpstreamDetail = null;
+    asmPageState.templateUpstreamDetailError = '';
+    renderASMTemplateLibrary();
+    if (typeof openAppModal === 'function') openAppModal('asm-template-library-modal', { focusEl: document.getElementById('asm-template-create-all') });
+    else document.getElementById('asm-template-library-modal').style.display = 'flex';
+    void loadASMTemplateLibrary();
+}
+
+function closeASMTemplateLibrary() {
+    if (asmPageState.templateLoading || asmPageState.templateBusyPreset || asmPageState.templateBulkCreating) return;
+    if (typeof closeAppModal === 'function') closeAppModal('asm-template-library-modal');
+    else document.getElementById('asm-template-library-modal').style.display = 'none';
+    asmPageState.templateResource = null;
+    asmPageState.templateSelectedPreset = '';
+    asmPageState.templateUpstreamDetailID = '';
+    asmPageState.templateUpstreamDetail = null;
+}
+
+async function createASMTemplatePreset(presetID, quiet) {
+    const resource = asmPageState.templateResource;
+    const preset = asmPageState.templatePresets.find(item => item.id === presetID);
+    if (!resource || !preset || asmPageState.templateBusyPreset) return false;
+    asmPageState.templateBusyPreset = presetID;
+    asmPageState.templateError = '';
+    renderASMTemplateLibrary();
+    try {
+        const result = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/templates`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preset_id: presetID }),
+        });
+        if (!quiet && typeof showNotification === 'function') {
+            showNotification(result.updated ? asmT('asm.templateSynced', '扫描模板已按内置预设校准') : asmT('asm.templateCreateSuccess', '扫描模板创建成功'), 'success');
+        }
+        return true;
+    } catch (error) {
+        asmPageState.templateError = error.message;
+        if (!quiet && typeof showNotification === 'function') showNotification(error.message, 'error');
+        return false;
+    } finally {
+        asmPageState.templateBusyPreset = '';
+        if (!quiet) await loadASMTemplateLibrary();
+        else renderASMTemplateLibrary();
+    }
+}
+
+async function createAllASMTemplatePresets() {
+    if (asmPageState.templateBulkCreating) return;
+    const pending = asmPageState.templatePresets.slice();
+    if (!pending.length) return;
+    asmPageState.templateBulkCreating = true;
+    renderASMTemplateLibrary();
+    let created = 0;
+    try {
+        for (const preset of pending) {
+            if (await createASMTemplatePreset(preset.id, true)) created += 1;
+        }
+        await loadASMTemplateLibrary();
+        if (typeof showNotification === 'function') showNotification(asmT('asm.templatesCreateSummary', `已处理 ${created} 个内置模板`, { count: created }), 'success');
+    } finally {
+        asmPageState.templateBulkCreating = false;
+        renderASMTemplateLibrary();
     }
 }
 
@@ -1300,6 +1649,12 @@ const asmCreateFieldLabels = Object.freeze({
     scheduled: '定时任务', cycle_type: '执行周期', hour: '小时', minute: '分钟', day: '日期', week: '星期', tls_probe: 'TLS 探测',
 });
 
+const asmCreateEnumLabels = Object.freeze({
+    task_tag: { task: '普通扫描任务', risk_cruising: '风险巡航' },
+    domain_brute_type: { test: '测试字典', big: '大字典' },
+    port_scan_type: { test: '测试端口', top100: 'TOP 100', top1000: 'TOP 1000', all: '全端口（1-65535）' },
+});
+
 const asmCreateOrders = Object.freeze({
     arl: ['task_mode', 'policy_id', 'task_tag', 'result_set_id', 'domain_brute', 'domain_brute_type', 'port_scan', 'port_scan_type', 'service_detection', 'service_brute', 'os_detection', 'site_identify', 'site_capture', 'file_leak', 'search_engines', 'site_spider', 'arl_search', 'alt_dns', 'ssl_cert', 'dns_query_plugin', 'skip_scan_cdn_ip', 'nuclei_scan', 'findvhost', 'web_info_hunter'],
     xingrin: ['engine_ids', 'port_scan', 'ports', 'top_ports', 'port_scan_passive', 'site_identify', 'fingerprint_libraries', 'site_capture', 'screenshot_sources', 'subdomain_discovery', 'subdomain_bruteforce', 'subdomain_permutation', 'subdomain_resolve', 'subdomain_wordlist', 'directory_scan', 'directory_wordlist', 'directory_concurrency', 'url_fetch', 'crawl_depth', 'nuclei_scan', 'nuclei_template_repos', 'nuclei_severity', 'nuclei_tags', 'dalfox_scan', 'rate_limit', 'concurrency', 'request_timeout'],
@@ -1342,6 +1697,10 @@ function asmOptionLabel(item) {
     const name = item.name ?? item.title ?? item.label ?? item.id ?? item._id ?? item.value;
     const extra = item.description ?? item.introduction ?? item.status;
     return `${name ?? ''}${extra && String(extra) !== String(name) ? ` · ${extra}` : ''}`;
+}
+
+function asmCreateChoiceLabel(field, value) {
+    return asmCreateEnumLabels[field]?.[String(value)] || String(value);
 }
 
 function asmDynamicKind(field, schema) {
@@ -1531,18 +1890,37 @@ function asmRenderCreateField(key, schema) {
     const defaultValue = schema.default;
     const description = schema.description ? `<small>${asmEscape(schema.description)}</small>` : '';
     let control = '';
+    if (key === 'task_mode') {
+        const selectedMode = defaultValue === 'policy' ? 'policy' : 'direct';
+        return `<section class="asm-create-field asm-create-mode-field" data-asm-create-field="task_mode">
+            <div class="asm-create-mode-head"><strong>ARL 下发方式</strong><span>与 MCP 的 <code>task_mode</code> 参数完全一致</span></div>
+            <div class="asm-create-mode-options" role="radiogroup" aria-label="ARL 下发方式">
+                <label class="asm-create-mode-option ${selectedMode === 'direct' ? 'is-selected' : ''}" data-asm-create-mode="direct">
+                    <input type="radio" name="asm-create-task-mode" value="direct" ${selectedMode === 'direct' ? 'checked' : ''} onchange="setASMCreateTaskMode(this.value)">
+                    <span><strong>直接自定义扫描</strong><small>逐项设置端口、域名、服务、Web、POC 等 ARL 原生开关。</small></span>
+                    <code>direct</code>
+                </label>
+                <label class="asm-create-mode-option ${selectedMode === 'policy' ? 'is-selected' : ''}" data-asm-create-mode="policy">
+                    <input type="radio" name="asm-create-task-mode" value="policy" ${selectedMode === 'policy' ? 'checked' : ''} onchange="setASMCreateTaskMode(this.value)">
+                    <span><strong>使用策略模板</strong><small>选择已在 ARL 创建的策略；端口、POC 和弱口令配置均由该策略决定。</small></span>
+                    <code>policy</code>
+                </label>
+            </div>
+            <input id="${id}" data-asm-create-option="task_mode" type="hidden" value="${selectedMode}">
+        </section>`;
+    }
     if (schema.type === 'boolean') {
         control = `<label class="asm-create-switch"><input id="${id}" data-asm-create-option="${asmEscape(key)}" type="checkbox" ${defaultValue ? 'checked' : ''} onchange="onASMCreateOptionChange('${asmEscape(key)}')"><span>${asmEscape(label)}</span></label>`;
         return `<div class="asm-create-field asm-create-boolean" data-asm-create-field="${asmEscape(key)}" data-requires="${asmEscape(schema.requires || '')}">${control}${description}</div>`;
     }
     const enums = Array.isArray(schema.enum) ? schema.enum : (Array.isArray(schema.items?.enum) ? schema.items.enum : []);
     if (schema.type === 'array' && (rows.length || enums.length)) {
-        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), String(value)]);
+        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), asmCreateChoiceLabel(key, value)]);
         control = `<select id="${id}" data-asm-create-option="${asmEscape(key)}" multiple size="${Math.min(6, Math.max(3, choices.length))}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">${choices.map(([value, text]) => `<option value="${asmEscape(value)}">${asmEscape(text)}</option>`).join('')}</select><small>可按 Ctrl / Command 多选</small>`;
     } else if (schema.type === 'array') {
         control = `<textarea id="${id}" data-asm-create-option="${asmEscape(key)}" rows="3" placeholder="每行一项" onchange="onASMCreateOptionChange('${asmEscape(key)}')"></textarea>`;
     } else if (rows.length || enums.length) {
-        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), String(value)]);
+        const choices = rows.length ? rows.map(item => [asmOptionValue(key, item), asmOptionLabel(item)]) : enums.map(value => [String(value), asmCreateChoiceLabel(key, value)]);
         control = `<select id="${id}" data-asm-create-option="${asmEscape(key)}" onchange="onASMCreateOptionChange('${asmEscape(key)}')"><option value="">请选择</option>${choices.map(([value, text]) => `<option value="${asmEscape(value)}" ${String(defaultValue ?? '') === value ? 'selected' : ''}>${asmEscape(text)}</option>`).join('')}</select>`;
     } else if (schema.type === 'integer') {
         control = `<input id="${id}" data-asm-create-option="${asmEscape(key)}" type="number" ${schema.minimum != null ? `min="${asmEscape(schema.minimum)}"` : ''} ${schema.maximum != null ? `max="${asmEscape(schema.maximum)}"` : ''} value="${asmEscape(defaultValue ?? '')}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">`;
@@ -1552,6 +1930,19 @@ function asmRenderCreateField(key, schema) {
         control = `<input id="${id}" data-asm-create-option="${asmEscape(key)}" type="text" value="${asmEscape(defaultValue ?? '')}" onchange="onASMCreateOptionChange('${asmEscape(key)}')">`;
     }
     return `<label class="asm-create-field" data-asm-create-field="${asmEscape(key)}" data-requires="${asmEscape(schema.requires || '')}"><span>${asmEscape(label)}</span>${control}${description}</label>`;
+}
+
+function setASMCreateTaskMode(mode) {
+    const selectedMode = mode === 'policy' ? 'policy' : 'direct';
+    const value = document.getElementById('asm-create-option-task_mode');
+    if (value) value.value = selectedMode;
+    document.querySelectorAll('[data-asm-create-mode]').forEach(card => {
+        const selected = card.dataset.asmCreateMode === selectedMode;
+        card.classList.toggle('is-selected', selected);
+        const radio = card.querySelector('input[type="radio"]');
+        if (radio) radio.checked = selected;
+    });
+    onASMCreateOptionChange('task_mode');
 }
 
 function renderASMTaskCreateProfile() {
@@ -1607,7 +1998,7 @@ function renderASMTemplateBuilder() {
                 <label><span>端口范围</span><input id="asm-template-create-ports" maxlength="200" placeholder="留空继承，例如 1-65535"></label>
                 <label><span>端口扫描并发</span><input id="asm-template-create-concurrency" type="number" min="1" max="200" placeholder="留空继承"></label>
             </div>
-            <fieldset class="asm-template-capability-picker"><legend>保留的扫描能力</legend>${asmScopeTemplateCapabilities.map(([key, label]) => `<label><input type="checkbox" data-asm-template-capability="${asmEscape(key)}"><span>${asmEscape(label)}</span><code>${asmEscape(key)}</code></label>`).join('')}</fieldset>
+            <fieldset class="asm-template-capability-picker"><legend>启用的扫描能力</legend>${asmScopeTemplateCapabilities.map(([key, label]) => `<label><input type="checkbox" data-asm-template-capability="${asmEscape(key)}"><span>${asmEscape(label)}</span><code>${asmEscape(key)}</code></label>`).join('')}</fieldset>
             ${pocOptions ? `<label class="asm-template-poc-picker"><span>POC 选择（可选）</span><select id="asm-template-create-pocs" multiple size="5">${pocOptions}</select><small>留空时继承基模板的 POC 选择。</small></label>` : ''}
             <div id="asm-template-base-status" class="asm-template-base-status">开启后将实时核对基模板能力。</div>
         </div>`;
@@ -1634,14 +2025,22 @@ async function inspectASMTemplateBase() {
         const summary = payload.options?.capability_summary || {};
         asmPageState.createTemplateBaseSummary = summary;
         const capabilities = summary.capabilities || {};
+        const profileAvailable = Array.isArray(asmPageState.createProfile?.available_template_capabilities) ? asmPageState.createProfile.available_template_capabilities : [];
+        const availableCapabilities = new Set(Array.isArray(summary.available_capabilities) ? summary.available_capabilities : profileAvailable);
         document.querySelectorAll('[data-asm-template-capability]').forEach(node => {
-            const available = Boolean(capabilities[node.dataset.asmTemplateCapability]);
-            node.checked = available;
+            const capability = node.dataset.asmTemplateCapability;
+            const available = availableCapabilities.has(capability);
+            node.checked = Boolean(capabilities[capability]);
             node.disabled = !available;
+            const card = node.closest('label');
+            if (card) {
+                card.classList.toggle('is-unavailable', !available);
+                card.title = available ? '' : '当前 ScopeSentry 上游未安装该能力对应的插件';
+            }
         });
         const ports = document.getElementById('asm-template-create-ports');
         if (ports && !ports.value) ports.value = String(summary.port_expression || '');
-        if (status) status.textContent = `已核对：${(summary.enabled_capabilities || []).length} 项能力 · 端口 ${summary.port_scope || 'unknown'}${summary.selected_poc_count ? ` · ${summary.selected_poc_count} 个 POC` : ''}`;
+        if (status) status.textContent = `已核对：基模板启用 ${(summary.enabled_capabilities || []).length} 项 · 上游可用 ${availableCapabilities.size} 项 · 端口 ${summary.port_scope || 'unknown'}${summary.selected_poc_count ? ` · ${summary.selected_poc_count} 个 POC` : ''}`;
     } catch (error) {
         if (status) status.textContent = error.message;
     }
@@ -1680,6 +2079,7 @@ function syncASMCreateDependencies() {
             const policyFields = ['policy_id', 'task_tag', 'result_set_id'];
             if (mode === 'policy') visible = key === 'task_mode' || policyFields.includes(key);
             else if (policyFields.includes(key)) visible = false;
+            if (key === 'result_set_id' && mode === 'policy' && asmCreateFieldValue('task_tag') !== 'risk_cruising') visible = false;
         }
         field.hidden = !visible;
         field.querySelectorAll('input,select,textarea').forEach(node => { node.disabled = !visible; });
@@ -1793,6 +2193,7 @@ function collectASMTaskCreateOptions() {
         if (schema.type === 'object') value = JSON.parse(String(value));
         result[key] = value;
     });
+    if (profile.provider === 'arl' && mode === 'policy' && !result.policy_id) throw new Error('请选择要使用的 ARL 策略模板');
     if (templateSelected) {
         if (!asmPageState.createTemplateToken) throw new Error('请等待 ScopeSentry 模板详情核对完成');
         result.template_verification_token = asmPageState.createTemplateToken;
@@ -1887,6 +2288,7 @@ function handleASMGridClick(event) {
     if (!id) return;
     const action = button.dataset.asmAction;
     if (action === 'test') void testASMResource(id);
+    if (action === 'templates') openASMTemplateLibrary(id);
     if (action === 'edit') openASMResourceModal(id);
     if (action === 'toggle') void toggleASMResource(id);
     if (action === 'delete') void deleteASMResource(id);
@@ -1912,6 +2314,11 @@ window.initASMTaskCenterPage = initASMTaskCenterPage;
 window.loadASMResources = loadASMResources;
 window.openASMResourceModal = openASMResourceModal;
 window.closeASMResourceModal = closeASMResourceModal;
+window.openASMTemplateLibrary = openASMTemplateLibrary;
+window.closeASMTemplateLibrary = closeASMTemplateLibrary;
+window.loadASMTemplateLibrary = loadASMTemplateLibrary;
+window.createASMTemplatePreset = createASMTemplatePreset;
+window.createAllASMTemplatePresets = createAllASMTemplatePresets;
 window.syncASMProviderForm = syncASMProviderForm;
 window.syncASMAuthForm = syncASMAuthForm;
 window.saveASMResource = saveASMResource;

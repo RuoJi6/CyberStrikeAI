@@ -25,10 +25,13 @@ var scopeSentryTaskIDPattern = regexp.MustCompile(`^[0-9a-fA-F]{24}$`)
 
 var scopeSentryPortArgumentPattern = regexp.MustCompile(`(?:^|\s)-port(?:\s+|=)([^\s]+)`)
 
-var scopeSentryCapabilityModules = []struct {
-	Capability string
-	Module     string
-}{
+type scopeSentryCapabilityModule struct {
+	Capability  string
+	Module      string
+	PluginNames []string
+}
+
+var scopeSentryCapabilityModules = []scopeSentryCapabilityModule{
 	{Capability: "subdomain_discovery", Module: "SubdomainScan"},
 	{Capability: "subdomain_takeover", Module: "SubdomainSecurity"},
 	{Capability: "port_scan", Module: "PortScan"},
@@ -36,7 +39,10 @@ var scopeSentryCapabilityModules = []struct {
 	{Capability: "site_identify", Module: "AssetMapping"},
 	{Capability: "url_scan", Module: "URLScan"},
 	{Capability: "web_crawler", Module: "WebCrawler"},
-	{Capability: "sensitive_scan", Module: "URLSecurity"},
+	// URLSecurity also contains PageMonitoring and trufflehog. Requiring the
+	// concrete sensitive plugin avoids reporting the whole module as
+	// sensitive_scan merely because a different URLSecurity plugin is enabled.
+	{Capability: "sensitive_scan", Module: "URLSecurity", PluginNames: []string{"sensitive"}},
 	{Capability: "directory_scan", Module: "DirScan"},
 	{Capability: "vulnerability_scan", Module: "VulnerabilityScan"},
 	{Capability: "passive_scan", Module: "PassiveScan"},
@@ -268,12 +274,104 @@ func scopeSentryPortSummary(template map[string]interface{}, enabled bool) (stri
 	return "unknown", ""
 }
 
-func scopeSentryTemplateCapabilitySummary(template map[string]interface{}) map[string]interface{} {
+func scopeSentrySelectedPluginHashes(template map[string]interface{}, module string) map[string]struct{} {
+	selected := make(map[string]struct{})
+	for _, raw := range scopeSentryList(template[module]) {
+		hash := strings.TrimSpace(fmt.Sprint(raw))
+		if hash != "" && hash != "<nil>" {
+			selected[hash] = struct{}{}
+		}
+	}
+	return selected
+}
+
+func scopeSentryPluginNameMatches(plugin map[string]interface{}, names []string) bool {
+	if len(names) == 0 {
+		return true
+	}
+	name := strings.TrimSpace(fmt.Sprint(plugin["name"]))
+	for _, expected := range names {
+		if strings.EqualFold(name, strings.TrimSpace(expected)) {
+			return true
+		}
+	}
+	return false
+}
+
+func scopeSentryCapabilityPluginCandidates(mapping scopeSentryCapabilityModule, payload interface{}) []map[string]interface{} {
+	candidates := make([]map[string]interface{}, 0)
+	for _, raw := range scopeSentryList(payload) {
+		plugin := scopeSentryMap(raw)
+		if !strings.EqualFold(strings.TrimSpace(fmt.Sprint(plugin["module"])), mapping.Module) || !scopeSentryPluginNameMatches(plugin, mapping.PluginNames) {
+			continue
+		}
+		hash := strings.TrimSpace(fmt.Sprint(plugin["hash"]))
+		if hash == "" || hash == "<nil>" {
+			continue
+		}
+		candidates = append(candidates, plugin)
+	}
+	return candidates
+}
+
+func scopeSentryCapabilityAvailable(mapping scopeSentryCapabilityModule, plugins interface{}) bool {
+	return len(scopeSentryCapabilityPluginCandidates(mapping, plugins)) > 0
+}
+
+func scopeSentryCapabilityEnabled(template map[string]interface{}, mapping scopeSentryCapabilityModule, plugins interface{}) bool {
+	if len(mapping.PluginNames) == 0 {
+		return scopeSentrySelectionEnabled(template[mapping.Module])
+	}
+	selected := scopeSentrySelectedPluginHashes(template, mapping.Module)
+	if len(selected) == 0 {
+		return false
+	}
+	matchedNames := make(map[string]bool, len(mapping.PluginNames))
+	for _, plugin := range scopeSentryCapabilityPluginCandidates(mapping, plugins) {
+		hash := strings.TrimSpace(fmt.Sprint(plugin["hash"]))
+		if _, ok := selected[hash]; !ok {
+			continue
+		}
+		name := strings.TrimSpace(fmt.Sprint(plugin["name"]))
+		for _, expected := range mapping.PluginNames {
+			if strings.EqualFold(name, strings.TrimSpace(expected)) {
+				matchedNames[strings.ToLower(strings.TrimSpace(expected))] = true
+			}
+		}
+	}
+	for _, expected := range mapping.PluginNames {
+		if !matchedNames[strings.ToLower(strings.TrimSpace(expected))] {
+			return false
+		}
+	}
+	return true
+}
+
+func scopeSentryAvailableCapabilities(plugins interface{}) ([]string, []string) {
+	availableSet := make(map[string]bool, len(scopeSentryRequiredCapabilities))
+	for _, mapping := range scopeSentryCapabilityModules {
+		availableSet[mapping.Capability] = scopeSentryCapabilityAvailable(mapping, plugins)
+	}
+	availableSet["site_capture"] = availableSet["site_identify"]
+	availableSet["tls_probe"] = availableSet["site_identify"]
+	available := make([]string, 0, len(scopeSentryRequiredCapabilities))
+	unavailable := make([]string, 0, len(scopeSentryRequiredCapabilities))
+	for _, capability := range scopeSentryRequiredCapabilities {
+		if availableSet[capability] {
+			available = append(available, capability)
+		} else {
+			unavailable = append(unavailable, capability)
+		}
+	}
+	return available, unavailable
+}
+
+func scopeSentryTemplateCapabilitySummary(template map[string]interface{}, plugins interface{}) map[string]interface{} {
 	capabilities := make(map[string]bool, len(scopeSentryRequiredCapabilities))
 	enabled := make([]string, 0, len(scopeSentryRequiredCapabilities))
 	disabled := make([]string, 0, len(scopeSentryRequiredCapabilities))
 	for _, mapping := range scopeSentryCapabilityModules {
-		capabilities[mapping.Capability] = scopeSentrySelectionEnabled(template[mapping.Module])
+		capabilities[mapping.Capability] = scopeSentryCapabilityEnabled(template, mapping, plugins)
 	}
 	assetMappingParameters := scopeSentryTemplateParameters(template, "AssetMapping")
 	capabilities["site_capture"] = capabilities["site_identify"] && scopeSentryParameterFlag(assetMappingParameters, "screenshot")
@@ -286,6 +384,7 @@ func scopeSentryTemplateCapabilitySummary(template map[string]interface{}) map[s
 		}
 	}
 	portScope, portExpression := scopeSentryPortSummary(template, capabilities["port_scan"])
+	availableCapabilities, unavailableCapabilities := scopeSentryAvailableCapabilities(plugins)
 	pocSelection := "disabled"
 	pocCount := 0
 	if capabilities["vulnerability_scan"] {
@@ -299,17 +398,19 @@ func scopeSentryTemplateCapabilitySummary(template map[string]interface{}) map[s
 		}
 	}
 	return map[string]interface{}{
-		"template_id":           strings.TrimSpace(fmt.Sprint(template["id"])),
-		"template_name":         strings.TrimSpace(fmt.Sprint(template["name"])),
-		"port_scope":            portScope,
-		"port_expression":       portExpression,
-		"full_ports":            portScope == "all",
-		"capabilities":          capabilities,
-		"enabled_capabilities":  enabled,
-		"disabled_capabilities": disabled,
-		"all_capabilities":      len(disabled) == 0,
-		"poc_selection":         pocSelection,
-		"selected_poc_count":    pocCount,
+		"template_id":              strings.TrimSpace(fmt.Sprint(template["id"])),
+		"template_name":            strings.TrimSpace(fmt.Sprint(template["name"])),
+		"port_scope":               portScope,
+		"port_expression":          portExpression,
+		"full_ports":               portScope == "all",
+		"capabilities":             capabilities,
+		"enabled_capabilities":     enabled,
+		"disabled_capabilities":    disabled,
+		"available_capabilities":   availableCapabilities,
+		"unavailable_capabilities": unavailableCapabilities,
+		"all_capabilities":         len(disabled) == 0,
+		"poc_selection":            pocSelection,
+		"selected_poc_count":       pocCount,
 	}
 }
 
@@ -322,7 +423,7 @@ func scopeSentryTemplateVerificationToken(template map[string]interface{}) (stri
 	return fmt.Sprintf("sha256:%x", digest[:]), nil
 }
 
-func scopeSentryTemplateInspection(payload interface{}) (map[string]interface{}, string, error) {
+func scopeSentryTemplateInspection(payload, plugins interface{}) (map[string]interface{}, string, error) {
 	template := scopeSentryMap(scopeSentryData(payload))
 	if template == nil {
 		return nil, "", fmt.Errorf("ScopeSentry 模板详情响应无效")
@@ -331,7 +432,7 @@ func scopeSentryTemplateInspection(payload interface{}) (map[string]interface{},
 	if err != nil {
 		return nil, "", err
 	}
-	return scopeSentryTemplateCapabilitySummary(template), token, nil
+	return scopeSentryTemplateCapabilitySummary(template, plugins), token, nil
 }
 
 func scopeSentryValidateTemplateExpectations(options map[string]interface{}, summary map[string]interface{}) error {
@@ -632,7 +733,117 @@ func scopeSentryCapabilitySet(options map[string]interface{}) (map[string]bool, 
 	return result, configured, nil
 }
 
-func scopeSentryCustomizeTemplate(source map[string]interface{}, name string, options map[string]interface{}) (map[string]interface{}, error) {
+func scopeSentryMissingCapabilityModules(template map[string]interface{}, options map[string]interface{}, plugins interface{}) ([]int, error) {
+	capabilities, configured, err := scopeSentryCapabilitySet(options)
+	if err != nil || !configured {
+		return nil, err
+	}
+	missing := make([]int, 0)
+	for index, mapping := range scopeSentryCapabilityModules {
+		if capabilities[mapping.Capability] && !scopeSentryCapabilityEnabled(template, mapping, plugins) {
+			missing = append(missing, index)
+		}
+	}
+	return missing, nil
+}
+
+func scopeSentryPluginBool(value interface{}) bool {
+	if typed, ok := value.(bool); ok {
+		return typed
+	}
+	parsed, _ := strconv.ParseBool(strings.TrimSpace(fmt.Sprint(value)))
+	return parsed
+}
+
+// scopeSentryEnableInstalledPlugins fills capabilities that are disabled in a
+// base template with upstream-installed scan plugins. It only copies the
+// plugin hash and the upstream-owned default parameters; callers still cannot
+// inject or rewrite arbitrary plugin commands.
+func scopeSentryEnableInstalledPlugins(template map[string]interface{}, options map[string]interface{}, payload interface{}) ([]map[string]interface{}, error) {
+	missingIndexes, err := scopeSentryMissingCapabilityModules(template, options, payload)
+	if err != nil || len(missingIndexes) == 0 {
+		return nil, err
+	}
+
+	parameters := scopeSentryMap(template["Parameters"])
+	if parameters == nil {
+		parameters = make(map[string]interface{})
+	}
+	parameterLists := scopeSentryMap(template["ParameterLists"])
+	if parameterLists == nil {
+		parameterLists = make(map[string]interface{})
+	}
+	autoEnabled := make([]map[string]interface{}, 0)
+	missingCapabilities := make([]string, 0)
+	for _, index := range missingIndexes {
+		mapping := scopeSentryCapabilityModules[index]
+		candidates := scopeSentryCapabilityPluginCandidates(mapping, payload)
+		systemPlugins := make([]map[string]interface{}, 0, len(candidates))
+		for _, plugin := range candidates {
+			if scopeSentryPluginBool(plugin["isSystem"]) {
+				systemPlugins = append(systemPlugins, plugin)
+			}
+		}
+		if len(systemPlugins) > 0 {
+			candidates = systemPlugins
+		}
+		if len(candidates) == 0 {
+			missingCapabilities = append(missingCapabilities, fmt.Sprintf("%s (%s)", mapping.Capability, mapping.Module))
+			continue
+		}
+
+		selection := make([]interface{}, 0, len(candidates)+len(scopeSentrySelectedPluginHashes(template, mapping.Module)))
+		selected := scopeSentrySelectedPluginHashes(template, mapping.Module)
+		for hash := range selected {
+			selection = append(selection, hash)
+		}
+		moduleParameters := scopeSentryMap(parameters[mapping.Module])
+		if moduleParameters == nil {
+			moduleParameters = make(map[string]interface{}, len(candidates))
+		}
+		moduleParameterLists := scopeSentryMap(parameterLists[mapping.Module])
+		if moduleParameterLists == nil {
+			moduleParameterLists = make(map[string]interface{}, len(candidates))
+		}
+		for _, plugin := range candidates {
+			hash := strings.TrimSpace(fmt.Sprint(plugin["hash"]))
+			if _, exists := selected[hash]; !exists {
+				selection = append(selection, hash)
+				selected[hash] = struct{}{}
+			}
+			parameter := strings.TrimSpace(fmt.Sprint(plugin["parameter"]))
+			if parameter == "<nil>" {
+				parameter = ""
+			}
+			moduleParameters[hash] = parameter
+			parameterList := strings.TrimSpace(fmt.Sprint(plugin["parameterList"]))
+			if parameterList != "" && parameterList != "<nil>" {
+				moduleParameterLists[hash] = parameterList
+			}
+			autoEnabled = append(autoEnabled, map[string]interface{}{
+				"capability": mapping.Capability, "module": mapping.Module,
+				"plugin": strings.TrimSpace(fmt.Sprint(plugin["name"])), "hash": hash,
+			})
+		}
+		template[mapping.Module] = selection
+		parameters[mapping.Module] = moduleParameters
+		parameterLists[mapping.Module] = moduleParameterLists
+	}
+	if len(missingCapabilities) > 0 {
+		return nil, fmt.Errorf("ScopeSentry 上游未安装请求能力对应的插件: %s", strings.Join(missingCapabilities, ", "))
+	}
+	template["Parameters"] = parameters
+	template["ParameterLists"] = parameterLists
+	return autoEnabled, nil
+}
+
+func scopeSentryTemplateEquivalent(left, right map[string]interface{}) bool {
+	leftRaw, leftErr := json.Marshal(left)
+	rightRaw, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftRaw, rightRaw)
+}
+
+func scopeSentryCustomizeTemplate(source map[string]interface{}, name string, options map[string]interface{}, plugins interface{}) (map[string]interface{}, error) {
 	result, err := scopeSentryCloneTemplate(source)
 	if err != nil {
 		return nil, err
@@ -723,7 +934,7 @@ func scopeSentryCustomizeTemplate(source map[string]interface{}, name string, op
 		result["vullist"] = selected
 	}
 
-	summary := scopeSentryTemplateCapabilitySummary(result)
+	summary := scopeSentryTemplateCapabilitySummary(result, plugins)
 	if configured {
 		actual, _ := summary["capabilities"].(map[string]bool)
 		missing := make([]string, 0)
@@ -757,11 +968,16 @@ func (a *ScopeSentryAdapter) CreateTemplate(ctx context.Context, conn *Connectio
 	if err != nil {
 		return nil, err
 	}
-	if existingID, _ := scopeSentryTemplateByName(templates, name); existingID != "" {
+	existingID, _ := scopeSentryTemplateByName(templates, name)
+	if existingID != "" && req.PresetID == "" {
 		return nil, fmt.Errorf("ScopeSentry 模板名称已存在: %s", name)
 	}
 	baseID := strings.TrimSpace(req.BaseTemplateID)
-	if baseID == "" {
+	saveID := ""
+	if existingID != "" {
+		baseID = existingID
+		saveID = existingID
+	} else if baseID == "" {
 		baseID, _ = scopeSentryTemplateByName(templates, "default")
 		if baseID == "" {
 			return nil, fmt.Errorf("ScopeSentry 未找到 default 基模板")
@@ -780,14 +996,66 @@ func (a *ScopeSentryAdapter) CreateTemplate(ctx context.Context, conn *Connectio
 	if source == nil {
 		return nil, fmt.Errorf("ScopeSentry 基模板详情无效")
 	}
-	profile, err := scopeSentryCustomizeTemplate(source, name, req.Options)
+	baseline, err := scopeSentryCloneTemplate(source)
 	if err != nil {
 		return nil, err
 	}
+	delete(baseline, "id")
+	baseline["name"] = name
+	baseline["TaskName"] = ""
+
+	plugins, pluginErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/plugin", nil, map[string]interface{}{
+		"pageIndex": 1, "pageSize": 200, "search": "",
+	})
+	if pluginErr != nil {
+		return nil, fmt.Errorf("读取 ScopeSentry 已安装插件失败: %w", pluginErr)
+	}
+	var autoEnabled []map[string]interface{}
+	missingModules, missingErr := scopeSentryMissingCapabilityModules(source, req.Options, plugins)
+	if missingErr != nil {
+		return nil, missingErr
+	}
+	if len(missingModules) > 0 {
+		autoEnabled, err = scopeSentryEnableInstalledPlugins(source, req.Options, plugins)
+		if err != nil {
+			return nil, err
+		}
+	}
+	profile, err := scopeSentryCustomizeTemplate(source, name, req.Options, plugins)
+	if err != nil {
+		return nil, err
+	}
+	if saveID != "" && scopeSentryTemplateEquivalent(baseline, profile) {
+		summary, verificationToken, inspectErr := scopeSentryTemplateInspection(detail, plugins)
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		return map[string]interface{}{
+			"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "template_kind": "task_template",
+			"template_id": saveID, "template_name": name, "preset_id": req.PresetID, "reused": true, "repaired": false,
+			"capability_summary": summary, "verification_token": verificationToken,
+		}, nil
+	}
 	if _, err = scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/save", nil, map[string]interface{}{
-		"id": "", "result": profile,
+		"id": saveID, "result": profile,
 	}); err != nil {
 		return nil, err
+	}
+	if saveID != "" {
+		updatedDetail, detailErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": saveID})
+		if detailErr != nil {
+			return nil, detailErr
+		}
+		summary, verificationToken, inspectErr := scopeSentryTemplateInspection(updatedDetail, plugins)
+		if inspectErr != nil {
+			return nil, inspectErr
+		}
+		return map[string]interface{}{
+			"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "template_kind": "task_template",
+			"template_id": saveID, "template_name": name, "base_template_id": baseID,
+			"preset_id": req.PresetID, "reused": true, "repaired": true, "auto_enabled_plugins": autoEnabled,
+			"capability_summary": summary, "verification_token": verificationToken,
+		}, nil
 	}
 	for attempt := 0; attempt < 10; attempt++ {
 		listed, listErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template", nil, map[string]interface{}{
@@ -799,13 +1067,14 @@ func (a *ScopeSentryAdapter) CreateTemplate(ctx context.Context, conn *Connectio
 				if detailErr != nil {
 					return nil, detailErr
 				}
-				summary, verificationToken, inspectErr := scopeSentryTemplateInspection(createdDetail)
+				summary, verificationToken, inspectErr := scopeSentryTemplateInspection(createdDetail, plugins)
 				if inspectErr != nil {
 					return nil, inspectErr
 				}
 				return map[string]interface{}{
-					"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID,
+					"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "template_kind": "task_template",
 					"template_id": templateID, "template_name": name, "base_template_id": baseID,
+					"preset_id": req.PresetID, "reused": false, "repaired": false, "auto_enabled_plugins": autoEnabled,
 					"capability_summary": summary, "verification_token": verificationToken,
 				}, nil
 			}
@@ -959,6 +1228,12 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 	if err != nil {
 		return nil, err
 	}
+	plugins, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/plugin", nil, map[string]interface{}{
+		"pageIndex": 1, "pageSize": 200, "search": "",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("读取 ScopeSentry 已安装插件失败: %w", err)
+	}
 	allNodes, err := taskOptionBool("ScopeSentry", req.Options, "all_nodes", false)
 	if err != nil {
 		return nil, err
@@ -998,7 +1273,7 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 			return nil, detailErr
 		}
 		actualToken := ""
-		templateSummary, actualToken, detailErr = scopeSentryTemplateInspection(detail)
+		templateSummary, actualToken, detailErr = scopeSentryTemplateInspection(detail, plugins)
 		if detailErr != nil {
 			return nil, detailErr
 		}
@@ -1017,7 +1292,7 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 		if detailErr != nil {
 			return nil, detailErr
 		}
-		templateSummary, _, detailErr = scopeSentryTemplateInspection(detail)
+		templateSummary, _, detailErr = scopeSentryTemplateInspection(detail, plugins)
 		if detailErr != nil {
 			return nil, detailErr
 		}
@@ -1154,13 +1429,26 @@ func (a *ScopeSentryAdapter) CreateTask(ctx context.Context, conn *Connection, r
 	return nil, fmt.Errorf("ScopeSentry 任务已提交但无法读取任务 ID")
 }
 
-func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interface{}, error) {
+func (a *ScopeSentryAdapter) GetTaskProfile(ctx context.Context, conn *Connection) (interface{}, error) {
+	client, token, err := a.session(ctx, conn)
+	if err != nil {
+		return nil, err
+	}
+	plugins, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/plugin", nil, map[string]interface{}{
+		"pageIndex": 1, "pageSize": 200, "search": "",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("读取 ScopeSentry 已安装插件失败: %w", err)
+	}
+	availableCapabilities, unavailableCapabilities := scopeSentryAvailableCapabilities(plugins)
 	return map[string]interface{}{
 		"provider": ProviderScopeSentry, "resource_id": conn.Resource.ID, "upstream_version": "v1.9.3",
-		"task_modes":           []string{"immediate", "scheduled"},
-		"dynamic_option_kinds": []string{"nodes", "templates", "template_detail", "port_dictionaries", "dictionaries", "plugins", "pocs", "projects"},
-		"manage_actions":       []string{"resume", "restart", "delete"},
-		"result_types":         providerResultTypes(ProviderScopeSentry),
+		"available_template_capabilities":   availableCapabilities,
+		"unavailable_template_capabilities": unavailableCapabilities,
+		"task_modes":                        []string{"immediate", "scheduled"},
+		"dynamic_option_kinds":              []string{"nodes", "templates", "template_detail", "port_dictionaries", "dictionaries", "plugins", "pocs", "projects"},
+		"manage_actions":                    []string{"resume", "restart", "delete"},
+		"result_types":                      providerResultTypes(ProviderScopeSentry),
 		"notes": []string{
 			"提供 template_id 时完整复用 ScopeSentry 上游模板，端口字典、文件字典、插件参数和 POC 均由该模板决定",
 			"Agent 和 ASM 任务中心可以克隆已有模板，通过受控字段选择能力、端口、并发、截图、TLS 和 POC，并立即用新模板下发任务",
@@ -1173,7 +1461,7 @@ func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection)
 		},
 		"template_create_options": map[string]interface{}{
 			"base_template_id":     map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "要克隆的上游模板；留空使用 default"},
-			"enabled_capabilities": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": scopeSentryRequiredCapabilities}, "description": "新模板保留的能力；留空完整继承基模板"},
+			"enabled_capabilities": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": availableCapabilities}, "description": "新模板启用的能力；已安装但基模板未启用的插件会自动补齐"},
 			"ports":                map[string]interface{}{"type": "string", "description": "结构化端口表达式，例如 1-65535 或 80,443"},
 			"concurrency":          map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 200, "description": "端口扫描并发"},
 			"site_capture":         map[string]interface{}{"type": "boolean", "description": "是否截图"},
@@ -1184,7 +1472,7 @@ func (a *ScopeSentryAdapter) GetTaskProfile(_ context.Context, conn *Connection)
 			"template_id":                 map[string]interface{}{"type": "string", "dynamic_kind": "templates", "description": "选择已在上游配置好的完整模板；选择后必须查询 template_detail"},
 			"template_verification_token": map[string]interface{}{"type": "string", "requires": "template_id", "dynamic_kind": "template_detail", "description": "template_detail 返回的校验令牌，用于证明已核对实际模板配置"},
 			"required_port_scope":         map[string]interface{}{"type": "string", "enum": []string{"all", "top1000", "top100", "custom"}, "requires": "template_id", "description": "用户要求的端口范围断言；要求全端口时必须传 all"},
-			"required_capabilities":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": scopeSentryRequiredCapabilities}, "requires": "template_id", "description": "用户明确要求的能力断言；MCP 在创建上游任务前逐项校验"},
+			"required_capabilities":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": availableCapabilities}, "requires": "template_id", "description": "用户明确要求的已安装能力断言；MCP 在创建上游任务前逐项校验"},
 			"node_names":                  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "dynamic_kind": "nodes"},
 			"all_nodes":                   map[string]interface{}{"type": "boolean", "default": false},
 			"ignore":                      map[string]interface{}{"type": "string", "description": "排除目标，按上游格式分行"},
@@ -1257,7 +1545,13 @@ func (a *ScopeSentryAdapter) ListTaskOptions(ctx context.Context, conn *Connecti
 		return nil, err
 	}
 	if kind == "template_detail" {
-		summary, verificationToken, inspectionErr := scopeSentryTemplateInspection(payload)
+		plugins, pluginErr := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/plugin", nil, map[string]interface{}{
+			"pageIndex": 1, "pageSize": 200, "search": "",
+		})
+		if pluginErr != nil {
+			return nil, fmt.Errorf("读取 ScopeSentry 已安装插件失败: %w", pluginErr)
+		}
+		summary, verificationToken, inspectionErr := scopeSentryTemplateInspection(payload, plugins)
 		if inspectionErr != nil {
 			return nil, inspectionErr
 		}

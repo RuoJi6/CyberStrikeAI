@@ -63,7 +63,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMListTaskOptions, ShortDescription: "查询 ASM 动态任务选项",
-		Description: "按类别查询平台实时的策略、引擎、字典、端口字典、节点、模板、插件或 POC。kind 可传 all，按当前分页批量查询全部列表型类别；*_detail 需传 id 单独查询。ScopeSentry 选择模板后必须再查询 template_detail；返回的 capability_summary 是实际端口/能力依据，verification_token 必须传给 asm_create_task。禁止仅根据模板名称推断“全功能”或“全端口”。",
+		Description: "按类别查询平台实时的策略、引擎、字典、端口字典、节点、模板、插件、POC 或弱口令插件；ARL 使用 pocs 与 brute_plugins 区分两类插件。kind=template_presets 返回 CyberStrikeAI 内置的快速探测、信息收集、漏洞巡检和全量扫描预设；每项 provider_config 是当前资源平台的精确配置，mcp_usage 给出创建及下发参数，Agent 应据此比较后再选择 preset_id。kind 也可传 all，按当前分页批量查询全部列表型类别；ARL policy_detail 与 ScopeSentry template_detail 需传 id 单独查询上游模板具体设置。ScopeSentry 详情返回的 capability_summary 是实际端口/能力依据，verification_token 必须传给 asm_create_task。禁止仅根据模板名称推断“全功能”或“全端口”。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"kind":      map[string]interface{}{"type": "string", "description": "动态选项类别；传 all 会按 page/page_size 为每个列表型类别各查询一页"},
 			"query":     map[string]interface{}{"type": "string", "description": "名称或关键字筛选"},
@@ -79,16 +79,20 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	})
 
 	register(mcp.Tool{
-		Name: builtin.ToolASMCreateTemplate, ShortDescription: "创建 ScopeSentry 扫描模板",
-		Description: "在 ScopeSentry 上游创建可审计的扫描模板。先用 asm_list_task_options(kind=templates) 选择基模板，再通过结构化字段设置能力、端口、并发、截图、TLS 和 POC。不接受任意插件命令行。成功后返回 template_id、capability_summary 和 verification_token，可直接传给 asm_create_task。当 enabled_capabilities 留空时完整继承基模板。",
+		Name: builtin.ToolASMCreateTemplate, ShortDescription: "创建 ASM 扫描模板或策略",
+		Description: "在 ARL 上游创建扫描策略，或在 ScopeSentry 上游创建扫描模板。推荐先用 asm_list_task_options(kind=template_presets) 获取四级内置预设，再只传 preset_id；内置预设是固定、可审计且可重复校准的，不允许同时覆盖 options。ARL 漏洞巡检会实时选择全部已安装 POC；全量扫描还会选择全部已安装弱口令插件，重复调用会修复同名旧策略的配置漂移。ScopeSentry 自定义模板必须先调用 asm_get_task_profile，并只使用 available_template_capabilities；已安装但基模板未启用的插件会自动补齐。仍不接受任意插件命令行。成功后统一返回 template_id；ScopeSentry 另返回 capability_summary 和 verification_token。XingRin 暂无原生模板创建能力。",
 		InputSchema: resourceSchema(map[string]interface{}{
-			"name":             map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 150, "description": "新模板的唯一名称"},
+			"preset_id": map[string]interface{}{
+				"type": "string", "enum": []string{"quick_discovery", "information_collection", "vulnerability_assessment", "full_scan"},
+				"description": "内置扫描预设；使用时 name 可省略，且不得同时传 options/base_template_id",
+			},
+			"name":             map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 150, "description": "自定义 ScopeSentry 模板必填；使用 preset_id 时必须省略"},
 			"base_template_id": map[string]interface{}{"type": "string", "description": "由 templates 返回的基模板 ID；留空克隆 default"},
 			"options": map[string]interface{}{
 				"type": "object", "additionalProperties": false,
 				"properties": map[string]interface{}{
 					"enabled_capabilities": map[string]interface{}{
-						"type": "array", "description": "仅保留指定能力；省略时完整继承基模板",
+						"type": "array", "description": "启用指定能力；必须来自 asm_get_task_profile.available_template_capabilities，已安装但基模板未启用的插件会自动补齐",
 						"items": map[string]interface{}{"type": "string", "enum": []string{
 							"subdomain_discovery", "subdomain_takeover", "port_scan", "service_fingerprint", "site_identify",
 							"site_capture", "tls_probe", "url_scan", "web_crawler", "sensitive_scan", "directory_scan",
@@ -102,11 +106,11 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 					"poc_ids":      map[string]interface{}{"type": "array", "maxItems": 500, "items": map[string]interface{}{"type": "string", "maxLength": 200}},
 				},
 			},
-		}, "name"),
+		}),
 	}, func(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 		options, _ := args["options"].(map[string]interface{})
 		return service.CreateTemplate(ctx, asmStringArg(args, "resource_id"), asm.TemplateRequest{
-			Name: asmStringArg(args, "name"), BaseTemplateID: asmStringArg(args, "base_template_id"), Options: options,
+			Name: asmStringArg(args, "name"), PresetID: asmStringArg(args, "preset_id"), BaseTemplateID: asmStringArg(args, "base_template_id"), Options: options,
 		})
 	})
 
@@ -120,8 +124,8 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	} {
 		optionProperties[name] = map[string]interface{}{"type": "boolean"}
 	}
-	optionProperties["task_mode"] = map[string]interface{}{"type": "string", "enum": []string{"direct", "policy"}, "description": "ARL 任务模式"}
-	optionProperties["policy_id"] = map[string]interface{}{"type": "string", "description": "ARL policy 模式策略 ID"}
+	optionProperties["task_mode"] = map[string]interface{}{"type": "string", "enum": []string{"direct", "policy"}, "description": "ARL 下发方式：direct=直接自定义扫描，policy=使用已有 ARL 策略模板"}
+	optionProperties["policy_id"] = map[string]interface{}{"type": "string", "description": "ARL policy 模式必填；由 asm_list_task_options(kind=policies) 返回的策略模板 ID"}
 	optionProperties["task_tag"] = map[string]interface{}{"type": "string", "enum": []string{"task", "risk_cruising"}}
 	optionProperties["result_set_id"] = map[string]interface{}{"type": "string"}
 	optionProperties["domain_brute_type"] = map[string]interface{}{"type": "string", "enum": []string{"test", "big"}}
@@ -139,7 +143,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 	optionProperties["template_verification_token"] = map[string]interface{}{"type": "string", "description": "ScopeSentry template_detail 返回的 verification_token；使用 template_id 时必填"}
 	optionProperties["required_port_scope"] = map[string]interface{}{"type": "string", "enum": []string{"all", "top1000", "top100", "custom"}, "description": "ScopeSentry 模板端口范围断言；用户要求全端口时必须传 all"}
 	optionProperties["required_capabilities"] = map[string]interface{}{
-		"type": "array", "description": "ScopeSentry 用户明确要求的能力；创建前会根据上游模板详情逐项校验",
+		"type": "array", "description": "ScopeSentry 用户明确要求的能力；应来自 asm_get_task_profile.available_template_capabilities，创建前会根据上游模板详情逐项校验",
 		"items": map[string]interface{}{"type": "string", "enum": []string{
 			"subdomain_discovery", "subdomain_takeover", "port_scan", "service_fingerprint", "site_identify",
 			"site_capture", "tls_probe", "url_scan", "web_crawler", "sensitive_scan", "directory_scan",
@@ -161,7 +165,7 @@ func registerASMTools(server *mcp.Server, service *asm.Service, logger *zap.Logg
 
 	register(mcp.Tool{
 		Name: builtin.ToolASMCreateTask, ShortDescription: "向 ASM 下发资产发现任务",
-		Description: "向指定 ASM 创建资产发现任务。仅当用户明确授权目标并要求扫描时调用；先调用 asm_get_task_profile，再查询所需实时选项。XingRin 多目标会返回多个远程子任务，成功响应的 history_records、local_task_ids 和 remote_task_ids 是完整落库清单，local_task_id 仅保留为旧调用兼容字段。ScopeSentry 使用 template_id 时，必须先单独查询 template_detail 并传回 template_verification_token；用户要求全端口时传 required_port_scope=all，要求的功能逐项写入 required_capabilities。MCP 会在上游创建前校验，成功响应中的 effective_template 才是最终配置依据；不得仅根据任务名或模板名宣称“全功能”。",
+		Description: "向指定 ASM 创建资产发现任务。仅当用户明确授权目标并要求扫描时调用；先调用 asm_get_task_profile，再查询所需实时选项。ARL 支持 task_mode=direct 直接自定义扫描，或 task_mode=policy 配合从 policies 实时取得的 policy_id 使用策略模板；两种模式不可混传配置。XingRin 多目标会返回多个远程子任务，成功响应的 history_records、local_task_ids 和 remote_task_ids 是完整落库清单，local_task_id 仅保留为旧调用兼容字段。ScopeSentry 使用 template_id 时，必须先单独查询 template_detail 并传回 template_verification_token；用户要求全端口时传 required_port_scope=all，要求的功能逐项写入 required_capabilities。MCP 会在上游创建前校验，成功响应中的 effective_template 才是最终配置依据；不得仅根据任务名或模板名宣称“全功能”。",
 		InputSchema: resourceSchema(map[string]interface{}{
 			"name":    map[string]interface{}{"type": "string", "description": "任务名称"},
 			"target":  map[string]interface{}{"type": "string", "description": "已获授权的域名、IP 或 CIDR；多个目标按 ASM 支持的空格/换行格式传递"},

@@ -75,9 +75,17 @@ func TestASMRealMCPFlow(t *testing.T) {
 	call(builtin.ToolASMListResources, map[string]interface{}{})
 	call(builtin.ToolASMTestConnection, map[string]interface{}{"resource_id": resourceID})
 	profile := call(builtin.ToolASMGetTaskProfile, map[string]interface{}{"resource_id": resourceID})
+	optionPage := 1
+	optionPageSize := 10
+	if value, parseErr := strconv.Atoi(strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_OPTION_PAGE"))); parseErr == nil && value > 0 {
+		optionPage = value
+	}
+	if value, parseErr := strconv.Atoi(strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_OPTION_PAGE_SIZE"))); parseErr == nil && value > 0 {
+		optionPageSize = value
+	}
 	for _, kind := range asmRealOptionKinds(profile) {
 		arguments := map[string]interface{}{
-			"resource_id": resourceID, "kind": kind, "page": 1, "page_size": 10,
+			"resource_id": resourceID, "kind": kind, "page": optionPage, "page_size": optionPageSize,
 		}
 		if value := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_OPTION_ID")); value != "" {
 			arguments["id"] = value
@@ -99,7 +107,12 @@ func TestASMRealMCPFlow(t *testing.T) {
 		}
 	}
 	var createdTemplate map[string]interface{}
-	if templateName := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_NAME")); templateName != "" {
+	if presetID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_PRESET_ID")); presetID != "" {
+		createdTemplate = call(builtin.ToolASMCreateTemplate, map[string]interface{}{
+			"resource_id": resourceID,
+			"preset_id":   presetID,
+		})
+	} else if templateName := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_NAME")); templateName != "" {
 		templateOptions := map[string]interface{}{}
 		if raw := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ASM_REAL_TEMPLATE_OPTIONS")); raw != "" {
 			if err := json.Unmarshal([]byte(raw), &templateOptions); err != nil {

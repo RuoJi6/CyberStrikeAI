@@ -1,7 +1,7 @@
 # ASM 平台能力与适配基线
 
-> 文档版本：2.1
-> 基线日期：2026-08-13
+> 文档版本：2.6
+> 基线日期：2026-08-14
 > 适用范围：CyberStrikeAI 内置 ARL、XingRin、ScopeSentry 适配器
 > 维护原则：上游版本、API 或任务参数变化时，先更新本文，再调整 MCP schema、适配器与界面。
 
@@ -33,8 +33,8 @@ Agent 当前看到的是以下 11 个内置工具，而不是直接看到三套�
 | `asm_list_resources` | 列出已启用的 ASM、类型、连接状态与能力 | 否 |
 | `asm_test_connection` | 验证地址与凭据并更新连接状态 | 仅更新本地连接状态 |
 | `asm_get_task_profile` | 读取平台版本、任务模式、字段、默认值和依赖 | 否 |
-| `asm_list_task_options` | 实时查询单类策略、引擎、字典、节点、模板、插件和 POC；或用 `kind=all` 聚合所有列表型类别 | 否 |
-| `asm_create_template` | 克隆 ScopeSentry 基模板，用结构化字段设置能力、端口、并发、截图、TLS 和 POC | 是 |
+| `asm_list_task_options` | 实时查询单类策略、引擎、字典、节点、模板、插件、POC 和弱口令插件；`kind=template_presets` 读取本地内置预设；`kind=all` 聚合所有列表型类别 | 否 |
+| `asm_create_template` | 按 `preset_id` 创建或校准 ARL 策略、ScopeSentry 模板；ScopeSentry 也支持克隆基模板并设置受控参数 | 是 |
 | `asm_create_task` | 向指定资源创建扫描/资产发现任务 | 是 |
 | `asm_list_tasks` | 按任务 ID、名称、目标、状态分页查询任务 | 否 |
 | `asm_get_task` | 读取单个任务的进度、阶段、统计与配置 | 否 |
@@ -42,9 +42,24 @@ Agent 当前看到的是以下 11 个内置工具，而不是直接看到三套�
 | `asm_stop_task` | 停止指定远端任务 | 是 |
 | `asm_manage_task` | 重跑、恢复、删除或结果同步 | 是 |
 
-调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称 → ScopeSentry 可选调用 `asm_create_template` 创建受控模板 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
+调用链为：`asm_list_resources` 取得 `resource_id` → `asm_get_task_profile` 读取平台差异 → 必要时用 `asm_list_task_options` 获取实时 ID/名称或内置预设 → ARL/ScopeSentry 可选调用 `asm_create_template` 创建策略/模板 → 按用户已授权的目标调用 `asm_create_task`。平台地址和凭据保留在服务端，不进入模型上下文。
 
 `asm_list_task_options(kind=all)` 表示一次查询该资源声明的所有列表型动态选项，不表示扫描全部目标，也不表示无分页获取全部记录。`page` 和 `page_size` 会分别应用到每个类别（默认每类第 1 页 20 条）；`policy_detail`、`template_detail` 等需要具体 `id` 的详情类别会跳过并返回原因，个别类别失败时会返回 `partial=true` 和分类错误，其余成功结果仍可使用。
+
+### 3.1 CyberStrikeAI 内置分级模板
+
+ASM 资源页和 MCP 共用同一份服务端预设，不在浏览器或 Agent 提示词中复制参数。`template_presets` 只从本地代码读取摘要；仅在调用 `asm_create_template` 时向上游创建对应的 ARL 策略或 ScopeSentry 任务模板。
+
+`template_presets` 的每个条目会按当前资源返回 `provider`、`provider_kind`、`provider_config` 和 `mcp_usage`：ARL 返回真实策略字段（端口档位、字典、功能开关、POC/弱口令选择与并发参数），ScopeSentry 返回端口表达式、并发及启用的插件能力，不再用一份通用摘要代替平台差异。ASM 资源页的“查看具体配置”直接展示同一份结构化数据；上游已创建策略/模板另通过 `policy_detail` 或 `template_detail` 实时回读。
+
+| `preset_id` | 等级 | 主要用途 | ARL 端口范围 | ScopeSentry 端口范围 |
+| --- | --- | --- | --- | --- |
+| `quick_discovery` | 低 | 常见端口、服务指纹、站点与 TLS 快速存活探测 | TOP100 | 常见服务端口集 |
+| `information_collection` | 中 | 子域、扩展端口、站点截图、URL 和爬虫，不主动执行漏洞 POC | TOP1000 | `1-10000` |
+| `vulnerability_assessment` | 中高 | 在资产识别基础上进行文件泄露与默认漏洞检测；ARL 选择全部已安装 POC | TOP1000 | `1-10000` |
+| `full_scan` | 高 | 大字典子域、全端口、站点/爬虫/敏感信息、漏洞 POC；ARL 另启用全部弱口令插件 | 全端口 | `1-65535` |
+
+内置名称固定为 `CyberStrikeAI · <预设名>`。重复创建会精确查找已有上游记录并按当前预设校准，而不是盲目复用旧配置；因此升级预设后无需删除旧策略。ARL 的漏洞巡检实时分页读取 `plugin_type=poc` 并写入全部已安装 POC，全量扫描还读取 `plugin_type=brute` 并写入全部弱口令插件；上游未返回相应插件时创建会失败，不会生成名不副实的策略。预设不接受任务级覆盖。创建操作不再额外弹出漏洞扫描确认框；ScopeSentry 基模板若未启用预设声明的插件能力，适配器会从上游已安装插件中自动补入其哈希与上游默认参数并回读验证。能力判断同时核对模块和具体插件：例如 `sensitive_scan` 必须启用 `URLSecurity/sensitive`，不能由同模块的 `trufflehog` 冒充。v1.9.3 默认插件库没有 `PassiveScan` 实现，因此内置“全量扫描”不声明该空模块；若其他必需模块确实未安装，创建会返回明确的缺失能力清单，不会降级为名不副实的模板。XingRin 无原生模板创建 API，因此不暴露该功能。
 
 ## 4. 上游能力矩阵
 
@@ -64,7 +79,7 @@ Agent 当前看到的是以下 11 个内置工具，而不是直接看到三套�
 | 资产搜索、分组、导出 | 支持资产组与搜索 | 支持全局表达式搜索、快照/差异、导出 | 支持资产分组 |
 | 定时/监控任务 | 定时任务、GitHub/域名/IP/站点变化监控 | Cron 定时扫描、通知 | 页面监控、Webhook |
 | 多节点/分布式执行 | 未作为该版本核心能力声明 | 支持 Worker 与负载调度 | 支持多节点扫描 |
-| 弱口令爆破 | `service_brute` 任务开关 | 未作为核心阶段声明 | **v1.9.3 README 仍列为 TODO，不能标记为支持** |
+| 弱口令爆破 | 策略 `brute_config` 选择已安装插件；直接任务另有 `service_brute` 开关 | 未作为核心阶段声明 | **v1.9.3 README 仍列为 TODO，不能标记为支持** |
 
 ## 5. 创建任务时可选择的动作
 
@@ -74,7 +89,10 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 - `task_mode=direct`：调用 `/api/task/`，支持下表直接任务开关。`port_scan_type` 为 `test|top100|top1000|all`。
 - `task_mode=policy`：调用 `/api/task/policy/`，必须提供从 `policies` 实时查询的 `policy_id`；可选 `task_tag=task|risk_cruising` 和 `result_set_id`。
+- ASM 任务中心与 MCP 使用相同语义：界面的“直接自定义扫描”提交 `task_mode=direct`，“使用策略模板”提交 `task_mode=policy + policy_id`；切换模式时不会把另一模式的字段混入请求。
+- `asm_create_template`：在 ARL 中表示创建“策略”，新建使用 `/api/policy/add/`，同名内置策略校准使用 `/api/policy/edit/`；内置预设只使用类型化且受控的策略字段。
 - 自定义端口、排除端口、宿主超时、端口并发/速率、POC 和弱口令字典属于策略本身；policy 任务 API 不接受任务级覆盖，因此 MCP 不会伪装成可直接传入。
+- `asm_list_task_options(kind=pocs)` 只读取 `plugin_type=poc`，`kind=brute_plugins` 只读取 `plugin_type=brute`。漏洞巡检选择全部实时 POC；全量扫描同时选择全部实时 POC 与弱口令插件，并在响应 `plugin_summary` 中返回实际数量。
 
 | 分组 | options 字段 | 默认值 | 用途 |
 | --- | --- | --- | --- |
@@ -119,15 +137,15 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 使用上游 `template_id` 时实行创建前强制校验：Agent 必须单独调用 `asm_list_task_options(kind=template_detail,id=...)`，读取可机读的 `capability_summary` 和 `verification_token`，创建时传回 `template_verification_token`。用户要求全端口时必须传 `required_port_scope=all`；用户指定的子域、端口、指纹、截图、URL、爬虫、敏感信息、目录、漏洞等能力必须通过 `required_capabilities` 逐项声明。MCP 会重新读取上游模板，校验令牌、端口和能力后才创建；成功响应的 `effective_template` 回显实际生效配置。模板名称、任务名称和 POC 库总数均不能作为“全功能”证据。
 
-`asm_create_template` 与 ASM 任务中心使用同一后端能力：选择 `base_template_id`，按需保留 `enabled_capabilities`，并可修改 `ports`、`concurrency`、`site_capture`、`tls_probe` 和 `poc_ids`。适配器只克隆基模板已有的插件，不允许提交任意命令行；基模板缺少所选插件时会拒绝创建。创建响应会返回新 `template_id`、`capability_summary` 和 `verification_token`，任务中心在同一次提交中立即用它下发任务。
+`asm_create_template` 与 ASM 任务中心使用同一后端能力：选择 `base_template_id`，按需启用 `enabled_capabilities`，并可修改 `ports`、`concurrency`、`site_capture`、`tls_probe` 和 `poc_ids`。`asm_get_task_profile` 实时返回 `available_template_capabilities` 和 `unavailable_template_capabilities`；界面仅禁用上游确实未安装的能力，已安装但基模板未启用的能力仍可选择。适配器优先复用基模板插件，缺少所选能力时自动合并上游已安装的系统插件及其默认参数，但仍不允许提交任意命令行。创建响应会返回新 `template_id`、插件级 `capability_summary`、自动补入的插件摘要和 `verification_token`，任务中心在同一次提交中立即用它下发任务。
 
 ## 6. 当前适配范围与差距
 
 | 平台 | 连接与任务 | 结果读取 | 当前结论 |
 | --- | --- | --- | --- |
-| ARL | direct/policy 创建、策略/POC/资产范围选项、查询、详情、停止、重跑、删除、同步 | site/domain/ip/cert/service/fileleak/url/vulnerability/npoc_service/cip/nuclei_result/stat_finger/wih | 已适配上游任务详情页 13 类结果；自定义端口等高级字段按上游规则归属策略 |
+| ARL | direct/policy 创建、内置分级策略创建/复用、策略/POC/资产范围选项、查询、详情、停止、重跑、删除、同步 | site/domain/ip/cert/service/fileleak/url/vulnerability/npoc_service/cip/nuclei_result/stat_finger/wih | 已适配上游任务详情页 13 类结果；自定义端口等高级字段按上游规则归属策略 |
 | XingRin | 子域、端口、站点、指纹、目录、URL、截图、Nuclei/Dalfox；引擎/字典/模板仓库实时选择 | site/domain/ip/url/service/directory/vulnerability/screenshot，可按任务限定 | 已适配扫描快照中的目录、漏洞与原生截图；截图二进制由 CyberStrikeAI 自动认证拉取并本地缓存；不开放任意 YAML |
-| ScopeSentry | 低负载生成模板或完整上游模板；节点、项目、字典、插件、POC、定时与生命周期动作 | site/domain/ip/url/service/crawler/sensitive/directory/takeover/vulnerability，可按任务限定 | 已适配爬虫、敏感信息、目录、子域接管和漏洞列表；漏洞请求/响应通过上游详情接口按需读取；不开放任意插件命令行 |
+| ScopeSentry | 低负载生成模板、内置分级模板或完整上游模板；节点、项目、字典、插件、POC、定时与生命周期动作 | site/domain/ip/url/service/crawler/sensitive/directory/takeover/vulnerability，可按任务限定 | 已适配爬虫、敏感信息、目录、子域接管和漏洞列表；漏洞请求/响应通过上游详情接口按需读取；不开放任意插件命令行 |
 
 统一 `asm_create_task` schema 是三套平台字段的并集，三个适配器现在都会严格拒绝未知选项和错误类型。Agent 必须以 provider-specific profile 为准，避免“字段看似可选但被平台忽略”。
 
@@ -137,7 +155,7 @@ ARL 有两条实际上游请求路径，未知字段和类型错误会被适配�
 
 | 平台 | 认证/连通性 | 任务 | 资产 |
 | --- | --- | --- | --- |
-| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `/api/task/policy/`, `/api/task/stop/:id`, `/api/task/restart/`, `/api/task/delete/`, `/api/task/sync/`; `/api/policy/`, `/api/poc/`, `/api/asset_scope/` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
+| ARL | `POST /api/user/login`, `GET /api/console/info` | `/api/task/`, `/api/task/policy/`, `/api/task/stop/:id`, `/api/task/restart/`, `/api/task/delete/`, `/api/task/sync/`; `/api/policy/`, `/api/policy/add/`, `/api/poc/`, `/api/asset_scope/` | `/api/site/`, `/api/domain/`, `/api/ip/`, `/api/cert/`, `/api/service/`, `/api/fileleak/`, `/api/url/`, `/api/vuln/`, `/api/npoc_service/`, `/api/cip/`, `/api/nuclei_result/`, `/api/stat_finger/`, `/api/wih/` |
 | XingRin | `POST /api/auth/login/`, `GET /api/auth/me/` | `/api/scans/quick/`, `/api/scans/`, `/api/scans/:id/`, `/api/scans/:id/stop/`; `/api/engines/`, `/api/workers/`, `/api/wordlists/`, `/api/nuclei/repos/` | `/api/assets/:type/`, `/api/scans/:id/:type/` |
 | ScopeSentry | `POST /api/user/login`, `GET /api/node/online` | `/api/task/template*`, `/api/task/add`, `/api/task/scheduled/add`, `/api/task/scheduled`, `/api/task/scheduled/detail`, `/api/task/scheduled/delete`, `/api/task/`, `/api/task/detail`, `/api/task/stop`, `/api/task/start`, `/api/task/retest`, `/api/task/delete`; `/api/dictionary/*`, `/api/plugin`, `/api/poc`, `/api/project/all` | `/api/assets/asset`, `/api/assets/subdomain`, `/api/assets/ip`, `/api/assets/url`, `/api/assets/crawler`, `/api/assets/sensitive`, `/api/assets/dirscan`, `/api/assets/subdomain/taker`, `/api/assets/vulnerability`, `/api/assets/vulnerability/detail` |
 
@@ -181,6 +199,11 @@ XingRin 截图只在 `site_capture=true` 或选中的上游引擎包含 screensh
 
 | 文档版本 | 日期 | 平台基线 | 变化 |
 | --- | --- | --- | --- |
+| 2.6 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 内置模板按平台返回并展示精确 `provider_config` 与 `mcp_usage`；资源页新增内置及上游模板点击详情，Agent 可据真实 ARL 策略或 ScopeSentry 插件配置选型 |
+| 2.5 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ARL 漏洞巡检实时选择全部 POC，全量扫描同时选择全部 POC 与弱口令插件；同名内置策略可通过 UI/MCP 原位校准，修复旧策略空 `poc_config`/`brute_config` |
+| 2.4 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 改为插件级能力识别；`sensitive_scan` 精确对应 sensitive；任务面板与 MCP 按实时已安装插件统一可用能力，已安装但基模板未启用的能力可自动补齐 |
+| 2.3 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ScopeSentry 内置模板可从已安装插件库自动补齐基模板未启用的模块；已有同名预设可原位修复；页面取消漏洞/全量模板创建确认弹窗 |
+| 2.2 | 2026-08-14 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | ASM 资源页新增分级模板库和上游模板查看；MCP 新增 `template_presets` 查询及 `preset_id` 幂等创建；ARL 策略与 ScopeSentry 模板共用四级受控预设 |
 | 2.1 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 新增 `asm_create_template`，Agent 和任务中心均可克隆 ScopeSentry 基模板、设置受控能力/端口/并发/POC 并立即用新模板下发任务 |
 | 2.0 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | 任务中心新增 provider-native 手动创建、任务停止/暂停操作，并使 XingRin 截图首次缓存优先复用本地结果索引 |
 | 1.9 | 2026-08-13 | ARL 2.6.3 / XingRin v1.5.8 / ScopeSentry v1.9.3 | XingRin 多目标创建响应改为全量子任务落库，MCP 返回完整本地/远程 ID 列表，任务中心按 `batch_id` 折叠展示同次下发 |

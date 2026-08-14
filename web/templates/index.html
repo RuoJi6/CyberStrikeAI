@@ -32,7 +32,7 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/style.css?v=20260813-6">
-    <link rel="stylesheet" href="/static/css/asm.css?v=20260813-8">
+    <link rel="stylesheet" href="/static/css/asm.css?v=20260814-4">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -2357,6 +2357,41 @@
                                     <button id="asm-save-button" type="submit" class="btn-primary" data-i18n="common.save">保存</button>
                                 </div>
                             </form>
+                        </div>
+                    </div>
+
+                    <div id="asm-template-library-modal" class="modal-overlay" style="display:none" role="dialog" aria-modal="true" aria-labelledby="asm-template-library-title">
+                        <div class="modal-content asm-template-library-content">
+                            <div class="modal-header asm-template-library-header">
+                                <div>
+                                    <div class="asm-modal-kicker">MANAGED SCAN PROFILES</div>
+                                    <h3 id="asm-template-library-title" data-i18n="asm.templateLibraryTitle">扫描模板库</h3>
+                                    <p id="asm-template-library-subtitle"></p>
+                                </div>
+                                <div class="asm-template-header-actions">
+                                    <button id="asm-template-create-all" type="button" class="btn-primary" data-require-permission="mcp:write" onclick="createAllASMTemplatePresets()" data-i18n="asm.createAllTemplates">一键创建全部</button>
+                                    <button type="button" class="modal-close" onclick="closeASMTemplateLibrary()" aria-label="关闭">&times;</button>
+                                </div>
+                            </div>
+                            <div class="modal-body asm-template-library-body">
+                                <div id="asm-template-library-error" class="form-error asm-template-library-error" hidden></div>
+                                <section class="asm-template-presets" aria-labelledby="asm-template-presets-title">
+                                    <div class="asm-template-section-head">
+                                        <div><span>BUILT-IN</span><h4 id="asm-template-presets-title" data-i18n="asm.builtInProfiles">内置分级模板</h4></div>
+                                        <p data-i18n="asm.builtInProfilesHint">固定参数、可审计、重复创建时自动复用。</p>
+                                    </div>
+                                    <div id="asm-template-preset-grid" class="asm-template-preset-grid"></div>
+                                    <div id="asm-template-preset-detail" class="asm-template-detail-panel" hidden></div>
+                                </section>
+                                <section class="asm-template-upstream" aria-labelledby="asm-template-upstream-title">
+                                    <div class="asm-template-section-head">
+                                        <div><span>UPSTREAM</span><h4 id="asm-template-upstream-title" data-i18n="asm.upstreamProfiles">上游已创建模板</h4></div>
+                                        <div class="asm-template-upstream-summary"><span id="asm-template-upstream-count"></span><button type="button" class="btn-secondary btn-small" onclick="loadASMTemplateLibrary()" data-i18n="common.refresh">刷新</button></div>
+                                    </div>
+                                    <div id="asm-template-upstream-list" class="asm-template-upstream-list"></div>
+                                    <div id="asm-template-upstream-detail" class="asm-template-detail-panel asm-template-upstream-detail" hidden></div>
+                                </section>
+                            </div>
                         </div>
                     </div>
 				</div>
@@ -7044,7 +7079,7 @@
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
     <script src="/static/js/assets.js?v=20260717-7"></script>
-	<script src="/static/js/asm.js?v=20260813-5"></script>
+	<script src="/static/js/asm.js?v=20260814-7"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260813-6"></script>

@@ -20,6 +20,8 @@ const arlMaxResponseBytes = 4 * 1024 * 1024
 
 var arlTaskIDPattern = regexp.MustCompile(`^[a-fA-F0-9]{24}$`)
 
+var arlPolicyPortPattern = regexp.MustCompile(`^[0-9,\-\s]*$`)
+
 type ARLAdapter struct{}
 
 type arlAPIError struct {
@@ -34,7 +36,7 @@ func NewARLAdapter() *ARLAdapter { return &ARLAdapter{} }
 func (a *ARLAdapter) Provider() string { return ProviderARL }
 
 func (a *ARLAdapter) Capabilities() []string {
-	return []string{"test_connection", "get_task_profile", "list_task_options", "create_task", "list_tasks", "get_task", "list_assets", "stop_task", "manage_task"}
+	return []string{"test_connection", "get_task_profile", "list_task_options", "create_template", "create_task", "list_tasks", "get_task", "list_assets", "stop_task", "manage_task"}
 }
 
 func arlHTTPClient(verifyTLS bool) *http.Client {
@@ -388,12 +390,13 @@ func (a *ARLAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interf
 	return map[string]interface{}{
 		"provider": ProviderARL, "resource_id": conn.Resource.ID, "upstream_version": "2.6.3",
 		"task_modes":           []string{"direct", "policy"},
-		"dynamic_option_kinds": []string{"policies", "policy_detail", "pocs", "scopes"},
+		"dynamic_option_kinds": []string{"policies", "policy_detail", "pocs", "brute_plugins", "scopes"},
 		"manage_actions":       []string{"restart", "delete", "sync_results"},
 		"result_types":         providerResultTypes(ProviderARL),
 		"notes": []string{
 			"direct 模式对应 /api/task/，仅支持 ARL 直接任务字段",
-			"policy 模式对应 /api/task/policy/，自定义端口、排除端口、速率、POC 和字典由 policy_id 指向的上游策略决定，不支持任务级覆盖",
+			"policy 模式对应 /api/task/policy/，自定义端口、排除端口、速率、POC 和弱口令插件由 policy_id 指向的上游策略决定，不支持任务级覆盖",
+			"内置漏洞巡检会实时选择全部已安装 POC；内置全量扫描还会实时选择全部已安装弱口令插件，并在复用旧策略时校准配置",
 		},
 		"create_options": map[string]interface{}{
 			"task_mode":         map[string]interface{}{"type": "string", "enum": []string{"direct", "policy"}, "default": "direct"},
@@ -415,7 +418,7 @@ func (a *ARLAdapter) GetTaskProfile(_ context.Context, conn *Connection) (interf
 		},
 		"policy_fields": map[string]interface{}{
 			"port_scan_type": []string{"test", "top100", "top1000", "all", "custom"},
-			"advanced":       []string{"port_custom", "exclude_ports", "host_timeout_type", "host_timeout", "port_parallelism", "port_min_rate", "poc_config", "brute_config", "scope_config"},
+			"advanced":       []string{"port_custom", "exclude_ports", "host_timeout_type", "host_timeout", "port_parallelism", "port_min_rate", "poc_selection", "brute_selection", "poc_config", "brute_config", "scope_config"},
 		},
 	}, nil
 }
@@ -438,6 +441,10 @@ func (a *ARLAdapter) ListTaskOptions(ctx context.Context, conn *Connection, filt
 		query.Set("_id", filter.ID)
 	case "pocs":
 		endpoint = "/api/poc/"
+		query.Set("plugin_type", "poc")
+	case "brute_plugins":
+		endpoint = "/api/poc/"
+		query.Set("plugin_type", "brute")
 	case "scopes":
 		endpoint = "/api/asset_scope/"
 	default:
@@ -448,6 +455,251 @@ func (a *ARLAdapter) ListTaskOptions(ctx context.Context, conn *Connection, filt
 		return nil, err
 	}
 	return map[string]interface{}{"provider": ProviderARL, "resource_id": conn.Resource.ID, "kind": filter.Kind, "options": payload}, nil
+}
+
+var arlTemplateOptions = taskOptionAllowed(
+	"domain_brute", "domain_brute_type", "alt_dns", "arl_search", "dns_query_plugin",
+	"port_scan", "port_scan_type", "service_detection", "os_detection", "ssl_cert", "skip_scan_cdn_ip",
+	"port_custom", "host_timeout_type", "host_timeout", "port_parallelism", "port_min_rate", "exclude_ports",
+	"site_identify", "site_capture", "search_engines", "site_spider", "nuclei_scan", "web_info_hunter",
+	"file_leak", "npoc_service_detection", "scope_id", "poc_selection", "brute_selection",
+)
+
+func buildARLPolicyRequest(req TemplateRequest) (map[string]interface{}, error) {
+	if err := rejectUnknownTaskOptions("ARL 策略", req.Options, arlTemplateOptions); err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" || len(name) > 150 || strings.ContainsAny(name, "\r\n") {
+		return nil, fmt.Errorf("ARL 策略名称必填、不能换行且不能超过 150 字符")
+	}
+
+	boolDefaults := map[string]bool{
+		"domain_brute": false, "alt_dns": false, "arl_search": false, "dns_query_plugin": false,
+		"port_scan": true, "service_detection": true, "os_detection": false, "ssl_cert": true, "skip_scan_cdn_ip": true,
+		"site_identify": true, "site_capture": false, "search_engines": false, "site_spider": false,
+		"nuclei_scan": false, "web_info_hunter": false, "file_leak": false, "npoc_service_detection": false,
+	}
+	flags := make(map[string]bool, len(boolDefaults))
+	for key, fallback := range boolDefaults {
+		value, err := taskOptionBool("ARL 策略", req.Options, key, fallback)
+		if err != nil {
+			return nil, err
+		}
+		flags[key] = value
+	}
+	domainBruteType, err := taskOptionEnum("ARL 策略", req.Options, "domain_brute_type", "test", "test", "big")
+	if err != nil {
+		return nil, err
+	}
+	portScanType, err := taskOptionEnum("ARL 策略", req.Options, "port_scan_type", "top100", "test", "top100", "top1000", "all", "custom")
+	if err != nil {
+		return nil, err
+	}
+	hostTimeoutType, err := taskOptionEnum("ARL 策略", req.Options, "host_timeout_type", "default", "default", "custom")
+	if err != nil {
+		return nil, err
+	}
+	hostTimeout, err := taskOptionInt("ARL 策略", req.Options, "host_timeout", 900, 60, 7200)
+	if err != nil {
+		return nil, err
+	}
+	parallelism, err := taskOptionInt("ARL 策略", req.Options, "port_parallelism", 32, 1, 512)
+	if err != nil {
+		return nil, err
+	}
+	minRate, err := taskOptionInt("ARL 策略", req.Options, "port_min_rate", 60, 1, 10000)
+	if err != nil {
+		return nil, err
+	}
+	portCustom, err := taskOptionString("ARL 策略", req.Options, "port_custom", "80,443", 500)
+	if err != nil {
+		return nil, err
+	}
+	excludePorts, err := taskOptionString("ARL 策略", req.Options, "exclude_ports", "", 500)
+	if err != nil {
+		return nil, err
+	}
+	if !arlPolicyPortPattern.MatchString(portCustom) || !arlPolicyPortPattern.MatchString(excludePorts) {
+		return nil, fmt.Errorf("ARL 策略端口表达式只能包含数字、逗号和连字符")
+	}
+	scopeID, err := taskOptionString("ARL 策略", req.Options, "scope_id", "", 64)
+	if err != nil {
+		return nil, err
+	}
+	if scopeID != "" && !arlTaskIDPattern.MatchString(scopeID) {
+		return nil, fmt.Errorf("ARL 策略 scope_id 格式无效")
+	}
+	if _, err := taskOptionEnum("ARL 策略", req.Options, "poc_selection", "none", "none", "all"); err != nil {
+		return nil, err
+	}
+	if _, err := taskOptionEnum("ARL 策略", req.Options, "brute_selection", "none", "none", "all"); err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"name": name,
+		"desc": "由 CyberStrikeAI 创建的受控扫描策略",
+		"policy": map[string]interface{}{
+			"domain_config": map[string]interface{}{
+				"domain_brute": flags["domain_brute"], "domain_brute_type": domainBruteType,
+				"alt_dns": flags["alt_dns"], "arl_search": flags["arl_search"], "dns_query_plugin": flags["dns_query_plugin"],
+			},
+			"ip_config": map[string]interface{}{
+				"port_scan": flags["port_scan"], "port_scan_type": portScanType,
+				"service_detection": flags["service_detection"], "os_detection": flags["os_detection"],
+				"ssl_cert": flags["ssl_cert"], "skip_scan_cdn_ip": flags["skip_scan_cdn_ip"],
+				"port_custom": portCustom, "host_timeout_type": hostTimeoutType, "host_timeout": hostTimeout,
+				"port_parallelism": parallelism, "port_min_rate": minRate, "exclude_ports": excludePorts,
+			},
+			"site_config": map[string]interface{}{
+				"site_identify": flags["site_identify"], "site_capture": flags["site_capture"],
+				"search_engines": flags["search_engines"], "site_spider": flags["site_spider"],
+				"nuclei_scan": flags["nuclei_scan"], "web_info_hunter": flags["web_info_hunter"],
+			},
+			"file_leak": flags["file_leak"], "npoc_service_detection": flags["npoc_service_detection"],
+			"poc_config": []interface{}{}, "brute_config": []interface{}{}, "scope_config": map[string]interface{}{"scope_id": scopeID},
+		},
+	}, nil
+}
+
+func (a *ARLAdapter) policyPluginConfig(ctx context.Context, conn *Connection, pluginType string) ([]interface{}, error) {
+	if pluginType != "poc" && pluginType != "brute" {
+		return nil, fmt.Errorf("ARL 不支持的策略插件类型: %s", pluginType)
+	}
+	const pageSize = 1000
+	seen := make(map[string]struct{})
+	plugins := make([]interface{}, 0)
+	for page := 1; page <= 100; page++ {
+		query := url.Values{
+			"page":        {strconv.Itoa(page)},
+			"size":        {strconv.Itoa(pageSize)},
+			"order":       {"-_id"},
+			"plugin_type": {pluginType},
+		}
+		payload, err := a.authenticatedRequest(ctx, conn, http.MethodGet, "/api/poc/", query, nil)
+		if err != nil {
+			return nil, err
+		}
+		items, _ := payload["items"].([]interface{})
+		for _, raw := range items {
+			item := valueMap(raw)
+			pluginName := strings.TrimSpace(fmt.Sprint(item["plugin_name"]))
+			if pluginName == "" || pluginName == "<nil>" {
+				continue
+			}
+			if _, exists := seen[pluginName]; exists {
+				continue
+			}
+			seen[pluginName] = struct{}{}
+			plugins = append(plugins, map[string]interface{}{"plugin_name": pluginName, "enable": true})
+		}
+		if len(items) < pageSize {
+			break
+		}
+		if page == 100 {
+			return nil, fmt.Errorf("ARL %s 插件超过可安全读取的分页上限", pluginType)
+		}
+	}
+	if len(plugins) == 0 {
+		label := "POC"
+		if pluginType == "brute" {
+			label = "弱口令"
+		}
+		return nil, fmt.Errorf("ARL 上游未返回可用的%s插件，无法创建声明该能力的策略", label)
+	}
+	return plugins, nil
+}
+
+func (a *ARLAdapter) resolvePolicyPlugins(ctx context.Context, conn *Connection, req TemplateRequest, body map[string]interface{}) (map[string]interface{}, error) {
+	pocSelection, err := taskOptionEnum("ARL 策略", req.Options, "poc_selection", "none", "none", "all")
+	if err != nil {
+		return nil, err
+	}
+	bruteSelection, err := taskOptionEnum("ARL 策略", req.Options, "brute_selection", "none", "none", "all")
+	if err != nil {
+		return nil, err
+	}
+	policy := valueMap(body["policy"])
+	if policy == nil {
+		return nil, fmt.Errorf("ARL 策略请求缺少 policy")
+	}
+	pocConfig := []interface{}{}
+	if pocSelection == "all" {
+		pocConfig, err = a.policyPluginConfig(ctx, conn, "poc")
+		if err != nil {
+			return nil, err
+		}
+	}
+	bruteConfig := []interface{}{}
+	if bruteSelection == "all" {
+		bruteConfig, err = a.policyPluginConfig(ctx, conn, "brute")
+		if err != nil {
+			return nil, err
+		}
+	}
+	policy["poc_config"] = pocConfig
+	policy["brute_config"] = bruteConfig
+	return map[string]interface{}{
+		"poc_selection": pocSelection, "poc_count": len(pocConfig),
+		"brute_selection": bruteSelection, "brute_count": len(bruteConfig),
+	}, nil
+}
+
+func (a *ARLAdapter) CreateTemplate(ctx context.Context, conn *Connection, req TemplateRequest) (interface{}, error) {
+	body, err := buildARLPolicyRequest(req)
+	if err != nil {
+		return nil, err
+	}
+	pluginSummary, err := a.resolvePolicyPlugins(ctx, conn, req, body)
+	if err != nil {
+		return nil, err
+	}
+	name := strings.TrimSpace(req.Name)
+	query := url.Values{"page": {"1"}, "size": {"100"}, "order": {"-_id"}, "name": {name}}
+	existing, err := a.authenticatedRequest(ctx, conn, http.MethodGet, "/api/policy/", query, nil)
+	if err != nil {
+		return nil, err
+	}
+	if items, ok := existing["items"].([]interface{}); ok {
+		for _, raw := range items {
+			item := valueMap(raw)
+			if item == nil || !strings.EqualFold(strings.TrimSpace(fmt.Sprint(item["name"])), name) {
+				continue
+			}
+			policyID := strings.TrimSpace(fmt.Sprint(item["_id"]))
+			if req.PresetID == "" {
+				return nil, fmt.Errorf("ARL 策略名称已存在: %s", name)
+			}
+			updated, err := a.authenticatedRequest(ctx, conn, http.MethodPost, "/api/policy/edit/", nil, map[string]interface{}{
+				"policy_id": policyID, "policy_data": body,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("校准已有 ARL 内置策略失败: %w", err)
+			}
+			return map[string]interface{}{
+				"provider": ProviderARL, "resource_id": conn.Resource.ID, "template_kind": "policy",
+				"template_id": policyID, "policy_id": policyID, "template_name": name,
+				"preset_id": req.PresetID, "reused": true, "updated": true, "policy": updated,
+				"plugin_summary": pluginSummary,
+			}, nil
+		}
+	}
+	created, err := a.authenticatedRequest(ctx, conn, http.MethodPost, "/api/policy/add/", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	data := valueMap(created["data"])
+	policyID := strings.TrimSpace(fmt.Sprint(data["policy_id"]))
+	if !arlTaskIDPattern.MatchString(policyID) {
+		return nil, fmt.Errorf("ARL 策略已创建但未返回有效 policy_id")
+	}
+	return map[string]interface{}{
+		"provider": ProviderARL, "resource_id": conn.Resource.ID, "template_kind": "policy",
+		"template_id": policyID, "policy_id": policyID, "template_name": name,
+		"preset_id": req.PresetID, "reused": false, "updated": false, "response": created,
+		"plugin_summary": pluginSummary,
+	}, nil
 }
 
 func (a *ARLAdapter) ManageTask(ctx context.Context, conn *Connection, req TaskManageRequest) (interface{}, error) {
