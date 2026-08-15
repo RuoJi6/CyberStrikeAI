@@ -78,6 +78,7 @@ type TaskRequest struct {
 	Name           string                 `json:"name"`
 	Target         string                 `json:"target"`
 	Options        map[string]interface{} `json:"options,omitempty"`
+	CreationSource string                 `json:"-"`
 	ConversationID string                 `json:"-"`
 	OwnerUserID    string                 `json:"-"`
 }

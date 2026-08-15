@@ -8,26 +8,27 @@ import (
 )
 
 type ASMTask struct {
-	ID           string     `json:"id"`
-	BatchID      string     `json:"batch_id,omitempty"`
-	BatchIndex   int        `json:"batch_index,omitempty"`
-	BatchSize    int        `json:"batch_size,omitempty"`
-	ResourceID   string     `json:"resource_id"`
-	ResourceName string     `json:"resource_name"`
-	Provider     string     `json:"provider"`
-	RemoteTaskID string     `json:"remote_task_id"`
-	Name         string     `json:"name"`
-	Target       string     `json:"target"`
-	OptionsJSON  string     `json:"options_json"`
-	Status       string     `json:"status"`
-	Progress     int        `json:"progress"`
-	Stage        string     `json:"stage"`
-	SummaryJSON  string     `json:"summary_json"`
-	DetailJSON   string     `json:"detail_json,omitempty"`
-	LastError    string     `json:"last_error,omitempty"`
-	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID             string     `json:"id"`
+	BatchID        string     `json:"batch_id,omitempty"`
+	BatchIndex     int        `json:"batch_index,omitempty"`
+	BatchSize      int        `json:"batch_size,omitempty"`
+	ResourceID     string     `json:"resource_id"`
+	ResourceName   string     `json:"resource_name"`
+	Provider       string     `json:"provider"`
+	CreationSource string     `json:"creation_source"`
+	RemoteTaskID   string     `json:"remote_task_id"`
+	Name           string     `json:"name"`
+	Target         string     `json:"target"`
+	OptionsJSON    string     `json:"options_json"`
+	Status         string     `json:"status"`
+	Progress       int        `json:"progress"`
+	Stage          string     `json:"stage"`
+	SummaryJSON    string     `json:"summary_json"`
+	DetailJSON     string     `json:"detail_json,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	LastSyncedAt   *time.Time `json:"last_synced_at,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
 }
 
 type ASMTaskFilter struct {
@@ -74,7 +75,7 @@ type ASMResultSyncState struct {
 	UpdatedAt time.Time  `json:"updated_at"`
 }
 
-const asmTaskColumns = `id, batch_id, batch_index, batch_size, resource_id, resource_name, provider, remote_task_id,
+const asmTaskColumns = `id, batch_id, batch_index, batch_size, resource_id, resource_name, provider, creation_source, remote_task_id,
 	name, target, options_json, status, progress, stage, summary_json, detail_json,
 	last_error, last_synced_at, created_at, updated_at`
 
@@ -84,7 +85,7 @@ func scanASMTask(scanner interface{ Scan(...interface{}) error }) (*ASMTask, err
 	var createdAt, updatedAt string
 	if err := scanner.Scan(
 		&item.ID, &item.BatchID, &item.BatchIndex, &item.BatchSize,
-		&item.ResourceID, &item.ResourceName, &item.Provider, &item.RemoteTaskID,
+		&item.ResourceID, &item.ResourceName, &item.Provider, &item.CreationSource, &item.RemoteTaskID,
 		&item.Name, &item.Target, &item.OptionsJSON, &item.Status, &item.Progress, &item.Stage,
 		&item.SummaryJSON, &item.DetailJSON, &item.LastError, &syncedAt, &createdAt, &updatedAt,
 	); err != nil {
@@ -110,14 +111,17 @@ func (db *DB) CreateASMTask(item *ASMTask) error {
 	if item.BatchSize < 1 {
 		item.BatchSize = 1
 	}
+	if strings.TrimSpace(item.CreationSource) == "" {
+		item.CreationSource = "legacy"
+	}
 	item.UpdatedAt = now
 	_, err := db.Exec(`INSERT INTO asm_tasks (
-		id, batch_id, batch_index, batch_size, resource_id, resource_name, provider, remote_task_id, name, target,
+		id, batch_id, batch_index, batch_size, resource_id, resource_name, provider, creation_source, remote_task_id, name, target,
 		options_json, status, progress, stage, summary_json, detail_json, last_error,
 		last_synced_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		item.ID, item.BatchID, item.BatchIndex, item.BatchSize,
-		item.ResourceID, item.ResourceName, item.Provider, item.RemoteTaskID,
+		item.ResourceID, item.ResourceName, item.Provider, item.CreationSource, item.RemoteTaskID,
 		item.Name, item.Target, item.OptionsJSON, item.Status, item.Progress, item.Stage,
 		item.SummaryJSON, item.DetailJSON, item.LastError, item.LastSyncedAt,
 		item.CreatedAt, item.UpdatedAt,
@@ -136,10 +140,13 @@ func (db *DB) UpdateASMTask(item *ASMTask) error {
 	if item.BatchSize < 1 {
 		item.BatchSize = 1
 	}
-	result, err := db.Exec(`UPDATE asm_tasks SET batch_id = ?, batch_index = ?, batch_size = ?, name = ?, target = ?, status = ?, progress = ?, stage = ?,
+	if strings.TrimSpace(item.CreationSource) == "" {
+		item.CreationSource = "legacy"
+	}
+	result, err := db.Exec(`UPDATE asm_tasks SET batch_id = ?, batch_index = ?, batch_size = ?, creation_source = ?, name = ?, target = ?, status = ?, progress = ?, stage = ?,
 		summary_json = ?, detail_json = ?, last_error = ?, last_synced_at = ?, updated_at = ?
 		WHERE id = ?`, item.BatchID, item.BatchIndex, item.BatchSize,
-		item.Name, item.Target, item.Status, item.Progress, item.Stage, item.SummaryJSON,
+		item.CreationSource, item.Name, item.Target, item.Status, item.Progress, item.Stage, item.SummaryJSON,
 		item.DetailJSON, item.LastError, item.LastSyncedAt, item.UpdatedAt, item.ID)
 	if err != nil {
 		return fmt.Errorf("更新 ASM 任务记录失败: %w", err)

@@ -32,7 +32,7 @@
         })();
     </script>
     <link rel="stylesheet" href="/static/css/style.css?v=20260813-6">
-    <link rel="stylesheet" href="/static/css/asm.css?v=20260815-5">
+    <link rel="stylesheet" href="/static/css/asm.css?v=20260816-2">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -2402,7 +2402,7 @@
 						<div class="page-header-main">
 							<div class="asm-eyebrow" data-i18n="asm.eyebrow">ATTACK SURFACE MANAGEMENT</div>
 							<h2 data-i18n="asm.taskCenterTitle">ASM 任务中心</h2>
-							<p data-i18n="asm.taskCenterSubtitle">统一查看 Agent 与 MCP 创建的 ASM 任务、扫描进度、结果和站点截图。</p>
+							<p data-i18n="asm.taskCenterSubtitle">统一查看 Agent/MCP 与任务中心创建的 ASM 任务、来源、扫描进度、结果和站点截图。</p>
 						</div>
 						<div class="page-header-actions">
 							<button type="button" class="btn-secondary btn-icon-text" data-require-permission="mcp:write" onclick="openASMAgentContinuationModal()">
@@ -2487,6 +2487,24 @@
 									<label><span>任务名称</span><input id="asm-create-name" type="text" maxlength="200" placeholder="例如：季度外网资产复核"></label>
 								</div>
 								<label class="asm-create-target-field"><span>扫描目标 *</span><textarea id="asm-create-target" required maxlength="10000" rows="4" placeholder="每行一个 IP、IP 段或域名"></textarea><small>请只填写已获得明确授权的目标。</small></label>
+								<section class="asm-create-agent-trigger" aria-labelledby="asm-create-agent-title">
+									<div class="asm-create-agent-trigger-head">
+										<div><strong id="asm-create-agent-title">扫描完成后启动 Agent</strong><span>可选功能。结果和截图本地化完成后，系统只创建并执行一次所选项目中的 Agent 对话。</span></div>
+										<button id="asm-create-agent-toggle" type="button" class="btn-secondary" aria-pressed="false" onclick="toggleASMCreateAgentTrigger()">启用自动分析</button>
+									</div>
+									<div id="asm-create-agent-fields" class="asm-create-agent-fields" hidden>
+										<div class="asm-create-agent-grid">
+											<div class="asm-create-agent-field"><div class="asm-create-agent-project-label"><label for="asm-create-agent-project">对话项目</label><button type="button" class="asm-create-agent-project-create" data-require-permission="project:write" onclick="openASMCreateAgentProjectModal()">+ 新建项目</button></div><select id="asm-create-agent-project"><option value="">不绑定项目</option></select><small>可选择已有项目，也可新建项目；自动创建的对话会归入所选项目。</small></div>
+											<label><span>对话模式</span><select id="asm-create-agent-mode"><option value="eino_single">Eino 单代理</option><option value="deep">Deep</option><option value="plan_execute">Plan-Execute</option><option value="supervisor">Supervisor</option></select></label>
+											<label><span>角色</span><select id="asm-create-agent-role"><option value="默认">默认</option></select></label>
+											<label><span>审查方式</span><select id="asm-create-agent-review-mode" onchange="syncASMCreateAgentReview()"><option value="off">不启用审查（自动执行）</option><option value="approval">审批</option><option value="review_edit">审查并可编辑</option></select></label>
+											<label id="asm-create-agent-reviewer-field" hidden><span>执行方</span><select id="asm-create-agent-reviewer" onchange="syncASMCreateAgentReview()"><option value="human">人工</option><option value="audit_agent">Agent（自动审查）</option></select></label>
+											<label id="asm-create-agent-timeout-field" hidden><span>人工审批等待时限</span><select id="asm-create-agent-timeout"><option value="60">1 分钟</option><option value="300" selected>5 分钟</option><option value="600">10 分钟</option><option value="0">不限制</option></select></label>
+										</div>
+										<label class="asm-create-agent-prompt"><span>扫描完成提示词</span><textarea id="asm-create-agent-prompt" rows="8" maxlength="8000"></textarea><small>提示词会在结果本地化后作为新对话的首条任务发送。可用变量：<code>&#123;&#123;provider&#125;&#125;</code> <code>&#123;&#123;resource_id&#125;&#125;</code> <code>&#123;&#123;task_type&#125;&#125;</code> <code>&#123;&#123;task_id&#125;&#125;</code> <code>&#123;&#123;task_name&#125;&#125;</code> <code>&#123;&#123;targets&#125;&#125;</code> <code>&#123;&#123;sync_status&#125;&#125;</code></small></label>
+										<div class="asm-create-agent-note"><span>后台会在扫描结果和截图全部本地化后创建并启动对话，Agent 收到的是可直接分析的最终结果。</span><button type="button" class="btn-secondary btn-small" onclick="resetASMCreateAgentPrompt()">恢复默认提示词</button></div>
+									</div>
+								</section>
 								<div id="asm-create-profile-summary" class="asm-create-profile-summary"></div>
 								<section id="asm-create-template-builder" class="asm-template-builder" hidden></section>
 								<div id="asm-create-options" class="asm-create-options"><div class="asm-task-loading"><span class="asm-spinner"></span><span>正在读取平台任务能力…</span></div></div>
@@ -2503,7 +2521,7 @@
 								<button type="button" class="modal-close" onclick="closeASMAgentContinuationModal()" aria-label="关闭">&times;</button>
 							</div>
 							<div class="modal-body asm-form-body asm-agent-continuation-body">
-								<div class="asm-continuation-intro"><strong>扫描结果完成后恢复原 Agent 对话</strong><span>仅 Agent/MCP 下发的任务会自动绑定来源对话；任务中心手工下发不会触发续跑。</span></div>
+								<div class="asm-continuation-intro"><strong>扫描结果完成后联动 Agent</strong><span>Agent/MCP 下发会恢复来源对话；任务中心手工下发可在创建任务时选择项目、模式、角色和审查策略，完成后启动新的自动分析对话。</span></div>
 								<div id="asm-agent-continuation-error" class="form-error" hidden></div>
 								<section class="asm-continuation-config" aria-labelledby="asm-continuation-config-title">
 									<div class="asm-continuation-head">
@@ -7156,7 +7174,7 @@
     <script src="/static/js/notifications.js"></script>
     <script src="/static/js/info-collect.js?v=20260717-1"></script>
     <script src="/static/js/assets.js?v=20260717-7"></script>
-    <script src="/static/js/asm.js?v=20260815-5"></script>
+    <script src="/static/js/asm.js?v=20260816-2"></script>
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
@@ -7174,7 +7192,7 @@
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
-    <script src="/static/js/projects.js?v=20260812-6"></script>
+    <script src="/static/js/projects.js?v=20260815-1"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>

@@ -428,6 +428,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	externalMCPHandler.SetAudit(auditSvc)
 	asmHandler := handler.NewASMHandler(asmService, log.Logger)
 	asmHandler.SetAudit(auditSvc)
+	asmHandler.SetAgentProvisioning(db, agentHandler)
 	roleHandler := handler.NewRoleHandler(cfg, configPath, log.Logger)
 	roleHandler.SetAudit(auditSvc)
 	skillsHandler := handler.NewSkillsHandler(cfg, configPath, log.Logger)
@@ -616,7 +617,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			})
 		},
 	)
-	asmService.StartResultSyncWorker(asmWorkerCtx, 30*time.Second)
+	asmService.StartResultSyncWorker(asmWorkerCtx, 10*time.Second)
 
 	// 设置漏洞工具注册器（内置工具，必须设置）
 	vulnerabilityRegistrar := func() error {

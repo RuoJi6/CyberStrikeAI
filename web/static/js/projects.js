@@ -2037,15 +2037,21 @@ async function saveProjectModal() {
         if (!(await notifyProjectApiFailure(res, 'projects.saveFailed', '保存失败'))) return;
         const fromChat = !!window._projectModalFromChat;
         const fromChatSidebar = !!window._projectModalFromChatSidebar;
+        const fromASMTask = !!window._projectModalFromASMTask;
         const fromWebshellConnId = window._projectModalFromWebshellConnId || '';
         window._projectModalFromChat = false;
         window._projectModalFromChatSidebar = false;
+        window._projectModalFromASMTask = false;
         window._projectModalFromWebshellConnId = '';
         closeProjectModal();
         const saved = await res.json();
         await loadProjectsList();
         if (saved.id) {
-            if (fromWebshellConnId && !editId) {
+            if (fromASMTask && !editId) {
+                if (typeof window.handleASMTaskProjectCreated === 'function') {
+                    await window.handleASMTaskProjectCreated(saved);
+                }
+            } else if (fromWebshellConnId && !editId) {
                 if (typeof applyWebshellAiProjectSelection === 'function') {
                     await applyWebshellAiProjectSelection(saved.id);
                 }
@@ -2069,6 +2075,7 @@ async function saveProjectModal() {
 function closeProjectModal() {
     window._projectModalFromChat = false;
     window._projectModalFromChatSidebar = false;
+    window._projectModalFromASMTask = false;
     window._projectModalEditId = null;
     closeProjectsOverlay('project-modal');
 }

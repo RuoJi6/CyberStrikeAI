@@ -2,6 +2,7 @@ package database
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -546,6 +547,7 @@ func (db *DB) initTables() error {
 		resource_id TEXT NOT NULL,
 		resource_name TEXT NOT NULL,
 		provider TEXT NOT NULL,
+		creation_source TEXT NOT NULL DEFAULT 'legacy',
 		remote_task_id TEXT NOT NULL,
 		name TEXT NOT NULL DEFAULT '',
 		target TEXT NOT NULL DEFAULT '',
@@ -567,6 +569,7 @@ func (db *DB) initTables() error {
 		task_ids_json TEXT NOT NULL DEFAULT '[]',
 		conversation_id TEXT NOT NULL,
 		owner_user_id TEXT NOT NULL,
+		trigger_source TEXT NOT NULL DEFAULT 'agent_mcp',
 		behavior TEXT NOT NULL DEFAULT 'auto',
 		delivery_mode TEXT NOT NULL DEFAULT 'after_turn',
 		running_prompt TEXT NOT NULL DEFAULT '',
@@ -1027,6 +1030,9 @@ func (db *DB) initTables() error {
 	if err := db.migrateASMAgentContinuationsTable(); err != nil {
 		return fmt.Errorf("迁移asm_agent_continuations表失败: %w", err)
 	}
+	if err := db.backfillASMTaskCreationSources(); err != nil {
+		return fmt.Errorf("回填 ASM 任务来源失败: %w", err)
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_asm_agent_continuations_status ON asm_agent_continuations(status, updated_at)`); err != nil {
 		return fmt.Errorf("创建 ASM Agent 联动索引失败: %w", err)
 	}
@@ -1281,6 +1287,7 @@ func (db *DB) migrateASMAgentContinuationsTable() error {
 		{name: "consumed_task_ids_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "consumed_at", definition: "DATETIME"},
 		{name: "consumed_tool", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "trigger_source", definition: "TEXT NOT NULL DEFAULT 'agent_mcp'"},
 	}
 	for _, column := range columns {
 		var count int
@@ -2012,8 +2019,9 @@ func (db *DB) migrateKnowledgeEmbeddingsColumns() error {
 	return nil
 }
 
-// migrateASMTasksTable adds request-batch metadata without rebuilding existing
-// task history. Empty batch IDs keep legacy rows as independent tasks.
+// migrateASMTasksTable adds request-batch and creation-source metadata without
+// rebuilding existing task history. Legacy rows keep an explicit legacy source
+// because their original caller cannot be recovered reliably.
 func (db *DB) migrateASMTasksTable() error {
 	migrations := []struct {
 		col  string
@@ -2022,6 +2030,7 @@ func (db *DB) migrateASMTasksTable() error {
 		{"batch_id", `ALTER TABLE asm_tasks ADD COLUMN batch_id TEXT NOT NULL DEFAULT ''`},
 		{"batch_index", `ALTER TABLE asm_tasks ADD COLUMN batch_index INTEGER NOT NULL DEFAULT 0`},
 		{"batch_size", `ALTER TABLE asm_tasks ADD COLUMN batch_size INTEGER NOT NULL DEFAULT 1`},
+		{"creation_source", `ALTER TABLE asm_tasks ADD COLUMN creation_source TEXT NOT NULL DEFAULT 'legacy'`},
 	}
 	for _, migration := range migrations {
 		var count int
@@ -2032,6 +2041,51 @@ func (db *DB) migrateASMTasksTable() error {
 			continue
 		}
 		if _, err := db.Exec(migration.stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) backfillASMTaskCreationSources() error {
+	type sourceUpdate struct {
+		taskID string
+		source string
+	}
+	rows, err := db.Query(`SELECT trigger_source, task_ids_json FROM asm_agent_continuations`)
+	if err != nil {
+		return err
+	}
+	updates := make([]sourceUpdate, 0)
+	for rows.Next() {
+		var triggerSource, rawTaskIDs string
+		if err := rows.Scan(&triggerSource, &rawTaskIDs); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		var taskIDs []string
+		if json.Unmarshal([]byte(rawTaskIDs), &taskIDs) != nil {
+			continue
+		}
+		source := "agent_mcp"
+		if strings.EqualFold(strings.TrimSpace(triggerSource), "task_center") {
+			source = "task_center_auto_agent"
+		}
+		for _, taskID := range taskIDs {
+			if taskID = strings.TrimSpace(taskID); taskID != "" {
+				updates = append(updates, sourceUpdate{taskID: taskID, source: source})
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, update := range updates {
+		if _, err := db.Exec(`UPDATE asm_tasks SET creation_source = ? WHERE id = ? AND creation_source = 'legacy'`, update.source, update.taskID); err != nil {
 			return err
 		}
 	}

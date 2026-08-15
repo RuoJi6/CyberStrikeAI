@@ -152,6 +152,63 @@ func TestManualASMTaskDoesNotCreateAgentContinuation(t *testing.T) {
 	}
 }
 
+func TestTaskCenterManualASMTaskCreatesOptInAgentContinuation(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	resource, err := service.CreateResource(CreateResourceInput{
+		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
+		Username: "admin", Credential: "secret", AuthType: "password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.CreateTask(context.Background(), resource.ID, TaskRequest{
+		Name: "task-center", Target: "192.0.2.32", Options: map[string]interface{}{"task_mode": "direct"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := service.db.CreateConversation("ASM 自动分析", database.ConversationCreateMeta{
+		Source: "asm_task_center_auto_agent", RoleName: "默认", AgentMode: "eino_single",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := service.AttachManualAgentContinuation(resource.ID, created, ManualAgentContinuationInput{
+		ConversationID: conversation.ID, OwnerUserID: "user-task-center",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadata := valueMap(valueMap(linked)["agent_continuation"])
+	if meaningfulString(metadata["status"]) != "waiting" || meaningfulString(metadata["trigger_source"]) != "task_center" {
+		t.Fatalf("unexpected task-center continuation metadata: %#v", metadata)
+	}
+	items, err := service.db.ListPendingASMAgentContinuations(10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("unexpected task-center continuation rows: %#v err=%v", items, err)
+	}
+	item := items[0]
+	if item.TriggerSource != "task_center" || item.ConversationID != conversation.ID || item.OwnerUserID != "user-task-center" {
+		t.Fatalf("task-center origin was not persisted: %#v", item)
+	}
+	prompt, pending, err := service.PrepareAgentContinuationPrompt(item)
+	if err != nil || !pending {
+		t.Fatalf("task-center prompt was not prepared: prompt=%q pending=%v err=%v", prompt, pending, err)
+	}
+	if !strings.Contains(prompt, resource.ID) || !strings.Contains(prompt, "扫描结果与截图全部本地化后启动") || !strings.Contains(prompt, "192.0.2.32") {
+		t.Fatalf("task-center prompt is missing completed local-result guidance: %q", prompt)
+	}
+	if strings.Contains(prompt, "sleep") || strings.Contains(prompt, "轮询") {
+		t.Fatalf("completed task-center prompt must not contain waiting instructions: %q", prompt)
+	}
+	page, err := service.ListAgentContinuations(AgentContinuationHistoryFilter{
+		Page: 1, PageSize: 20, Access: database.RBACListAccess{Scope: database.RBACScopeAll},
+	})
+	if err != nil || len(page.Items) != 1 || page.Items[0].TriggerSource != "task_center" {
+		t.Fatalf("task-center trigger source missing from history: %#v err=%v", page, err)
+	}
+}
+
 func TestManagedASMTaskResumeCreatesAgentContinuation(t *testing.T) {
 	service, _ := newTaskHistoryTestService(t)
 	resource, err := service.CreateResource(CreateResourceInput{

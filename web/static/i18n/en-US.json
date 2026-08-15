@@ -126,7 +126,7 @@
     "title": "ASM Resources",
     "subtitle": "Connect ARL, XingRin, and ScopeSentry so agents can dispatch tasks and retrieve results through unified MCP tools.",
     "taskCenterTitle": "ASM Task Center",
-    "taskCenterSubtitle": "Review ASM tasks created by agents and MCP tools, including progress, results, and website screenshots.",
+    "taskCenterSubtitle": "Review ASM tasks created by agents/MCP tools and the task center, including origin, progress, results, and website screenshots.",
     "refreshTasks": "Refresh tasks",
     "unifiedTaskHistory": "UNIFIED TASK HISTORY",
     "taskHistoryTitle": "Unified task history",

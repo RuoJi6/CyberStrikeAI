@@ -42,6 +42,17 @@ const defaultIdlePrompt = `ASM 扫描结果已完成。
 
 继续原任务。请调用 ASM MCP，使用上述任务 ID 读取已本地化的扫描结果并继续分析。`
 
+const defaultTaskCenterPrompt = `ASM 扫描结果已完成并已本地化。
+平台：{{provider}}
+资源 ID：{{resource_id}}
+类型：{{task_type}}
+任务 ID：{{task_id}}
+任务名称：{{task_name}}
+目标：{{targets}}
+结果同步状态：{{sync_status}}
+
+这是由 ASM 任务中心在扫描结果与截图全部本地化后启动的自动分析任务。请直接使用上述资源 ID 和任务 ID，通过 ASM MCP 读取该任务已本地化的资产、漏洞和截图结果，完成分析并给出结论。`
+
 type AgentContinuationSettings struct {
 	Behavior      string `json:"behavior"`
 	DeliveryMode  string `json:"delivery_mode"`
@@ -76,6 +87,7 @@ type AgentContinuationHistoryItem struct {
 	ID                string                      `json:"id"`
 	ConversationID    string                      `json:"conversation_id"`
 	ConversationTitle string                      `json:"conversation_title,omitempty"`
+	TriggerSource     string                      `json:"trigger_source"`
 	Behavior          string                      `json:"behavior"`
 	DeliveryMode      string                      `json:"delivery_mode"`
 	InteractionMode   string                      `json:"interaction_mode"`
@@ -93,6 +105,17 @@ type AgentContinuationHistoryItem struct {
 	ConsumedTool      string                      `json:"consumed_tool,omitempty"`
 	Tasks             []AgentContinuationTaskView `json:"tasks"`
 }
+
+// ManualAgentContinuationInput binds a task-center scan to a newly prepared
+// Agent conversation. Unlike Agent/MCP task creation, this is an explicit
+// per-task opt-in and therefore does not inherit the resource-level behavior.
+type ManualAgentContinuationInput struct {
+	ConversationID string
+	OwnerUserID    string
+	Prompt         string
+}
+
+func DefaultTaskCenterAgentPrompt() string { return defaultTaskCenterPrompt }
 
 type AgentResultConsumptionView struct {
 	Consumed                  bool     `json:"consumed"`
@@ -290,6 +313,48 @@ func (s *Service) attachAgentContinuation(conn *Connection, req TaskRequest, res
 	}
 }
 
+// AttachManualAgentContinuation schedules exactly one Agent turn after every
+// recorded child task and its local result/screenshot cache are ready.
+func (s *Service) AttachManualAgentContinuation(resourceID string, result interface{}, input ManualAgentContinuationInput) (interface{}, error) {
+	object := valueMap(result)
+	if object == nil {
+		return result, fmt.Errorf("ASM 任务响应无法关联 Agent")
+	}
+	taskIDs := continuationTaskIDs(result)
+	if len(taskIDs) == 0 {
+		return result, fmt.Errorf("ASM 任务未生成可持久化的本地任务 ID")
+	}
+	conversationID := strings.TrimSpace(input.ConversationID)
+	ownerUserID := strings.TrimSpace(input.OwnerUserID)
+	if conversationID == "" || ownerUserID == "" {
+		return result, fmt.Errorf("Agent 对话和所属用户不能为空")
+	}
+	if _, err := s.db.GetASMResource(resourceID); err != nil {
+		return result, err
+	}
+	prompt := truncateContinuationPrompt(strings.TrimSpace(input.Prompt))
+	if prompt == "" {
+		prompt = defaultTaskCenterPrompt
+	}
+	rawTaskIDs, _ := json.Marshal(taskIDs)
+	item := &database.ASMAgentContinuation{
+		ID: "asmcont_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20], TaskIDsJSON: string(rawTaskIDs),
+		ConversationID: conversationID, OwnerUserID: ownerUserID, TriggerSource: "task_center",
+		Behavior: ContinuationAuto, DeliveryMode: ContinuationDeliveryAfterTurn,
+		RunningPrompt: prompt, IdlePrompt: prompt, Status: "waiting",
+	}
+	if err := s.db.CreateASMAgentContinuation(item); err != nil {
+		return result, err
+	}
+	object["agent_continuation"] = map[string]interface{}{
+		"id": item.ID, "status": item.Status, "behavior": item.Behavior,
+		"delivery_mode": item.DeliveryMode, "trigger_source": item.TriggerSource,
+		"conversation_id": conversationID, "wait_strategy": "system_managed",
+		"message": "扫描结果与截图本地化完成后，系统将自动启动所选项目中的 Agent 对话",
+	}
+	return object, nil
+}
+
 func continuationTasks(raw string) []string {
 	var result []string
 	_ = json.Unmarshal([]byte(raw), &result)
@@ -426,6 +491,7 @@ func renderContinuationPrompt(template string, tasks []*database.ASMTask, syncSt
 	first := tasks[0]
 	return strings.NewReplacer(
 		"{{provider}}", providerDisplayName(first.Provider),
+		"{{resource_id}}", first.ResourceID,
 		"{{task_type}}", continuationTaskType(first),
 		"{{task_id}}", strings.Join(ids, ", "),
 		"{{task_name}}", first.Name,
@@ -532,7 +598,7 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 	}
 	for _, row := range rows {
 		view := AgentContinuationHistoryItem{
-			ID: row.ID, ConversationID: row.ConversationID, Behavior: row.Behavior, DeliveryMode: row.DeliveryMode,
+			ID: row.ID, ConversationID: row.ConversationID, TriggerSource: row.TriggerSource, Behavior: row.Behavior, DeliveryMode: row.DeliveryMode,
 			InteractionMode: continuationInteractionMode(row), Status: row.Status, AgentWasRunning: row.AgentWasRunning, Attempts: row.Attempts,
 			LastError: row.LastError, ReadyAt: row.ReadyAt, CompletedAt: row.CompletedAt,
 			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,

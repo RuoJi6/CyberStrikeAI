@@ -111,6 +111,56 @@ func TestARLPolicyTaskReturnsPolicyNameExecutionProfile(t *testing.T) {
 	}
 }
 
+func TestARLCreateTaskResolvesMissingIDFromTaskList(t *testing.T) {
+	const taskID = "64b000000000000000000099"
+	listCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "test-token"}})
+		case "/api/task/":
+			if r.Method == http.MethodPost {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "message": "success"})
+				return
+			}
+			listCalls++
+			if r.URL.Query().Get("name") != "resolve missing id" || r.URL.Query().Get("target") != "192.0.2.25" {
+				t.Errorf("unexpected task lookup query: %s", r.URL.RawQuery)
+			}
+			if listCalls == 1 {
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{}})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{
+				map[string]interface{}{"_id": taskID, "name": "resolve missing id", "target": "192.0.2.25", "status": "waiting"},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewARLAdapter().CreateTask(context.Background(), &Connection{
+		Resource: &database.ASMResource{ID: "asm-arl-resolve", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}, TaskRequest{Name: "resolve missing id", Target: "192.0.2.25"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listCalls != 2 {
+		t.Fatalf("expected eventual-consistency retry, got %d task-list lookups", listCalls)
+	}
+	object := valueMap(result)
+	if meaningfulString(object["task_id_resolution"]) != "task_list" || remoteTaskID(ProviderARL, result) != taskID {
+		t.Fatalf("ARL task ID was not resolved from the task list: %#v", result)
+	}
+	entries := createdTaskEntries(ProviderARL, TaskRequest{Name: "resolve missing id", Target: "192.0.2.25"}, result)
+	if len(entries) != 1 || entries[0].RemoteID != taskID {
+		t.Fatalf("resolved ARL task was not recordable: %#v", entries)
+	}
+}
+
 func TestARLFetchScreenshotUsesAPINamespace(t *testing.T) {
 	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

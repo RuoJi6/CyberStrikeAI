@@ -17,6 +17,7 @@ type ASMAgentContinuation struct {
 	TaskIDsJSON         string     `json:"task_ids_json"`
 	ConversationID      string     `json:"conversation_id"`
 	OwnerUserID         string     `json:"owner_user_id"`
+	TriggerSource       string     `json:"trigger_source"`
 	Behavior            string     `json:"behavior"`
 	DeliveryMode        string     `json:"delivery_mode"`
 	RunningPrompt       string     `json:"running_prompt"`
@@ -55,7 +56,7 @@ type ASMAgentContinuationFilter struct {
 	Access   RBACListAccess
 }
 
-const asmAgentContinuationColumns = `id, task_ids_json, conversation_id, owner_user_id,
+const asmAgentContinuationColumns = `id, task_ids_json, conversation_id, owner_user_id, trigger_source,
 	behavior, delivery_mode, running_prompt, idle_prompt, status, agent_was_running, agent_started_at, attempts,
 	consumed_task_ids_json, consumed_at, consumed_tool, last_error, ready_at, completed_at, created_at, updated_at`
 
@@ -66,6 +67,7 @@ func scanASMAgentContinuation(scanner interface{ Scan(...interface{}) error }) (
 	var createdAt, updatedAt string
 	if err := scanner.Scan(
 		&item.ID, &item.TaskIDsJSON, &item.ConversationID, &item.OwnerUserID,
+		&item.TriggerSource,
 		&item.Behavior, &item.DeliveryMode, &item.RunningPrompt, &item.IdlePrompt, &item.Status,
 		&wasRunning, &agentStartedAt, &item.Attempts, &item.ConsumedTaskIDsJSON, &consumedAt,
 		&item.ConsumedTool, &item.LastError, &readyAt, &completedAt,
@@ -85,6 +87,9 @@ func scanASMAgentContinuation(scanner interface{ Scan(...interface{}) error }) (
 	}
 	if strings.TrimSpace(item.DeliveryMode) == "" {
 		item.DeliveryMode = "after_turn"
+	}
+	if strings.TrimSpace(item.TriggerSource) == "" {
+		item.TriggerSource = "agent_mcp"
 	}
 	if consumedAt.Valid && strings.TrimSpace(consumedAt.String) != "" {
 		value := parseDBTime(consumedAt.String)
@@ -116,14 +121,17 @@ func (db *DB) CreateASMAgentContinuation(item *ASMAgentContinuation) error {
 	if strings.TrimSpace(item.ConsumedTaskIDsJSON) == "" {
 		item.ConsumedTaskIDsJSON = "[]"
 	}
+	if strings.TrimSpace(item.TriggerSource) == "" {
+		item.TriggerSource = "agent_mcp"
+	}
 	item.UpdatedAt = now
 	_, err := db.Exec(`INSERT INTO asm_agent_continuations (
-		id, task_ids_json, conversation_id, owner_user_id, behavior, delivery_mode, running_prompt,
+		id, task_ids_json, conversation_id, owner_user_id, trigger_source, behavior, delivery_mode, running_prompt,
 		idle_prompt, status, agent_was_running, agent_started_at, attempts,
 		consumed_task_ids_json, consumed_at, consumed_tool, last_error, ready_at,
 		completed_at, created_at, updated_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		item.ID, item.TaskIDsJSON, item.ConversationID, item.OwnerUserID, item.Behavior,
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.TaskIDsJSON, item.ConversationID, item.OwnerUserID, item.TriggerSource, item.Behavior,
 		item.DeliveryMode, item.RunningPrompt, item.IdlePrompt, item.Status, boolToInt(item.AgentWasRunning),
 		item.AgentStartedAt, item.Attempts, item.ConsumedTaskIDsJSON, item.ConsumedAt, item.ConsumedTool,
 		item.LastError, item.ReadyAt, item.CompletedAt, item.CreatedAt, item.UpdatedAt,

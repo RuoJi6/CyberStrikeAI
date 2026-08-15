@@ -338,6 +338,15 @@ func (a *ARLAdapter) CreateTask(ctx context.Context, conn *Connection, req TaskR
 		return nil, err
 	}
 	result := map[string]interface{}{"provider": ProviderARL, "resource_id": conn.Resource.ID, "response": payload}
+	if remoteTaskID(ProviderARL, result) == "" {
+		resolved, lookupErr := a.resolveCreatedTasks(ctx, conn, meaningfulString(body["name"]), meaningfulString(body["target"]))
+		if len(resolved) > 0 {
+			result["resolved_tasks"] = resolved
+			result["task_id_resolution"] = "task_list"
+		} else if lookupErr != nil {
+			result["task_id_resolution_warning"] = "ARL 任务已创建，但任务 ID 回查失败: " + lookupErr.Error()
+		}
+	}
 	if endpoint == "/api/task/policy/" {
 		policyID := meaningfulString(body["policy_id"])
 		profile := map[string]interface{}{"kind": "policy", "label": "ARL 策略", "id": policyID}
@@ -358,6 +367,84 @@ func (a *ARLAdapter) CreateTask(ctx context.Context, conn *Connection, req TaskR
 		result["execution_profile"] = profile
 	}
 	return result, nil
+}
+
+func (a *ARLAdapter) resolveCreatedTasks(ctx context.Context, conn *Connection, name, target string) ([]interface{}, error) {
+	requestedTargets := requestTargetList(target)
+	expected := len(requestedTargets)
+	if expected < 1 {
+		expected = 1
+	}
+	var best []interface{}
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return best, ctx.Err()
+			case <-timer.C:
+			}
+		}
+		listed, err := a.ListTasks(ctx, conn, TaskFilter{Name: name, Target: target, Page: 1, PageSize: 100})
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		matches := matchARLCreatedTasks(listed, name, target, expected)
+		if len(matches) > len(best) {
+			best = matches
+		}
+		if len(best) >= expected {
+			return best, nil
+		}
+	}
+	if len(best) > 0 {
+		return best, nil
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("未在 ARL 任务列表中找到刚创建的任务")
+}
+
+func matchARLCreatedTasks(payload interface{}, name, target string, limit int) []interface{} {
+	name = strings.TrimSpace(name)
+	target = strings.TrimSpace(target)
+	requestedTargets := requestTargetList(target)
+	targetSet := make(map[string]bool, len(requestedTargets)+1)
+	for _, item := range requestedTargets {
+		targetSet[item] = true
+	}
+	if target != "" {
+		targetSet[target] = true
+	}
+	if limit < 1 {
+		limit = 1
+	}
+	result := make([]interface{}, 0, limit)
+	for _, raw := range taskCollection(ProviderARL, payload) {
+		task := valueMap(raw)
+		if task == nil {
+			continue
+		}
+		remoteID := meaningfulString(mapValue(task, "id", "_id", "task_id", "TaskID"))
+		if !arlTaskIDPattern.MatchString(remoteID) {
+			continue
+		}
+		if actualName := meaningfulString(mapValue(task, "name", "task_name")); name != "" && actualName != name {
+			continue
+		}
+		if actualTarget := meaningfulString(mapValue(task, "target", "targetName", "domain", "ip")); len(targetSet) > 0 && !targetSet[actualTarget] {
+			continue
+		}
+		result = append(result, raw)
+		if len(result) >= limit {
+			break
+		}
+	}
+	return result
 }
 
 func normalizePagination(page, size int) (int, int) {

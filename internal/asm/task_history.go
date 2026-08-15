@@ -32,6 +32,7 @@ type TaskHistoryView struct {
 	ResourceID        string                    `json:"resource_id"`
 	ResourceName      string                    `json:"resource_name"`
 	Provider          string                    `json:"provider"`
+	CreationSource    string                    `json:"creation_source"`
 	RemoteTaskID      string                    `json:"remote_task_id"`
 	Name              string                    `json:"name"`
 	Target            string                    `json:"target"`
@@ -99,7 +100,7 @@ func taskHistoryView(item *database.ASMTask) TaskHistoryView {
 	return TaskHistoryView{
 		ID: item.ID, BatchID: item.BatchID, BatchIndex: item.BatchIndex, BatchSize: item.BatchSize,
 		ResourceID: item.ResourceID, ResourceName: item.ResourceName,
-		Provider: item.Provider, RemoteTaskID: item.RemoteTaskID, Name: item.Name,
+		Provider: item.Provider, CreationSource: item.CreationSource, RemoteTaskID: item.RemoteTaskID, Name: item.Name,
 		Target: item.Target, Options: options, ExecutionProfile: taskExecutionProfile(item.Provider, options, detail), Status: item.Status,
 		Progress: item.Progress, Stage: item.Stage, Summary: jsonObject(item.SummaryJSON),
 		Detail: detail, LastError: item.LastError,
@@ -339,6 +340,9 @@ func remoteTaskID(provider string, result interface{}) string {
 	switch normalizeProvider(provider) {
 	case ProviderARL:
 		paths = [][]interface{}{
+			{"resolved_tasks", 0, "task_id"},
+			{"resolved_tasks", 0, "_id"},
+			{"resolved_tasks", 0, "id"},
 			{"response", "data", "task_id"},
 			{"response", "data", "_id"},
 			{"response", "data", "id"},
@@ -437,6 +441,9 @@ func createdTaskEntries(provider string, req TaskRequest, result interface{}) []
 		rawTasks, _ = pathValue(object, "response", "scans").([]interface{})
 	case ProviderARL:
 		rawTasks, _ = pathValue(object, "response", "items").([]interface{})
+		if len(rawTasks) == 0 {
+			rawTasks, _ = object["resolved_tasks"].([]interface{})
+		}
 	}
 	requestTargets := requestTargetList(req.Target)
 	entries := make([]createdTaskEntry, 0, len(rawTasks))
@@ -514,6 +521,14 @@ func withHistoryMetadata(result interface{}, batchID string, expected int, recor
 }
 
 func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result interface{}) interface{} {
+	creationSource := strings.ToLower(strings.TrimSpace(req.CreationSource))
+	if creationSource == "" {
+		if strings.TrimSpace(req.ConversationID) != "" {
+			creationSource = "agent_mcp"
+		} else {
+			creationSource = "task_center"
+		}
+	}
 	entries := createdTaskEntries(conn.Resource.Provider, req, result)
 	if len(entries) == 0 {
 		warning := "ASM 已接收任务，但响应中没有可识别的任务 ID"
@@ -531,6 +546,7 @@ func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result in
 	for index, entry := range entries {
 		if existing, err := s.db.FindASMTask(conn.Resource.ID, entry.RemoteID); err == nil && existing != nil {
 			existing.BatchID, existing.BatchIndex, existing.BatchSize = batchID, index, len(entries)
+			existing.CreationSource = creationSource
 			existing.OptionsJSON = string(optionsJSON)
 			if existing.Target == "" {
 				existing.Target = entry.Target
@@ -547,7 +563,7 @@ func (s *Service) recordCreatedTask(conn *Connection, req TaskRequest, result in
 		item := &database.ASMTask{
 			ID: localID, BatchID: batchID, BatchIndex: index, BatchSize: len(entries),
 			ResourceID: conn.Resource.ID, ResourceName: conn.Resource.Name,
-			Provider: normalizeProvider(conn.Resource.Provider), RemoteTaskID: entry.RemoteID,
+			Provider: normalizeProvider(conn.Resource.Provider), CreationSource: creationSource, RemoteTaskID: entry.RemoteID,
 			Name: strings.TrimSpace(req.Name), Target: entry.Target,
 			OptionsJSON: string(optionsJSON), Status: entry.Status,
 			SummaryJSON: "{}", DetailJSON: string(detailJSON),
@@ -643,7 +659,7 @@ func (s *Service) recordListedTasks(conn *Connection, payload interface{}) {
 		item := &database.ASMTask{
 			ID:         "asmtask_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20],
 			ResourceID: conn.Resource.ID, ResourceName: conn.Resource.Name,
-			Provider: normalizeProvider(conn.Resource.Provider), RemoteTaskID: remoteID,
+			Provider: normalizeProvider(conn.Resource.Provider), CreationSource: "legacy", RemoteTaskID: remoteID,
 			Name:        meaningfulString(mapValue(task, "name", "taskName")),
 			Target:      meaningfulString(mapValue(task, "targetName", "target", "domain", "ip")),
 			OptionsJSON: "{}", Status: status, Progress: progress,

@@ -124,7 +124,7 @@ func TestTaskHistoryRecordsSyncsAndCachesResults(t *testing.T) {
 	if err != nil || page.Total != 1 || len(page.Tasks) != 1 {
 		t.Fatalf("unexpected task history page: %#v, err=%v", page, err)
 	}
-	if page.Tasks[0].RemoteTaskID != "7" || page.Tasks[0].Status != "submitted" {
+	if page.Tasks[0].RemoteTaskID != "7" || page.Tasks[0].Status != "submitted" || page.Tasks[0].CreationSource != "task_center" {
 		t.Fatalf("unexpected recorded task: %#v", page.Tasks[0])
 	}
 

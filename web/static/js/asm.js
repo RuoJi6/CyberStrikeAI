@@ -9,6 +9,10 @@ const asmPageState = {
     taskPageSize: 20,
     taskTotal: 0,
     loadingTasks: false,
+    taskLoadPromise: null,
+    taskPollTimer: null,
+    taskDetailRefreshing: false,
+    pendingSubmissions: [],
     expandedBatches: new Set(),
     selectedTask: null,
     selectedAssetType: 'site',
@@ -27,6 +31,10 @@ const asmPageState = {
     createTemplateToken: '',
     createTemplateBaseSummary: null,
     createLoading: false,
+    createAgentTriggerEnabled: false,
+    createAgentProjects: [],
+    createAgentRoles: [],
+    createAgentChoicesError: '',
     templateResource: null,
     templatePresets: [],
     upstreamTemplates: [],
@@ -69,6 +77,107 @@ const asmDefaultIdlePrompt = `ASM 扫描结果已完成。
 结果同步状态：{{sync_status}}
 
 继续原任务。请调用 ASM MCP，使用上述任务 ID 读取已本地化的扫描结果并继续分析。`;
+
+const asmDefaultTaskCenterAgentPrompt = `ASM 扫描结果已完成并已本地化。
+平台：{{provider}}
+资源 ID：{{resource_id}}
+类型：{{task_type}}
+任务 ID：{{task_id}}
+任务名称：{{task_name}}
+目标：{{targets}}
+结果同步状态：{{sync_status}}
+
+这是由 ASM 任务中心在扫描结果与截图全部本地化后启动的自动分析任务。请直接使用上述资源 ID 和任务 ID，通过 ASM MCP 读取该任务已本地化的资产、漏洞和截图结果，完成分析并给出结论。`;
+
+const asmPendingAutoAgentStorageKey = 'cyberstrike.asm.pendingAutoAgentContinuations';
+let asmPendingAutoAgentPollTimer = null;
+let asmPendingAutoAgentPolling = false;
+
+function readASMPendingAutoAgents() {
+    try {
+        const value = JSON.parse(sessionStorage.getItem(asmPendingAutoAgentStorageKey) || '[]');
+        return Array.isArray(value) ? value.filter(item => item && item.id) : [];
+    } catch (_) {
+        return [];
+    }
+}
+
+function writeASMPendingAutoAgents(items) {
+    try {
+        if (items.length) sessionStorage.setItem(asmPendingAutoAgentStorageKey, JSON.stringify(items));
+        else sessionStorage.removeItem(asmPendingAutoAgentStorageKey);
+    } catch (_) {}
+}
+
+function asmChatPageActive() {
+    return document.getElementById('page-chat')?.classList.contains('active') === true;
+}
+
+async function refreshASMAutoAgentChatLists() {
+    if (!asmChatPageActive()) return false;
+    const jobs = [];
+    if (typeof loadConversationsWithGroups === 'function') jobs.push(loadConversationsWithGroups());
+    else if (typeof loadConversations === 'function') jobs.push(loadConversations());
+    if (typeof window.refreshChatProjectFolders === 'function') jobs.push(window.refreshChatProjectFolders());
+    if (jobs.length) await Promise.allSettled(jobs);
+    return jobs.length > 0;
+}
+
+function ensureASMPendingAutoAgentPoll() {
+    if (asmPendingAutoAgentPollTimer || !readASMPendingAutoAgents().length) return;
+    asmPendingAutoAgentPollTimer = window.setInterval(() => void pollASMPendingAutoAgents(), 5000);
+    void pollASMPendingAutoAgents();
+}
+
+function trackASMTaskCenterAgentContinuation(result) {
+    const continuation = result?.agent_continuation || {};
+    const id = String(continuation.id || '').trim();
+    if (!id) return;
+    const items = readASMPendingAutoAgents().filter(item => item.id !== id);
+    items.push({
+        id,
+        conversationId: String(continuation.conversation_id || '').trim(),
+        status: String(continuation.status || 'waiting'),
+        needsRefresh: true,
+        createdAt: Date.now(),
+    });
+    writeASMPendingAutoAgents(items.slice(-20));
+    ensureASMPendingAutoAgentPoll();
+}
+
+async function pollASMPendingAutoAgents() {
+    if (asmPendingAutoAgentPolling) return;
+    let pending = readASMPendingAutoAgents();
+    if (!pending.length) {
+        if (asmPendingAutoAgentPollTimer) window.clearInterval(asmPendingAutoAgentPollTimer);
+        asmPendingAutoAgentPollTimer = null;
+        return;
+    }
+    asmPendingAutoAgentPolling = true;
+    try {
+        const payload = await asmApi('/api/asm/agent-continuations?page=1&page_size=100');
+        const byID = new Map((Array.isArray(payload.items) ? payload.items : []).map(item => [String(item.id || ''), item]));
+        let shouldRefresh = pending.some(item => item.needsRefresh);
+        const terminal = new Set(['completed', 'agent_consumed', 'user_stopped', 'failed', 'cancelled']);
+        pending = pending.filter(record => {
+            const item = byID.get(record.id);
+            if (!item) return Date.now() - Number(record.createdAt || 0) < 24 * 60 * 60 * 1000;
+            const nextStatus = String(item.status || 'waiting');
+            if (nextStatus !== record.status) shouldRefresh = true;
+            record.status = nextStatus;
+            record.needsRefresh = shouldRefresh && !asmChatPageActive();
+            return !terminal.has(nextStatus);
+        });
+        if (shouldRefresh && await refreshASMAutoAgentChatLists()) {
+            pending.forEach(item => { item.needsRefresh = false; });
+        }
+        writeASMPendingAutoAgents(pending);
+    } catch (error) {
+        console.warn('刷新 ASM 自动 Agent 对话列表失败:', error);
+    } finally {
+        asmPendingAutoAgentPolling = false;
+    }
+}
 
 function asmT(key, fallback, options) {
     if (window.i18next && typeof window.i18next.t === 'function') {
@@ -484,10 +593,12 @@ function renderASMAgentContinuations() {
     summary.innerHTML = cards.map(([key, label]) => `<button type="button" class="asm-continuation-summary-card ${key}${asmPageState.continuationFilter === key ? ' active' : ''}" aria-pressed="${asmPageState.continuationFilter === key}" onclick="setASMContinuationFilter('${key}')"><strong>${counts[key] || 0}</strong><span>${label}</span></button>`).join('');
     const items = asmPageState.continuations;
     if (!items.length) {
-        root.innerHTML = `<div class="asm-continuation-empty"><strong>当前分类暂无联动记录</strong><span>Agent/MCP 下发并成功绑定来源对话后，会在这里持续更新状态。</span></div>`;
+        root.innerHTML = `<div class="asm-continuation-empty"><strong>当前分类暂无联动记录</strong><span>Agent/MCP 下发或任务中心启用自动分析后，会在这里持续更新状态。</span></div>`;
     } else root.innerHTML = items.map(item => {
         const meta = asmContinuationMeta(item);
         const interaction = asmContinuationInteraction(item);
+        const taskCenterTriggered = item.trigger_source === 'task_center';
+        const sourceLabel = taskCenterTriggered ? '任务中心自动分析' : 'Agent / MCP 来源';
         const tasks = Array.isArray(item.tasks) ? item.tasks : [];
         const first = tasks[0] || {};
         const title = first.name || (tasks.length > 1 ? `${tasks.length} 个 ASM 子任务` : item.id);
@@ -502,7 +613,7 @@ function renderASMAgentContinuations() {
         const error = item.last_error ? `<p class="asm-continuation-error">${asmEscape(item.last_error)}</p>` : '';
         const actions = [
             taskIDs.length ? `<button type="button" class="btn-secondary btn-small" onclick="openASMContinuationTask('${asmEscape(taskIDs[0])}')">查看扫描任务</button>` : '',
-            item.conversation_id ? `<button type="button" class="btn-secondary btn-small" data-conversation-id="${asmEscape(item.conversation_id)}" onclick="openASMContinuationConversation(this.dataset.conversationId)">查看来源对话</button>` : '',
+            item.conversation_id ? `<button type="button" class="btn-secondary btn-small" data-conversation-id="${asmEscape(item.conversation_id)}" onclick="openASMContinuationConversation(this.dataset.conversationId)">${taskCenterTriggered ? '查看自动分析对话' : '查看来源对话'}</button>` : '',
         ].filter(Boolean).join('');
         const footerStatus = item.phase === 'agent_consumed'
             ? `Agent 已主动读取 ${consumedCount}/${tasks.length} 个关联任务结果`
@@ -510,12 +621,12 @@ function renderASMAgentContinuations() {
                 ? (item.delivery_mode === 'next_checkpoint' ? '通知时机：当前步骤结束后' : '通知时机：当前整轮结束后')
                 : '扫描完成时 Agent 已停止或空闲');
         return `<article class="asm-continuation-item ${meta.tone}">
-            <header><div class="asm-continuation-badges"><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><span class="asm-continuation-interaction ${interaction.tone}" title="${asmEscape(interaction.description)}">${asmEscape(interaction.label)}</span></div><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
+            <header><div class="asm-continuation-badges"><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><span class="asm-continuation-interaction ${interaction.tone}" title="${asmEscape(interaction.description)}">${asmEscape(interaction.label)}</span><span class="asm-continuation-source${taskCenterTriggered ? ' task-center' : ''}">${asmEscape(sourceLabel)}</span></div><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
             <p class="asm-continuation-description">${asmEscape(meta.description)}</p>
             <div class="asm-continuation-task-line"><span>${asmEscape(provider)} · ${asmEscape(resource)}</span><span>${asmEscape(taskStatus)} · ${progress}%</span></div>
             ${executionChips ? `<div class="asm-continuation-profile">${executionChips}</div>` : ''}
             <div class="asm-continuation-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>
-            <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>来源对话</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动方式</dt><dd>${asmEscape(interaction.label)}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
+            <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>${taskCenterTriggered ? '自动分析对话' : '来源对话'}</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动方式</dt><dd>${asmEscape(interaction.label)}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
             ${error}<footer><span>${asmEscape(footerStatus)}</span><div class="asm-continuation-actions">${actions}</div></footer>
         </article>`;
     }).join('');
@@ -1159,12 +1270,68 @@ function renderASMTaskExecutionPanel(task) {
     </section>`;
 }
 
+function asmTaskSourceMeta(task) {
+    const source = String(task?.creation_source || 'legacy').toLowerCase();
+    return {
+        agent_mcp: ['agent', 'Agent 对话下发'],
+        task_center: ['task-center', 'ASM 任务中心创建'],
+        task_center_auto_agent: ['auto-agent', '扫描完成自动创建 Agent'],
+        legacy: ['legacy', '历史任务'],
+    }[source] || ['legacy', '历史任务'];
+}
+
+function renderASMTaskSourceChip(task) {
+    const [type, label] = asmTaskSourceMeta(task);
+    return `<em class="asm-task-source-chip ${type}">${asmEscape(label)}</em>`;
+}
+
+function addASMPendingSubmission(resource, name, target, creationSource, stage) {
+    const id = `asmpending_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    asmPageState.pendingSubmissions.unshift({
+        id,
+        name: name || '新建 ASM 扫描任务',
+        target,
+        resource_name: resource?.name || asmProviderLabel(resource?.provider),
+        provider: resource?.provider || '',
+        creation_source: creationSource || 'task_center',
+        stage: stage || '等待 ASM 上游返回任务 ID',
+        created_at: new Date().toISOString(),
+    });
+    renderASMTasks();
+    return id;
+}
+
+function updateASMPendingSubmission(id, changes) {
+    const item = asmPageState.pendingSubmissions.find(entry => entry.id === id);
+    if (!item) return;
+    Object.assign(item, changes || {});
+    renderASMTasks();
+}
+
+function removeASMPendingSubmission(id) {
+    if (!id) return;
+    const next = asmPageState.pendingSubmissions.filter(item => item.id !== id);
+    if (next.length === asmPageState.pendingSubmissions.length) return;
+    asmPageState.pendingSubmissions = next;
+    renderASMTasks();
+}
+
+function renderASMPendingSubmission(item) {
+    return `<article class="asm-task-row asm-task-row-pending" aria-label="正在下发 ASM 扫描任务">
+        <div class="asm-task-primary"><strong>${asmEscape(item.name)}</strong><span title="${asmEscape(item.target)}">${asmEscape(item.target)}</span></div>
+        <div class="asm-task-provider">${renderASMProviderMark(item.provider, true)}<span><strong>${asmEscape(item.resource_name)}</strong><small>等待生成远程任务 ID</small><span class="asm-task-provider-badges">${renderASMTaskSourceChip(item)}</span></span></div>
+        <div class="asm-task-progress-cell"><div><span class="asm-task-status submitted"><span class="asm-spinner"></span>正在下发</span><small>${asmEscape(item.stage)}</small></div><div class="asm-progress-track"><span style="width:0%"></span></div><b>0%</b></div>
+        <time>${asmEscape(formatASMTime(item.created_at))}</time>
+        <span class="asm-task-pending-action">等待创建</span>
+    </article>`;
+}
+
 function renderASMTaskRow(task, child) {
     const progress = asmTaskProgress(task.progress);
     const status = asmTaskStatusClass(task.status);
     return `<article class="asm-task-row${child ? ' asm-task-child' : ''}" onclick="openASMTaskModal('${asmEscape(task.id)}')">
         <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
-        <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><span class="asm-task-provider-badges">${renderASMTaskExecutionChip(task)}<em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></span></div>
+        <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><span class="asm-task-provider-badges">${renderASMTaskSourceChip(task)}${renderASMTaskExecutionChip(task)}<em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></span></div>
         <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
         <time>${asmEscape(formatASMTime(task.created_at))}</time>
         <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>
@@ -1182,7 +1349,7 @@ function renderASMBatch(group) {
     return `<section class="asm-task-batch${expanded ? ' expanded' : ''}" data-batch-id="${asmEscape(group.batchID)}">
         <article class="asm-task-row asm-task-batch-row" onclick="toggleASMBatch('${asmEscape(group.batchID)}')">
             <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span></div>
-            <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><span class="asm-task-provider-badges">${renderASMTaskExecutionChip(first)}<em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></span></div>
+            <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><span class="asm-task-provider-badges">${renderASMTaskSourceChip(first)}${renderASMTaskExecutionChip(first)}<em class="asm-result-sync-badge completed">同次批量下发</em></span></span></div>
             <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(state.status))}</span><small>${state.completed}/${state.expected} 个子任务完成</small></div><div class="asm-progress-track"><span style="width:${state.progress}%"></span></div><b>${state.progress}%</b></div>
             <time>${asmEscape(formatASMTime(group.createdAtValue || first.created_at))}</time>
             <button type="button" class="btn-secondary btn-small" aria-expanded="${expanded}" onclick="event.stopPropagation();toggleASMBatch('${asmEscape(group.batchID)}')">${expanded ? '收起' : '展开'} ${expanded ? '↑' : '↓'}</button>
@@ -1201,12 +1368,13 @@ function renderASMTasks() {
     const summary = document.getElementById('asm-task-summary');
     const pagination = document.getElementById('asm-task-pagination');
     if (!root) return;
-    if (summary) summary.textContent = `${asmPageState.taskTotal} 条历史子任务 · MCP 下发后自动记录`;
-    if (!asmPageState.tasks.length) {
+    const pending = Array.isArray(asmPageState.pendingSubmissions) ? asmPageState.pendingSubmissions : [];
+    if (summary) summary.textContent = `${asmPageState.taskTotal} 条历史子任务 · 统一记录 Agent 与任务中心下发${pending.length ? ` · ${pending.length} 个正在下发` : ''}`;
+    if (!asmPageState.tasks.length && !pending.length) {
         root.innerHTML = `<div class="asm-task-empty"><strong>暂无任务记录</strong><span>Agent 或 MCP 创建任务后会自动出现在这里。</span></div>`;
     } else {
         const groups = asmTaskGroups(asmPageState.tasks);
-        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间（最新优先）</span><span></span></div>${groups.map(group => group.grouped ? renderASMBatch(group) : renderASMTaskRow(group.tasks[0], false)).join('')}`;
+        root.innerHTML = `<div class="asm-task-table-head"><span>任务 / 目标</span><span>ASM 资源</span><span>进度</span><span>创建时间（最新优先）</span><span></span></div>${pending.map(renderASMPendingSubmission).join('')}${groups.map(group => group.grouped ? renderASMBatch(group) : renderASMTaskRow(group.tasks[0], false)).join('')}`;
     }
     const pages = Math.max(1, Math.ceil(asmPageState.taskTotal / asmPageState.taskPageSize));
     if (pagination) pagination.innerHTML = asmPageState.taskTotal > asmPageState.taskPageSize
@@ -1214,8 +1382,13 @@ function renderASMTasks() {
     if (typeof applyRBACToUI === 'function') applyRBACToUI(root);
 }
 
-async function loadASMTasks(resetPage) {
-    if (asmPageState.loadingTasks) return;
+async function loadASMTasks(resetPage, silent) {
+    if (asmPageState.loadingTasks) {
+        const activeLoad = asmPageState.taskLoadPromise;
+        if (activeLoad) await activeLoad;
+        if (resetPage) return loadASMTasks(true, silent);
+        return true;
+    }
     if (resetPage) asmPageState.taskPage = 1;
     asmPageState.loadingTasks = true;
     const root = document.getElementById('asm-task-list');
@@ -1227,17 +1400,57 @@ async function loadASMTasks(resetPage) {
     if (query) params.set('query', query);
     if (provider) params.set('provider', provider);
     if (status) params.set('status', status);
+    const loadPromise = (async () => {
+        try {
+            const payload = await asmApi(`/api/asm/tasks?${params.toString()}`);
+            asmPageState.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+            asmPageState.taskTotal = Number(payload.total) || 0;
+            asmPageState.taskPage = Number(payload.page) || 1;
+            renderASMTasks();
+            return true;
+        } catch (error) {
+            if (!silent && root) root.innerHTML = `<div class="asm-task-empty error"><strong>任务加载失败</strong><span>${asmEscape(error.message)}</span></div>`;
+            return false;
+        } finally {
+            asmPageState.loadingTasks = false;
+        }
+    })();
+    asmPageState.taskLoadPromise = loadPromise;
     try {
-        const payload = await asmApi(`/api/asm/tasks?${params.toString()}`);
-        asmPageState.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
-        asmPageState.taskTotal = Number(payload.total) || 0;
-        asmPageState.taskPage = Number(payload.page) || 1;
-        renderASMTasks();
-    } catch (error) {
-        if (root) root.innerHTML = `<div class="asm-task-empty error"><strong>任务加载失败</strong><span>${asmEscape(error.message)}</span></div>`;
+        return await loadPromise;
     } finally {
-        asmPageState.loadingTasks = false;
+        if (asmPageState.taskLoadPromise === loadPromise) asmPageState.taskLoadPromise = null;
     }
+}
+
+async function refreshASMTaskCenterSilently() {
+    const active = document.getElementById('page-asm-tasks')?.classList.contains('active') === true;
+    if (!active || asmPageState.createLoading) return;
+    await loadASMTasks(false, true);
+    const selectedID = String(asmPageState.selectedTask?.id || '');
+    if (!selectedID || asmPageState.taskDetailRefreshing) return;
+    asmPageState.taskDetailRefreshing = true;
+    try {
+        const previousStatus = String(asmPageState.selectedTask?.status || '');
+        const latest = await asmApi(`/api/asm/tasks/${encodeURIComponent(selectedID)}`);
+        if (String(asmPageState.selectedTask?.id || '') !== selectedID) return;
+        asmPageState.selectedTask = latest;
+        renderASMTaskDetail();
+        syncASMTaskStopButton();
+        renderASMScreenshotCacheStatus();
+        if (previousStatus !== 'completed' && latest.status === 'completed') {
+            await loadSelectedASMResults({ autoSelect: true });
+        }
+    } catch (error) {
+        console.warn('自动刷新 ASM 任务详情失败:', error);
+    } finally {
+        asmPageState.taskDetailRefreshing = false;
+    }
+}
+
+function ensureASMTaskCenterAutoRefresh() {
+    if (asmPageState.taskPollTimer) return;
+    asmPageState.taskPollTimer = window.setInterval(() => void refreshASMTaskCenterSilently(), 5000);
 }
 
 function changeASMTaskPage(delta) {
@@ -1267,7 +1480,7 @@ function renderASMTaskDetail() {
     const syncProgress = asmResultSyncProgress(resultSync);
     const executionChip = renderASMTaskExecutionChip(task);
     root.innerHTML = `<div class="asm-task-detail-hero">
-        <div class="asm-task-detail-main"><div class="asm-task-detail-badges"><span class="asm-task-status ${asmTaskStatusClass(task.status)}">${asmEscape(asmTaskStatusLabel(task.status))}</span><span>${asmEscape(asmProviderLabel(task.provider))}</span><span>${asmEscape(task.resource_name)}</span>${executionChip}</div><h4>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</h4><code>${asmEscape(task.target || '')}</code></div>
+        <div class="asm-task-detail-main"><div class="asm-task-detail-badges"><span class="asm-task-status ${asmTaskStatusClass(task.status)}">${asmEscape(asmTaskStatusLabel(task.status))}</span><span>${asmEscape(asmProviderLabel(task.provider))}</span><span>${asmEscape(task.resource_name)}</span>${renderASMTaskSourceChip(task)}${executionChip}</div><h4>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</h4><code>${asmEscape(task.target || '')}</code></div>
         <div class="asm-task-detail-progress"><strong>${progress}%</strong><span>${asmEscape(task.stage || '等待同步')}</span></div>
     </div>
     <div class="asm-detail-progress-track"><span style="width:${progress}%"></span></div>
@@ -2531,8 +2744,128 @@ async function loadASMTaskCreateProfile() {
     }
 }
 
+async function loadASMCreateAgentChoices() {
+    asmPageState.createAgentChoicesError = '';
+    try {
+        const [projectsPayload, rolesPayload] = await Promise.all([
+            asmApi('/api/projects?limit=500&offset=0'),
+            asmApi('/api/roles'),
+        ]);
+        asmPageState.createAgentProjects = Array.isArray(projectsPayload.projects) ? projectsPayload.projects : [];
+        asmPageState.createAgentRoles = (Array.isArray(rolesPayload.roles) ? rolesPayload.roles : [])
+            .filter(role => role && role.enabled !== false);
+    } catch (error) {
+        asmPageState.createAgentProjects = [];
+        asmPageState.createAgentRoles = [];
+        asmPageState.createAgentChoicesError = error.message || '项目或角色读取失败';
+    }
+    const project = document.getElementById('asm-create-agent-project');
+    const role = document.getElementById('asm-create-agent-role');
+    if (project) {
+        project.innerHTML = `<option value="">不绑定项目</option>${asmPageState.createAgentProjects.map(item => `<option value="${asmEscape(item.id)}">${asmEscape(item.name || item.id)}</option>`).join('')}`;
+        syncASMCreateSelect(project);
+    }
+    if (role) {
+        role.innerHTML = `<option value="默认">默认</option>${asmPageState.createAgentRoles.map(item => {
+            const name = String(item.name || '').trim();
+            return name && name !== '默认' ? `<option value="${asmEscape(name)}">${asmEscape(name)}</option>` : '';
+        }).join('')}`;
+        syncASMCreateSelect(role);
+    }
+}
+
+function openASMCreateAgentProjectModal() {
+    if (typeof showNewProjectModal !== 'function') {
+        showNotification('项目创建功能尚未加载，请刷新页面后重试', 'error');
+        return;
+    }
+    window._projectModalFromASMTask = true;
+    showNewProjectModal();
+}
+
+async function handleASMTaskProjectCreated(project) {
+    const projectID = String(project?.id || '').trim();
+    await loadASMCreateAgentChoices();
+    const select = document.getElementById('asm-create-agent-project');
+    if (select && projectID) {
+        select.value = projectID;
+        syncASMCreateSelect(select);
+    }
+    showNotification(`项目「${project?.name || projectID}」已创建并用于本次自动分析`, 'success');
+}
+
+function syncASMCreateAgentReview() {
+    const mode = document.getElementById('asm-create-agent-review-mode')?.value || 'off';
+    const reviewer = document.getElementById('asm-create-agent-reviewer')?.value || 'human';
+    const reviewerField = document.getElementById('asm-create-agent-reviewer-field');
+    const timeoutField = document.getElementById('asm-create-agent-timeout-field');
+    if (reviewerField) reviewerField.hidden = mode === 'off';
+    if (timeoutField) timeoutField.hidden = mode === 'off' || reviewer !== 'human';
+}
+
+function toggleASMCreateAgentTrigger(force) {
+    const enabled = typeof force === 'boolean' ? force : !asmPageState.createAgentTriggerEnabled;
+    asmPageState.createAgentTriggerEnabled = enabled;
+    const button = document.getElementById('asm-create-agent-toggle');
+    const fields = document.getElementById('asm-create-agent-fields');
+    if (button) {
+        button.classList.toggle('active', enabled);
+        button.setAttribute('aria-pressed', String(enabled));
+        button.textContent = enabled ? '已启用自动分析' : '启用自动分析';
+    }
+    if (fields) fields.hidden = !enabled;
+    if (enabled) {
+        enhanceASMCreateSelects(fields);
+        syncASMCreateAgentReview();
+    }
+}
+
+function resetASMCreateAgentTrigger() {
+    toggleASMCreateAgentTrigger(false);
+    const values = {
+        'asm-create-agent-project': '',
+        'asm-create-agent-mode': 'eino_single',
+        'asm-create-agent-role': '默认',
+        'asm-create-agent-review-mode': 'off',
+        'asm-create-agent-reviewer': 'human',
+        'asm-create-agent-timeout': '300',
+    };
+    Object.entries(values).forEach(([id, value]) => {
+        const node = document.getElementById(id);
+        if (!node) return;
+        node.value = value;
+        syncASMCreateSelect(node);
+    });
+    const prompt = document.getElementById('asm-create-agent-prompt');
+    if (prompt) prompt.value = asmDefaultTaskCenterAgentPrompt;
+    syncASMCreateAgentReview();
+}
+
+function resetASMCreateAgentPrompt() {
+    const prompt = document.getElementById('asm-create-agent-prompt');
+    if (prompt) prompt.value = asmDefaultTaskCenterAgentPrompt;
+}
+
+function collectASMCreateAgentTrigger() {
+    if (!asmPageState.createAgentTriggerEnabled) return { enabled: false };
+    if (asmPageState.createAgentChoicesError) throw new Error(`无法配置 Agent 自动分析：${asmPageState.createAgentChoicesError}`);
+    const reviewMode = document.getElementById('asm-create-agent-review-mode')?.value || 'off';
+    return {
+        enabled: true,
+        project_id: document.getElementById('asm-create-agent-project')?.value || '',
+        agent_mode: document.getElementById('asm-create-agent-mode')?.value || 'eino_single',
+        role_name: document.getElementById('asm-create-agent-role')?.value || '默认',
+        review_mode: reviewMode,
+        reviewer: reviewMode === 'off' ? 'human' : (document.getElementById('asm-create-agent-reviewer')?.value || 'human'),
+        timeout_seconds: reviewMode === 'off' || document.getElementById('asm-create-agent-reviewer')?.value === 'audit_agent'
+            ? 0
+            : Number(document.getElementById('asm-create-agent-timeout')?.value || 300),
+        prompt: document.getElementById('asm-create-agent-prompt')?.value.trim() || asmDefaultTaskCenterAgentPrompt,
+    };
+}
+
 async function openASMTaskCreateModal() {
-    await loadASMResources();
+    await Promise.all([loadASMResources(), loadASMCreateAgentChoices()]);
     const select = document.getElementById('asm-create-resource');
     const enabled = asmPageState.resources.filter(item => item.enabled);
     if (select) select.innerHTML = enabled.map(item => `<option value="${asmEscape(item.id)}">${asmEscape(item.name)} · ${asmEscape(asmProviderLabel(item.provider))}</option>`).join('');
@@ -2540,6 +2873,7 @@ async function openASMTaskCreateModal() {
     syncASMCreateSelect(select);
     document.getElementById('asm-create-name').value = '';
     document.getElementById('asm-create-target').value = '';
+    resetASMCreateAgentTrigger();
     if (typeof openAppModal === 'function') openAppModal('asm-task-create-modal');
     else document.getElementById('asm-task-create-modal').style.display = 'flex';
     await loadASMTaskCreateProfile();
@@ -2587,29 +2921,52 @@ async function submitASMTaskCreate() {
     const errorRoot = document.getElementById('asm-create-error');
     const submit = document.getElementById('asm-create-submit');
     if (!resource || !target) return;
+    let modalClosed = false;
+    let pendingSubmissionID = '';
     try {
         const templateRequest = collectASMTemplateCreateRequest(name);
         const options = collectASMTaskCreateOptions();
+        const agentTrigger = collectASMCreateAgentTrigger();
         asmPageState.createLoading = true;
         if (submit) { submit.disabled = true; submit.textContent = templateRequest ? '正在创建模板…' : '正在下发…'; }
         if (errorRoot) { errorRoot.style.display = 'none'; errorRoot.textContent = ''; }
+        closeASMTaskCreateModal();
+        modalClosed = true;
+        pendingSubmissionID = addASMPendingSubmission(
+            resource,
+            name,
+            target,
+            agentTrigger.enabled ? 'task_center_auto_agent' : 'task_center',
+            templateRequest ? '正在创建扫描模板' : '等待 ASM 上游返回任务 ID',
+        );
+        if (typeof showNotification === 'function') {
+            showNotification(templateRequest ? '正在后台创建模板并下发 ASM 任务' : '正在后台下发 ASM 任务', 'info');
+        }
         if (templateRequest) {
             const template = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/templates`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(templateRequest) });
             options.template_id = template.template_id;
             options.template_verification_token = template.verification_token;
             if (template.capability_summary?.port_scope) options.required_port_scope = template.capability_summary.port_scope;
             options.required_capabilities = templateRequest.options.enabled_capabilities;
+            updateASMPendingSubmission(pendingSubmissionID, { stage: '模板已创建，正在下发扫描任务' });
             if (submit) submit.textContent = '模板已创建，正在下发…';
         }
-        const result = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, target, options }) });
-        closeASMTaskCreateModal();
+        const result = await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/tasks`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, target, options, agent_trigger: agentTrigger }) });
+        if (agentTrigger.enabled) trackASMTaskCenterAgentContinuation(result);
         await loadASMTasks(true);
         const count = Number(result.history_recorded_count) || 1;
-        if (typeof showNotification === 'function') showNotification(`ASM 任务已下发，记录 ${count} 个扫描子任务`, 'success');
+        if (typeof showNotification === 'function') {
+            const continuation = result.agent_continuation || {};
+            if (agentTrigger.enabled && continuation.status === 'failed') showNotification(`ASM 任务已下发，但 Agent 自动分析配置失败：${continuation.message || '未知错误'}`, 'warning');
+            else if (agentTrigger.enabled) showNotification(`ASM 任务已下发，记录 ${count} 个扫描子任务；结果本地化后将自动启动 Agent`, 'success');
+            else showNotification(`ASM 任务已下发，记录 ${count} 个扫描子任务`, 'success');
+        }
     } catch (error) {
-        if (errorRoot) { errorRoot.style.display = ''; errorRoot.textContent = error.message; }
+        if (!modalClosed && errorRoot) { errorRoot.style.display = ''; errorRoot.textContent = error.message; }
+        else if (typeof showNotification === 'function') showNotification(`ASM 任务下发失败：${error.message}`, 'error');
     } finally {
         asmPageState.createLoading = false;
+        removeASMPendingSubmission(pendingSubmissionID);
         if (submit) { submit.disabled = false; submit.textContent = '确认下发'; }
     }
 }
@@ -2682,6 +3039,7 @@ function initASMResourcesPage() {
 }
 
 async function initASMTaskCenterPage() {
+    ensureASMTaskCenterAutoRefresh();
     await loadASMResources();
     syncASMTaskProviderOptions();
     await loadASMTasks(true);
@@ -2722,8 +3080,13 @@ window.onASMResultDetailToggle = onASMResultDetailToggle;
 window.syncSelectedASMScreenshots = syncSelectedASMScreenshots;
 window.openASMTaskCreateModal = openASMTaskCreateModal;
 window.closeASMTaskCreateModal = closeASMTaskCreateModal;
+window.openASMCreateAgentProjectModal = openASMCreateAgentProjectModal;
+window.handleASMTaskProjectCreated = handleASMTaskProjectCreated;
+window.syncASMCreateAgentReview = syncASMCreateAgentReview;
 window.loadASMTaskCreateProfile = loadASMTaskCreateProfile;
 window.onASMCreateOptionChange = onASMCreateOptionChange;
 window.toggleASMTemplateBuilder = toggleASMTemplateBuilder;
 window.inspectASMTemplateBase = inspectASMTemplateBase;
 window.submitASMTaskCreate = submitASMTaskCreate;
+
+ensureASMPendingAutoAgentPoll();

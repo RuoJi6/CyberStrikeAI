@@ -839,7 +839,6 @@ func (h *AgentHandler) ProcessMessageForRobotAt(ctx context.Context, platform st
 			return "", "", fmt.Errorf("对话不存在")
 		}
 	}
-
 	// Claim the conversation before persisting this turn. This makes deferred
 	// TurnLoop retries race-safe: a losing turn returns without creating
 	// duplicate user messages or assistant placeholders.
@@ -856,6 +855,10 @@ func (h *AgentHandler) ProcessMessageForRobotAt(ctx context.Context, platform st
 	defer func() {
 		h.tasks.FinishTask(conversationID, taskStatus)
 	}()
+	h.activateHITLForConversation(conversationID, nil)
+	if h.hitlManager != nil {
+		defer h.hitlManager.DeactivateConversation(conversationID)
+	}
 
 	agentHistoryMessages, err := h.loadHistoryFromAgentTrace(conversationID)
 	if err != nil {

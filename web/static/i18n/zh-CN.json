@@ -126,7 +126,7 @@
     "title": "ASM 资源",
     "subtitle": "连接 ARL、XingRin 与 ScopeSentry，让 Agent 通过统一 MCP 下发任务并读取结果。",
     "taskCenterTitle": "ASM 任务中心",
-    "taskCenterSubtitle": "统一查看 Agent 与 MCP 创建的 ASM 任务、扫描进度、结果和站点截图。",
+    "taskCenterSubtitle": "统一查看 Agent/MCP 与任务中心创建的 ASM 任务、来源、扫描进度、结果和站点截图。",
     "refreshTasks": "刷新任务",
     "unifiedTaskHistory": "UNIFIED TASK HISTORY",
     "taskHistoryTitle": "统一任务历史",

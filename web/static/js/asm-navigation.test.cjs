@@ -69,3 +69,18 @@ test('Agent 主动读取扫描结果后以成功状态展示并进入成功筛�
     assert.match(asm, /success:\s*'completed,agent_consumed'/);
     assert.match(asm, /task\.consumed_by_agent/);
 });
+
+test('ASM 任务下发后立即显示占位记录且权威刷新不会被轮询吞掉', () => {
+    const submitStart = asm.indexOf('async function submitASMTaskCreate()');
+    const submitEnd = asm.indexOf('async function syncSelectedASMTaskResults()', submitStart);
+    const submit = asm.slice(submitStart, submitEnd);
+    const closeIndex = submit.indexOf('closeASMTaskCreateModal()');
+    const pendingIndex = submit.indexOf('addASMPendingSubmission(');
+    const requestIndex = submit.indexOf("await asmApi(`/api/asm/resources/${encodeURIComponent(resource.id)}/tasks`");
+
+    assert.ok(closeIndex >= 0 && pendingIndex > closeIndex, '关闭弹窗后应立即加入正在下发记录');
+    assert.ok(requestIndex > pendingIndex, '占位记录必须早于耗时的上游创建请求');
+    assert.match(submit, /finally\s*\{[\s\S]*removeASMPendingSubmission\(pendingSubmissionID\)/);
+    assert.match(asm, /if \(asmPageState\.loadingTasks\) \{[\s\S]{0,180}await activeLoad;[\s\S]{0,120}loadASMTasks\(true, silent\)/);
+    assert.match(asm, /pending\.map\(renderASMPendingSubmission\)\.join\(''\)/);
+});

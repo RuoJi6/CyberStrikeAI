@@ -17,7 +17,8 @@ func TestASMTaskPersistenceAndFilters(t *testing.T) {
 	defer db.Close()
 	item := &ASMTask{
 		ID: "asmtask_test", ResourceID: "asm_test", ResourceName: "Test ARL", Provider: "arl",
-		BatchID: "asmbatch_test", BatchIndex: 1, BatchSize: 2,
+		CreationSource: "task_center_auto_agent",
+		BatchID:        "asmbatch_test", BatchIndex: 1, BatchSize: 2,
 		RemoteTaskID: "0123456789abcdef01234567", Name: "authorized scan", Target: "192.0.2.1",
 		OptionsJSON: `{}`, Status: "submitted", SummaryJSON: `{}`, DetailJSON: `{}`,
 	}
@@ -34,7 +35,7 @@ func TestASMTaskPersistenceAndFilters(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := db.GetASMTask(item.ID)
-	if err != nil || got.Status != "completed" || got.Progress != 100 || got.LastSyncedAt == nil || got.BatchID != "asmbatch_test" || got.BatchIndex != 1 || got.BatchSize != 2 {
+	if err != nil || got.Status != "completed" || got.Progress != 100 || got.LastSyncedAt == nil || got.BatchID != "asmbatch_test" || got.BatchIndex != 1 || got.BatchSize != 2 || got.CreationSource != "task_center_auto_agent" {
 		t.Fatalf("unexpected updated task: %#v err=%v", got, err)
 	}
 	if err := db.UpsertASMTaskResult(item.ID, "site", `{"results":[]}`); err != nil {
