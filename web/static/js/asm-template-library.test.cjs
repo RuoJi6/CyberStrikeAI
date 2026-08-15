@@ -98,9 +98,12 @@ test('ASM task center exposes standalone durable Agent continuation settings', (
     assert.match(template, /用户主动停止对话/);
     assert.match(template, /不会自动重新启动 Agent/);
     assert.match(source, /renderASMTaskExecutionChip\(task\)/);
+    assert.match(source, /class="asm-task-provider-badges">\$\{renderASMTaskExecutionChip\(task\)\}/);
+    assert.doesNotMatch(source, /class="asm-task-primary"[^\n]+renderASMTaskExecutionChip\(task\)/);
     assert.match(source, /asm-task-detail-badges[^\n]+executionChip/);
     assert.match(source, /renderASMTaskExecutionPanel\(task\)/);
     assert.match(css, /\.asm-task-profile-chip/);
+    assert.match(css, /\.asm-task-provider-badges/);
     assert.match(css, /\.asm-task-execution-panel/);
     assert.match(template, /id="asm-continuation-summary"/);
     assert.match(template, /id="asm-continuation-list"/);

@@ -947,7 +947,9 @@
 .asm-provider-mark.asm-provider-xingrin.small { padding: 6px; }
 .asm-task-provider strong { color: var(--text-primary); font-size: 11px; }
 .asm-task-provider small { margin-top: 2px; color: var(--text-muted); font-size: 9px; }
-.asm-task-provider .asm-result-sync-badge { margin-top: 5px; }
+.asm-task-provider-badges { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 5px; }
+.asm-task-provider-badges .asm-task-profile-chip,
+.asm-task-provider-badges .asm-result-sync-badge { margin-top: 0; }
 .asm-task-row time { color: var(--text-secondary); font-size: 10px; }
 
 .asm-result-sync-badge { display: inline-flex; width: max-content; align-items: center; gap: 4px; padding: 3px 7px; font-size: 9px; font-style: normal; font-weight: 800; border-radius: 99px; }

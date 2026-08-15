@@ -1163,8 +1163,8 @@ function renderASMTaskRow(task, child) {
     const progress = asmTaskProgress(task.progress);
     const status = asmTaskStatusClass(task.status);
     return `<article class="asm-task-row${child ? ' asm-task-child' : ''}" onclick="openASMTaskModal('${asmEscape(task.id)}')">
-        <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span>${renderASMTaskExecutionChip(task)}</div>
-        <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></div>
+        <div class="asm-task-primary"><strong>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</strong><span title="${asmEscape(task.target)}">${asmEscape(task.target || '未记录目标')}</span></div>
+        <div class="asm-task-provider">${renderASMProviderMark(task.provider, true)}<span><strong>${asmEscape(task.resource_name)}</strong><small>${asmEscape(task.remote_task_id)}</small><span class="asm-task-provider-badges">${renderASMTaskExecutionChip(task)}<em class="asm-result-sync-badge ${asmResultSyncClass(task.result_sync)}">${asmEscape(asmResultSyncLabel(task.result_sync))}</em></span></span></div>
         <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(task.status))}</span><small>${asmEscape(task.stage || '')}</small></div><div class="asm-progress-track"><span style="width:${progress}%"></span></div><b>${progress}%</b></div>
         <time>${asmEscape(formatASMTime(task.created_at))}</time>
         <button type="button" class="btn-secondary btn-small" onclick="event.stopPropagation();openASMTaskModal('${asmEscape(task.id)}')">查看</button>
@@ -1181,8 +1181,8 @@ function renderASMBatch(group) {
     const children = expanded ? group.tasks.map(task => renderASMTaskRow(task, true)).join('') : '';
     return `<section class="asm-task-batch${expanded ? ' expanded' : ''}" data-batch-id="${asmEscape(group.batchID)}">
         <article class="asm-task-row asm-task-batch-row" onclick="toggleASMBatch('${asmEscape(group.batchID)}')">
-            <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span>${renderASMTaskExecutionChip(first)}</div>
-            <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></div>
+            <div class="asm-task-primary"><strong>${asmEscape(first.name || '批量扫描')}</strong><span title="${asmEscape(targetLabel)}">${state.expected} 个目标 · ${asmEscape(targetLabel)}</span></div>
+            <div class="asm-task-provider">${renderASMProviderMark(first.provider, true)}<span><strong>${asmEscape(first.resource_name)}</strong><small>${asmEscape(group.batchID)}</small><span class="asm-task-provider-badges">${renderASMTaskExecutionChip(first)}<em class="asm-result-sync-badge completed">同次 MCP 下发</em></span></span></div>
             <div class="asm-task-progress-cell"><div><span class="asm-task-status ${status}">${asmEscape(asmTaskStatusLabel(state.status))}</span><small>${state.completed}/${state.expected} 个子任务完成</small></div><div class="asm-progress-track"><span style="width:${state.progress}%"></span></div><b>${state.progress}%</b></div>
             <time>${asmEscape(formatASMTime(group.createdAtValue || first.created_at))}</time>
             <button type="button" class="btn-secondary btn-small" aria-expanded="${expanded}" onclick="event.stopPropagation();toggleASMBatch('${asmEscape(group.batchID)}')">${expanded ? '收起' : '展开'} ${expanded ? '↑' : '↓'}</button>
