@@ -4167,6 +4167,9 @@ function renderProcessDetails(messageId, processDetails, options) {
             itemTitle = typeof window.t === 'function'
                 ? window.t('chat.userInterruptContinueTitle')
                 : '⏸️ 用户中断并继续';
+        } else if (eventType === 'system_safe_point' && data.kind === 'asm_continuation') {
+            itemTitle = '🔔 ASM 运行中提示词已送达';
+            detail.message = String(data.prompt || '').trim();
         }
         
         if (eventType === 'hitl_interrupt' || eventType === 'hitl_audit_agent_started' ||

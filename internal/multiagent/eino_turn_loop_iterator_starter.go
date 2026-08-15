@@ -15,6 +15,7 @@ import (
 type einoTurnLoopRuntimeControl interface {
 	Run(context.Context)
 	PushInterruptContinue(string) bool
+	PushSystemMessageAtSafePoint(string) bool
 	StopImmediate(string)
 	StopWhenIdle()
 	Wait() *adk.TurnLoopExitState[EinoTurnLoopItem, *schema.Message]
@@ -35,8 +36,10 @@ type einoTurnLoopIteratorStarterConfig struct {
 	NativeCancelCause           *atomic.Value
 	UnregisterAgentCancel       *func()
 	UnregisterTurnLoopInterrupt *func()
+	UnregisterTurnLoopSafePoint *func()
 	RuntimeCancelRegistrar      AgentRuntimeCancelRegistrar
 	TurnLoopInterruptRegistrar  AgentTurnLoopInterruptRegistrar
+	TurnLoopSafePointRegistrar  AgentTurnLoopSafePointRegistrar
 	RuntimeFactory              einoTurnLoopRuntimeFactory
 }
 
@@ -58,6 +61,7 @@ func (s *einoTurnLoopIteratorStarter) Start(runMsgs []adk.Message) *adk.AsyncIte
 		return nil
 	}
 	callAndClearUnregister(s.cfg.UnregisterTurnLoopInterrupt)
+	callAndClearUnregister(s.cfg.UnregisterTurnLoopSafePoint)
 	callAndClearUnregister(s.cfg.UnregisterAgentCancel)
 
 	iter, gen := adk.NewAsyncIteratorPair[*adk.AgentEvent]()
@@ -72,6 +76,7 @@ func (s *einoTurnLoopIteratorStarter) Start(runMsgs []adk.Message) *adk.AsyncIte
 		OnAgentEvents:    eventsBridge.OnAgentEvents,
 	})
 	s.bindTurnLoopInterrupt(runtime)
+	s.bindTurnLoopSafePoint(runtime)
 	s.bindRuntimeCancel(runtime)
 	runtime.Run(s.cfg.Context)
 	runtime.StopWhenIdle()
@@ -84,6 +89,26 @@ func (s *einoTurnLoopIteratorStarter) Start(runMsgs []adk.Message) *adk.AsyncIte
 		gen.Send(&adk.AgentEvent{Err: state.ExitReason})
 	}()
 	return iter
+}
+
+func (s *einoTurnLoopIteratorStarter) bindTurnLoopSafePoint(runtime einoTurnLoopRuntimeControl) {
+	if s == nil || runtime == nil || s.cfg.TurnLoopSafePointRegistrar == nil || s.cfg.UnregisterTurnLoopSafePoint == nil {
+		return
+	}
+	*s.cfg.UnregisterTurnLoopSafePoint = s.cfg.TurnLoopSafePointRegistrar(func(message string) bool {
+		ok := runtime.PushSystemMessageAtSafePoint(message)
+		if ok && s.cfg.Progress != nil {
+			s.cfg.Progress("system_safe_point", "ASM 扫描完成通知已在 Agent 安全检查点送达（运行中提示词）。", map[string]interface{}{
+				"conversationId": s.cfg.ConversationID,
+				"kind":           "asm_continuation",
+				"source":         "eino",
+				"orchestration":  s.cfg.OrchMode,
+				"promptMode":     "running",
+				"prompt":         strings.TrimSpace(message),
+			})
+		}
+		return ok
+	})
 }
 
 func (s *einoTurnLoopIteratorStarter) turnLoopCheckpointID() string {

@@ -1574,6 +1574,43 @@ func normalizeScopeSentryTaskID(value string) (string, error) {
 	return strings.ToLower(value), nil
 }
 
+func scopeSentryTaskTemplateID(task map[string]interface{}) string {
+	if task == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(mapValue(task, "template", "template_id", "templateId")))
+}
+
+func (a *ScopeSentryAdapter) enrichTaskTemplateProfile(ctx context.Context, client *http.Client, conn *Connection, token string, task map[string]interface{}, cache map[string]map[string]interface{}) {
+	templateID := scopeSentryTaskTemplateID(task)
+	if !scopeSentryTaskIDPattern.MatchString(templateID) {
+		return
+	}
+	profile, exists := cache[templateID]
+	if !exists {
+		payload, err := scopeSentryRequest(ctx, client, conn, token, http.MethodPost, "/api/task/template/detail", nil, map[string]string{"id": templateID})
+		if err != nil {
+			cache[templateID] = nil
+			return
+		}
+		template := scopeSentryMap(scopeSentryData(payload))
+		name := strings.TrimSpace(fmt.Sprint(template["name"]))
+		if name == "" || name == "<nil>" {
+			cache[templateID] = nil
+			return
+		}
+		profile = map[string]interface{}{
+			"kind": "template", "label": "ScopeSentry 模板", "id": templateID, "name": name,
+		}
+		cache[templateID] = profile
+	}
+	if len(profile) == 0 {
+		return
+	}
+	task["template_name"] = profile["name"]
+	task["execution_profile"] = profile
+}
+
 func (a *ScopeSentryAdapter) ListTasks(ctx context.Context, conn *Connection, filter TaskFilter) (interface{}, error) {
 	client, token, err := a.session(ctx, conn)
 	if err != nil {
@@ -1599,8 +1636,13 @@ func (a *ScopeSentryAdapter) ListTasks(ctx context.Context, conn *Connection, fi
 	if err != nil {
 		return nil, err
 	}
+	templateProfiles := make(map[string]map[string]interface{})
+	for _, item := range scopeSentryList(payload) {
+		a.enrichTaskTemplateProfile(ctx, client, conn, token, scopeSentryMap(item), templateProfiles)
+	}
 	for _, item := range scopeSentryList(scheduled) {
 		task := scopeSentryMap(item)
+		a.enrichTaskTemplateProfile(ctx, client, conn, token, task, templateProfiles)
 		task["status"] = "submitted"
 		task["stage"] = "scheduled"
 		task["task_kind"] = "scheduled"
@@ -1683,10 +1725,26 @@ func (a *ScopeSentryAdapter) getTaskWithSession(ctx context.Context, client *htt
 	}
 	immediate, immediateErr := a.getImmediateTaskWithSession(ctx, client, conn, token, taskID)
 	if immediateErr == nil {
+		result := valueMap(immediate)
+		task := scopeSentryMap(scopeSentryData(result["task"]))
+		a.enrichTaskTemplateProfile(ctx, client, conn, token, task, make(map[string]map[string]interface{}))
+		if profile := valueMap(task["execution_profile"]); len(profile) > 0 {
+			result["execution_profile"] = profile
+			result["template_id"] = profile["id"]
+			result["template_name"] = profile["name"]
+		}
 		return immediate, nil
 	}
 	scheduled, scheduledErr := a.getScheduledTaskWithSession(ctx, client, conn, token, taskID)
 	if scheduledErr == nil {
+		result := valueMap(scheduled)
+		task := scopeSentryMap(scopeSentryData(result["task"]))
+		a.enrichTaskTemplateProfile(ctx, client, conn, token, task, make(map[string]map[string]interface{}))
+		if profile := valueMap(task["execution_profile"]); len(profile) > 0 {
+			result["execution_profile"] = profile
+			result["template_id"] = profile["id"]
+			result["template_name"] = profile["name"]
+		}
 		return scheduled, nil
 	}
 	return nil, fmt.Errorf("ScopeSentry 既未找到即时任务也未找到定时任务: %w", immediateErr)

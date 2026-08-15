@@ -17,6 +17,9 @@ const (
 	ContinuationAuto       = "auto"
 	ContinuationNotifyOnly = "notify_only"
 	ContinuationNone       = "none"
+
+	ContinuationDeliveryAfterTurn      = "after_turn"
+	ContinuationDeliveryNextCheckpoint = "next_checkpoint"
 )
 
 const defaultRunningPrompt = `ASM 扫描结果已完成。
@@ -41,6 +44,7 @@ const defaultIdlePrompt = `ASM 扫描结果已完成。
 
 type AgentContinuationSettings struct {
 	Behavior      string `json:"behavior"`
+	DeliveryMode  string `json:"delivery_mode"`
 	RunningPrompt string `json:"running_prompt"`
 	IdlePrompt    string `json:"idle_prompt"`
 }
@@ -54,17 +58,18 @@ type AgentContinuationHistoryFilter struct {
 }
 
 type AgentContinuationTaskView struct {
-	ID           string `json:"id"`
-	RemoteTaskID string `json:"remote_task_id,omitempty"`
-	ResourceID   string `json:"resource_id"`
-	ResourceName string `json:"resource_name"`
-	Provider     string `json:"provider"`
-	Name         string `json:"name"`
-	Target       string `json:"target"`
-	Status       string `json:"status"`
-	Progress     int    `json:"progress"`
-	Stage        string `json:"stage,omitempty"`
-	Consumed     bool   `json:"consumed_by_agent,omitempty"`
+	ID               string                 `json:"id"`
+	RemoteTaskID     string                 `json:"remote_task_id,omitempty"`
+	ResourceID       string                 `json:"resource_id"`
+	ResourceName     string                 `json:"resource_name"`
+	Provider         string                 `json:"provider"`
+	Name             string                 `json:"name"`
+	Target           string                 `json:"target"`
+	Status           string                 `json:"status"`
+	Progress         int                    `json:"progress"`
+	Stage            string                 `json:"stage,omitempty"`
+	Consumed         bool                   `json:"consumed_by_agent,omitempty"`
+	ExecutionProfile map[string]interface{} `json:"execution_profile,omitempty"`
 }
 
 type AgentContinuationHistoryItem struct {
@@ -72,6 +77,8 @@ type AgentContinuationHistoryItem struct {
 	ConversationID    string                      `json:"conversation_id"`
 	ConversationTitle string                      `json:"conversation_title,omitempty"`
 	Behavior          string                      `json:"behavior"`
+	DeliveryMode      string                      `json:"delivery_mode"`
+	InteractionMode   string                      `json:"interaction_mode"`
 	Status            string                      `json:"status"`
 	Phase             string                      `json:"phase"`
 	AgentWasRunning   bool                        `json:"agent_was_running"`
@@ -104,7 +111,10 @@ type AgentContinuationHistoryPage struct {
 }
 
 func DefaultAgentContinuationSettings() AgentContinuationSettings {
-	return AgentContinuationSettings{Behavior: ContinuationAuto, RunningPrompt: defaultRunningPrompt, IdlePrompt: defaultIdlePrompt}
+	return AgentContinuationSettings{
+		Behavior: ContinuationAuto, DeliveryMode: ContinuationDeliveryAfterTurn,
+		RunningPrompt: defaultRunningPrompt, IdlePrompt: defaultIdlePrompt,
+	}
 }
 
 func normalizeContinuationBehavior(value string) string {
@@ -129,6 +139,17 @@ func truncateContinuationPrompt(value string) string {
 	return value
 }
 
+func normalizeContinuationDeliveryMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case ContinuationDeliveryNextCheckpoint:
+		return ContinuationDeliveryNextCheckpoint
+	case ContinuationDeliveryAfterTurn, "":
+		return ContinuationDeliveryAfterTurn
+	default:
+		return ContinuationDeliveryAfterTurn
+	}
+}
+
 func normalizeAgentContinuationSettings(input *AgentContinuationSettings) AgentContinuationSettings {
 	defaults := DefaultAgentContinuationSettings()
 	if input == nil {
@@ -136,6 +157,7 @@ func normalizeAgentContinuationSettings(input *AgentContinuationSettings) AgentC
 	}
 	result := AgentContinuationSettings{
 		Behavior:      normalizeContinuationBehavior(input.Behavior),
+		DeliveryMode:  normalizeContinuationDeliveryMode(input.DeliveryMode),
 		RunningPrompt: strings.TrimSpace(input.RunningPrompt),
 		IdlePrompt:    strings.TrimSpace(input.IdlePrompt),
 	}
@@ -226,8 +248,9 @@ func (s *Service) attachAgentContinuation(conn *Connection, req TaskRequest, res
 	settings := resourceAgentContinuation(conn.Resource)
 	behavior := settings.Behavior
 	metadata := map[string]interface{}{
-		"behavior": behavior,
-		"status":   "disabled",
+		"behavior":      behavior,
+		"delivery_mode": settings.DeliveryMode,
+		"status":        "disabled",
 	}
 	object["agent_continuation"] = metadata
 	if behavior == ContinuationNone {
@@ -247,7 +270,7 @@ func (s *Service) attachAgentContinuation(conn *Connection, req TaskRequest, res
 	rawTaskIDs, _ := json.Marshal(taskIDs)
 	item := &database.ASMAgentContinuation{
 		ID: "asmcont_" + strings.ReplaceAll(uuid.NewString(), "-", "")[:20], TaskIDsJSON: string(rawTaskIDs),
-		ConversationID: conversationID, OwnerUserID: ownerUserID, Behavior: behavior,
+		ConversationID: conversationID, OwnerUserID: ownerUserID, Behavior: behavior, DeliveryMode: settings.DeliveryMode,
 		RunningPrompt: settings.RunningPrompt, IdlePrompt: settings.IdlePrompt, Status: "waiting",
 	}
 	if err := s.db.CreateASMAgentContinuation(item); err != nil {
@@ -421,6 +444,9 @@ func continuationHistoryPhase(item *database.ASMAgentContinuation, tasks []Agent
 	case "retry":
 		return "retry_wait"
 	case "queued":
+		if item.DeliveryMode == ContinuationDeliveryNextCheckpoint && item.AgentWasRunning {
+			return "checkpoint_pending"
+		}
 		return "queued_active"
 	case "running":
 		return "resuming"
@@ -462,6 +488,23 @@ func continuationHistoryPhase(item *database.ASMAgentContinuation, tasks []Agent
 	}
 }
 
+func continuationInteractionMode(item *database.ASMAgentContinuation) string {
+	if item == nil {
+		return "system_push"
+	}
+	consumed := continuationTasks(item.ConsumedTaskIDsJSON)
+	if item.Status == "agent_consumed" {
+		return "agent_query"
+	}
+	if len(consumed) > 0 {
+		return "mixed"
+	}
+	if item.Behavior == ContinuationNotifyOnly {
+		return "record_only"
+	}
+	return "system_push"
+}
+
 // ListAgentContinuations exposes the durable worker state used by the Agent
 // linkage diagnostics UI. Prompts and owner identifiers are intentionally not
 // returned because the page only needs execution state and task context.
@@ -489,8 +532,8 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 	}
 	for _, row := range rows {
 		view := AgentContinuationHistoryItem{
-			ID: row.ID, ConversationID: row.ConversationID, Behavior: row.Behavior,
-			Status: row.Status, AgentWasRunning: row.AgentWasRunning, Attempts: row.Attempts,
+			ID: row.ID, ConversationID: row.ConversationID, Behavior: row.Behavior, DeliveryMode: row.DeliveryMode,
+			InteractionMode: continuationInteractionMode(row), Status: row.Status, AgentWasRunning: row.AgentWasRunning, Attempts: row.Attempts,
 			LastError: row.LastError, ReadyAt: row.ReadyAt, CompletedAt: row.CompletedAt,
 			CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 			ConsumedTaskIDs: continuationTasks(row.ConsumedTaskIDsJSON), ConsumedAt: row.ConsumedAt, ConsumedTool: row.ConsumedTool,
@@ -509,7 +552,7 @@ func (s *Service) ListAgentContinuations(filter AgentContinuationHistoryFilter) 
 				ID: task.ID, RemoteTaskID: task.RemoteTaskID, ResourceID: task.ResourceID,
 				ResourceName: task.ResourceName, Provider: task.Provider, Name: task.Name,
 				Target: task.Target, Status: task.Status, Progress: task.Progress, Stage: task.Stage,
-				Consumed: consumedTaskIDs[task.ID],
+				Consumed: consumedTaskIDs[task.ID], ExecutionProfile: taskExecutionProfile(task.Provider, jsonObject(task.OptionsJSON), jsonValue(task.DetailJSON)),
 			})
 		}
 		view.Phase = continuationHistoryPhase(row, view.Tasks)

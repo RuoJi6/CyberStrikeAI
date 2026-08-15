@@ -121,6 +121,46 @@ func TestEinoTurnLoopRuntimePushInterruptStartsNextTurn(t *testing.T) {
 	}
 }
 
+func TestEinoTurnLoopRuntimePushSystemMessageAtSafePoint(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	mockModel := newTurnLoopBlockingModel()
+	agent, err := adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{Name: "safe-point-agent", Model: mockModel})
+	if err != nil {
+		t.Fatalf("NewChatModelAgent: %v", err)
+	}
+	runtime := NewEinoTurnLoopRuntime(EinoTurnLoopRuntimeConfig{
+		Agent: agent, InitialMessages: []*schema.Message{schema.UserMessage("keep working")}, InterruptTimeout: 20 * time.Millisecond,
+	})
+	runtime.Run(ctx)
+	select {
+	case <-mockModel.started:
+	case <-ctx.Done():
+		t.Fatal("first model call did not start")
+	}
+	if !runtime.PushSystemMessageAtSafePoint("ASM result ready: task-1") {
+		t.Fatal("safe-point system message was rejected")
+	}
+	// System delivery must not cancel the in-flight model call. Completing that
+	// step opens the safe point and only then starts the supplemented turn.
+	close(mockModel.release)
+	select {
+	case <-mockModel.started:
+	case <-ctx.Done():
+		t.Fatal("second model call did not start after safe-point push")
+	}
+	runtime.StopWhenIdle()
+	if state := runtime.Wait(); state == nil || state.ExitReason != nil {
+		t.Fatalf("unexpected turn-loop exit: %#v", state)
+	}
+	inputs := mockModel.snapshotInputs()
+	last := inputs[len(inputs)-1]
+	if got := last[len(last)-1].Content; got != "ASM result ready: task-1" {
+		t.Fatalf("safe-point message = %q", got)
+	}
+}
+
 func TestMergeEinoTurnLoopMessagesClonesInput(t *testing.T) {
 	original := schema.UserMessage("hello")
 	msgs := mergeEinoTurnLoopMessages([]EinoTurnLoopItem{{Messages: []*schema.Message{original}}})

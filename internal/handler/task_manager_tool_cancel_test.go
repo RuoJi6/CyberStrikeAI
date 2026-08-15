@@ -156,6 +156,27 @@ func TestCancelTaskPushesInterruptContinueToTurnLoopFirst(t *testing.T) {
 	}
 }
 
+func TestPushAgentTurnLoopSafePointUsesIndependentChannel(t *testing.T) {
+	tm := NewAgentTaskManager()
+	_, cancel := context.WithCancelCause(context.Background())
+	if _, err := tm.StartTask("conv-safe-point", "hello", cancel); err != nil {
+		t.Fatalf("StartTask: %v", err)
+	}
+	var got string
+	unregister := tm.BindAgentTurnLoopSafePoint("conv-safe-point", func(message string) bool {
+		got = message
+		return true
+	})
+	defer unregister()
+	if !tm.PushAgentTurnLoopSafePoint("conv-safe-point", "ASM ready") || got != "ASM ready" {
+		t.Fatalf("safe-point push failed: got=%q", got)
+	}
+	tm.UpdateTaskStatus("conv-safe-point", "cancelling")
+	if tm.PushAgentTurnLoopSafePoint("conv-safe-point", "must not deliver") {
+		t.Fatal("cancelling task must reject safe-point delivery")
+	}
+}
+
 func TestCancelTaskFallsBackWhenTurnLoopInterruptRejects(t *testing.T) {
 	tm := NewAgentTaskManager()
 	var order []string

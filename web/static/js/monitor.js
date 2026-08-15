@@ -6504,6 +6504,11 @@ function addTimelineItem(timeline, type, options) {
             ? formatTimelineStreamBody(options.message, options.data)
             : options.message;
         content += `<div class="timeline-item-content timeline-stream-plain">${formatTimelinePlainTextHtml(streamBody)}</div>`;
+    } else if (type === 'system_safe_point' && options.data && options.data.kind === 'asm_continuation') {
+        const prompt = String(options.data.prompt || options.message || '').trim();
+        if (prompt) {
+            content += `<div class="timeline-item-content timeline-stream-plain">${formatTimelinePlainTextHtml(prompt)}</div>`;
+        }
     }
 
     item.innerHTML = content;

@@ -337,7 +337,27 @@ func (a *ARLAdapter) CreateTask(ctx context.Context, conn *Connection, req TaskR
 	if err != nil {
 		return nil, err
 	}
-	return map[string]interface{}{"provider": ProviderARL, "resource_id": conn.Resource.ID, "response": payload}, nil
+	result := map[string]interface{}{"provider": ProviderARL, "resource_id": conn.Resource.ID, "response": payload}
+	if endpoint == "/api/task/policy/" {
+		policyID := meaningfulString(body["policy_id"])
+		profile := map[string]interface{}{"kind": "policy", "label": "ARL 策略", "id": policyID}
+		if detail, detailErr := a.readPolicyDetail(ctx, conn, policyID); detailErr == nil {
+			name := meaningfulString(detail["name"])
+			if name == "" {
+				name = meaningfulString(detail["policy_name"])
+			}
+			if name == "" {
+				policy := valueMap(detail["policy"])
+				name = meaningfulString(mapValue(policy, "name", "policy_name"))
+			}
+			profile["name"] = name
+			result["policy_name"] = name
+		} else {
+			result["profile_lookup_warning"] = "ARL 任务已创建，但策略名称回读失败: " + detailErr.Error()
+		}
+		result["execution_profile"] = profile
+	}
+	return result, nil
 }
 
 func normalizePagination(page, size int) (int, int) {

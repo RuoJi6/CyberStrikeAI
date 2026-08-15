@@ -77,6 +77,40 @@ func TestARLTaskProfileMarksPolicyOnlyFields(t *testing.T) {
 	}
 }
 
+func TestARLPolicyTaskReturnsPolicyNameExecutionProfile(t *testing.T) {
+	const policyID = "64b000000000000000000001"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/user/login":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"token": "test-token"}})
+		case "/api/task/policy/":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "data": map[string]interface{}{"task_id": "64b000000000000000000099"}})
+		case "/api/policy/":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"code": 200, "items": []interface{}{
+				map[string]interface{}{"_id": policyID, "name": "CyberStrikeAI · 外网全量策略", "policy": map[string]interface{}{}},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := NewARLAdapter().CreateTask(context.Background(), &Connection{
+		Resource: &database.ASMResource{ID: "asm-arl-policy", Provider: ProviderARL, BaseURL: server.URL, Username: "admin", AuthType: "password", VerifyTLS: true},
+		Secret:   "password",
+	}, TaskRequest{Name: "policy task", Target: "192.0.2.20", Options: map[string]interface{}{
+		"task_mode": "policy", "policy_id": policyID,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := valueMap(valueMap(result)["execution_profile"])
+	if meaningfulString(profile["id"]) != policyID || meaningfulString(profile["name"]) != "CyberStrikeAI · 外网全量策略" {
+		t.Fatalf("ARL policy execution profile missing: %#v", profile)
+	}
+}
+
 func TestARLFetchScreenshotUsesAPINamespace(t *testing.T) {
 	jpeg := []byte{0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 'J', 'F', 'I', 'F'}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -16,13 +16,14 @@ func TestAgentContinuationSettingsPersistOnResource(t *testing.T) {
 		Name: "XingRin", Provider: ProviderXingRin, BaseURL: "https://asm.example.test",
 		Username: "admin", Credential: "secret", AuthType: "password",
 		AgentContinuation: &AgentContinuationSettings{
-			Behavior: ContinuationNotifyOnly, RunningPrompt: "running {{task_id}}", IdlePrompt: "idle {{task_id}}",
+			Behavior: ContinuationNotifyOnly, DeliveryMode: ContinuationDeliveryNextCheckpoint,
+			RunningPrompt: "running {{task_id}}", IdlePrompt: "idle {{task_id}}",
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if view.AgentContinuation.Behavior != ContinuationNotifyOnly || view.AgentContinuation.RunningPrompt != "running {{task_id}}" {
+	if view.AgentContinuation.Behavior != ContinuationNotifyOnly || view.AgentContinuation.DeliveryMode != ContinuationDeliveryNextCheckpoint || view.AgentContinuation.RunningPrompt != "running {{task_id}}" {
 		t.Fatalf("unexpected continuation settings: %#v", view.AgentContinuation)
 	}
 	reloaded, err := service.GetResource(view.ID)
@@ -46,14 +47,74 @@ func TestAgentContinuationSettingsPersistOnResource(t *testing.T) {
 func TestAgentContinuationSettingsRejectUnknownBehaviorWithoutAutoRun(t *testing.T) {
 	settings := normalizeAgentContinuationSettings(&AgentContinuationSettings{
 		Behavior:      "unexpected",
+		DeliveryMode:  "unsafe-now",
 		RunningPrompt: strings.Repeat("续", 8100),
 		IdlePrompt:    "idle",
 	})
 	if settings.Behavior != ContinuationNone {
 		t.Fatalf("unknown behavior must fail closed, got %q", settings.Behavior)
 	}
+	if settings.DeliveryMode != ContinuationDeliveryAfterTurn {
+		t.Fatalf("unknown delivery mode must preserve the safe default, got %q", settings.DeliveryMode)
+	}
 	if len([]rune(settings.RunningPrompt)) != 8000 || !strings.HasSuffix(settings.RunningPrompt, "续") {
 		t.Fatalf("prompt was not truncated on a Unicode boundary: runes=%d", len([]rune(settings.RunningPrompt)))
+	}
+}
+
+func TestAgentContinuationQueuedPhaseShowsSafePointDelivery(t *testing.T) {
+	item := &database.ASMAgentContinuation{
+		Status: "queued", AgentWasRunning: true, DeliveryMode: ContinuationDeliveryNextCheckpoint,
+	}
+	if got := continuationHistoryPhase(item, nil); got != "checkpoint_pending" {
+		t.Fatalf("phase = %q, want checkpoint_pending", got)
+	}
+	item.DeliveryMode = ContinuationDeliveryAfterTurn
+	if got := continuationHistoryPhase(item, nil); got != "queued_active" {
+		t.Fatalf("phase = %q, want queued_active", got)
+	}
+}
+
+func TestAgentContinuationHistoryExposesInteractionModeAndExecutionProfile(t *testing.T) {
+	service, _ := newTaskHistoryTestService(t)
+	task := &database.ASMTask{
+		ID: "asmtask-profile", ResourceID: "resource-profile", ResourceName: "ScopeSentry",
+		Provider: ProviderScopeSentry, RemoteTaskID: "remote-profile", Name: "template scan", Target: "192.0.2.55",
+		OptionsJSON: `{"template_id":"template-55","_execution_profile":{"kind":"template","label":"ScopeSentry 模板","id":"template-55","name":"外网全量模板"}}`,
+		Status:      "completed", Progress: 100, SummaryJSON: "{}", DetailJSON: "{}",
+	}
+	if err := service.db.CreateASMTask(task); err != nil {
+		t.Fatal(err)
+	}
+	continuation := &database.ASMAgentContinuation{
+		ID: "asmcont-profile", TaskIDsJSON: `["asmtask-profile"]`, ConversationID: "conversation-profile",
+		OwnerUserID: "user-profile", Behavior: ContinuationAuto, DeliveryMode: ContinuationDeliveryAfterTurn,
+		RunningPrompt: "running", IdlePrompt: "idle", Status: "waiting",
+	}
+	if err := service.db.CreateASMAgentContinuation(continuation); err != nil {
+		t.Fatal(err)
+	}
+	page, err := service.ListAgentContinuations(AgentContinuationHistoryFilter{
+		Page: 1, PageSize: 20, Access: database.RBACListAccess{Scope: database.RBACScopeAll},
+	})
+	if err != nil || len(page.Items) != 1 || len(page.Items[0].Tasks) != 1 {
+		t.Fatalf("unexpected continuation history: page=%#v err=%v", page, err)
+	}
+	item := page.Items[0]
+	if item.InteractionMode != "system_push" {
+		t.Fatalf("interaction mode = %q, want system_push", item.InteractionMode)
+	}
+	if meaningfulString(item.Tasks[0].ExecutionProfile["name"]) != "外网全量模板" {
+		t.Fatalf("execution profile missing from continuation task: %#v", item.Tasks[0].ExecutionProfile)
+	}
+	continuation.Status = "agent_consumed"
+	continuation.ConsumedTaskIDsJSON = `["asmtask-profile"]`
+	if mode := continuationInteractionMode(continuation); mode != "agent_query" {
+		t.Fatalf("interaction mode = %q, want agent_query", mode)
+	}
+	continuation.Status = "waiting"
+	if mode := continuationInteractionMode(continuation); mode != "mixed" {
+		t.Fatalf("interaction mode = %q, want mixed", mode)
 	}
 }
 

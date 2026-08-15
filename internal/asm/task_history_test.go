@@ -246,6 +246,34 @@ func TestTaskHistoryExposesProviderExecutionProfile(t *testing.T) {
 	if meaningfulString(legacyView.ExecutionProfile["id"]) != "legacy-template" {
 		t.Fatalf("legacy template id was not recovered: %#v", legacyView.ExecutionProfile)
 	}
+
+	resolvedLegacy := &database.ASMTask{
+		ID: "scope-resolved-legacy", Provider: ProviderScopeSentry,
+		OptionsJSON: `{"template_id":"legacy-template","_execution_profile":{"kind":"template","id":"legacy-template","name":""}}`,
+		DetailJSON:  `{"execution_profile":{"kind":"template","label":"ScopeSentry 模板","id":"legacy-template","name":"外网全量模板"}}`,
+	}
+	resolvedLegacyView := taskHistoryView(resolvedLegacy)
+	if meaningfulString(resolvedLegacyView.ExecutionProfile["name"]) != "外网全量模板" {
+		t.Fatalf("resolved template name did not fill the stored empty profile: %#v", resolvedLegacyView.ExecutionProfile)
+	}
+
+	arlLegacy := &database.ASMTask{
+		ID: "arl-policy-name", Provider: ProviderARL, OptionsJSON: `{}`,
+		DetailJSON: `{"tasks":{"items":[{"options":{"policy_name":"CyberStrikeAI · 快速探测"}}]}}`,
+	}
+	arlLegacyView := taskHistoryView(arlLegacy)
+	if meaningfulString(arlLegacyView.ExecutionProfile["name"]) != "CyberStrikeAI · 快速探测" {
+		t.Fatalf("legacy ARL policy name was not recovered: %#v", arlLegacyView.ExecutionProfile)
+	}
+
+	arlReturned := &database.ASMTask{
+		ID: "arl-returned-profile", Provider: ProviderARL, OptionsJSON: `{"policy_id":"policy-1"}`,
+		DetailJSON: `{"execution_profile":{"kind":"policy","label":"ARL 策略","id":"policy-1","name":"外网全量策略"}}`,
+	}
+	arlReturnedView := taskHistoryView(arlReturned)
+	if meaningfulString(arlReturnedView.ExecutionProfile["name"]) != "外网全量策略" {
+		t.Fatalf("returned ARL execution profile was not preserved: %#v", arlReturnedView.ExecutionProfile)
+	}
 }
 
 func TestCreatedTaskEntriesIncludesEveryARLItem(t *testing.T) {

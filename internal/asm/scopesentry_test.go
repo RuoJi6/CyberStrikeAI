@@ -160,7 +160,7 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 			mu.Unlock()
 			items := []map[string]interface{}{}
 			if created {
-				items = append(items, map[string]interface{}{"id": taskID, "name": name, "status": 1, "progress": 10})
+				items = append(items, map[string]interface{}{"id": taskID, "name": name, "status": 1, "progress": 10, "template": profileID})
 			}
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"list": items, "total": len(items)}})
 		case "/api/task/scheduled":
@@ -181,7 +181,7 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 				http.Error(w, `{"code":500,"data":"task not found"}`, http.StatusInternalServerError)
 				return
 			}
-			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"id": taskID, "name": name, "status": 3, "progress": 100}})
+			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"id": taskID, "name": name, "status": 3, "progress": 100, "template": profileID}})
 		case "/api/task/scheduled/detail":
 			writeScopeSentryTestJSON(t, w, map[string]interface{}{"code": 200, "data": map[string]interface{}{"id": scheduledID, "name": scheduledName, "scheduledTasks": true, "cycleType": "daily"}})
 		case "/api/assets/ip":
@@ -309,10 +309,10 @@ func TestScopeSentryAdapterProtocol(t *testing.T) {
 	if !strings.Contains(fmt.Sprint(created), "effective_template") || !strings.Contains(fmt.Sprint(created), "custom") {
 		t.Fatalf("CreateTask must return the effective template summary: %#v", created)
 	}
-	if result, err := adapter.ListTasks(ctx, connection, TaskFilter{Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), taskID) {
+	if result, err := adapter.ListTasks(ctx, connection, TaskFilter{Page: 1, PageSize: 10}); err != nil || !strings.Contains(fmt.Sprint(result), taskID) || !strings.Contains(fmt.Sprint(result), profileName) {
 		t.Fatalf("ListTasks result=%#v err=%v", result, err)
 	}
-	if result, err := adapter.GetTask(ctx, connection, taskID); err != nil || !strings.Contains(fmt.Sprint(result), "completed") {
+	if result, err := adapter.GetTask(ctx, connection, taskID); err != nil || !strings.Contains(fmt.Sprint(result), "completed") || !strings.Contains(fmt.Sprint(result), profileName) {
 		t.Fatalf("GetTask result=%#v err=%v", result, err)
 	}
 	if result, err := adapter.ListAssets(ctx, connection, AssetFilter{TaskID: taskID, Type: "ip", Page: 1, PageSize: 20}); err != nil || !strings.Contains(fmt.Sprint(result), "192.0.2.10") {

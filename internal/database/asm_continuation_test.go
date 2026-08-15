@@ -23,6 +23,10 @@ func TestListASMAgentContinuationsFiltersAccessStatusAndCounts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	stored, err := db.GetASMAgentContinuation("cont-waiting")
+	if err != nil || stored.DeliveryMode != "after_turn" {
+		t.Fatalf("legacy/default delivery mode = %q, err=%v", stored.DeliveryMode, err)
+	}
 
 	items, total, err := db.ListASMAgentContinuations(ASMAgentContinuationFilter{
 		Page: 1, PageSize: 20, Access: RBACListAccess{UserID: "user-a", Scope: RBACScopeOwn},

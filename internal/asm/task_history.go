@@ -186,10 +186,19 @@ func firstTaskHistoryValue(value interface{}, paths ...[]interface{}) interface{
 }
 
 func taskExecutionProfile(provider string, options map[string]interface{}, detail interface{}) map[string]interface{} {
-	if stored := valueMap(options["_execution_profile"]); len(stored) > 0 {
-		return stored
-	}
 	profile := map[string]interface{}{}
+	mergeMissing := func(values map[string]interface{}) {
+		for key, value := range values {
+			if _, exists := profile[key]; !exists || meaningfulString(profile[key]) == "" {
+				profile[key] = value
+			}
+		}
+	}
+	mergeMissing(valueMap(options["_execution_profile"]))
+	mergeMissing(valueMap(firstTaskHistoryValue(detail,
+		[]interface{}{"execution_profile"},
+		[]interface{}{"response", "execution_profile"},
+	)))
 	switch normalizeProvider(provider) {
 	case ProviderScopeSentry:
 		effective := valueMap(firstTaskHistoryValue(detail,
@@ -197,7 +206,10 @@ func taskExecutionProfile(provider string, options map[string]interface{}, detai
 			[]interface{}{"creation_response", "effective_template"},
 			[]interface{}{"response", "effective_template"},
 		))
-		id := meaningfulString(options["template_id"])
+		id := meaningfulString(profile["id"])
+		if id == "" {
+			id = meaningfulString(options["template_id"])
+		}
 		if id == "" && effective != nil {
 			id = meaningfulString(effective["template_id"])
 		}
@@ -208,9 +220,22 @@ func taskExecutionProfile(provider string, options map[string]interface{}, detai
 				[]interface{}{"task", "template"},
 			))
 		}
-		name := ""
+		name := meaningfulString(profile["name"])
+		if name == "" {
+			name = meaningfulString(options["template_name"])
+		}
+		if name == "" {
+			name = meaningfulString(firstTaskHistoryValue(detail,
+				[]interface{}{"template_name"},
+				[]interface{}{"templateName"},
+				[]interface{}{"task", "data", "template_name"},
+				[]interface{}{"task", "data", "templateName"},
+			))
+		}
 		if effective != nil {
-			name = meaningfulString(effective["template_name"])
+			if effectiveName := meaningfulString(effective["template_name"]); effectiveName != "" {
+				name = effectiveName
+			}
 			for _, key := range []string{"port_scope", "port_expression", "full_ports", "enabled_capabilities", "selected_poc_count"} {
 				if value, exists := effective[key]; exists {
 					profile[key] = value
@@ -222,17 +247,39 @@ func taskExecutionProfile(provider string, options map[string]interface{}, detai
 		}
 		profile["kind"], profile["label"], profile["id"], profile["name"] = "template", "ScopeSentry 模板", id, name
 	case ProviderARL:
-		id := meaningfulString(options["policy_id"])
+		id := meaningfulString(profile["id"])
 		if id == "" {
+			id = meaningfulString(options["policy_id"])
+		}
+		if id == "" {
+			id = meaningfulString(firstTaskHistoryValue(detail,
+				[]interface{}{"policy_id"},
+				[]interface{}{"policyId"},
+				[]interface{}{"response", "policy_id"},
+				[]interface{}{"tasks", "items", 0, "policy_id"},
+			))
+		}
+		name := meaningfulString(profile["name"])
+		if name == "" {
+			name = meaningfulString(options["policy_name"])
+		}
+		if name == "" {
+			name = meaningfulString(firstTaskHistoryValue(detail,
+				[]interface{}{"policy_name"},
+				[]interface{}{"response", "policy_name"},
+				[]interface{}{"options", "policy_name"},
+				[]interface{}{"tasks", "items", 0, "options", "policy_name"},
+			))
+		}
+		if id == "" && name == "" {
 			return nil
 		}
-		profile["kind"], profile["label"], profile["id"] = "policy", "ARL 策略", id
-		profile["name"] = meaningfulString(firstTaskHistoryValue(detail,
-			[]interface{}{"policy_name"},
-			[]interface{}{"response", "policy_name"},
-		))
+		profile["kind"], profile["label"], profile["id"], profile["name"] = "policy", "ARL 策略", id, name
 	case ProviderXingRin:
-		ids := historyStringSlice(options["engine_ids"])
+		ids := historyStringSlice(profile["ids"])
+		if len(ids) == 0 {
+			ids = historyStringSlice(options["engine_ids"])
+		}
 		if len(ids) == 0 {
 			ids = historyStringSlice(firstTaskHistoryValue(detail,
 				[]interface{}{"execution_profile", "ids"},
@@ -240,11 +287,17 @@ func taskExecutionProfile(provider string, options map[string]interface{}, detai
 				[]interface{}{"response", "scans", 0, "engineIds"},
 			))
 		}
-		names := historyStringSlice(firstTaskHistoryValue(detail,
-			[]interface{}{"execution_profile", "names"},
-			[]interface{}{"tasks", "results", 0, "engineNames"},
-			[]interface{}{"response", "scans", 0, "engineNames"},
-		))
+		names := historyStringSlice(profile["names"])
+		if len(names) == 0 {
+			names = historyStringSlice(options["engine_names"])
+		}
+		if len(names) == 0 {
+			names = historyStringSlice(firstTaskHistoryValue(detail,
+				[]interface{}{"execution_profile", "names"},
+				[]interface{}{"tasks", "results", 0, "engineNames"},
+				[]interface{}{"response", "scans", 0, "engineNames"},
+			))
+		}
 		if len(ids) == 0 && len(names) == 0 {
 			return nil
 		}
@@ -262,6 +315,20 @@ func taskHistoryOptions(provider string, input map[string]interface{}, result in
 	}
 	if profile := taskExecutionProfile(provider, options, result); len(profile) > 0 {
 		options["_execution_profile"] = profile
+		switch normalizeProvider(provider) {
+		case ProviderScopeSentry:
+			if name := meaningfulString(profile["name"]); name != "" {
+				options["template_name"] = name
+			}
+		case ProviderARL:
+			if name := meaningfulString(profile["name"]); name != "" {
+				options["policy_name"] = name
+			}
+		case ProviderXingRin:
+			if names := historyStringSlice(profile["names"]); len(names) > 0 {
+				options["engine_names"] = names
+			}
+		}
 	}
 	return options
 }

@@ -373,16 +373,20 @@ function resetASMAgentContinuationPrompts() {
 function syncASMAgentContinuationForm() {
     const behavior = document.getElementById('asm-agent-continuation-behavior')?.value || 'auto';
     const prompts = document.getElementById('asm-agent-continuation-prompts');
+    const deliveryField = document.getElementById('asm-agent-continuation-delivery-field');
     if (prompts) prompts.hidden = behavior !== 'auto';
+    if (deliveryField) deliveryField.hidden = behavior !== 'auto';
 }
 
 function loadASMAgentContinuationSettings() {
     const resource = selectedASMAgentContinuationResource();
     const settings = resource?.agent_continuation || {};
     const behavior = document.getElementById('asm-agent-continuation-behavior');
+    const deliveryMode = document.getElementById('asm-agent-continuation-delivery-mode');
     const running = document.getElementById('asm-agent-continuation-running-prompt');
     const idle = document.getElementById('asm-agent-continuation-idle-prompt');
     if (behavior) behavior.value = settings.behavior || 'auto';
+    if (deliveryMode) deliveryMode.value = settings.delivery_mode || 'after_turn';
     if (running) running.value = settings.running_prompt || asmDefaultRunningPrompt;
     if (idle) idle.value = settings.idle_prompt || asmDefaultIdlePrompt;
     syncASMAgentContinuationForm();
@@ -396,6 +400,7 @@ const asmContinuationPhaseMeta = Object.freeze({
     awaiting_agent: { label: '等待发起', group: 'waiting', tone: 'ready', description: '结果已就绪，等待来源 Agent 空闲' },
     retry_wait: { label: '等待重试', group: 'waiting', tone: 'warning', description: '上次恢复失败，系统将自动重试' },
     queued_active: { label: '已排队', group: 'waiting', tone: 'ready', description: '来源 Agent 仍在运行；已进入 Eino TurnLoop，将在当前任务结束后自动续跑' },
+    checkpoint_pending: { label: '等待当前步骤结束', group: 'waiting', tone: 'ready', description: '来源 Agent 仍在运行；将在当前模型或工具步骤结束后插入扫描完成通知' },
     resuming: { label: '正在恢复', group: 'running', tone: 'running', description: '系统正在向来源对话发起 Agent 续跑' },
     success: { label: '成功', group: 'success', tone: 'success', description: '联动消息已送达，并已成功启动一次 Agent 续跑' },
     agent_consumed: { label: 'Agent 已读取', group: 'success', tone: 'success', description: '来源 Agent 已主动读取全部关联扫描结果，系统已取消重复插入' },
@@ -407,6 +412,18 @@ const asmContinuationPhaseMeta = Object.freeze({
 
 function asmContinuationMeta(item) {
     return asmContinuationPhaseMeta[item?.phase] || asmContinuationPhaseMeta.failed;
+}
+
+const asmContinuationInteractionMeta = Object.freeze({
+    agent_query: { label: 'Agent 主动查询', tone: 'agent', description: 'Agent 已通过 ASM MCP 主动读取结果，系统没有重复发送完成通知' },
+    system_push: { label: '系统主动通知', tone: 'system', description: '系统按联动设置向来源 Agent 主动发送扫描完成通知' },
+    mixed: { label: '查询 + 系统通知', tone: 'mixed', description: '部分任务由 Agent 主动查询，其余任务由系统发送完成通知' },
+    record_only: { label: '仅记录，不发送', tone: 'record', description: '系统只记录扫描完成状态，不向 Agent 发送通知' },
+});
+
+function asmContinuationInteraction(item) {
+    const mode = item?.interaction_mode || (item?.phase === 'agent_consumed' ? 'agent_query' : 'system_push');
+    return asmContinuationInteractionMeta[mode] || asmContinuationInteractionMeta.system_push;
 }
 
 function asmContinuationSummaryCounts() {
@@ -470,6 +487,7 @@ function renderASMAgentContinuations() {
         root.innerHTML = `<div class="asm-continuation-empty"><strong>当前分类暂无联动记录</strong><span>Agent/MCP 下发并成功绑定来源对话后，会在这里持续更新状态。</span></div>`;
     } else root.innerHTML = items.map(item => {
         const meta = asmContinuationMeta(item);
+        const interaction = asmContinuationInteraction(item);
         const tasks = Array.isArray(item.tasks) ? item.tasks : [];
         const first = tasks[0] || {};
         const title = first.name || (tasks.length > 1 ? `${tasks.length} 个 ASM 子任务` : item.id);
@@ -480,18 +498,25 @@ function renderASMAgentContinuations() {
         const taskStatus = tasks.length ? [...new Set(tasks.map(task => asmTaskStatusLabel(task.status)).filter(Boolean))].join('、') : '等待任务记录';
         const taskIDs = tasks.map(task => task.id).filter(Boolean);
         const consumedCount = tasks.filter(task => task.consumed_by_agent).length;
+        const executionChips = renderASMTaskExecutionChips(tasks);
         const error = item.last_error ? `<p class="asm-continuation-error">${asmEscape(item.last_error)}</p>` : '';
-        const action = taskIDs.length ? `<button type="button" class="btn-secondary btn-small" onclick="openASMContinuationTask('${asmEscape(taskIDs[0])}')">查看扫描任务</button>` : '';
+        const actions = [
+            taskIDs.length ? `<button type="button" class="btn-secondary btn-small" onclick="openASMContinuationTask('${asmEscape(taskIDs[0])}')">查看扫描任务</button>` : '',
+            item.conversation_id ? `<button type="button" class="btn-secondary btn-small" data-conversation-id="${asmEscape(item.conversation_id)}" onclick="openASMContinuationConversation(this.dataset.conversationId)">查看来源对话</button>` : '',
+        ].filter(Boolean).join('');
         const footerStatus = item.phase === 'agent_consumed'
             ? `Agent 已主动读取 ${consumedCount}/${tasks.length} 个关联任务结果`
-            : (item.agent_was_running ? '扫描完成时 Agent 正在运行' : '扫描完成时 Agent 已停止或空闲');
+            : (item.agent_was_running
+                ? (item.delivery_mode === 'next_checkpoint' ? '通知时机：当前步骤结束后' : '通知时机：当前整轮结束后')
+                : '扫描完成时 Agent 已停止或空闲');
         return `<article class="asm-continuation-item ${meta.tone}">
-            <header><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
+            <header><div class="asm-continuation-badges"><span class="asm-continuation-status ${meta.tone}"><i aria-hidden="true"></i>${asmEscape(meta.label)}</span><span class="asm-continuation-interaction ${interaction.tone}" title="${asmEscape(interaction.description)}">${asmEscape(interaction.label)}</span></div><strong>${asmEscape(title)}</strong><time>${asmEscape(formatASMTime(item.updated_at))}</time></header>
             <p class="asm-continuation-description">${asmEscape(meta.description)}</p>
             <div class="asm-continuation-task-line"><span>${asmEscape(provider)} · ${asmEscape(resource)}</span><span>${asmEscape(taskStatus)} · ${progress}%</span></div>
+            ${executionChips ? `<div class="asm-continuation-profile">${executionChips}</div>` : ''}
             <div class="asm-continuation-progress"><span style="width:${Math.max(0, Math.min(100, progress))}%"></span></div>
-            <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>来源对话</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
-            ${error}<footer><span>${asmEscape(footerStatus)}</span>${action}</footer>
+            <dl><div><dt>扫描目标</dt><dd>${asmEscape(targets.join('、') || '—')}</dd></div><div><dt>来源对话</dt><dd title="${asmEscape(item.conversation_id)}">${asmEscape(item.conversation_title || item.conversation_id || '—')}</dd></div><div><dt>联动方式</dt><dd>${asmEscape(interaction.label)}</dd></div><div><dt>联动 ID</dt><dd>${asmEscape(item.id)}</dd></div><div><dt>尝试次数</dt><dd>${Number(item.attempts) || 0}</dd></div></dl>
+            ${error}<footer><span>${asmEscape(footerStatus)}</span><div class="asm-continuation-actions">${actions}</div></footer>
         </article>`;
     }).join('');
     const pages = Math.max(1, Math.ceil(asmPageState.continuationTotal / asmPageState.continuationPageSize));
@@ -538,6 +563,14 @@ function openASMContinuationTask(taskID) {
     void openASMTaskModal(taskID);
 }
 
+function openASMContinuationConversation(conversationID) {
+    const id = String(conversationID || '').trim();
+    if (!id) return;
+    closeASMAgentContinuationModal();
+    if (typeof window.navigateToConversation === 'function') window.navigateToConversation(id);
+    else window.location.hash = 'chat?conversation=' + encodeURIComponent(id);
+}
+
 async function openASMAgentContinuationModal() {
     if (!asmPageState.resources.length) await loadASMResources();
     if (!asmPageState.resources.length) {
@@ -582,6 +615,7 @@ async function saveASMAgentContinuation(event) {
     const payload = {
         agent_continuation: {
             behavior: document.getElementById('asm-agent-continuation-behavior')?.value || 'auto',
+            delivery_mode: document.getElementById('asm-agent-continuation-delivery-mode')?.value || 'after_turn',
             running_prompt: document.getElementById('asm-agent-continuation-running-prompt')?.value.trim() || asmDefaultRunningPrompt,
             idle_prompt: document.getElementById('asm-agent-continuation-idle-prompt')?.value.trim() || asmDefaultIdlePrompt,
         },
@@ -1086,7 +1120,7 @@ function asmTaskExecutionProfile(task) {
 function asmTaskExecutionName(profile) {
     if (!profile) return '';
     const names = Array.isArray(profile.names) ? profile.names.map(String).filter(Boolean) : [];
-    return String(profile.name || names.join('、') || profile.id || (Array.isArray(profile.ids) ? profile.ids.join(', ') : '') || '').trim();
+    return String(profile.name || names.join('、') || '').trim();
 }
 
 function renderASMTaskExecutionChip(task) {
@@ -1094,7 +1128,20 @@ function renderASMTaskExecutionChip(task) {
     const name = asmTaskExecutionName(profile);
     if (!profile || !name) return '';
     const label = String(profile.label || '扫描配置');
-    return `<em class="asm-task-profile-chip" title="${asmEscape(`${label}：${name}`)}">${asmEscape(label)} · ${asmEscape(name)}</em>`;
+    return `<em class="asm-task-profile-chip" title="${asmEscape(`${label}：${name}`)}"><span>${asmEscape(label)}</span><strong>${asmEscape(name)}</strong></em>`;
+}
+
+function renderASMTaskExecutionChips(tasks) {
+    const seen = new Set();
+    return (Array.isArray(tasks) ? tasks : []).map(task => {
+        const profile = asmTaskExecutionProfile(task);
+        const name = asmTaskExecutionName(profile);
+        if (!profile || !name) return '';
+        const key = `${profile.kind || ''}:${name}`;
+        if (seen.has(key)) return '';
+        seen.add(key);
+        return renderASMTaskExecutionChip(task);
+    }).filter(Boolean).join('');
 }
 
 function renderASMTaskExecutionPanel(task) {
@@ -1218,8 +1265,9 @@ function renderASMTaskDetail() {
     const summaries = asmSummaryEntries(task.summary);
     const resultSync = task.result_sync || {};
     const syncProgress = asmResultSyncProgress(resultSync);
+    const executionChip = renderASMTaskExecutionChip(task);
     root.innerHTML = `<div class="asm-task-detail-hero">
-        <div class="asm-task-detail-main"><div class="asm-task-detail-badges"><span class="asm-task-status ${asmTaskStatusClass(task.status)}">${asmEscape(asmTaskStatusLabel(task.status))}</span><span>${asmEscape(asmProviderLabel(task.provider))}</span><span>${asmEscape(task.resource_name)}</span></div><h4>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</h4><code>${asmEscape(task.target || '')}</code></div>
+        <div class="asm-task-detail-main"><div class="asm-task-detail-badges"><span class="asm-task-status ${asmTaskStatusClass(task.status)}">${asmEscape(asmTaskStatusLabel(task.status))}</span><span>${asmEscape(asmProviderLabel(task.provider))}</span><span>${asmEscape(task.resource_name)}</span>${executionChip}</div><h4>${asmEscape(task.name || `远程任务 ${task.remote_task_id}`)}</h4><code>${asmEscape(task.target || '')}</code></div>
         <div class="asm-task-detail-progress"><strong>${progress}%</strong><span>${asmEscape(task.stage || '等待同步')}</span></div>
     </div>
     <div class="asm-detail-progress-track"><span style="width:${progress}%"></span></div>
@@ -2650,6 +2698,7 @@ window.loadASMAgentContinuationSettings = loadASMAgentContinuationSettings;
 window.syncASMAgentContinuationForm = syncASMAgentContinuationForm;
 window.resetASMAgentContinuationPrompts = resetASMAgentContinuationPrompts;
 window.saveASMAgentContinuation = saveASMAgentContinuation;
+window.openASMContinuationConversation = openASMContinuationConversation;
 window.openASMTemplateLibrary = openASMTemplateLibrary;
 window.closeASMTemplateLibrary = closeASMTemplateLibrary;
 window.loadASMTemplateLibrary = loadASMTemplateLibrary;

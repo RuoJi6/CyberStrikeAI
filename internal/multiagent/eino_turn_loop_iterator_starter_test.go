@@ -3,6 +3,7 @@ package multiagent
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,6 +31,13 @@ func (f *fakeTurnLoopRuntimeControl) PushInterruptContinue(note string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.pushedNotes = append(f.pushedNotes, note)
+	return f.pushOK
+}
+
+func (f *fakeTurnLoopRuntimeControl) PushSystemMessageAtSafePoint(message string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushedNotes = append(f.pushedNotes, "system:"+message)
 	return f.pushOK
 }
 
@@ -136,6 +144,46 @@ func TestEinoTurnLoopIteratorStarterBindsRegistrarsAndProgress(t *testing.T) {
 	}
 	if events[1].eventType != "progress" {
 		t.Fatalf("second event = %#v", events[1])
+	}
+}
+
+func TestEinoTurnLoopIteratorStarterSafePointExposesDeliveredRunningPrompt(t *testing.T) {
+	fakeRuntime := &fakeTurnLoopRuntimeControl{pushOK: true}
+	var safePointPush func(string) bool
+	var unregisterSafePoint func()
+	var eventType, eventMessage string
+	var eventData map[string]interface{}
+
+	newEinoTurnLoopIteratorStarter(einoTurnLoopIteratorStarterConfig{
+		Context:                     context.Background(),
+		ConversationID:              "conv-safe-point",
+		OrchMode:                    "supervisor",
+		UnregisterTurnLoopSafePoint: &unregisterSafePoint,
+		TurnLoopSafePointRegistrar: func(push func(string) bool) func() {
+			safePointPush = push
+			return func() {}
+		},
+		RuntimeFactory: func(EinoTurnLoopRuntimeConfig) einoTurnLoopRuntimeControl {
+			return fakeRuntime
+		},
+		Progress: func(kind, message string, data interface{}) {
+			eventType, eventMessage = kind, message
+			eventData, _ = data.(map[string]interface{})
+		},
+	}).Start(nil)
+
+	if safePointPush == nil {
+		t.Fatal("turn loop safe-point registrar was not bound")
+	}
+	const prompt = "  ASM 扫描结果已完成。\n任务 ID：asmtask_1  "
+	if !safePointPush(prompt) {
+		t.Fatal("safe-point prompt should be accepted")
+	}
+	if eventType != "system_safe_point" || eventMessage != "ASM 扫描完成通知已在 Agent 安全检查点送达（运行中提示词）。" {
+		t.Fatalf("event = %q %q", eventType, eventMessage)
+	}
+	if eventData["promptMode"] != "running" || eventData["prompt"] != strings.TrimSpace(prompt) {
+		t.Fatalf("event data = %#v", eventData)
 	}
 }
 

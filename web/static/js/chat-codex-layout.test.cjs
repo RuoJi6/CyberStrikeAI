@@ -9,6 +9,14 @@ const styles = fs.readFileSync('web/static/css/style.css', 'utf8');
 const zh = JSON.parse(fs.readFileSync('web/static/i18n/zh-CN.json', 'utf8'));
 const en = JSON.parse(fs.readFileSync('web/static/i18n/en-US.json', 'utf8'));
 
+test('ASM 运行中联动在对话时间线展示实际送达提示词', () => {
+    assert.match(chat, /eventType === 'system_safe_point' && data\.kind === 'asm_continuation'/);
+    assert.match(chat, /ASM 运行中提示词已送达/);
+    assert.match(chat, /data\.prompt/);
+    assert.match(monitor, /type === 'system_safe_point' && options\.data && options\.data\.kind === 'asm_continuation'/);
+    assert.match(monitor, /formatTimelinePlainTextHtml\(prompt\)/);
+});
+
 test('主对话时间线不再创建用户或助手头像', () => {
     assert.doesNotMatch(chat, /createMessageAvatar/);
     assert.doesNotMatch(monitor, /createMessageAvatar/);

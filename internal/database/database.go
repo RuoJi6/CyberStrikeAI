@@ -568,6 +568,7 @@ func (db *DB) initTables() error {
 		conversation_id TEXT NOT NULL,
 		owner_user_id TEXT NOT NULL,
 		behavior TEXT NOT NULL DEFAULT 'auto',
+		delivery_mode TEXT NOT NULL DEFAULT 'after_turn',
 		running_prompt TEXT NOT NULL DEFAULT '',
 		idle_prompt TEXT NOT NULL DEFAULT '',
 		status TEXT NOT NULL DEFAULT 'waiting',
@@ -1276,6 +1277,7 @@ func (db *DB) migrateASMAgentContinuationsTable() error {
 		definition string
 	}{
 		{name: "agent_started_at", definition: "DATETIME"},
+		{name: "delivery_mode", definition: "TEXT NOT NULL DEFAULT 'after_turn'"},
 		{name: "consumed_task_ids_json", definition: "TEXT NOT NULL DEFAULT '[]'"},
 		{name: "consumed_at", definition: "DATETIME"},
 		{name: "consumed_tool", definition: "TEXT NOT NULL DEFAULT ''"},

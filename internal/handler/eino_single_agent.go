@@ -233,6 +233,9 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		taskCtxLoop = multiagent.WithAgentTurnLoopInterruptRegistrar(taskCtxLoop, func(push func(string) bool) func() {
 			return h.tasks.BindAgentTurnLoopInterrupt(conversationID, push)
 		})
+		taskCtxLoop = multiagent.WithAgentTurnLoopSafePointRegistrar(taskCtxLoop, func(push func(string) bool) func() {
+			return h.tasks.BindAgentTurnLoopSafePoint(conversationID, push)
+		})
 		taskCtxLoop = multiagent.WithHITLToolInterceptor(taskCtxLoop, func(ctx context.Context, toolName, arguments string) (string, error) {
 			return h.interceptHITLForEinoTool(ctx, cancelWithCause, conversationID, assistantMessageID, sendEvent, toolName, arguments)
 		})

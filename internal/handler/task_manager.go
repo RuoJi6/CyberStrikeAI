@@ -54,6 +54,11 @@ type AgentTask struct {
 	agentTurnLoopInterrupt        func(string) bool
 	agentTurnLoopInterruptVersion uint64
 
+	// agentTurnLoopSafePoint accepts system-generated background context at
+	// the next Eino model/tool boundary without treating it as a user cancel.
+	agentTurnLoopSafePoint        func(string) bool
+	agentTurnLoopSafePointVersion uint64
+
 	cancel func(error)
 	done   chan struct{}
 }
@@ -279,6 +284,54 @@ func (m *AgentTaskManager) BindAgentTurnLoopInterrupt(conversationID string, pus
 			cur.agentTurnLoopInterrupt = nil
 		}
 	}
+}
+
+// BindAgentTurnLoopSafePoint registers the active Eino TurnLoop system-message
+// channel. It is separate from user interrupt-and-continue so an ASM completion
+// cannot accidentally inherit user cancellation semantics.
+func (m *AgentTaskManager) BindAgentTurnLoopSafePoint(conversationID string, push func(string) bool) func() {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" || push == nil {
+		return func() {}
+	}
+	m.mu.Lock()
+	t, ok := m.tasks[conversationID]
+	if !ok || t == nil {
+		m.mu.Unlock()
+		return func() {}
+	}
+	t.agentTurnLoopSafePointVersion++
+	version := t.agentTurnLoopSafePointVersion
+	t.agentTurnLoopSafePoint = push
+	m.mu.Unlock()
+
+	return func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cur, exists := m.tasks[conversationID]; exists && cur != nil && cur.agentTurnLoopSafePointVersion == version {
+			cur.agentTurnLoopSafePoint = nil
+		}
+	}
+}
+
+// PushAgentTurnLoopSafePoint hands a background notification to the active
+// conversation TurnLoop. false means the conversation is already idle or the
+// active runtime cannot accept the item, and callers should use after-turn
+// delivery as a fallback.
+func (m *AgentTaskManager) PushAgentTurnLoopSafePoint(conversationID, message string) bool {
+	conversationID = strings.TrimSpace(conversationID)
+	message = strings.TrimSpace(message)
+	if conversationID == "" || message == "" {
+		return false
+	}
+	m.mu.RLock()
+	t := m.tasks[conversationID]
+	var push func(string) bool
+	if t != nil && t.Status == "running" {
+		push = t.agentTurnLoopSafePoint
+	}
+	m.mu.RUnlock()
+	return push != nil && push(message)
 }
 
 // ActiveMCPExecutionID 返回当前会话进行中的工具 executionId，无则空串。

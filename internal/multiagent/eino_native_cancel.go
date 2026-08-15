@@ -16,6 +16,7 @@ const (
 
 type agentRuntimeCancelRegistrarKey struct{}
 type agentTurnLoopInterruptRegistrarKey struct{}
+type agentTurnLoopSafePointRegistrarKey struct{}
 
 // AgentRuntimeCancelRegistrar binds the currently active Eino ADK cancel hook
 // into the host task manager. The hook returns true when Eino accepted and
@@ -46,6 +47,12 @@ func agentRuntimeCancelRegistrarFromContext(ctx context.Context) AgentRuntimeCan
 // and returns true when the note was accepted by the loop.
 type AgentTurnLoopInterruptRegistrar func(push func(note string) bool) (unregister func())
 
+// AgentTurnLoopSafePointRegistrar binds a system-message pusher that hands
+// durable background notifications to the active TurnLoop at its next safe
+// model/tool boundary. Unlike the user interrupt channel, this does not carry
+// cancellation semantics or rewrite the message as a user interruption.
+type AgentTurnLoopSafePointRegistrar func(push func(message string) bool) (unregister func())
+
 // WithAgentTurnLoopInterruptRegistrar lets the HTTP/task layer enqueue a user
 // supplement into an active Eino TurnLoop before falling back to cancellation.
 func WithAgentTurnLoopInterruptRegistrar(ctx context.Context, registrar AgentTurnLoopInterruptRegistrar) context.Context {
@@ -60,6 +67,25 @@ func agentTurnLoopInterruptRegistrarFromContext(ctx context.Context) AgentTurnLo
 		return nil
 	}
 	if v, ok := ctx.Value(agentTurnLoopInterruptRegistrarKey{}).(AgentTurnLoopInterruptRegistrar); ok {
+		return v
+	}
+	return nil
+}
+
+// WithAgentTurnLoopSafePointRegistrar lets background workers enqueue a
+// system-generated supplement into an active Eino TurnLoop.
+func WithAgentTurnLoopSafePointRegistrar(ctx context.Context, registrar AgentTurnLoopSafePointRegistrar) context.Context {
+	if ctx == nil || registrar == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, agentTurnLoopSafePointRegistrarKey{}, registrar)
+}
+
+func agentTurnLoopSafePointRegistrarFromContext(ctx context.Context) AgentTurnLoopSafePointRegistrar {
+	if ctx == nil {
+		return nil
+	}
+	if v, ok := ctx.Value(agentTurnLoopSafePointRegistrarKey{}).(AgentTurnLoopSafePointRegistrar); ok {
 		return v
 	}
 	return nil

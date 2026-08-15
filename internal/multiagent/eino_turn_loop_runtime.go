@@ -96,15 +96,41 @@ func (r *EinoTurnLoopRuntime) Run(ctx context.Context) {
 }
 
 func (r *EinoTurnLoopRuntime) PushInterruptContinue(note string) bool {
-	if r == nil || r.loop == nil {
-		return false
-	}
-	item := EinoTurnLoopItem{
+	return r.pushAtSafePoint(EinoTurnLoopItem{
 		Kind:     "interrupt_continue",
 		Note:     strings.TrimSpace(note),
 		Messages: []*schema.Message{schema.UserMessage(formatInterruptContinuePrompt(note))},
+	}, true)
+}
+
+// PushSystemMessageAtSafePoint injects background context after the currently
+// executing model/tool step has reached an Eino safe point. The current turn
+// continues with the supplied message and no in-flight operation is forcefully
+// cancelled.
+func (r *EinoTurnLoopRuntime) PushSystemMessageAtSafePoint(message string) bool {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return false
 	}
-	ok, ack := r.loop.Push(item, adk.WithPreemptTimeout[EinoTurnLoopItem, *schema.Message](adk.AnySafePoint, r.interruptTimeout))
+	return r.pushAtSafePoint(EinoTurnLoopItem{
+		Kind:     "system_safe_point",
+		Messages: []*schema.Message{schema.UserMessage(message)},
+	}, false)
+}
+
+func (r *EinoTurnLoopRuntime) pushAtSafePoint(item EinoTurnLoopItem, escalateOnTimeout bool) bool {
+	if r == nil || r.loop == nil {
+		return false
+	}
+	var ok bool
+	var ack <-chan struct{}
+	if escalateOnTimeout {
+		ok, ack = r.loop.Push(item, adk.WithPreemptTimeout[EinoTurnLoopItem, *schema.Message](adk.AnySafePoint, r.interruptTimeout))
+	} else {
+		// System notifications must never escalate to CancelImmediate merely
+		// because an in-flight tool exceeds the user-interrupt timeout.
+		ok, ack = r.loop.Push(item, adk.WithPreempt[EinoTurnLoopItem, *schema.Message](adk.AnySafePoint))
+	}
 	if ack != nil {
 		go func() { <-ack }()
 	}
