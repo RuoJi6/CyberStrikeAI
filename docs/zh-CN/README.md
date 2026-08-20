@@ -12,6 +12,7 @@
 ## 核心概念与编排
 
 - [架构说明](architecture.md) · [安全模型](security-model.md) · [RBAC](rbac.md)
+- [Agent 容器、边界规则与出站代理实施计划](container-boundary-egress-implementation-plan.md) · [执行面盘点](container-execution-surface-inventory.md)
 - [Agent 与角色](agent-and-role-guide.md) · [Skills](skills-guide.md) · [Eino 多代理](MULTI_AGENT_EINO.md) · [Agent 最终回复治理](agent-finalization-best-practices.md)
 - [工作流](workflow-graph.md) · [工具执行治理](tool-execution-governance.md) · [人机协同最佳实践](hitl-best-practices.md)
 

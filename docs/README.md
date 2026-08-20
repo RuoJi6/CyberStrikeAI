@@ -17,6 +17,8 @@ CyberStrikeAI documentation is organized by user journey. Start with deployment,
 
 - [架构说明](zh-CN/architecture.md)
 - [安全模型](zh-CN/security-model.md)
+- [Agent 容器、边界规则与出站代理实施计划](zh-CN/container-boundary-egress-implementation-plan.md)
+- [Agent 容器执行面盘点](zh-CN/container-execution-surface-inventory.md)
 - [Agent 与角色](zh-CN/agent-and-role-guide.md)
 - [Skills 指南](zh-CN/skills-guide.md)
 - [Eino 多代理](zh-CN/MULTI_AGENT_EINO.md)
