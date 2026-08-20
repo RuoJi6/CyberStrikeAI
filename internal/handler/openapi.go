@@ -250,6 +250,32 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 					"required": []string{"conversationId", "status"},
 				},
+				"ContainerExecutionGateResponse": map[string]interface{}{
+					"type":        "object",
+					"description": "container 对话在后台初始化或容器执行后端不可用时的失败关闭响应；请求不会回退到宿主机执行。",
+					"properties": map[string]interface{}{
+						"conversationId": map[string]interface{}{"type": "string"},
+						"messageId":      map[string]interface{}{"type": "string"},
+						"runtimeMode":    map[string]interface{}{"type": "string", "enum": []string{"container"}},
+						"deferred":       map[string]interface{}{"type": "boolean", "enum": []bool{true}},
+						"message":        map[string]interface{}{"type": "string"},
+						"containerInitialization": map[string]interface{}{
+							"type": "object",
+							"properties": map[string]interface{}{
+								"state": map[string]interface{}{
+									"type": "string",
+									"enum": []string{"initializing", "failed", "unavailable", "execution_backend_pending"},
+								},
+								"retryable":       map[string]interface{}{"type": "boolean"},
+								"runtimeId":       map[string]interface{}{"type": "string"},
+								"status":          map[string]interface{}{"type": "string", "enum": []string{"queued", "creating", "created", "failed"}},
+								"readinessStatus": map[string]interface{}{"type": "string", "enum": []string{"not_required", "pending", "validating", "ready", "failed"}},
+								"attempt":          map[string]interface{}{"type": "integer", "minimum": 0},
+							},
+						},
+					},
+					"required": []string{"conversationId", "runtimeMode", "deferred", "message", "containerInitialization"},
+				},
 				"ConversationDetail": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1778,6 +1804,18 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								},
 							},
 						},
+						"202": map[string]interface{}{
+							"description": "container 对话已创建且后台初始化已排队；Agent 未执行且不回退宿主机。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
+						"409": map[string]interface{}{
+							"description": "容器已就绪，但容器执行后端尚未接入；保持失败关闭。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
+						"503": map[string]interface{}{
+							"description": "容器运行时或初始化不可用；保持失败关闭。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
 						"400": map[string]interface{}{"description": "参数错误"},
 						"401": map[string]interface{}{"description": "未授权"},
 						"500": map[string]interface{}{"description": "执行失败"},
@@ -1816,7 +1854,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								"text/event-stream": map[string]interface{}{
 									"schema": map[string]interface{}{
 										"type":        "string",
-										"description": "SSE 流。终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks；过程事件可能包含 finalization_auto_continue。",
+										"description": "SSE 流。container 对话初始化时发送 conversation、message_saved、container_initialization、done，且不启动 Agent；正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
 									},
 								},
 							},
@@ -1876,6 +1914,18 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								},
 							},
 						},
+						"202": map[string]interface{}{
+							"description": "container 对话已创建且后台初始化已排队；Agent 未执行且不回退宿主机。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
+						"409": map[string]interface{}{
+							"description": "容器已就绪，但容器执行后端尚未接入；保持失败关闭。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
+						"503": map[string]interface{}{
+							"description": "容器运行时或初始化不可用；保持失败关闭。",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+						},
 						"400": map[string]interface{}{"description": "参数错误"},
 						"401": map[string]interface{}{"description": "未授权"},
 						"404": map[string]interface{}{"description": "多代理未启用或对话不存在"},
@@ -1920,7 +1970,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								"text/event-stream": map[string]interface{}{
 									"schema": map[string]interface{}{
 										"type":        "string",
-										"description": "SSE 流。终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks；过程事件可能包含 finalization_auto_continue。",
+										"description": "SSE 流。container 对话初始化时发送 conversation、message_saved、container_initialization、done，且不启动 Agent；正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
 									},
 								},
 							},

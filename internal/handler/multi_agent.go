@@ -123,16 +123,18 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 
 	conversationID := prep.ConversationID
 	assistantMessageID := prep.AssistantMessageID
-	h.activateHITLForConversation(conversationID, req.Hitl)
-	if h.hitlManager != nil {
-		defer h.hitlManager.DeactivateConversation(conversationID)
-	}
-
 	if prep.UserMessageID != "" {
 		sendEvent("message_saved", "", map[string]interface{}{
 			"conversationId": conversationID,
 			"userMessageId":  prep.UserMessageID,
 		})
+	}
+	if h.finishConversationContainerExecutionStream(prep, sendEvent) {
+		return
+	}
+	h.activateHITLForConversation(conversationID, req.Hitl)
+	if h.hitlManager != nil {
+		defer h.hitlManager.DeactivateConversation(conversationID)
 	}
 	if h.runRoleWorkflowStreamIfBound(c, &req, prep, sendEvent) {
 		return
@@ -442,6 +444,9 @@ func (h *AgentHandler) MultiAgentLoop(c *gin.Context) {
 	if err != nil {
 		status, msg := multiAgentHTTPErrorStatus(err)
 		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	if h.finishConversationContainerExecutionJSON(c, prep) {
 		return
 	}
 	h.activateHITLForConversation(prep.ConversationID, req.Hitl)

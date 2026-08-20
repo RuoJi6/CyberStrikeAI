@@ -493,6 +493,13 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerManager = containerManager
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
+		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+			spec, specErr := conversationContainerSpec(cfg, conversationID)
+			if specErr != nil {
+				return containerruntime.InitializationRecord{}, specErr
+			}
+			return containerInitializer.EnsureAsync(ctx, spec)
+		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 		if containerOrphan != nil {

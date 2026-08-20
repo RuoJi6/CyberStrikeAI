@@ -2942,7 +2942,7 @@ function handleStreamEvent(event, progressElement, progressId,
     }
 
     const timeline = resolveStreamTimeline(progressId);
-    const canHandleWithoutTimeline = ['conversation', 'response', 'error', 'cancelled', 'done'].includes(String(event.type || ''));
+    const canHandleWithoutTimeline = ['conversation', 'container_initialization', 'response', 'error', 'cancelled', 'done'].includes(String(event.type || ''));
     if (!timeline && !canHandleWithoutTimeline) return;
 
     // 终态事件（error/cancelled）优先复用现有助手消息，避免重复追加相同报错
@@ -4078,6 +4078,58 @@ function handleStreamEvent(event, progressElement, progressId,
             }, 200);
             break;
             
+        case 'container_initialization': {
+            stopProgressElapsedClock(progressId);
+            const initializationData = event.data || {};
+            const initializationState = String(initializationData.state || 'initializing');
+            let initializationTitle = typeof window.t === 'function'
+                ? window.t('chat.containerInitializingTitle')
+                : '📦 容器初始化中';
+            if (initializationState === 'failed' || initializationState === 'unavailable') {
+                initializationTitle = typeof window.t === 'function'
+                    ? window.t('chat.containerInitializationFailedTitle')
+                    : '⚠️ 容器初始化不可用';
+            } else if (initializationState === 'execution_backend_pending') {
+                initializationTitle = typeof window.t === 'function'
+                    ? window.t('chat.containerExecutionBlockedTitle')
+                    : '🛡️ 容器执行保持阻断';
+            }
+            if (timeline) {
+                addTimelineItem(timeline, 'container_initialization', {
+                    title: initializationTitle,
+                    message: event.message,
+                    data: initializationData,
+                    expanded: true
+                });
+            }
+            const initializationStage = document.querySelector(`#${progressId} .progress-stage`);
+            if (initializationStage) initializationStage.textContent = initializationTitle;
+            if (progressTaskState.has(progressId)) {
+                finalizeProgressTask(progressId, initializationTitle);
+            }
+            const preferredMessageId = resolveEventBackendMessageId(initializationData) || null;
+            const { assistantId, assistantElement } = upsertTerminalAssistantMessage(event.message, preferredMessageId);
+            if (assistantId && preferredMessageId) {
+                applyBackendMessageIdToAssistantDom(assistantId, preferredMessageId);
+            }
+            if (assistantElement) {
+                integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], 'deferred');
+                setTimeout(() => collapseAllProgressDetails(assistantId, progressId), 100);
+            }
+            hideProgressMessageForFinalReply(progressId);
+            if (typeof setChatRuntimeModeLocked === 'function') setChatRuntimeModeLocked(true);
+            if (typeof loadConversationsWithGroups === 'function') {
+                setTimeout(() => loadConversationsWithGroups(), 100);
+            } else if (typeof loadConversations === 'function') {
+                setTimeout(() => loadConversations(), 100);
+            }
+            if (typeof window.refreshChatProjectFolders === 'function') {
+                setTimeout(() => window.refreshChatProjectFolders(), 100);
+            }
+            loadActiveTasks();
+            break;
+        }
+
         case 'error':
             stopProgressElapsedClock(progressId);
             // 显示错误

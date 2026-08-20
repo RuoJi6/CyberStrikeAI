@@ -201,11 +201,19 @@ type AgentHandler struct {
 	hitlDefaultReviewerSaver HitlDefaultReviewerSaver
 	auditLLM                 *openai.Client
 	audit                    *audit.Service
+	containerInitializer     ConversationContainerInitializationScheduler
 }
 
 // SetAudit wires platform audit logging.
 func (h *AgentHandler) SetAudit(s *audit.Service) {
 	h.audit = s
+}
+
+// SetConversationContainerInitializationScheduler wires the stage-1 durable
+// initializer into chat preparation. Container conversations fail closed when
+// this dependency is absent; they never fall back to host execution.
+func (h *AgentHandler) SetConversationContainerInitializationScheduler(s ConversationContainerInitializationScheduler) {
+	h.containerInitializer = s
 }
 
 // TaskManager 返回 Agent 任务管理器（供 MCP 监控页终止 Eino execute 等）。
@@ -793,6 +801,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 		return "", "", fmt.Errorf("机器人账号缺少 agent:execute、chat:read 或 chat:write 权限")
 	}
 	ctx = authctx.WithPrincipal(ctx, principal)
+	var conversation *database.Conversation
 	if conversationID == "" {
 		title := safeTruncateString(message, 50)
 		src := "robot"
@@ -808,10 +817,13 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 		if createErr != nil {
 			return "", "", fmt.Errorf("创建对话失败: %w", createErr)
 		}
+		conversation = conv
 		conversationID = conv.ID
 		_ = h.db.SetResourceOwner("conversation", conversationID, ownerUserID)
 	} else {
-		if _, getErr := h.db.GetConversation(conversationID); getErr != nil || !h.db.UserCanAccessResource(ownerUserID, principal.ScopeFor("chat:write"), "conversation", conversationID) {
+		var getErr error
+		conversation, getErr = h.db.GetConversation(conversationID)
+		if getErr != nil || !h.db.UserCanAccessResource(ownerUserID, principal.ScopeFor("chat:write"), "conversation", conversationID) {
 			return "", "", fmt.Errorf("对话不存在")
 		}
 	}
@@ -854,6 +866,23 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 		assistantMessageID = assistantMsg.ID
 	}
 
+	containerGate := h.prepareConversationContainerExecutionGate(ctx, conversation)
+	if containerGate != nil {
+		prep := &multiAgentPrepared{
+			ConversationID:         conversationID,
+			AssistantMessageID:     assistantMessageID,
+			ContainerExecutionGate: containerGate,
+		}
+		gateMessage, payload := h.finalizeConversationContainerExecutionGate(prep)
+		h.publishProgressToTaskEventBus(conversationID, "container_initialization", gateMessage, payload)
+		h.publishProgressToTaskEventBus(conversationID, "done", "", map[string]interface{}{
+			"conversationId":          conversationID,
+			"containerInitialization": true,
+			"deferred":                true,
+		})
+		return gateMessage, conversationID, nil
+	}
+
 	// 注册运行中任务并向 taskEventBus 镜像进度事件，供 Web 端 task-events 补流。
 	taskCtx, cancelWithCause := context.WithCancelCause(ctx)
 	defer cancelWithCause(nil)
@@ -890,7 +919,7 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 
 // StreamEvent 流式事件
 type StreamEvent struct {
-	Type    string      `json:"type"`    // conversation, progress, tool_call, tool_result, response, error, cancelled, done
+	Type    string      `json:"type"`    // conversation, container_initialization, progress, tool_call, tool_result, response, error, cancelled, done
 	Message string      `json:"message"` // 显示消息
 	Data    interface{} `json:"data,omitempty"`
 }

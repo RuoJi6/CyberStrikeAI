@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"cyberstrike-ai/internal/database"
@@ -111,6 +112,16 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := createProperties["runtimeMode"]; !ok {
 		t.Fatal("CreateConversationRequest schema is missing runtimeMode")
 	}
+	gateSchema, ok := schemas["ContainerExecutionGateResponse"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ContainerExecutionGateResponse schema is missing")
+	}
+	gateProperties := gateSchema["properties"].(map[string]interface{})
+	for _, field := range []string{"conversationId", "runtimeMode", "deferred", "message", "containerInitialization"} {
+		if _, ok := gateProperties[field]; !ok {
+			t.Fatalf("ContainerExecutionGateResponse schema is missing %s", field)
+		}
+	}
 	for _, route := range []string{"/api/eino-agent", "/api/eino-agent/stream", "/api/multi-agent", "/api/multi-agent/stream"} {
 		post := paths[route].(map[string]interface{})["post"].(map[string]interface{})
 		requestBody := post["requestBody"].(map[string]interface{})
@@ -120,6 +131,34 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		requestProperties := requestSchema["properties"].(map[string]interface{})
 		if _, ok := requestProperties["runtimeMode"]; !ok {
 			t.Fatalf("%s request schema is missing runtimeMode", route)
+		}
+	}
+	for _, route := range []string{"/api/eino-agent", "/api/multi-agent"} {
+		post := paths[route].(map[string]interface{})["post"].(map[string]interface{})
+		responses := post["responses"].(map[string]interface{})
+		for _, status := range []string{"202", "409", "503"} {
+			response, ok := responses[status].(map[string]interface{})
+			if !ok {
+				t.Fatalf("%s response %s is missing", route, status)
+			}
+			content := response["content"].(map[string]interface{})
+			applicationJSON := content["application/json"].(map[string]interface{})
+			responseSchema := applicationJSON["schema"].(map[string]interface{})
+			if responseSchema["$ref"] != "#/components/schemas/ContainerExecutionGateResponse" {
+				t.Fatalf("%s response %s schema = %#v", route, status, responseSchema)
+			}
+		}
+	}
+	for _, route := range []string{"/api/eino-agent/stream", "/api/multi-agent/stream"} {
+		post := paths[route].(map[string]interface{})["post"].(map[string]interface{})
+		responses := post["responses"].(map[string]interface{})
+		response := responses["200"].(map[string]interface{})
+		content := response["content"].(map[string]interface{})
+		stream := content["text/event-stream"].(map[string]interface{})
+		streamSchema := stream["schema"].(map[string]interface{})
+		description, _ := streamSchema["description"].(string)
+		if !strings.Contains(description, "container_initialization") {
+			t.Fatalf("%s SSE description does not document container_initialization: %q", route, description)
 		}
 	}
 	for path, method := range map[string]string{

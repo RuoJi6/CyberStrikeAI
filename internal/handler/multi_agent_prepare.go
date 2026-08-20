@@ -17,13 +17,14 @@ import (
 
 // multiAgentPrepared 多代理请求在调用 Eino 前的会话与消息准备结果。
 type multiAgentPrepared struct {
-	ConversationID     string
-	CreatedNew         bool
-	History            []agent.ChatMessage
-	FinalMessage       string
-	RoleTools          []string
-	AssistantMessageID string
-	UserMessageID      string
+	ConversationID         string
+	CreatedNew             bool
+	History                []agent.ChatMessage
+	FinalMessage           string
+	RoleTools              []string
+	AssistantMessageID     string
+	UserMessageID          string
+	ContainerExecutionGate *conversationContainerExecutionGate
 }
 
 func chatRequestAgentMode(req *ChatRequest, source string) string {
@@ -58,13 +59,13 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		return nil, fmt.Errorf("无权访问该 WebShell 连接")
 	}
 	createdNew := false
+	var conv *database.Conversation
 	if conversationID == "" {
 		runtimeMode, runtimeModeErr := database.NormalizeConversationRuntimeMode(req.RuntimeMode)
 		if runtimeModeErr != nil {
 			return nil, fmt.Errorf("新对话 runtimeMode 必须为 host 或 container")
 		}
 		title := safeTruncateString(req.Message, 50)
-		var conv *database.Conversation
 		var err error
 		meta := audit.ConversationCreateMetaFromGin(c, source)
 		meta.ProjectID = projectID
@@ -88,7 +89,9 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			_ = h.db.AssignResourceToUser(session.UserID, "conversation", conversationID)
 		}
 	} else {
-		if _, err := h.db.GetConversation(conversationID); err != nil {
+		var err error
+		conv, err = h.db.GetConversation(conversationID)
+		if err != nil {
 			return nil, fmt.Errorf("对话不存在")
 		}
 		if !canAccess("conversation", conversationID) {
@@ -187,13 +190,16 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		assistantMessageID = assistantMsg.ID
 	}
 
+	containerExecutionGate := h.prepareConversationContainerExecutionGate(c.Request.Context(), conv)
+
 	return &multiAgentPrepared{
-		ConversationID:     conversationID,
-		CreatedNew:         createdNew,
-		History:            agentHistoryMessages,
-		FinalMessage:       finalMessage,
-		RoleTools:          roleTools,
-		AssistantMessageID: assistantMessageID,
-		UserMessageID:      userMessageID,
+		ConversationID:         conversationID,
+		CreatedNew:             createdNew,
+		History:                agentHistoryMessages,
+		FinalMessage:           finalMessage,
+		RoleTools:              roleTools,
+		AssistantMessageID:     assistantMessageID,
+		UserMessageID:          userMessageID,
+		ContainerExecutionGate: containerExecutionGate,
 	}, nil
 }
