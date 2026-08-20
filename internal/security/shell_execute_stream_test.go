@@ -42,6 +42,45 @@ func TestEinoStreamingShell_StreamsStderrBeforeStdoutEOF(t *testing.T) {
 	}
 }
 
+func TestEinoStreamingShell_RetriesWithPTYWithoutLeakingProbeOutput(t *testing.T) {
+	executor := &ptyRetryContainerRuntimeExecutor{}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := NewEinoStreamingShellWithResolver(NewFixedExecutionBackendResolver(backend))
+	sr, err := shell.ExecuteStreaming(context.Background(), &filesystem.ExecuteRequest{Command: "tty-check"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sr.Close()
+
+	var output strings.Builder
+	exitCode := -1
+	for {
+		resp, recvErr := sr.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatal(recvErr)
+		}
+		if resp == nil {
+			continue
+		}
+		output.WriteString(resp.Output)
+		if resp.ExitCode != nil {
+			exitCode = *resp.ExitCode
+		}
+	}
+	if len(executor.requests) != 2 || executor.requests[0].TTY || !executor.requests[1].TTY {
+		t.Fatalf("PTY requests = %#v", executor.requests)
+	}
+	if got := output.String(); got != "pty-ok" || strings.Contains(got, "not a tty") || exitCode != 0 {
+		t.Fatalf("output=%q exitCode=%d", got, exitCode)
+	}
+}
+
 func TestEinoStreamingShell_SudoFailsFast(t *testing.T) {
 	shell := NewEinoStreamingShell()
 	// Do not invoke the host's real sudo: PAM failure throttling is process-external

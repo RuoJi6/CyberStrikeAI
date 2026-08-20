@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strings"
+	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/schema"
@@ -34,6 +37,121 @@ func TerminateShellCmdSession(session *ShellSession) {
 // 导致 stderr 错误（如 sudo 密码提示）长时间不可见、UI 一直显示「执行中」。
 type EinoStreamingShell struct {
 	resolver ExecutionBackendResolver
+}
+
+const ptyRetryProbeDelay = 250 * time.Millisecond
+
+// streamingOutputGate keeps only the very first short output burst speculative.
+// Immediate "not a tty" failures can then be replaced by the authoritative PTY
+// retry result, while longer commands still begin streaming after a small bound.
+type streamingOutputGate struct {
+	mu      sync.Mutex
+	sendMu  sync.Mutex
+	pending strings.Builder
+	timer   *time.Timer
+	flushed bool
+	closed  bool
+	emitted bool
+	send    func(string)
+}
+
+func newStreamingOutputGate(send func(string)) *streamingOutputGate {
+	return &streamingOutputGate{send: send}
+}
+
+func (g *streamingOutputGate) Write(chunk string) {
+	if g == nil || chunk == "" {
+		return
+	}
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	if g.flushed {
+		g.mu.Unlock()
+		g.emit(chunk)
+		return
+	}
+	g.pending.WriteString(chunk)
+	if g.timer == nil {
+		g.timer = time.AfterFunc(ptyRetryProbeDelay, g.flush)
+	}
+	g.mu.Unlock()
+}
+
+func (g *streamingOutputGate) flush() {
+	if g == nil {
+		return
+	}
+	g.sendMu.Lock()
+	defer g.sendMu.Unlock()
+	g.mu.Lock()
+	if g.closed || g.flushed {
+		g.mu.Unlock()
+		return
+	}
+	chunk := g.pending.String()
+	g.pending.Reset()
+	g.flushed = true
+	if chunk != "" {
+		g.emitted = true
+	}
+	g.mu.Unlock()
+	if chunk != "" && g.send != nil {
+		g.send(chunk)
+	}
+}
+
+func (g *streamingOutputGate) emit(chunk string) {
+	if g == nil || chunk == "" {
+		return
+	}
+	g.sendMu.Lock()
+	defer g.sendMu.Unlock()
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return
+	}
+	g.emitted = true
+	g.mu.Unlock()
+	if g.send != nil {
+		g.send(chunk)
+	}
+}
+
+// Finish closes the speculative window. If it never flushed, only the
+// backend's authoritative result is emitted, so a successful PTY retry does
+// not retain the first non-TTY diagnostic in the tool result.
+func (g *streamingOutputGate) Finish(authoritative string) bool {
+	if g == nil {
+		return false
+	}
+	g.sendMu.Lock()
+	g.mu.Lock()
+	g.closed = true
+	if g.timer != nil {
+		g.timer.Stop()
+	}
+	chunk := ""
+	if !g.flushed {
+		chunk = authoritative
+		if chunk == "" {
+			chunk = g.pending.String()
+		}
+		g.pending.Reset()
+		if chunk != "" {
+			g.emitted = true
+		}
+	}
+	emitted := g.emitted
+	g.mu.Unlock()
+	if chunk != "" && g.send != nil {
+		g.send(chunk)
+	}
+	g.sendMu.Unlock()
+	return emitted
 }
 
 // NewEinoStreamingShell 创建 execute 流式 shell 实现。
@@ -89,17 +207,17 @@ func streamShellForeground(ctx context.Context, backend ExecutionBackend, comman
 	defer w.Close()
 
 	command = PrepareShellCommandForExecute(command)
-	hadOutput := false
+	gate := newStreamingOutputGate(func(chunk string) {
+		_ = w.Send(&filesystem.ExecuteResponse{Output: chunk}, nil)
+	})
 	result, err := backend.Execute(ctx, ExecutionRequest{
-		Command: []string{"/bin/sh", "-c", command},
+		Command:      []string{"/bin/sh", "-c", command},
+		RetryWithPTY: true,
 		Output: func(chunk string) {
-			if chunk == "" {
-				return
-			}
-			hadOutput = true
-			_ = w.Send(&filesystem.ExecuteResponse{Output: chunk}, nil)
+			gate.Write(chunk)
 		},
 	})
+	hadOutput := gate.Finish(result.Output)
 	if err == nil {
 		exitCode := result.ExitCode
 		_ = w.Send(&filesystem.ExecuteResponse{ExitCode: &exitCode}, nil)

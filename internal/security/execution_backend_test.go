@@ -309,6 +309,9 @@ func TestEinoExecuteUsesConfiguredExecutionBackend(t *testing.T) {
 		}
 	}
 	assertLastBackendCommand(t, backend, "/bin/sh", "eino-route")
+	if !backend.requests[len(backend.requests)-1].RetryWithPTY {
+		t.Fatal("Eino execute did not request PTY fallback")
+	}
 }
 
 func assertLastBackendCommand(t *testing.T, backend *recordingExecutionBackend, fragments ...string) {
