@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
@@ -177,6 +178,71 @@ func TestContainerInitializationStoreLifecycleAndCascade(t *testing.T) {
 	_, err = db.GetContainerInitialization(context.Background(), conversation.ID)
 	if !errors.Is(err, containerruntime.ErrNotFound) {
 		t.Fatalf("cascade get error = %v", err)
+	}
+}
+
+func TestIdleContainerCandidatesAndAtomicStopClaim(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	old := time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC)
+	cutoff := old.Add(time.Hour)
+
+	createRunning := func(title string) string {
+		t.Helper()
+		conversation, err := db.CreateConversation(title, ConversationCreateMeta{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := databaseRuntimeSpec(conversation.ID)
+		if _, _, err := db.Queue(ctx, spec, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+			t.Fatalf("claim runtime = %v, %v", claimed, err)
+		}
+		if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-" + conversation.ID, Status: containerruntime.StatusRunning}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, formatSQLiteUTC(old), conversation.ID); err != nil {
+			t.Fatal(err)
+		}
+		return conversation.ID
+	}
+
+	idleID := createRunning("idle")
+	busyID := createRunning("busy")
+	if _, err := db.Exec(`
+		INSERT INTO tool_executions (id, tool_name, arguments, status, start_time, conversation_id)
+		VALUES (?, 'execute', '{}', 'running', ?, ?)
+	`, "busy-execution", formatSQLiteUTC(old), busyID); err != nil {
+		t.Fatal(err)
+	}
+
+	candidates, err := db.ListIdleRuntimeCandidates(ctx, cutoff, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(candidates) != 1 || candidates[0].ConversationID != idleID || !candidates[0].LastActivityAt.Equal(old) {
+		t.Fatalf("idle candidates = %#v", candidates)
+	}
+
+	claimed, err := db.BeginIdleStop(ctx, idleID, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.LifecycleOperation != containerruntime.LifecycleOperationStop || claimed.LifecycleState != containerruntime.LifecycleInProgress {
+		t.Fatalf("idle stop claim = %#v", claimed)
+	}
+	if _, err := db.BeginIdleStop(ctx, busyID, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		t.Fatalf("busy stop claim = %v", err)
+	}
+
+	recentID := createRunning("recent")
+	if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, formatSQLiteUTC(cutoff.Add(time.Second)), recentID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginIdleStop(ctx, recentID, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		t.Fatalf("recent stop claim = %v", err)
 	}
 }
 

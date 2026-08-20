@@ -1061,6 +1061,8 @@ type ContainerRuntimeConfig struct {
 	InitializerWorkers   int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
 	QueueCapacity        int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
 	CreateTimeoutSeconds int                            `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
+	IdleStopSeconds      int                            `yaml:"idle_stop_seconds,omitempty" json:"idle_stop_seconds,omitempty"`
+	IdleScanSeconds      int                            `yaml:"idle_scan_seconds,omitempty" json:"idle_scan_seconds,omitempty"`
 	NanoCPUs             int64                          `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
 	MemoryBytes          int64                          `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
 	PIDs                 int64                          `yaml:"pids,omitempty" json:"pids,omitempty"`
@@ -1086,6 +1088,12 @@ func (c *ContainerRuntimeConfig) applyDefaults() {
 	}
 	if c.CreateTimeoutSeconds == 0 {
 		c.CreateTimeoutSeconds = 120
+	}
+	if c.IdleStopSeconds == 0 {
+		c.IdleStopSeconds = 1800
+	}
+	if c.IdleScanSeconds == 0 {
+		c.IdleScanSeconds = 60
 	}
 	if c.NanoCPUs == 0 {
 		c.NanoCPUs = 1_000_000_000
@@ -1137,6 +1145,9 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	}
 	if c.InitializerWorkers <= 0 || c.QueueCapacity <= 0 || c.CreateTimeoutSeconds <= 0 {
 		return fmt.Errorf("container initializer_workers, queue_capacity and create_timeout_seconds must be positive")
+	}
+	if c.IdleStopSeconds < -1 || c.IdleStopSeconds == 0 || c.IdleScanSeconds <= 0 {
+		return fmt.Errorf("container idle_stop_seconds must be -1 or positive and idle_scan_seconds must be positive")
 	}
 	spec := containerruntime.RuntimeSpec{
 		ID:             "config-validation",
@@ -2033,6 +2044,7 @@ func Default() *Config {
 		},
 		Container: ContainerRuntimeConfig{
 			InitializerWorkers: 2, QueueCapacity: 64, CreateTimeoutSeconds: 120,
+			IdleStopSeconds: 1800, IdleScanSeconds: 60,
 			NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
 			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30, TmpfsBytes: 64 << 20,
 			MaxConcurrentExec: 2, MaxQueuedExec: 8, LogMaxBytes: 10 << 20, LogMaxFiles: 3,

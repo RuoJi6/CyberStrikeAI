@@ -87,6 +87,20 @@ func logContainerOrphanScan(logger *zap.Logger, report containerruntime.OrphanSc
 	}
 }
 
+func logContainerIdleStop(logger *zap.Logger, report containerruntime.IdleStopReport, err error) {
+	fields := []zap.Field{
+		zap.Int("candidates", report.Candidates), zap.Int("activeTasks", report.ActiveTasks),
+		zap.Int("stopped", report.Stopped), zap.Int("skipped", report.Skipped), zap.Int("failed", report.Failed),
+	}
+	if err != nil {
+		logger.Warn("空闲对话容器自动停止未全部成功", append(fields, zap.Error(err))...)
+		return
+	}
+	if report.Candidates > 0 {
+		logger.Info("空闲对话容器自动停止扫描完成", fields...)
+	}
+}
+
 // conversationContainerSpec converts trusted configuration into the immutable
 // specification used when phase 2 requests a container for first execution.
 func conversationContainerSpec(cfg *config.Config, conversationID string) (containerruntime.RuntimeSpec, error) {

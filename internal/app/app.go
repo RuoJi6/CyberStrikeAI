@@ -43,42 +43,45 @@ import (
 
 // App 应用
 type App struct {
-	config                *config.Config
-	logger                *logger.Logger
-	router                *gin.Engine
-	mcpServer             *mcp.Server
-	externalMCPMgr        *mcp.ExternalMCPManager
-	agent                 *agent.Agent
-	executor              *security.Executor
-	db                    *database.DB
-	knowledgeDB           *database.DB // 知识库数据库连接（如果使用独立数据库）
-	auth                  *security.AuthManager
-	knowledgeManager      *knowledge.Manager        // 知识库管理器（用于动态初始化）
-	knowledgeRetriever    *knowledge.Retriever      // 知识库检索器（用于动态初始化）
-	knowledgeIndexer      *knowledge.Indexer        // 知识库索引器（用于动态初始化）
-	knowledgeHandler      *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
-	agentHandler          *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
-	robotHandler          *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
-	robotMu               sync.Mutex                // 保护机器人长连接的 cancel
-	dingCancel            context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
-	larkCancel            context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
-	wechatCancel          context.CancelFunc        // 微信 iLink 长轮询取消函数
-	telegramCancel        context.CancelFunc        // Telegram 长轮询取消函数
-	slackCancel           context.CancelFunc        // Slack Socket Mode 取消函数
-	discordCancel         context.CancelFunc        // Discord Gateway 取消函数
-	qqCancel              context.CancelFunc        // QQ WebSocket 取消函数
-	alertCancel           context.CancelFunc        // 漏洞提醒持久化投递 worker
-	c2Manager             *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
-	c2Watchdog            *c2.SessionWatchdog       // C2 会话看门狗
-	c2WatchdogCancel      context.CancelFunc        // 看门狗取消函数
-	c2Handler             *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
-	auditSvc              *audit.Service
-	containerInitializer  *containerruntime.Initializer
-	containerManager      *containerruntime.DockerManager
-	containerLifecycle    *containerruntime.LifecycleController
-	containerOrphan       *containerruntime.OrphanScanner
-	containerOrphanCancel context.CancelFunc
-	containerOrphanDone   chan struct{}
+	config                  *config.Config
+	logger                  *logger.Logger
+	router                  *gin.Engine
+	mcpServer               *mcp.Server
+	externalMCPMgr          *mcp.ExternalMCPManager
+	agent                   *agent.Agent
+	executor                *security.Executor
+	db                      *database.DB
+	knowledgeDB             *database.DB // 知识库数据库连接（如果使用独立数据库）
+	auth                    *security.AuthManager
+	knowledgeManager        *knowledge.Manager        // 知识库管理器（用于动态初始化）
+	knowledgeRetriever      *knowledge.Retriever      // 知识库检索器（用于动态初始化）
+	knowledgeIndexer        *knowledge.Indexer        // 知识库索引器（用于动态初始化）
+	knowledgeHandler        *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
+	agentHandler            *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
+	robotHandler            *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
+	robotMu                 sync.Mutex                // 保护机器人长连接的 cancel
+	dingCancel              context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
+	larkCancel              context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
+	wechatCancel            context.CancelFunc        // 微信 iLink 长轮询取消函数
+	telegramCancel          context.CancelFunc        // Telegram 长轮询取消函数
+	slackCancel             context.CancelFunc        // Slack Socket Mode 取消函数
+	discordCancel           context.CancelFunc        // Discord Gateway 取消函数
+	qqCancel                context.CancelFunc        // QQ WebSocket 取消函数
+	alertCancel             context.CancelFunc        // 漏洞提醒持久化投递 worker
+	c2Manager               *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
+	c2Watchdog              *c2.SessionWatchdog       // C2 会话看门狗
+	c2WatchdogCancel        context.CancelFunc        // 看门狗取消函数
+	c2Handler               *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
+	auditSvc                *audit.Service
+	containerInitializer    *containerruntime.Initializer
+	containerManager        *containerruntime.DockerManager
+	containerLifecycle      *containerruntime.LifecycleController
+	containerOrphan         *containerruntime.OrphanScanner
+	containerOrphanCancel   context.CancelFunc
+	containerOrphanDone     chan struct{}
+	containerIdleStop       *containerruntime.IdleStopScheduler
+	containerIdleStopCancel context.CancelFunc
+	containerIdleStopDone   chan struct{}
 }
 
 // New 创建新应用
@@ -503,6 +506,27 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 				})
 			}()
 		}
+		if cfg.Container.IdleStopSeconds > 0 {
+			idleStop, idleErr := containerruntime.NewIdleStopScheduler(db, containerLifecycle, agentHandler, containerruntime.IdleStopSchedulerOptions{
+				IdleAfter: time.Duration(cfg.Container.IdleStopSeconds) * time.Second,
+			})
+			if idleErr != nil {
+				log.Logger.Error("对话容器空闲自动停止调度器启动失败", zap.Error(idleErr))
+			} else {
+				idleCtx, idleCancel := context.WithCancel(context.Background())
+				app.containerIdleStop = idleStop
+				app.containerIdleStopCancel = idleCancel
+				app.containerIdleStopDone = make(chan struct{})
+				go func() {
+					defer close(app.containerIdleStopDone)
+					report, err := idleStop.Reconcile(idleCtx)
+					logContainerIdleStop(log.Logger, report, err)
+					_ = idleStop.RunPeriodic(idleCtx, time.Duration(cfg.Container.IdleScanSeconds)*time.Second, func(report containerruntime.IdleStopReport, err error) {
+						logContainerIdleStop(log.Logger, report, err)
+					})
+				}()
+			}
+		}
 	}
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()
@@ -790,6 +814,19 @@ func (a *App) Shutdown() {
 	a.robotMu.Unlock()
 
 	a.shutdownC2()
+	if a.containerIdleStopCancel != nil {
+		a.containerIdleStopCancel()
+		a.containerIdleStopCancel = nil
+	}
+	if a.containerIdleStopDone != nil {
+		select {
+		case <-a.containerIdleStopDone:
+		case <-time.After(5 * time.Second):
+			a.logger.Logger.Warn("等待对话容器空闲自动停止调度器停止超时")
+		}
+		a.containerIdleStopDone = nil
+	}
+	a.containerIdleStop = nil
 	if a.containerOrphanCancel != nil {
 		a.containerOrphanCancel()
 		a.containerOrphanCancel = nil

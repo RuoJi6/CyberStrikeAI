@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/database"
 	container "cyberstrike-ai/internal/runtime/container"
@@ -88,6 +89,55 @@ func TestLifecycleControllerRejectsConcurrentDurableOperation(t *testing.T) {
 	_, err := controller.Start(context.Background(), conversationID)
 	if !errors.Is(err, container.ErrRuntimeStateConflict) {
 		t.Fatalf("concurrent start error = %v", err)
+	}
+}
+
+func TestLifecycleControllerIdleStopPreservesRuntimeAndWorkspace(t *testing.T) {
+	db, manager, controller, conversationID := lifecycleFixture(t)
+	if _, err := controller.Start(context.Background(), conversationID); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC)
+	if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, old, conversationID); err != nil {
+		t.Fatal(err)
+	}
+	stopped, err := controller.StopIdle(context.Background(), conversationID, old.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("idle stop: %v", err)
+	}
+	if stopped.RuntimeStatus != container.StatusStopped || stopped.LifecycleOperation != container.LifecycleOperationStop {
+		t.Fatalf("idle stopped record = %#v", stopped)
+	}
+	if _, err := manager.Inspect(context.Background(), stopped.RuntimeID); err != nil {
+		t.Fatalf("idle stop deleted runtime: %v", err)
+	}
+	for _, call := range manager.Calls() {
+		if call.Operation == containertest.OperationDelete {
+			t.Fatalf("idle stop requested delete: %#v", manager.Calls())
+		}
+	}
+
+	if _, err := controller.Start(context.Background(), conversationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, old.Add(2*time.Hour), conversationID); err != nil {
+		t.Fatal(err)
+	}
+	countStopCalls := func() int {
+		count := 0
+		for _, call := range manager.Calls() {
+			if call.Operation == containertest.OperationStop {
+				count++
+			}
+		}
+		return count
+	}
+	stopCalls := countStopCalls()
+	if _, err := controller.StopIdle(context.Background(), conversationID, old.Add(time.Hour)); !errors.Is(err, container.ErrRuntimeStateConflict) {
+		t.Fatalf("recent conversation idle stop = %v", err)
+	}
+	if countStopCalls() != stopCalls {
+		t.Fatalf("recent conversation reached Docker stop: %#v", manager.Calls())
 	}
 }
 

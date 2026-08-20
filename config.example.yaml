@@ -140,6 +140,8 @@ container:
   initializer_workers: 2
   queue_capacity: 64
   create_timeout_seconds: 120
+  idle_stop_seconds: 1800 # 对话最后活动超过此秒数后自动停止运行中容器；-1 关闭，停止不会删除工作区
+  idle_scan_seconds: 60 # 空闲候选扫描周期；实际停止前再次以数据库 CAS 和活跃任务状态复核
   nano_cpus: 1000000000 # 1 CPU
   memory_bytes: 536870912 # 512 MiB
   pids: 128

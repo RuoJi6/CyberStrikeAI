@@ -26,8 +26,12 @@ func TestContainerRuntimeConfigDefaultsAndValidation(t *testing.T) {
 	if err := config.validateEnabled(); err != nil {
 		t.Fatal(err)
 	}
-	if config.InitializerWorkers != 2 || config.QueueCapacity != 64 || config.CreateTimeoutSeconds != 120 || config.MemoryBytes != 512<<20 || config.WorkspaceBytes != 1<<30 || config.LogMaxFiles != 3 {
+	if config.InitializerWorkers != 2 || config.QueueCapacity != 64 || config.CreateTimeoutSeconds != 120 || config.IdleStopSeconds != 1800 || config.IdleScanSeconds != 60 || config.MemoryBytes != 512<<20 || config.WorkspaceBytes != 1<<30 || config.LogMaxFiles != 3 {
 		t.Fatalf("defaults = %#v", config)
+	}
+	config.IdleStopSeconds = -1
+	if err := config.validateEnabled(); err != nil {
+		t.Fatalf("disabled idle stop = %v", err)
 	}
 }
 
@@ -41,6 +45,8 @@ func TestContainerRuntimeConfigFailsClosedWhenEnabled(t *testing.T) {
 		{name: "digest", mutate: func(config *ContainerRuntimeConfig) { config.ImageDigest = "latest" }, want: "digest"},
 		{name: "platform", mutate: func(config *ContainerRuntimeConfig) { config.ImagePlatform = "linux/aarch64" }, want: "canonical"},
 		{name: "negative queue", mutate: func(config *ContainerRuntimeConfig) { config.QueueCapacity = -1 }, want: "queue_capacity"},
+		{name: "invalid idle stop", mutate: func(config *ContainerRuntimeConfig) { config.IdleStopSeconds = -2 }, want: "idle_stop_seconds"},
+		{name: "invalid idle scan", mutate: func(config *ContainerRuntimeConfig) { config.IdleScanSeconds = -1 }, want: "idle_scan_seconds"},
 		{name: "nofile", mutate: func(config *ContainerRuntimeConfig) { config.NoFileSoft = 4096; config.NoFileHard = 1024 }, want: "nofile"},
 		{name: "inventory digest", mutate: func(config *ContainerRuntimeConfig) { config.ToolInventoryDigest = "latest" }, want: "inventory digest"},
 		{name: "inventory image", mutate: func(config *ContainerRuntimeConfig) {

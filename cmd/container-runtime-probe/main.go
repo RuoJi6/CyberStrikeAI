@@ -21,6 +21,7 @@ type probeResult struct {
 	Initialization *containerruntime.InitializationRecord `json:"initialization,omitempty"`
 	Created        *containerruntime.Runtime              `json:"created_runtime,omitempty"`
 	Lifecycle      *lifecycleProbeResult                  `json:"lifecycle,omitempty"`
+	IdleStop       *idleStopProbeResult                   `json:"idle_stop,omitempty"`
 	OrphanScan     *containerruntime.OrphanScanReport     `json:"orphan_scan,omitempty"`
 	Error          string                                 `json:"error,omitempty"`
 }
@@ -34,6 +35,14 @@ type lifecycleProbeResult struct {
 	Restopped          containerruntime.Runtime `json:"restopped"`
 	Deleted            bool                     `json:"deleted"`
 	MissingAfterDelete bool                     `json:"missing_after_delete"`
+}
+
+type idleStopProbeResult struct {
+	Report             containerruntime.IdleStopReport `json:"report"`
+	Stopped            containerruntime.Runtime        `json:"stopped"`
+	RetainedAfterStop  bool                            `json:"retained_after_stop"`
+	DeletedAfterCheck  bool                            `json:"deleted_after_check"`
+	MissingAfterDelete bool                            `json:"missing_after_delete"`
 }
 
 func main() {
@@ -50,6 +59,7 @@ func run() int {
 	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
 	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
 	exerciseLifecycle := flag.Bool("exercise-lifecycle", false, "after creation, start, stop, rebuild, restart, restop and delete the runtime")
+	exerciseIdleStop := flag.Bool("exercise-idle-stop", false, "after creation, auto-stop an idle runtime, verify it remains, then clean it up")
 	scanOrphans := flag.Bool("scan-orphans", false, "scan and delete only resources carrying this probe owner id")
 	inventoryFile := flag.String("inventory-file", "", "trusted tool inventory JSON for readiness validation")
 	inventoryDigest := flag.String("inventory-digest", "", "expected sha256 digest of the tool inventory JSON")
@@ -57,6 +67,9 @@ func run() int {
 	skipManifest := flag.Bool("skip-manifest", false, "diagnostic only: skip remote registry manifest inspection")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall probe timeout")
 	flag.Parse()
+	if *exerciseLifecycle && *exerciseIdleStop {
+		return writeResult(probeResult{Error: "exercise-lifecycle and exercise-idle-stop are mutually exclusive"}, 1)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
@@ -205,11 +218,86 @@ func run() int {
 				return writeResult(result, 1)
 			}
 		}
-	} else if *exerciseLifecycle {
-		result.Error = "exercise-lifecycle requires create-runtime-id"
+		if *exerciseIdleStop {
+			idleStop, idleErr := exerciseRuntimeIdleStop(ctx, manager, spec)
+			result.IdleStop = &idleStop
+			if idleErr != nil {
+				result.Error = idleErr.Error()
+				return writeResult(result, 1)
+			}
+		}
+	} else if *exerciseLifecycle || *exerciseIdleStop {
+		result.Error = "lifecycle exercises require create-runtime-id"
 		return writeResult(result, 1)
 	}
 	return writeResult(result, 0)
+}
+
+type probeIdleStore struct {
+	candidate containerruntime.IdleRuntimeCandidate
+}
+
+func (s probeIdleStore) ListIdleRuntimeCandidates(context.Context, time.Time, int) ([]containerruntime.IdleRuntimeCandidate, error) {
+	return []containerruntime.IdleRuntimeCandidate{s.candidate}, nil
+}
+
+type probeIdleLifecycle struct {
+	manager   containerruntime.RuntimeManager
+	runtimeID containerruntime.RuntimeID
+}
+
+func (l probeIdleLifecycle) StopIdle(ctx context.Context, conversationID string, _ time.Time) (containerruntime.InitializationRecord, error) {
+	runtime, err := l.manager.Stop(ctx, l.runtimeID, containerruntime.StopOptions{})
+	return containerruntime.InitializationRecord{ConversationID: conversationID, RuntimeID: l.runtimeID, RuntimeStatus: runtime.Status}, err
+}
+
+type probeIdleActivity struct{}
+
+func (probeIdleActivity) ConversationTaskRuntimeState(string) (bool, time.Time) {
+	return false, time.Time{}
+}
+
+func exerciseRuntimeIdleStop(ctx context.Context, manager containerruntime.RuntimeManager, spec containerruntime.RuntimeSpec) (idleStopProbeResult, error) {
+	var result idleStopProbeResult
+	if manager == nil {
+		return result, fmt.Errorf("%w: lifecycle manager is not configured", containerruntime.ErrEngineUnavailable)
+	}
+	if _, err := manager.Start(ctx, spec.ID); err != nil {
+		return result, fmt.Errorf("start idle acceptance runtime: %w", err)
+	}
+	scheduler, err := containerruntime.NewIdleStopScheduler(
+		probeIdleStore{candidate: containerruntime.IdleRuntimeCandidate{ConversationID: spec.ConversationID, LastActivityAt: time.Now().UTC().Add(-time.Hour)}},
+		probeIdleLifecycle{manager: manager, runtimeID: spec.ID}, probeIdleActivity{},
+		containerruntime.IdleStopSchedulerOptions{IdleAfter: time.Minute},
+	)
+	if err != nil {
+		return result, err
+	}
+	result.Report, err = scheduler.Reconcile(ctx)
+	if err != nil {
+		return result, fmt.Errorf("auto-stop idle runtime: %w", err)
+	}
+	result.Stopped, err = manager.Inspect(ctx, spec.ID)
+	if err != nil {
+		return result, fmt.Errorf("inspect retained idle runtime: %w", err)
+	}
+	if result.Report.Stopped != 1 || result.Stopped.Status != containerruntime.StatusStopped {
+		return result, fmt.Errorf("%w: idle runtime was not stopped", containerruntime.ErrRuntimeStateConflict)
+	}
+	result.RetainedAfterStop = true
+	if err := manager.Delete(ctx, spec.ID, containerruntime.DeleteOptions{RemoveWorkspace: false}); err != nil {
+		return result, fmt.Errorf("clean up idle acceptance runtime: %w", err)
+	}
+	result.DeletedAfterCheck = true
+	_, err = manager.Inspect(ctx, spec.ID)
+	if errors.Is(err, containerruntime.ErrNotFound) {
+		result.MissingAfterDelete = true
+		return result, nil
+	}
+	if err != nil {
+		return result, fmt.Errorf("inspect idle runtime after cleanup: %w", err)
+	}
+	return result, fmt.Errorf("%w: idle acceptance runtime still exists after cleanup", containerruntime.ErrRuntimeStateConflict)
 }
 
 func exerciseRuntimeLifecycle(ctx context.Context, manager containerruntime.RuntimeManager, spec containerruntime.RuntimeSpec) (lifecycleProbeResult, error) {

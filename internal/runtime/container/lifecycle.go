@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type LifecycleOperation string
@@ -43,6 +44,7 @@ type LifecycleFailure struct {
 type LifecycleStore interface {
 	Get(ctx context.Context, conversationID string) (InitializationRecord, error)
 	BeginLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation) (InitializationRecord, error)
+	BeginIdleStop(ctx context.Context, conversationID string, inactiveBefore time.Time) (InitializationRecord, error)
 	CompleteLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation, completion LifecycleCompletion) (InitializationRecord, error)
 	FailLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation, failure LifecycleFailure) (InitializationRecord, error)
 	DeleteLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation) error
@@ -88,6 +90,26 @@ func (c *LifecycleController) Stop(ctx context.Context, conversationID string) (
 	if err != nil {
 		return record, err
 	}
+	return c.stopPrepared(ctx, record)
+}
+
+// StopIdle atomically claims an idle running runtime using the conversation's
+// durable activity timestamp. It never requests workspace or runtime deletion.
+func (c *LifecycleController) StopIdle(ctx context.Context, conversationID string, inactiveBefore time.Time) (InitializationRecord, error) {
+	if ctx == nil {
+		return InitializationRecord{}, invalidSpec("context is required")
+	}
+	if inactiveBefore.IsZero() {
+		return InitializationRecord{}, invalidSpec("idle cutoff is required")
+	}
+	record, err := c.store.BeginIdleStop(ctx, strings.TrimSpace(conversationID), inactiveBefore.UTC())
+	if err != nil {
+		return record, err
+	}
+	return c.stopPrepared(ctx, record)
+}
+
+func (c *LifecycleController) stopPrepared(ctx context.Context, record InitializationRecord) (InitializationRecord, error) {
 	if _, err := c.verifyBeforeMutation(ctx, record, false); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationStop, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 	}
