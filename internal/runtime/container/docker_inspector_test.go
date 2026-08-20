@@ -58,7 +58,7 @@ func TestDockerInspectorEngineInfo(t *testing.T) {
 		pingResult: mobyclient.PingResult{APIVersion: "1.52", OSType: "linux"},
 		infoResult: mobyclient.SystemInfoResult{Info: system.Info{
 			ServerVersion:   "29.1.3",
-			Architecture:    "arm64",
+			Architecture:    "aarch64",
 			OSType:          "linux",
 			CgroupVersion:   "2",
 			SecurityOptions: []string{"name=apparmor", "name=seccomp,profile=builtin"},
@@ -69,7 +69,7 @@ func TestDockerInspectorEngineInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("engine info: %v", err)
 	}
-	if !info.Available || info.Version != "29.1.3" || info.APIVersion != "1.52" || info.Architecture != "arm64" || info.CgroupVersion != "2" {
+	if !info.Available || info.Version != "29.1.3" || info.APIVersion != "1.52" || info.Architecture != "arm64" || info.RawArchitecture != "aarch64" || info.CgroupVersion != "2" {
 		t.Fatalf("engine info = %#v", info)
 	}
 }

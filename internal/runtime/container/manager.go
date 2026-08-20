@@ -49,6 +49,7 @@ type EngineInfo struct {
 	Version         string
 	APIVersion      string
 	Architecture    string
+	RawArchitecture string
 	OperatingSys    string
 	CgroupVersion   string
 	SecurityOptions []string

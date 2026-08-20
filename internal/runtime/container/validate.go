@@ -87,8 +87,12 @@ func ValidateImageReference(image ImageReference) error {
 	if strings.TrimSpace(image.ResolvedDigest) != "" {
 		return invalidSpec("resolved image digest is engine output and cannot be requested")
 	}
-	if _, err := parsePlatform(image.Platform); err != nil {
+	parsedPlatform, err := parsePlatform(image.Platform)
+	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(image.Platform) != platformFromParts(parsedPlatform) {
+		return invalidSpec("image platform must use canonical OCI architecture names")
 	}
 	return nil
 }
@@ -101,11 +105,30 @@ func parsePlatform(platform string) ([3]string, error) {
 	if len(parts) == 3 && parts[2] == "" {
 		return [3]string{}, invalidSpec("image platform variant cannot be empty")
 	}
-	parsed := [3]string{parts[0], parts[1], ""}
+	parsed := [3]string{parts[0], normalizeArchitecture(parts[1]), ""}
 	if len(parts) == 3 {
 		parsed[2] = parts[2]
 	}
 	return parsed, nil
+}
+
+func normalizeArchitecture(architecture string) string {
+	switch strings.ToLower(strings.TrimSpace(architecture)) {
+	case "aarch64", "arm64":
+		return "arm64"
+	case "x86_64", "x86-64", "amd64":
+		return "amd64"
+	default:
+		return strings.ToLower(strings.TrimSpace(architecture))
+	}
+}
+
+func platformFromParts(parts [3]string) string {
+	value := parts[0] + "/" + parts[1]
+	if parts[2] != "" {
+		value += "/" + parts[2]
+	}
+	return value
 }
 
 func invalidSpec(message string) error {

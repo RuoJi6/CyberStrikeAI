@@ -69,7 +69,8 @@ func (d *DockerInspector) EngineInfo(ctx context.Context) (EngineInfo, error) {
 		Available:       true,
 		Version:         info.ServerVersion,
 		APIVersion:      ping.APIVersion,
-		Architecture:    info.Architecture,
+		Architecture:    normalizeArchitecture(info.Architecture),
+		RawArchitecture: info.Architecture,
 		OperatingSys:    info.OSType,
 		CgroupVersion:   info.CgroupVersion,
 		SecurityOptions: append([]string(nil), info.SecurityOptions...),
@@ -255,7 +256,7 @@ func platformString(platform ocispec.Platform) string {
 	if platform.OS == "" || platform.Architecture == "" {
 		return ""
 	}
-	value := platform.OS + "/" + platform.Architecture
+	value := platform.OS + "/" + normalizeArchitecture(platform.Architecture)
 	if platform.Variant != "" {
 		value += "/" + platform.Variant
 	}
