@@ -1,7 +1,7 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 2 第 4 项已完成（第 5 项待开始：超大工具输出迁移到对话 `/workspace/.tool-output/`）
+> 当前阶段：阶段 2 第 5 项已完成（第 6 项待开始：Agent 输入、上传文件和命令输出路径规范化到 `/workspace`）
 > 最后更新：2026-08-20  
 > 工作分支：`codex/docker-agent-runtime`
 
@@ -263,7 +263,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 容器模式首次执行调用阶段 1 后台初始化协调器，未就绪前不将 OS 命令回退到宿主机，同时不冻结对话列表。
 - [x] 将 `exec`、`execute`、脚本执行和命令型 YAML 工具统一路由到对话执行后端。
 - [x] 保留 stdout/stderr 流式输出、取消、超时、PTY 回退、退出码和输出溢出语义。
-- [ ] 将超大工具输出落到该对话 `/workspace/.tool-output/`，数据库和模型上下文只保留有界摘要与文件引用。
+- [x] 将超大工具输出落到该对话 `/workspace/.tool-output/`，数据库和模型上下文只保留有界摘要与文件引用。
 - [ ] 将 Agent 输入、上传文件和命令输出路径规范化到 `/workspace`，防止路径穿越。
 - [ ] 未启用持久化时，明确告知删除容器会删除文件；启用时创建每对话 named volume。
 - [ ] 删除对话时提供“保留工作区”和“一并删除”两种明确选项。
@@ -432,7 +432,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 已完成 | 2026-08-20 | `8c2c6bc` | Go 全量通过；前端 115/115 | 源码/文档已同步；服务 active；`GET /` 200 | `#chat` 非空白、无 console 错误；交互进入 `#dashboard` | 执行面全部归属；CGO 候选构建失败已回滚，当前服务健康 |
 | 1 | 已完成 | 2026-08-20 | `58ff685`（第 1 项）；`45e8da3` + `1645256`（第 2 项）；`36ab2d3`（第 3 项）；`7c17fd5`（第 4 项）；`49f0256`（第 5 项）；`338e047`（第 6 项）；`b4024d6`（第 7 项）；`45ef059`（第 8 项）；`93ff9a7`（第 9 项）；`b44f018`（第 10 项）；`99b3e10`（第 11 项） | Go 全包、`go vet ./...`、前端 115/115 及容器/数据库完整 race 通过；fake runtime 覆盖创建、就绪、生命周期、孤儿资源和空闲停止；真实验收发现并修复非 root 镜像的 tmpfs 工作区不可写问题 | 最终 Zig CGO Linux ARM64 服务 SHA-256 `93a33f7f…17c547b`，active / HTTP 200 / `NRestarts=0`；阶段探针 SHA-256 `f2ef6d69…bdc77c2`；仅使用测试机已有 `cyberstrike/agent` ARM64 镜像并跳过远端 manifest，未下载安全工具；两容器 provider 不同、无默认路由、无 Docker Socket、运行时工作区隔离、停止 A 不影响 B、未持久化 tmpfs 恢复后按设计重置，删除后容器/网络/卷残留均为 0 | 通过 SSH 本地转发访问同一测试机 `?qa=20260820-stage1-item11#dashboard`：URL/标题正确，仪表盘非空白，console 日志为空，截图成功；自动化未填写敏感密码 | 阶段 1 全部验收通过；阶段 2 开始后才持久化 host/container 选择、将 Agent 执行路由到容器并实现可选 named volume；当前仍不声称 Agent 已在容器执行；不实现 Agent 浏览器 |
-| 2 | 进行中 | 第 4 项：2026-08-20 | `361ba97`（第 1 项）；`28d9ad2`（第 2 项）；`a292b52`（第 3 项）；`424e084` + `9926f2c` + `9535a57` + `0fe6fa6` + `629d06f`（第 4 项） | 第 4 项：`go test ./... -count=1`、`go vet ./...`、前端 120/120 通过；runtime/container、security、multiagent 定向测试与 race 通过。覆盖 Docker exec 全进程树取消、Eino PTY 回退且不泄漏首次非 PTY 探测输出、250 ms 有界流门、无输出超时分类及并发取消；此前第 1—3 项验收继续有效 | 第 4 项最终 Linux ARM64 服务 SHA-256 `c8c30fccdc11ecf03363b628c5fc464d4b7d2c5a3224caa8243945e08340de90`，源码包 SHA-256 `ac9687fc78b4ea9a995a9318f69dfa7264d91a738da03eccf3926f08fe0e9626`，active / HTTP 200 / `NRestarts=0`。流与退出码：对话 `a244f2d6-fce5-480c-92a0-209201304fc8`、execution `8fa5bc37-d76b-4161-9149-a118f61285ed`，stdout/stderr 分流且退出码 7。取消：对话 `51710270-f724-4080-8185-363f32ea01e7`、execution `f2a44ee3-e5bc-44e8-998f-3e57cc3d9431`，状态 `cancelled`，根/子/孙 PID `14/15/16` 全部消失，无 `sleep 600` 与 after 文件。PTY：对话 `2da74d19-efbb-44e4-9737-adcac6747571`、execution `20d7239a-eb15-4963-bfdb-16c64bce39a9`，一次 MCP 执行成功且无非 PTY 探测输出泄漏。无输出超时：对话 `fbe75cc2-d5dc-4f6a-aec4-f509084efd5f`、execution `3fb973cc-a090-4f74-98a2-ed4b7855bd9e`，3 秒超时分类正确，PID `14/15/16` 与残留 sleep 均不存在，配置已恢复 1200 秒。溢出：对话 `78e499a0-74e4-4751-b234-ac31d8e57951`、execution `c508151c-1b85-4b73-bf17-a7d6929217c7`，有界流 100255 字节、完整落盘 258000 字节，首尾 marker `0000/5999` 均可复核。五项容器均为 `running`、`network=none`、挂载数 0，宿主无回退标记 | 第 4 项通过 SSH 本地转发访问 `?qa=20260820-stage2-item4-629d06f`：CyberStrikeAI 页面和标题正常，五个对话均显示“容器执行”；对话页可见 stdout/stderr/退出码 7、PTY marker 与完整溢出文件引用；MCP 状态监控 execution 详情可见取消状态、`当前工具调用已停止` 及 3 秒无输出终止提示。五类截图成功，页面无错误覆盖层，console error/warning 均为 0 | 第 1—4 项验收通过。第 4 项仅保留现有溢出语义；当前完整输出仍落在 `tmp/reduction/conversations/.../trunc/...`，第 5 项才迁移到对话 `/workspace/.tool-output/`，本次未提前实施。第 5 项待开始；未推送远端 |
+| 2 | 进行中 | 第 5 项：2026-08-20 | `361ba97`（第 1 项）；`28d9ad2`（第 2 项）；`a292b52`（第 3 项）；`424e084` + `9926f2c` + `9535a57` + `0fe6fa6` + `629d06f`（第 4 项）；`43c8084` + `637cf14` + `067f513`（第 5 项） | 第 1—4 项详细证据保留于 `629d06f`。第 5 项：`go test ./... -count=1`、`go vet ./...`、前端 120/120 通过；runtime/container、security、multiagent 定向测试与 race 通过；覆盖 Eino `execute` 原始 delta 隔离、monitor execution ID 绑定、容器输出工作区落盘、只读 rootfs exec-stdin 传输、字节数校验、符号链接拒绝和失败关闭 | 最终 Linux ARM64 服务 SHA-256 `43e1b15798977987168bca41005d8cfed2f3af5e172faec10fc289002d6d0d0e`，源码包 SHA-256 `fb60b6c45c8dbbbefdd529c97bfb4b7f49101a0efee6112c48ef05741b3af9c4`，部署关键源码与本地哈希完全一致，active / HTTP 200 / `NRestarts=0`。对话 `d87f1ace-0a7c-4679-bba6-91ad10a8aeb9`，runtime `conversation-d87f1ace-0a7c-4679-bba6-91ad10a8aeb9`，provider `4b6699136f064d613190a3275ea1ce0fbd48a2444b1a34fff322b284eda7df3f`，execute execution `7a755566-d0d0-4493-a99a-022ea592f077`。容器文件 `/workspace/.tool-output/7a755566-d0d0-4493-a99a-022ea592f077` 为 288000 字节、模式 0644、SHA-256 `50fcce5712a374b281058883eb0e213128c86e83eddef7c4c95cc810d81f3c4e`，首尾 `0000/5999` 正确；`readonlyRootfs=true`、`network=none`、挂载 0，宿主旧 reduction 文件数 0。SSE 无 error 且无旧路径；成功消息 process details 总计 25801 字节、单条最大 5519 字节，monitor result 4385 字节，均只保留有界预览与工作区引用 | 通过 SSH 本地转发登录 `?qa=20260820-stage2-item5-067f513#chat?conversation=d87f1ace-0a7c-4679-bba6-91ad10a8aeb9`；页面显示“容器执行”、288000 字节、首尾 marker 和 `/workspace/.tool-output/...` 引用，console error/warning 为 0；截图 `stage2-item5-067f513-success.png` 已保存 | 第 1—5 项验收通过。真实验收先后发现并修复 Eino 流封装二次落宿主 reduction、Docker `CopyToContainer` 拒绝只读 rootfs 两条漏链；最终使用所有权重验后的非特权 exec stdin 写入固定工作区路径。第 6 项待开始；实施提交已推送远端 |
 | 3 | 未开始 | - | - | - | - | - | - |
 | 4 | 未开始 | - | - | - | - | - | - |
 | 5 | 未开始 | - | - | - | - | - | - |
