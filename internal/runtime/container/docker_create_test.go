@@ -95,11 +95,15 @@ func (f *fakeDockerCreationAPI) ExecCreate(_ context.Context, containerID string
 	return mobyclient.ExecCreateResult{ID: f.execID}, nil
 }
 
-func (f *fakeDockerCreationAPI) ExecAttach(_ context.Context, _ string, _ mobyclient.ExecAttachOptions) (mobyclient.ExecAttachResult, error) {
+func (f *fakeDockerCreationAPI) ExecAttach(_ context.Context, _ string, options mobyclient.ExecAttachOptions) (mobyclient.ExecAttachResult, error) {
 	clientConn, serverConn := net.Pipe()
 	go func() {
-		writeFakeExecFrame(serverConn, mobystdcopy.Stdout, []byte(f.execStdout))
-		writeFakeExecFrame(serverConn, mobystdcopy.Stderr, []byte(f.execStderr))
+		if options.TTY {
+			_, _ = serverConn.Write([]byte(f.execStdout + f.execStderr))
+		} else {
+			writeFakeExecFrame(serverConn, mobystdcopy.Stdout, []byte(f.execStdout))
+			writeFakeExecFrame(serverConn, mobystdcopy.Stderr, []byte(f.execStderr))
+		}
 		_ = serverConn.Close()
 	}()
 	return mobyclient.ExecAttachResult{HijackedResponse: mobyclient.NewHijackedResponse(clientConn, "application/vnd.docker.multiplexed-stream")}, nil

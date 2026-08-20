@@ -144,18 +144,6 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 	if b == nil || b.executor == nil {
 		return ExecutionResult{Location: "container", ExitCode: -1}, fmt.Errorf("container execution backend is not configured")
 	}
-	var tee *tooloutput.Tee
-	if request.MaxOutputBytes > 0 {
-		tee = tooloutput.NewTee(request.Spill)
-	}
-	collector := newBoundedOutputCollector(request.MaxOutputBytes, tee)
-	sink := func(_ containerruntime.ExecStream, chunk []byte) error {
-		kept := collector.WriteStringLimited(string(chunk))
-		if kept != "" && request.Output != nil {
-			request.Output(kept)
-		}
-		return nil
-	}
 	env := append([]string{
 		"HOME=/workspace",
 		"TMPDIR=/tmp",
@@ -167,24 +155,97 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 		"SYSTEMD_PAGER=cat",
 		"DEBIAN_FRONTEND=noninteractive",
 	}, request.Env...)
-	result, err := b.executor.Exec(ctx, b.spec, containerruntime.ExecRequest{
-		Command:    append([]string(nil), request.Command...),
-		WorkingDir: strings.TrimSpace(request.WorkingDir),
-		Env:        env,
-	}, sink)
-	output := finalizeBoundedOutput(collector, request.MaxOutputBytes, tee)
-	executionResult := ExecutionResult{
-		Output:         output,
-		ExitCode:       result.ExitCode,
-		Location:       "container",
-		RuntimeID:      string(b.spec.ID),
-		ProviderExecID: result.ExecID,
+	run := func(tty bool) (ExecutionResult, error) {
+		var tee *tooloutput.Tee
+		if request.MaxOutputBytes > 0 {
+			tee = tooloutput.NewTee(request.Spill)
+		}
+		collector := newBoundedOutputCollector(request.MaxOutputBytes, tee)
+
+		execCtx := ctx
+		cancel := func() {}
+		var idleWatch *ShellInactivityWatch
+		idleExpired := make(chan struct{}, 1)
+		watchDone := make(chan struct{})
+		if request.Output != nil {
+			idleWatch = NewShellInactivityWatch(request.NoOutputTimeoutSec)
+		}
+		if idleWatch != nil {
+			execCtx, cancel = context.WithCancel(ctx)
+			go func() {
+				select {
+				case <-idleWatch.Expired:
+					select {
+					case idleExpired <- struct{}{}:
+					default:
+					}
+					cancel()
+				case <-watchDone:
+				}
+			}()
+		}
+
+		sink := func(_ containerruntime.ExecStream, chunk []byte) error {
+			if len(chunk) > 0 && idleWatch != nil {
+				idleWatch.Bump()
+			}
+			kept := collector.WriteStringLimited(string(chunk))
+			if kept != "" && request.Output != nil {
+				request.Output(kept)
+			}
+			return nil
+		}
+		result, err := b.executor.Exec(execCtx, b.spec, containerruntime.ExecRequest{
+			Command:    append([]string(nil), request.Command...),
+			WorkingDir: strings.TrimSpace(request.WorkingDir),
+			Env:        env,
+			TTY:        tty,
+		}, sink)
+		if idleWatch != nil {
+			idleWatch.Stop()
+			close(watchDone)
+			cancel()
+		}
+		select {
+		case <-idleExpired:
+			msg := ShellNoOutputTimeoutMessage(idleWatch.Sec)
+			kept := collector.WriteStringLimited(msg)
+			if kept != "" && request.Output != nil {
+				request.Output(kept)
+			}
+			timeoutErr := fmt.Errorf("shell inactivity timeout (%ds)", idleWatch.Sec)
+			var terminationErr *containerruntime.ExecTerminationError
+			if errors.As(err, &terminationErr) {
+				err = errors.Join(timeoutErr, terminationErr)
+			} else {
+				err = timeoutErr
+			}
+			result.ExitCode = -1
+		default:
+		}
+		output := finalizeBoundedOutput(collector, request.MaxOutputBytes, tee)
+		executionResult := ExecutionResult{
+			Output:         output,
+			ExitCode:       result.ExitCode,
+			Location:       "container",
+			RuntimeID:      string(b.spec.ID),
+			ProviderExecID: result.ExecID,
+		}
+		if err != nil {
+			if executionResult.ExitCode == 0 {
+				executionResult.ExitCode = -1
+			}
+			return executionResult, err
+		}
+		if result.ExitCode != 0 {
+			return executionResult, &CommandExitError{Code: result.ExitCode}
+		}
+		return executionResult, nil
 	}
-	if err != nil {
-		return executionResult, err
+
+	result, err := run(false)
+	if err != nil && request.RetryWithPTY && ctx.Err() == nil && shouldRetryWithPTY(result.Output) {
+		return run(true)
 	}
-	if result.ExitCode != 0 {
-		return executionResult, &CommandExitError{Code: result.ExitCode}
-	}
-	return executionResult, nil
+	return result, err
 }

@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/config"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
+	"cyberstrike-ai/internal/tooloutput"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	"go.uber.org/zap"
@@ -59,6 +62,136 @@ func TestContainerExecutionBackendStreamsAndPreservesExitCode(t *testing.T) {
 	}
 	if got := FormatCommandFailureFromErr(err, result.Output); !strings.Contains(got, "exit status 7") || !strings.Contains(got, "container-output") {
 		t.Fatalf("formatted failure = %q", got)
+	}
+}
+
+type blockingContainerRuntimeExecutor struct{}
+
+func (blockingContainerRuntimeExecutor) Exec(ctx context.Context, _ containerruntime.RuntimeSpec, _ containerruntime.ExecRequest, _ containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {
+	<-ctx.Done()
+	return containerruntime.ExecResult{ExecID: "exec-idle"}, ctx.Err()
+}
+
+type blockingContainerRuntimeTerminationFailureExecutor struct{}
+
+func (blockingContainerRuntimeTerminationFailureExecutor) Exec(ctx context.Context, _ containerruntime.RuntimeSpec, _ containerruntime.ExecRequest, _ containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {
+	<-ctx.Done()
+	return containerruntime.ExecResult{ExecID: "exec-idle-failed"}, errors.Join(
+		ctx.Err(),
+		&containerruntime.ExecTerminationError{Err: errors.New("kill helper failed")},
+	)
+}
+
+func TestContainerExecutionBackendEnforcesNoOutputTimeout(t *testing.T) {
+	backend, err := NewContainerExecutionBackend(blockingContainerRuntimeExecutor{}, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var streamed strings.Builder
+	started := time.Now()
+	result, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command:            []string{"/bin/sh", "-c", "sleep 30"},
+		Output:             func(chunk string) { streamed.WriteString(chunk) },
+		NoOutputTimeoutSec: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "shell inactivity timeout (1s)") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed < time.Second || elapsed > 3*time.Second {
+		t.Fatalf("timeout elapsed = %v", elapsed)
+	}
+	if result.ExitCode != -1 || !strings.Contains(result.Output, "Command terminated: no new output for 1 seconds") || streamed.String() != result.Output {
+		t.Fatalf("timeout result=%#v streamed=%q", result, streamed.String())
+	}
+}
+
+func TestContainerExecutionBackendPreservesTerminationFailureOnTimeout(t *testing.T) {
+	backend, err := NewContainerExecutionBackend(blockingContainerRuntimeTerminationFailureExecutor{}, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command:            []string{"/bin/sh", "-c", "sleep 30"},
+		Output:             func(string) {},
+		NoOutputTimeoutSec: 1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "shell inactivity timeout (1s)") || !strings.Contains(err.Error(), "kill helper failed") {
+		t.Fatalf("timeout error = %v", err)
+	}
+	var terminationErr *containerruntime.ExecTerminationError
+	if !errors.As(err, &terminationErr) {
+		t.Fatalf("termination failure was hidden: %v", err)
+	}
+	if result.ExitCode != -1 || result.ProviderExecID != "exec-idle-failed" {
+		t.Fatalf("timeout result = %#v", result)
+	}
+}
+
+type ptyRetryContainerRuntimeExecutor struct {
+	requests []containerruntime.ExecRequest
+}
+
+func (f *ptyRetryContainerRuntimeExecutor) Exec(_ context.Context, _ containerruntime.RuntimeSpec, request containerruntime.ExecRequest, sink containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {
+	f.requests = append(f.requests, request)
+	if !request.TTY {
+		_ = sink(containerruntime.ExecStreamStderr, []byte("not a tty"))
+		return containerruntime.ExecResult{ExecID: "exec-no-tty", ExitCode: 1}, nil
+	}
+	_ = sink(containerruntime.ExecStreamStdout, []byte("pty-ok"))
+	return containerruntime.ExecResult{ExecID: "exec-tty", ExitCode: 0}, nil
+}
+
+func TestContainerExecutionBackendRetriesWithPTY(t *testing.T) {
+	executor := &ptyRetryContainerRuntimeExecutor{}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := backend.Execute(context.Background(), ExecutionRequest{Command: []string{"tty-check"}, RetryWithPTY: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(executor.requests) != 2 || executor.requests[0].TTY || !executor.requests[1].TTY {
+		t.Fatalf("pty requests = %#v", executor.requests)
+	}
+	if result.Output != "pty-ok" || result.ProviderExecID != "exec-tty" || result.ExitCode != 0 {
+		t.Fatalf("pty result = %#v", result)
+	}
+}
+
+func TestContainerExecutionBackendSpillsOversizedOutput(t *testing.T) {
+	full := strings.Repeat("container-output-", 256)
+	executor := &fakeContainerRuntimeExecutor{
+		result: containerruntime.ExecResult{ExecID: "exec-spill", ExitCode: 0},
+		output: full,
+	}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	result, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command:        []string{"large-output"},
+		MaxOutputBytes: 512,
+		Spill: tooloutput.SpillOpts{
+			RootDir:        root,
+			ConversationID: "conversation-01",
+			ExecutionID:    "execution-01",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(root, "conversations", "conversation-01", "trunc", "execution-01")
+	if len(result.Output) > 512 || !strings.Contains(result.Output, "<persisted-output>") || !strings.Contains(result.Output, wantPath) {
+		t.Fatalf("bounded output = %q", result.Output)
+	}
+	data, err := os.ReadFile(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != full {
+		t.Fatalf("spilled bytes = %d, want %d", len(data), len(full))
 	}
 }
 

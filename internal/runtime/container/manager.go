@@ -184,6 +184,9 @@ type ExecRequest struct {
 	Command    []string
 	WorkingDir string
 	Env        []string
+	// TTY requests a non-interactive pseudo terminal. Stdin stays detached;
+	// stdout/stderr are returned as Docker's single raw TTY stream.
+	TTY bool
 }
 
 // ExecResult contains only engine-observed process metadata. Output is sent to

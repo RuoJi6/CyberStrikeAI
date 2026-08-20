@@ -2,20 +2,96 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	mobystdcopy "github.com/moby/moby/api/pkg/stdcopy"
 	mobyclient "github.com/moby/moby/client"
 )
 
-const maxContainerExecArgumentBytes = 1 << 20
+const (
+	maxContainerExecArgumentBytes = 1 << 20
+	containerExecCancelTimeout    = 5 * time.Second
+)
+
+// Every command is launched as a separate process group and publishes its
+// container PID before waiting. Docker has no "kill exec" endpoint; the
+// control file lets a second, ownership-verified exec terminate only this
+// command tree without stopping the conversation container.
+const containerExecWrapperScript = `pidfile=$1
+shift
+set -m 2>/dev/null || true
+"$@" &
+child=$!
+set +m 2>/dev/null || true
+printf '%s\n' "$child" > "$pidfile"
+wait "$child"
+status=$?
+rm -f "$pidfile"
+exit "$status"`
+
+const containerExecCancelScript = `pidfile=$1
+pid=
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+  if [ -r "$pidfile" ]; then
+    IFS= read -r pid < "$pidfile" || true
+  fi
+  case "$pid" in
+    ''|*[!0-9]*) pid= ;;
+    *) break ;;
+  esac
+  attempt=$((attempt + 1))
+  sleep 0.05
+done
+[ -n "$pid" ] || exit 0
+kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+attempt=0
+while [ "$attempt" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if kill -0 "$pid" 2>/dev/null; then
+  kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+fi
+rm -f "$pidfile"`
 
 type dockerExecAPI interface {
 	ExecCreate(context.Context, string, mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error)
 	ExecAttach(context.Context, string, mobyclient.ExecAttachOptions) (mobyclient.ExecAttachResult, error)
 	ExecInspect(context.Context, string, mobyclient.ExecInspectOptions) (mobyclient.ExecInspectResult, error)
+}
+
+// ExecTerminationError means the primary exec failed or was cancelled and the
+// follow-up command-tree termination could not be confirmed. Callers may
+// preserve this security-relevant detail while translating the primary error
+// (for example, an inactivity cancellation) into a user-facing timeout.
+type ExecTerminationError struct{ Err error }
+
+func (e *ExecTerminationError) Error() string {
+	if e == nil || e.Err == nil {
+		return "container exec termination failed"
+	}
+	return "container exec termination failed: " + e.Err.Error()
+}
+
+func (e *ExecTerminationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func joinExecTermination(primary, termination error) error {
+	if termination == nil {
+		return primary
+	}
+	return errors.Join(primary, &ExecTerminationError{Err: termination})
 }
 
 // Exec runs one non-interactive argv command inside the owned conversation
@@ -61,15 +137,18 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 	if workingDir == "" {
 		workingDir = spec.Workspace.MountPath
 	}
+	controlFile := "/tmp/.cyberstrike-exec-" + uuid.NewString() + ".pid"
+	wrappedCommand := []string{"/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", controlFile}
+	wrappedCommand = append(wrappedCommand, request.Command...)
 	created, err := m.execAPI.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
-		TTY:          false,
+		TTY:          request.TTY,
 		AttachStdin:  false,
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          append([]string(nil), request.Env...),
 		WorkingDir:   workingDir,
-		Cmd:          append([]string(nil), request.Command...),
+		Cmd:          wrappedCommand,
 	})
 	if err != nil {
 		return ExecResult{}, fmt.Errorf("create exec for runtime %s: %w", spec.ID, err)
@@ -78,8 +157,11 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 		return ExecResult{}, fmt.Errorf("%w: engine returned an empty exec id", ErrRuntimeStateConflict)
 	}
 
-	attached, err := m.execAPI.ExecAttach(ctx, created.ID, mobyclient.ExecAttachOptions{TTY: false})
+	attached, err := m.execAPI.ExecAttach(ctx, created.ID, mobyclient.ExecAttachOptions{TTY: request.TTY})
 	if err != nil {
+		if ctx.Err() != nil {
+			return ExecResult{ExecID: created.ID}, joinExecTermination(ctx.Err(), m.terminateExecProcess(spec, runtime, controlFile))
+		}
 		return ExecResult{ExecID: created.ID}, fmt.Errorf("attach exec %s: %w", created.ID, err)
 	}
 	defer attached.Close()
@@ -92,17 +174,25 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 		case <-copyDone:
 		}
 	}()
-	_, copyErr := mobystdcopy.StdCopy(
-		execSinkWriter{stream: ExecStreamStdout, sink: sink},
-		execSinkWriter{stream: ExecStreamStderr, sink: sink},
-		attached.Reader,
-	)
+	var copyErr error
+	if request.TTY {
+		_, copyErr = io.Copy(execSinkWriter{stream: ExecStreamStdout, sink: sink}, attached.Reader)
+	} else {
+		_, copyErr = mobystdcopy.StdCopy(
+			execSinkWriter{stream: ExecStreamStdout, sink: sink},
+			execSinkWriter{stream: ExecStreamStderr, sink: sink},
+			attached.Reader,
+		)
+	}
 	close(copyDone)
 	if ctx.Err() != nil {
-		return ExecResult{ExecID: created.ID}, ctx.Err()
+		return ExecResult{ExecID: created.ID}, joinExecTermination(ctx.Err(), m.terminateExecProcess(spec, runtime, controlFile))
 	}
 	if copyErr != nil {
-		return ExecResult{ExecID: created.ID}, fmt.Errorf("read exec %s output: %w", created.ID, copyErr)
+		return ExecResult{ExecID: created.ID}, joinExecTermination(
+			fmt.Errorf("read exec %s output: %w", created.ID, copyErr),
+			m.terminateExecProcess(spec, runtime, controlFile),
+		)
 	}
 
 	inspection, err := m.execAPI.ExecInspect(ctx, created.ID, mobyclient.ExecInspectOptions{})
@@ -113,9 +203,68 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 		return ExecResult{ExecID: created.ID}, fmt.Errorf("%w: exec identity does not match the owned runtime", ErrRuntimeStateConflict)
 	}
 	if inspection.Running {
-		return ExecResult{ExecID: created.ID}, fmt.Errorf("%w: exec %s still running after output closed", ErrRuntimeStateConflict, created.ID)
+		return ExecResult{ExecID: created.ID}, joinExecTermination(
+			fmt.Errorf("%w: exec %s still running after output closed", ErrRuntimeStateConflict, created.ID),
+			m.terminateExecProcess(spec, runtime, controlFile),
+		)
 	}
 	return ExecResult{ExecID: created.ID, ExitCode: inspection.ExitCode}, nil
+}
+
+func (m *DockerManager) terminateExecProcess(spec RuntimeSpec, expected Runtime, controlFile string) error {
+	if m == nil || m.execAPI == nil {
+		return fmt.Errorf("%w: container exec API is not configured", ErrEngineUnavailable)
+	}
+	timeout := containerExecCancelTimeout
+	if m.operationTimeout > 0 && m.operationTimeout < timeout {
+		timeout = m.operationTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	runtime, err := m.inspectOwned(ctx, spec.ID)
+	if err != nil {
+		return fmt.Errorf("verify runtime before terminating exec: %w", err)
+	}
+	if runtime.ProviderID != expected.ProviderID || runtime.ConversationID != spec.ConversationID || runtime.SpecDigest != RuntimeSpecDigest(spec) {
+		return fmt.Errorf("%w: runtime identity changed before terminating exec", ErrRuntimeStateConflict)
+	}
+	if runtime.Status != StatusRunning {
+		return nil // stopping the container already terminated the process tree
+	}
+	created, err := m.execAPI.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
+		Privileged:   false,
+		TTY:          false,
+		AttachStdin:  false,
+		AttachStdout: true,
+		AttachStderr: true,
+		WorkingDir:   spec.Workspace.MountPath,
+		Cmd:          []string{"/bin/sh", "-c", containerExecCancelScript, "cyberstrike-exec-cancel", controlFile},
+	})
+	if err != nil {
+		return fmt.Errorf("create exec cancellation helper: %w", err)
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		return fmt.Errorf("%w: engine returned an empty cancellation exec id", ErrRuntimeStateConflict)
+	}
+	attached, err := m.execAPI.ExecAttach(ctx, created.ID, mobyclient.ExecAttachOptions{TTY: false})
+	if err != nil {
+		return fmt.Errorf("attach exec cancellation helper %s: %w", created.ID, err)
+	}
+	defer attached.Close()
+	if _, err := mobystdcopy.StdCopy(io.Discard, io.Discard, attached.Reader); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("read exec cancellation helper %s: %w", created.ID, err)
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("wait for exec cancellation helper %s: %w", created.ID, ctx.Err())
+	}
+	inspection, err := m.execAPI.ExecInspect(ctx, created.ID, mobyclient.ExecInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("inspect exec cancellation helper %s: %w", created.ID, err)
+	}
+	if inspection.ID != created.ID || inspection.ContainerID != runtime.ProviderID || inspection.Running || inspection.ExitCode != 0 {
+		return fmt.Errorf("%w: cancellation helper did not complete cleanly", ErrRuntimeStateConflict)
+	}
+	return nil
 }
 
 func validateExecRequest(spec RuntimeSpec, request ExecRequest) error {
