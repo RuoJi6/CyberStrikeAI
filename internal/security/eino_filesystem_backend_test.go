@@ -1,8 +1,13 @@
 package security
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,6 +75,52 @@ func TestConversationFilesystemBackendRejectsTraversalBeforeExecution(t *testing
 	}
 	if len(container.requests) != 0 || len(container.writes) != 0 {
 		t.Fatalf("container backend reached for traversal: requests=%d writes=%d", len(container.requests), len(container.writes))
+	}
+}
+
+func TestContainerFilesystemScriptsStopAfterSymlinkGuardRejection(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "passwd"), []byte("must-not-be-read\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(workspace, "escape")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(link, "passwd")
+
+	tests := []struct {
+		name   string
+		script string
+		args   []string
+	}{
+		{name: "read", script: containerReadFileScript, args: []string{workspace, target, "1", "10"}},
+		{name: "read whole", script: containerReadWholeFileScript, args: []string{workspace, target}},
+		{name: "list", script: containerListDirectoryScript, args: []string{workspace, link}},
+		{name: "walk", script: containerWalkWorkspaceScript, args: []string{workspace, link}},
+		{name: "grep", script: containerGrepWorkspaceScript, args: []string{workspace, target, "--json", "-e", "must-not-be-read"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			commandArgs := append([]string{"-c", test.script, "cyberstrike-fs-test"}, test.args...)
+			cmd := exec.Command("/bin/sh", commandArgs...)
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			cmd.Stdout = &stdout
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 65 {
+				t.Fatalf("guard exit error = %v, stderr = %q", err, stderr.String())
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("guarded script leaked output: %q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "symlinked workspace path rejected") {
+				t.Fatalf("guard stderr = %q", stderr.String())
+			}
+		})
 	}
 }
 

@@ -51,21 +51,21 @@ workspace=$1
 file=$2
 offset=$3
 limit=$4
-guard_workspace_path "$workspace" "$file"
+guard_workspace_path "$workspace" "$file" || exit $?
 [ -f "$file" ] || { printf 'file not found: %s\n' "$file" >&2; exit 66; }
 awk -v start="$offset" -v max="$limit" 'NR >= start { if (seen >= max) exit; print; seen++ }' "$file"`
 
 const containerReadWholeFileScript = containerWorkspacePathGuard + `
 workspace=$1
 file=$2
-guard_workspace_path "$workspace" "$file"
+guard_workspace_path "$workspace" "$file" || exit $?
 [ -f "$file" ] || { printf 'file not found: %s\n' "$file" >&2; exit 66; }
 cat -- "$file"`
 
 const containerListDirectoryScript = containerWorkspacePathGuard + `
 workspace=$1
 directory=$2
-guard_workspace_path "$workspace" "$directory"
+guard_workspace_path "$workspace" "$directory" || exit $?
 if [ ! -e "$directory" ]; then exit 0; fi
 [ -d "$directory" ] || { printf 'not a directory: %s\n' "$directory" >&2; exit 66; }
 for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
@@ -77,7 +77,7 @@ done`
 const containerWalkWorkspaceScript = containerWorkspacePathGuard + `
 workspace=$1
 directory=$2
-guard_workspace_path "$workspace" "$directory"
+guard_workspace_path "$workspace" "$directory" || exit $?
 if [ ! -e "$directory" ]; then exit 0; fi
 [ -d "$directory" ] || { printf 'not a directory: %s\n' "$directory" >&2; exit 66; }
 find "$directory" -mindepth 1 -print0`
@@ -85,7 +85,7 @@ find "$directory" -mindepth 1 -print0`
 const containerGrepWorkspaceScript = containerWorkspacePathGuard + `
 workspace=$1
 target=$2
-guard_workspace_path "$workspace" "$target"
+guard_workspace_path "$workspace" "$target" || exit $?
 shift 2
 exec rg "$@" -- "$target"`
 
