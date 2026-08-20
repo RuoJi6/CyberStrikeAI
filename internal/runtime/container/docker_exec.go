@@ -50,16 +50,129 @@ while [ "$attempt" -lt 20 ]; do
   sleep 0.05
 done
 [ -n "$pid" ] || exit 0
-kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+
+targets=" $pid "
+groups=
+remember_group() {
+  group=$1
+  case "$group" in
+    ''|*[!0-9]*|0|1) return ;;
+  esac
+  case "$groups" in
+    *" $group "*) ;;
+    *) groups="$groups $group " ;;
+  esac
+}
+read_process() {
+  process_stat=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  process_tail=${process_stat##*) }
+  set -- $process_tail
+  [ "$#" -ge 3 ] || return 1
+  process_state=$1
+  process_parent=$2
+  process_group=$3
+}
+discover_descendants() {
+  round=0
+  while [ "$round" -lt 32 ]; do
+    changed=0
+    for stat_path in /proc/[0-9]*/stat; do
+      candidate=${stat_path#/proc/}
+      candidate=${candidate%/stat}
+      read_process "$candidate" || continue
+      case "$targets" in
+        *" $process_parent "*)
+          case "$targets" in
+            *" $candidate "*) ;;
+            *)
+              targets="$targets$candidate "
+              changed=1
+              ;;
+          esac
+          remember_group "$process_group"
+          ;;
+      esac
+    done
+    [ "$changed" -eq 1 ] || break
+    round=$((round + 1))
+  done
+}
+process_is_live() {
+  read_process "$1" || return 1
+  [ "$process_state" != Z ]
+}
+
+read_process "$pid" && remember_group "$process_group"
+discover_descendants
+
+# Freeze the discovered tree before signalling it so a child cannot fork a
+# replacement between discovery and termination. Process groups cover the
+# normal shell tree; explicit PIDs also cover descendants that called setsid.
+for group in $groups; do
+  kill -STOP -"$group" 2>/dev/null || true
+done
+for target in $targets; do
+  kill -STOP "$target" 2>/dev/null || true
+done
+# Scan once more after the known parents are frozen. This closes the normal
+# fork/discovery race and freezes any late child that moved to another group.
+discover_descendants
+for group in $groups; do
+  kill -STOP -"$group" 2>/dev/null || true
+done
+for target in $targets; do
+  kill -STOP "$target" 2>/dev/null || true
+done
+for group in $groups; do
+  kill -TERM -"$group" 2>/dev/null || true
+done
+for target in $targets; do
+  kill -TERM "$target" 2>/dev/null || true
+done
+for group in $groups; do
+  kill -CONT -"$group" 2>/dev/null || true
+done
+for target in $targets; do
+  kill -CONT "$target" 2>/dev/null || true
+done
+
 attempt=0
-while [ "$attempt" -lt 20 ] && kill -0 "$pid" 2>/dev/null; do
+while [ "$attempt" -lt 20 ]; do
+  alive=0
+  for target in $targets; do
+    if process_is_live "$target"; then
+      alive=1
+      break
+    fi
+  done
+  [ "$alive" -eq 1 ] || break
   attempt=$((attempt + 1))
   sleep 0.1
 done
-if kill -0 "$pid" 2>/dev/null; then
-  kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+if [ "$alive" -eq 1 ]; then
+  for group in $groups; do
+    kill -KILL -"$group" 2>/dev/null || true
+  done
+  for target in $targets; do
+    kill -KILL "$target" 2>/dev/null || true
+  done
 fi
-rm -f "$pidfile"`
+
+attempt=0
+while [ "$attempt" -lt 20 ]; do
+  alive=0
+  for target in $targets; do
+    if process_is_live "$target"; then
+      alive=1
+      break
+    fi
+  done
+  [ "$alive" -eq 1 ] || break
+  attempt=$((attempt + 1))
+  sleep 0.05
+done
+rm -f "$pidfile"
+[ "$alive" -eq 0 ]`
 
 type dockerExecAPI interface {
 	ExecCreate(context.Context, string, mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error)

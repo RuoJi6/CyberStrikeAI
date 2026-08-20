@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -165,6 +166,30 @@ func TestDockerManagerExecCancellationRunsOwnedTerminationHelper(t *testing.T) {
 	defer api.mu.Unlock()
 	if len(api.createOpts) != 2 || !wrappedExecEndsWith(api.createOpts[0].Cmd, []string{"/bin/sh", "-c", "sleep 30"}) || len(api.createOpts[1].Cmd) < 5 || api.createOpts[1].Cmd[2] != containerExecCancelScript || api.createOpts[1].Cmd[4] != api.createOpts[0].Cmd[4] {
 		t.Fatalf("main/cancel exec options = %#v", api.createOpts)
+	}
+}
+
+func TestContainerExecCancelScriptTargetsGroupsAndDescendants(t *testing.T) {
+	check := exec.Command("/bin/sh", "-n")
+	check.Stdin = strings.NewReader(containerExecCancelScript)
+	if output, err := check.CombinedOutput(); err != nil {
+		t.Fatalf("cancellation helper is not valid POSIX shell: %v: %s", err, output)
+	}
+	for _, required := range []string{
+		"/proc/[0-9]*/stat",
+		"discover_descendants",
+		"kill -STOP -\"$group\"",
+		"kill -TERM -\"$group\"",
+		"kill -KILL -\"$group\"",
+		"kill -KILL \"$target\"",
+		"[ \"$alive\" -eq 0 ]",
+	} {
+		if !strings.Contains(containerExecCancelScript, required) {
+			t.Fatalf("cancellation helper does not contain %q", required)
+		}
+	}
+	if strings.Contains(containerExecCancelScript, "kill -TERM -\"$pid\"") {
+		t.Fatal("cancellation helper regressed to assuming child PID equals process group")
 	}
 }
 
