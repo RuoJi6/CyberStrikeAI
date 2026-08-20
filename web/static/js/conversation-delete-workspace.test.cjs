@@ -23,7 +23,7 @@ test('删除对话弹窗为持久工作区提供两个明确选项', () => {
 test('聊天页所有删除入口均通过工作区选择弹窗', () => {
     assert.match(chat, /window\.requestConversationDeleteWorkspaceChoice = requestConversationDeleteWorkspaceChoice/);
     assert.match(chat, /workspace_action=\$\{encodeURIComponent\(workspaceAction\)\}/);
-    assert.match(chat, /function deleteConversationFromContext\(\)[\s\S]{0,350}void deleteConversation\(convId\)/);
+    assert.match(chat, /function deleteConversationFromContext\(\)[\s\S]{0,500}window\.setTimeout\(\(\) => \{[\s\S]{0,120}void deleteConversation\(convId\);[\s\S]{0,80}\}, 0\)/);
     assert.match(chat, /async function deleteSelectedConversations\(\)[\s\S]{0,1800}requestConversationDeleteWorkspaceChoice\('', \{/);
     assert.match(chat, /persistentConversationIDs\.has\(id\)[\s\S]{0,180}'retain'[\s\S]{0,80}'delete'/);
     assert.match(chat, /ephemeralEl\.hidden = !hasEphemeralWorkspace/);

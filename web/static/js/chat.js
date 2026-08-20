@@ -11541,7 +11541,11 @@ function deleteConversationFromContext() {
     const convId = contextMenuConversationId;
     if (!convId) return;
     closeContextMenu();
-    void deleteConversation(convId);
+    // Defer the modal workflow so the menu activation event can finish before
+    // deleteConversation waits for the user's workspace choice.
+    window.setTimeout(() => {
+        void deleteConversation(convId);
+    }, 0);
 }
 
 // 关闭上下文菜单
