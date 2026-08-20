@@ -193,6 +193,7 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 		var sb strings.Builder
 		success := true
 		var invokeErr error
+		inactivityTimedOut := false
 		exitCode := 0
 		hasExitCode := false
 		softReturned := false
@@ -237,6 +238,7 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 
 		fireInactivityTimeout := func() {
 			success = false
+			inactivityTimedOut = true
 			invokeErr = fmt.Errorf("shell inactivity timeout (%ds)", idleWatch.Sec)
 			msg := security.ShellNoOutputTimeoutMessage(idleWatch.Sec)
 			_ = sendOut(&filesystem.ExecuteResponse{Output: msg}, nil)
@@ -329,7 +331,10 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 		}
 		// WithTimeout 触发后，子进程常被信号结束，local 侧多报 exit -1 / canceled，错误链里不一定带 DeadlineExceeded。
 		// 用执行所用 ctx 归一化，便于 UI 展示「超时」而非含糊的 -1。
-		if tctx != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
+		if inactivityTimedOut {
+			success = false
+			invokeErr = fmt.Errorf("shell inactivity timeout (%ds)", idleWatch.Sec)
+		} else if tctx != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
 			success = false
 			invokeErr = context.DeadlineExceeded
 		} else if tctx != nil && errors.Is(tctx.Err(), context.Canceled) {

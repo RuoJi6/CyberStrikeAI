@@ -70,6 +70,8 @@ func TestEinoStreamingShellWrap_NoOutputTimeout(t *testing.T) {
 	inner := &mockStreamingShellHanging{}
 	notify := einomcp.NewToolInvokeNotifyHolder()
 	var fired string
+	var finishedErr error
+	var finishedSuccess bool
 	notify.Set(func(toolCallID, toolName, einoAgent string, success bool, content string, invokeErr error) {
 		fired = content
 	})
@@ -77,6 +79,10 @@ func TestEinoStreamingShellWrap_NoOutputTimeout(t *testing.T) {
 		inner:                   inner,
 		invokeNotify:            notify,
 		shellNoOutputTimeoutSec: 1,
+		finishMonitor: func(_, _, _, _ string, success bool, invokeErr error) {
+			finishedSuccess = success
+			finishedErr = invokeErr
+		},
 	}
 	sr, err := wrap.ExecuteStreaming(context.Background(), &filesystem.ExecuteRequest{Command: "sudo whoami"})
 	if err != nil {
@@ -102,6 +108,9 @@ func TestEinoStreamingShellWrap_NoOutputTimeout(t *testing.T) {
 	out := got.String()
 	if !strings.Contains(out, "没有新的输出") && !strings.Contains(out, "no new output") {
 		t.Fatalf("expected inactivity timeout message, got: %q notify=%q", out, fired)
+	}
+	if finishedSuccess || finishedErr == nil || errors.Is(finishedErr, context.Canceled) || !strings.Contains(finishedErr.Error(), "shell inactivity timeout (1s)") {
+		t.Fatalf("finish success=%v err=%v", finishedSuccess, finishedErr)
 	}
 }
 
