@@ -95,6 +95,13 @@ Content-Type: application/json
 
 容器模式只接受 `/workspace` 内的 Agent 文件路径。相对路径会基于 `/workspace` 规范化；绝对越界路径、父目录穿越、反斜杠、NUL、符号链接路径和跨对话附件引用会失败关闭。超大命令输出固定引用 `/workspace/.tool-output/<executionId>`。
 
+新建对话时，`POST /api/conversations` 以及四个 Agent 消息入口接受不可变字段 `workspacePersistent`。它只允许与 `runtimeMode=container` 同时使用：
+
+- `false`（默认）：`/workspace` 是临时 tmpfs；删除容器会永久删除其中全部文件，界面会在创建前明确显示该警告。
+- `true`：控制面只创建并挂载系统派生的每对话 Docker named volume `cyberstrike-workspace-<runtimeId>`，不接受用户提供的 volume 名或宿主路径。
+
+`DELETE /api/conversations/:id/container` 对持久工作区默认只删除容器并保留 volume；仅 `remove_workspace=true` 时删除受所有者标签复核的 volume。临时工作区随容器删除，响应中的 `workspacePersistent`、`workspaceDeleted`、`workspaceRetained` 和 `workspaceDeletionWarning` 会返回实际结果。
+
 ## 项目、漏洞、攻击链
 
 项目：

@@ -928,6 +928,34 @@ function getRuntimeModeLabelForValue(mode) {
     return normalized === CHAT_RUNTIME_MODE_CONTAINER ? '容器执行' : '本机执行';
 }
 
+function workspacePersistenceEnabledFromConversation(conversation) {
+    if (!conversation) return false;
+    const value = conversation.workspacePersistent !== undefined
+        ? conversation.workspacePersistent
+        : conversation.workspace_persistent;
+    return value === true || value === 1 || value === '1' || value === 'true';
+}
+
+function syncWorkspacePersistenceFromValue(enabled) {
+    const persistent = !!enabled;
+    const input = document.getElementById('workspace-persistence-toggle');
+    const hint = document.getElementById('workspace-persistence-hint');
+    if (input) input.checked = persistent;
+    if (hint) {
+        const key = persistent ? 'chat.workspacePersistenceHintPersistent' : 'chat.workspacePersistenceHintEphemeral';
+        const fallback = persistent
+            ? '持久工作区：使用该对话专属 Docker named volume'
+            : '临时工作区：删除容器会永久删除 /workspace 中的全部文件';
+        hint.textContent = typeof window.t === 'function' ? window.t(key) : fallback;
+        hint.setAttribute('data-i18n', key);
+    }
+}
+
+function syncWorkspacePersistenceVisibility(mode) {
+    const option = document.getElementById('workspace-persistence-option');
+    if (option) option.hidden = normalizeConversationRuntimeModeForUI(mode) !== CHAT_RUNTIME_MODE_CONTAINER;
+}
+
 function setChatRuntimeModeLocked(locked) {
     const button = document.getElementById('runtime-mode-btn');
     const panel = document.getElementById('runtime-mode-panel');
@@ -940,6 +968,10 @@ function setChatRuntimeModeLocked(locked) {
     button.title = title;
     button.setAttribute('aria-label', title);
     if (locked && panel) closeRuntimeModePanel();
+    const persistence = document.getElementById('workspace-persistence-toggle');
+    if (persistence) persistence.disabled = !!locked;
+    const persistenceOption = document.getElementById('workspace-persistence-option');
+    if (persistenceOption) persistenceOption.classList.toggle('locked', !!locked);
 }
 
 function syncRuntimeModeFromValue(mode) {
@@ -955,11 +987,13 @@ function syncRuntimeModeFromValue(mode) {
         option.classList.toggle('selected', selected);
         option.setAttribute('aria-selected', selected ? 'true' : 'false');
     });
+    syncWorkspacePersistenceVisibility(normalized);
 }
 
 function applyConversationRuntimeMode(conversationId, conversation) {
     const fromServer = conversation && (conversation.runtimeMode || conversation.runtime_mode);
     syncRuntimeModeFromValue(fromServer || CHAT_RUNTIME_MODE_HOST);
+    syncWorkspacePersistenceFromValue(workspacePersistenceEnabledFromConversation(conversation));
     setChatRuntimeModeLocked(!!conversationId);
 }
 
@@ -978,7 +1012,8 @@ if (typeof window !== 'undefined') {
         HOST: CHAT_RUNTIME_MODE_HOST,
         CONTAINER: CHAT_RUNTIME_MODE_CONTAINER,
         normalize: normalizeConversationRuntimeModeForUI,
-        sync: syncRuntimeModeFromValue
+        sync: syncRuntimeModeFromValue,
+        syncWorkspacePersistence: syncWorkspacePersistenceFromValue
     };
     window.applyHitlSidebarConfig = applyHitlSidebarConfig;
     window.readHitlConfigFromForm = readHitlConfigFromForm;
@@ -2133,6 +2168,7 @@ function selectRuntimeMode(mode) {
     if (currentConversationId) return;
     const normalized = normalizeConversationRuntimeModeForUI(mode);
     syncRuntimeModeFromValue(normalized);
+    if (normalized !== CHAT_RUNTIME_MODE_CONTAINER) syncWorkspacePersistenceFromValue(false);
     closeRuntimeModePanel();
 }
 
@@ -2250,6 +2286,8 @@ document.addEventListener('languagechange', function () {
     const runtimeMode = document.getElementById('runtime-mode-select');
     if (runtimeMode) {
         syncRuntimeModeFromValue(runtimeMode.value);
+        const persistence = document.getElementById('workspace-persistence-toggle');
+        syncWorkspacePersistenceFromValue(persistence && persistence.checked);
         setChatRuntimeModeLocked(!!currentConversationId);
     }
 });
@@ -2459,6 +2497,8 @@ async function sendMessage() {
     if (creatingNewConversation) {
         const runtimeModeSelect = document.getElementById('runtime-mode-select');
         body.runtimeMode = normalizeConversationRuntimeModeForUI(runtimeModeSelect && runtimeModeSelect.value);
+        const workspacePersistence = document.getElementById('workspace-persistence-toggle');
+        body.workspacePersistent = body.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && !!(workspacePersistence && workspacePersistence.checked);
         setChatRuntimeModeLocked(true);
     }
     if (window.__csNextChatFinalizationPolicy && typeof window.__csNextChatFinalizationPolicy === 'object') {
@@ -5844,6 +5884,7 @@ async function startNewConversation(options = {}) {
     
     currentConversationId = null;
     syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    syncWorkspacePersistenceFromValue(false);
     setChatRuntimeModeLocked(false);
     window._loadedConversationProjectId = '';
     try {
@@ -12254,6 +12295,7 @@ document.addEventListener('DOMContentLoaded', function() {
     initChatReasoningBarHeightSync();
     initChatPrimaryActionButton();
     syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    syncWorkspacePersistenceFromValue(false);
     setChatRuntimeModeLocked(!!currentConversationId);
     const customInput = document.getElementById('custom-icon-input');
     if (customInput) {
@@ -12285,6 +12327,7 @@ document.addEventListener('conversation-changed', function (event) {
         return;
     }
     syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    syncWorkspacePersistenceFromValue(false);
     setChatRuntimeModeLocked(false);
 });
 

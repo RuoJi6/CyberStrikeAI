@@ -185,6 +185,15 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 		return errors.Join(err, failErr)
 	}
 	if missing {
+		// The provider may have disappeared after a previous container removal
+		// while its explicitly requested named-volume deletion failed. Give the
+		// manager one final ownership-checked chance to remove that volume.
+		if removeWorkspace {
+			if deleteErr := c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: true}); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+				_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, deleteErr, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(deleteErr)})
+				return errors.Join(deleteErr, failErr)
+			}
+		}
 		writeCtx, cancel := lifecycleWriteContext()
 		defer cancel()
 		return c.store.DeleteLifecycle(writeCtx, record.ConversationID, LifecycleOperationDelete)

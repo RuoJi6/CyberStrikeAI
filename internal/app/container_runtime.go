@@ -103,7 +103,7 @@ func logContainerIdleStop(logger *zap.Logger, report containerruntime.IdleStopRe
 
 // conversationContainerSpec converts trusted configuration into the immutable
 // specification used when phase 2 requests a container for first execution.
-func conversationContainerSpec(cfg *config.Config, conversationID string) (containerruntime.RuntimeSpec, error) {
+func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool) (containerruntime.RuntimeSpec, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return containerruntime.RuntimeSpec{}, fmt.Errorf("%w: conversation container runtime is disabled", containerruntime.ErrEngineUnavailable)
 	}
@@ -136,12 +136,18 @@ func conversationContainerSpec(cfg *config.Config, conversationID string) (conta
 			SeccompProfile:      "default",
 			TmpfsBytes:          cfg.Container.TmpfsBytes,
 		},
-		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+		Workspace: containerruntime.WorkspaceSpec{
+			Persistent: workspacePersistent,
+			MountPath:  "/workspace",
+		},
 		Readiness: containerruntime.ReadinessPolicy{
 			Enabled:         true,
 			InventoryDigest: strings.TrimSpace(cfg.Container.ToolInventoryDigest),
 			Inventory:       cfg.Container.ToolInventory,
 		},
+	}
+	if workspacePersistent {
+		spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeName(spec.ID)
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return containerruntime.RuntimeSpec{}, err

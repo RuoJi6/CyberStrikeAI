@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -100,9 +101,9 @@ func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	}
 }
 
-func TestDeleteConversationContainerKeepsWorkspaceUnlessExplicit(t *testing.T) {
+func TestDeleteConversationContainerReportsWorkspacePolicy(t *testing.T) {
 	db, owner := setupConversationRBACTest(t)
-	conversation, err := db.CreateConversation("delete runtime", database.ConversationCreateMeta{})
+	conversation, err := db.CreateConversation("delete runtime", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +121,36 @@ func TestDeleteConversationContainerKeepsWorkspaceUnlessExplicit(t *testing.T) {
 	})
 	if response.Code != http.StatusOK || controller.action != "delete" || !controller.removeWorkspace {
 		t.Fatalf("delete response=%d %s call=%s remove=%v", response.Code, response.Body.String(), controller.action, controller.removeWorkspace)
+	}
+	var ephemeral map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &ephemeral); err != nil {
+		t.Fatal(err)
+	}
+	if ephemeral["workspacePersistent"] != false || ephemeral["workspaceDeleted"] != true || !strings.Contains(ephemeral["workspaceDeletionWarning"].(string), "删除容器会永久删除") {
+		t.Fatalf("ephemeral response = %#v", ephemeral)
+	}
+
+	persistent, err := db.CreateConversation("persistent runtime", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", persistent.ID); err != nil {
+		t.Fatal(err)
+	}
+	controller = &fakeConversationContainerLifecycle{}
+	handler.SetContainerLifecycleController(controller)
+	response = performConversationRequest(owner, http.MethodDelete, "/api/conversations/"+persistent.ID+"/container", nil, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: persistent.ID}}
+		handler.DeleteConversationContainer(c)
+	})
+	var retained map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &retained); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || controller.removeWorkspace || retained["workspacePersistent"] != true || retained["workspaceRetained"] != true || retained["workspaceDeleted"] != false {
+		t.Fatalf("persistent response=%d %#v", response.Code, retained)
 	}
 }
 

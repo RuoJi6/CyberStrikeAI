@@ -10,31 +10,35 @@ import (
 
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
+	mobymount "github.com/moby/moby/api/types/mount"
+	mobyvolume "github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
-	LabelManaged        = "com.cyberstrike.managed"
-	LabelOwner          = "com.cyberstrike.owner"
-	LabelRuntimeID      = "com.cyberstrike.runtime-id"
-	LabelConversationID = "com.cyberstrike.conversation-id"
-	LabelResourceKind   = "com.cyberstrike.resource-kind"
-	LabelResourceID     = "com.cyberstrike.resource-id"
-	LabelImageDigest    = "com.cyberstrike.image-digest"
-	LabelImagePlatform  = "com.cyberstrike.image-platform"
-	LabelSpecDigest     = "com.cyberstrike.spec-digest"
-	LabelNanoCPUs       = "com.cyberstrike.limit.nano-cpus"
-	LabelMemoryBytes    = "com.cyberstrike.limit.memory-bytes"
-	LabelPIDs           = "com.cyberstrike.limit.pids"
-	LabelNoFileSoft     = "com.cyberstrike.limit.nofile-soft"
-	LabelNoFileHard     = "com.cyberstrike.limit.nofile-hard"
-	LabelWorkspaceBytes = "com.cyberstrike.limit.workspace-bytes"
-	LabelTmpfsBytes     = "com.cyberstrike.limit.tmpfs-bytes"
-	LabelLogMaxBytes    = "com.cyberstrike.limit.log-max-bytes"
-	LabelLogMaxFiles    = "com.cyberstrike.limit.log-max-files"
-	LabelWorkspacePath  = "com.cyberstrike.workspace-path"
-	ResourceKindAgent   = "agent-runtime"
+	LabelManaged             = "com.cyberstrike.managed"
+	LabelOwner               = "com.cyberstrike.owner"
+	LabelRuntimeID           = "com.cyberstrike.runtime-id"
+	LabelConversationID      = "com.cyberstrike.conversation-id"
+	LabelResourceKind        = "com.cyberstrike.resource-kind"
+	LabelResourceID          = "com.cyberstrike.resource-id"
+	LabelImageDigest         = "com.cyberstrike.image-digest"
+	LabelImagePlatform       = "com.cyberstrike.image-platform"
+	LabelSpecDigest          = "com.cyberstrike.spec-digest"
+	LabelNanoCPUs            = "com.cyberstrike.limit.nano-cpus"
+	LabelMemoryBytes         = "com.cyberstrike.limit.memory-bytes"
+	LabelPIDs                = "com.cyberstrike.limit.pids"
+	LabelNoFileSoft          = "com.cyberstrike.limit.nofile-soft"
+	LabelNoFileHard          = "com.cyberstrike.limit.nofile-hard"
+	LabelWorkspaceBytes      = "com.cyberstrike.limit.workspace-bytes"
+	LabelTmpfsBytes          = "com.cyberstrike.limit.tmpfs-bytes"
+	LabelLogMaxBytes         = "com.cyberstrike.limit.log-max-bytes"
+	LabelLogMaxFiles         = "com.cyberstrike.limit.log-max-files"
+	LabelWorkspacePath       = "com.cyberstrike.workspace-path"
+	LabelWorkspacePersistent = "com.cyberstrike.workspace-persistent"
+	LabelWorkspaceVolume     = "com.cyberstrike.workspace-volume"
+	ResourceKindAgent        = "agent-runtime"
 
 	defaultDockerOperationTimeout = 30 * time.Second
 	rollbackTimeout               = 10 * time.Second
@@ -64,6 +68,12 @@ type dockerManagedResourceAPI interface {
 	VolumeRemove(context.Context, string, mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error)
 }
 
+type dockerVolumeAPI interface {
+	VolumeCreate(context.Context, mobyclient.VolumeCreateOptions) (mobyclient.VolumeCreateResult, error)
+	VolumeInspect(context.Context, string, mobyclient.VolumeInspectOptions) (mobyclient.VolumeInspectResult, error)
+	VolumeRemove(context.Context, string, mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error)
+}
+
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
 	OwnerID              string
@@ -81,6 +91,7 @@ type DockerManager struct {
 	execAPI          dockerExecAPI
 	execLimiter      *ExecLimiter
 	resourceAPI      dockerManagedResourceAPI
+	volumeAPI        dockerVolumeAPI
 	ownerID          string
 	operationTimeout time.Duration
 }
@@ -131,7 +142,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	inspector := newDockerInspector(api)
 	execAPI, _ := api.(dockerExecAPI)
 	resourceAPI, _ := api.(dockerManagedResourceAPI)
-	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	volumeAPI, _ := api.(dockerVolumeAPI)
+	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, volumeAPI: volumeAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {
@@ -140,9 +152,6 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	}
 	if err := ValidateSpec(spec); err != nil {
 		return Runtime{}, err
-	}
-	if spec.Workspace.Persistent {
-		return Runtime{}, invalidSpec("persistent workspace creation is not enabled in this rollout item")
 	}
 	ctx, cancel := context.WithTimeout(ctx, m.operationTimeout)
 	defer cancel()
@@ -162,6 +171,13 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	}
 	if _, err := m.InspectLocalImage(ctx, spec.Image); err != nil {
 		return Runtime{}, err
+	}
+	workspaceCreated := false
+	if spec.Workspace.Persistent {
+		workspaceCreated, err = m.ensureOwnedWorkspaceVolume(ctx, spec)
+		if err != nil {
+			return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, err)
+		}
 	}
 
 	pinned, _ := pinnedImageReference(spec.Image)
@@ -188,7 +204,8 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 		if containerderrdefs.IsConflict(err) {
 			return Runtime{}, fmt.Errorf("%w: %s", ErrAlreadyExists, name)
 		}
-		return Runtime{}, fmt.Errorf("create runtime %s: %w", spec.ID, err)
+		createErr := fmt.Errorf("create runtime %s: %w", spec.ID, err)
+		return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, createErr)
 	}
 
 	runtime, verifyErr := m.verifyCreatedRuntime(ctx, spec, name, labels, createResult)
@@ -201,7 +218,78 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if cleanupErr != nil {
 		return Runtime{}, errors.Join(verifyErr, fmt.Errorf("rollback created runtime %s: %w", createResult.ID, cleanupErr))
 	}
-	return Runtime{}, verifyErr
+	return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, verifyErr)
+}
+
+func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec RuntimeSpec) (bool, error) {
+	if m.volumeAPI == nil {
+		return false, fmt.Errorf("%w: engine client does not support named volumes", ErrEngineUnavailable)
+	}
+	expected := workspaceManagedResource(spec)
+	result, err := m.volumeAPI.VolumeInspect(ctx, expected.Name, mobyclient.VolumeInspectOptions{})
+	if err == nil {
+		return false, m.verifyWorkspaceVolume(spec, result.Volume)
+	}
+	if !containerderrdefs.IsNotFound(err) {
+		return false, fmt.Errorf("inspect workspace volume %s: %w", expected.Name, err)
+	}
+	created, err := m.volumeAPI.VolumeCreate(ctx, mobyclient.VolumeCreateOptions{
+		Name: expected.Name, Driver: "local", Labels: workspaceVolumeLabels(m.ownerID, spec),
+	})
+	if err != nil {
+		return false, fmt.Errorf("create workspace volume %s: %w", expected.Name, err)
+	}
+	if err := m.verifyWorkspaceVolume(spec, created.Volume); err != nil {
+		// VolumeCreate may return a concurrently-created existing volume. If its
+		// immutable labels differ, ownership is ambiguous and automatic deletion
+		// would be unsafe.
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolume.Volume) error {
+	expected := workspaceManagedResource(spec)
+	observed, err := m.resourceFromLabels(ResourceKindWorkspaceVolume, actual.Name, actual.Name, actual.Labels, parseVolumeCreatedAt(actual))
+	if err != nil || !sameManagedResource(expected, observed) {
+		return fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
+	}
+	for key, value := range workspaceVolumeLabels(m.ownerID, spec) {
+		if actual.Labels[key] != value {
+			return fmt.Errorf("%w: workspace volume label %s mismatch", ErrRuntimeStateConflict, key)
+		}
+	}
+	return nil
+}
+
+func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpec, cause error) error {
+	if !created || !spec.Workspace.Persistent || m.volumeAPI == nil {
+		return cause
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	if err := m.deleteOwnedVolumeResource(cleanupCtx, workspaceManagedResource(spec)); err != nil && !errors.Is(err, ErrNotFound) {
+		return errors.Join(cause, fmt.Errorf("rollback workspace volume %s: %w", spec.Workspace.VolumeName, err))
+	}
+	return cause
+}
+
+func workspaceVolumeLabels(ownerID string, spec RuntimeSpec) map[string]string {
+	return map[string]string{
+		LabelManaged: "true", LabelOwner: ownerID,
+		LabelResourceKind: ResourceKindWorkspaceVolume,
+		LabelResourceID:   string(spec.ID), LabelRuntimeID: string(spec.ID),
+		LabelConversationID: spec.ConversationID,
+		LabelSpecDigest:     RuntimeSpecDigest(spec),
+	}
+}
+
+func workspaceManagedResource(spec RuntimeSpec) ManagedResource {
+	return ManagedResource{
+		Kind: ResourceKindWorkspaceVolume, LogicalID: string(spec.ID),
+		ProviderID: spec.Workspace.VolumeName, Name: spec.Workspace.VolumeName,
+		ConversationID: spec.ConversationID,
+	}
 }
 
 func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSpec, name string, expectedLabels map[string]string, createResult mobyclient.ContainerCreateResult) (Runtime, error) {
@@ -298,7 +386,7 @@ func hasSecurityOption(options []string, expected string) bool {
 
 func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	pidsLimit := spec.Resources.PIDs
-	return &mobycontainer.HostConfig{
+	host := &mobycontainer.HostConfig{
 		NetworkMode: mobycontainer.NetworkMode(NetworkNone),
 		LogConfig: mobycontainer.LogConfig{
 			Type: "local",
@@ -313,8 +401,7 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 		ReadonlyRootfs: true,
 		SecurityOpt:    []string{"no-new-privileges"},
 		Tmpfs: map[string]string{
-			"/tmp":                   tmpfsOptions(spec.Security.TmpfsBytes, true),
-			spec.Workspace.MountPath: tmpfsOptions(spec.Resources.WorkspaceBytes, false),
+			"/tmp": tmpfsOptions(spec.Security.TmpfsBytes, true),
 		},
 		Resources: mobycontainer.Resources{
 			NanoCPUs:   spec.Resources.NanoCPUs,
@@ -328,6 +415,16 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 			}},
 		},
 	}
+	if spec.Workspace.Persistent {
+		host.Mounts = []mobymount.Mount{{
+			Type: mobymount.TypeVolume, Source: spec.Workspace.VolumeName,
+			Target: spec.Workspace.MountPath, ReadOnly: false,
+			VolumeOptions: &mobymount.VolumeOptions{NoCopy: false},
+		}}
+	} else {
+		host.Tmpfs[spec.Workspace.MountPath] = tmpfsOptions(spec.Resources.WorkspaceBytes, false)
+	}
+	return host
 }
 
 func tmpfsOptions(sizeBytes int64, noexec bool) string {
@@ -343,7 +440,7 @@ func tmpfsOptions(sizeBytes int64, noexec bool) string {
 
 func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
 	expected := runtimeHostConfig(spec)
-	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Mounts) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
+	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: created runtime has privileged access, host mounts, devices, or published ports", ErrRuntimeStateConflict)
 	}
 	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
@@ -374,6 +471,26 @@ func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec Runtim
 			return fmt.Errorf("%w: created runtime tmpfs %s mismatch", ErrRuntimeStateConflict, path)
 		}
 	}
+	if err := verifyWorkspaceHostMounts(actual.Mounts, spec); err != nil {
+		return err
+	}
+	return nil
+}
+
+func verifyWorkspaceHostMounts(actual []mobymount.Mount, spec RuntimeSpec) error {
+	if !spec.Workspace.Persistent {
+		if len(actual) != 0 {
+			return fmt.Errorf("%w: ephemeral runtime declares a persistent mount", ErrRuntimeStateConflict)
+		}
+		return nil
+	}
+	if len(actual) != 1 {
+		return fmt.Errorf("%w: persistent runtime must declare exactly one named volume", ErrRuntimeStateConflict)
+	}
+	mount := actual[0]
+	if mount.Type != mobymount.TypeVolume || mount.Source != spec.Workspace.VolumeName || mount.Target != spec.Workspace.MountPath || mount.ReadOnly || (mount.VolumeOptions != nil && mount.VolumeOptions.NoCopy) {
+		return fmt.Errorf("%w: persistent workspace named volume mismatch", ErrRuntimeStateConflict)
+	}
 	return nil
 }
 
@@ -392,23 +509,25 @@ func runtimeContainerName(id RuntimeID) string {
 
 func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	return map[string]string{
-		LabelManaged:        "true",
-		LabelOwner:          ownerID,
-		LabelRuntimeID:      string(spec.ID),
-		LabelConversationID: spec.ConversationID,
-		LabelResourceKind:   ResourceKindAgent,
-		LabelImageDigest:    spec.Image.Digest,
-		LabelImagePlatform:  spec.Image.Platform,
-		LabelSpecDigest:     RuntimeSpecDigest(spec),
-		LabelNanoCPUs:       strconv.FormatInt(spec.Resources.NanoCPUs, 10),
-		LabelMemoryBytes:    strconv.FormatInt(spec.Resources.MemoryBytes, 10),
-		LabelPIDs:           strconv.FormatInt(spec.Resources.PIDs, 10),
-		LabelNoFileSoft:     strconv.FormatUint(spec.Resources.NoFileSoft, 10),
-		LabelNoFileHard:     strconv.FormatUint(spec.Resources.NoFileHard, 10),
-		LabelWorkspaceBytes: strconv.FormatInt(spec.Resources.WorkspaceBytes, 10),
-		LabelTmpfsBytes:     strconv.FormatInt(spec.Security.TmpfsBytes, 10),
-		LabelLogMaxBytes:    strconv.FormatInt(spec.Resources.LogMaxBytes, 10),
-		LabelLogMaxFiles:    strconv.Itoa(spec.Resources.LogMaxFiles),
-		LabelWorkspacePath:  spec.Workspace.MountPath,
+		LabelManaged:             "true",
+		LabelOwner:               ownerID,
+		LabelRuntimeID:           string(spec.ID),
+		LabelConversationID:      spec.ConversationID,
+		LabelResourceKind:        ResourceKindAgent,
+		LabelImageDigest:         spec.Image.Digest,
+		LabelImagePlatform:       spec.Image.Platform,
+		LabelSpecDigest:          RuntimeSpecDigest(spec),
+		LabelNanoCPUs:            strconv.FormatInt(spec.Resources.NanoCPUs, 10),
+		LabelMemoryBytes:         strconv.FormatInt(spec.Resources.MemoryBytes, 10),
+		LabelPIDs:                strconv.FormatInt(spec.Resources.PIDs, 10),
+		LabelNoFileSoft:          strconv.FormatUint(spec.Resources.NoFileSoft, 10),
+		LabelNoFileHard:          strconv.FormatUint(spec.Resources.NoFileHard, 10),
+		LabelWorkspaceBytes:      strconv.FormatInt(spec.Resources.WorkspaceBytes, 10),
+		LabelTmpfsBytes:          strconv.FormatInt(spec.Security.TmpfsBytes, 10),
+		LabelLogMaxBytes:         strconv.FormatInt(spec.Resources.LogMaxBytes, 10),
+		LabelLogMaxFiles:         strconv.Itoa(spec.Resources.LogMaxFiles),
+		LabelWorkspacePath:       spec.Workspace.MountPath,
+		LabelWorkspacePersistent: strconv.FormatBool(spec.Workspace.Persistent),
+		LabelWorkspaceVolume:     spec.Workspace.VolumeName,
 	}
 }

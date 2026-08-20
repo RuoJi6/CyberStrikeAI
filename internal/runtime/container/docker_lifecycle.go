@@ -177,10 +177,21 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 		if contextErr != nil {
 			return Runtime{}, contextErr
 		}
-		_, removeErr := m.api.ContainerRemove(operationCtx, current.ProviderID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: options.RemoveWorkspace})
+		_, removeErr := m.api.ContainerRemove(operationCtx, current.ProviderID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
 		cancel()
 		if removeErr != nil && !containerderrdefs.IsNotFound(removeErr) {
 			return Runtime{}, fmt.Errorf("remove stopped runtime %s for rebuild: %w", id, removeErr)
+		}
+	}
+	if options.RemoveWorkspace && options.Spec.Workspace.Persistent {
+		operationCtx, cancel, contextErr := m.operationContext(ctx)
+		if contextErr != nil {
+			return Runtime{}, contextErr
+		}
+		removeErr := m.deleteOwnedVolumeResource(operationCtx, workspaceManagedResource(options.Spec))
+		cancel()
+		if removeErr != nil && !errors.Is(removeErr, ErrNotFound) {
+			return Runtime{}, fmt.Errorf("remove workspace volume for rebuild %s: %w", id, removeErr)
 		}
 	}
 	rebuilt, createErr := m.Create(ctx, options.Spec)
@@ -201,19 +212,80 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 	defer cancel()
 	runtime, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) && options.RemoveWorkspace {
+			removed, volumeErr := m.deleteOwnedWorkspaceVolumeByRuntimeID(operationCtx, id)
+			if volumeErr != nil {
+				return volumeErr
+			}
+			if removed {
+				return nil
+			}
+		}
 		return err
 	}
 	if runtime.Status != StatusStopped && runtime.Status != StatusFailed {
 		return fmt.Errorf("%w: runtime %s must be stopped before deletion", ErrRuntimeStateConflict, id)
 	}
-	_, err = m.api.ContainerRemove(operationCtx, runtime.ProviderID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: options.RemoveWorkspace})
+	inspection, err := m.api.ContainerInspect(operationCtx, runtime.ProviderID, mobyclient.ContainerInspectOptions{Size: false})
+	if err != nil {
+		return fmt.Errorf("inspect runtime %s before deletion: %w", id, err)
+	}
+	if inspection.Container.Config == nil {
+		return fmt.Errorf("%w: runtime %s configuration disappeared before deletion", ErrRuntimeStateConflict, id)
+	}
+	securitySpec, err := runtimeSecuritySpecFromLabels(inspection.Container.Config.Labels)
+	if err != nil {
+		return fmt.Errorf("%w: runtime %s workspace labels are invalid", ErrRuntimeStateConflict, id)
+	}
+	_, err = m.api.ContainerRemove(operationCtx, runtime.ProviderID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
 	if err != nil {
 		if containerderrdefs.IsNotFound(err) {
 			return fmt.Errorf("%w: runtime %s", ErrNotFound, id)
 		}
 		return fmt.Errorf("delete runtime %s: %w", id, err)
 	}
+	if options.RemoveWorkspace && securitySpec.Workspace.Persistent {
+		if err := m.deleteOwnedVolumeResource(operationCtx, workspaceManagedResource(securitySpec)); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("delete runtime %s workspace: %w", id, err)
+		}
+	}
 	return nil
+}
+
+func (m *DockerManager) deleteOwnedWorkspaceVolumeByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
+	if m.volumeAPI == nil {
+		return false, fmt.Errorf("%w: engine client does not support named volumes", ErrEngineUnavailable)
+	}
+	name := WorkspaceVolumeName(id)
+	result, err := m.volumeAPI.VolumeInspect(ctx, name, mobyclient.VolumeInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect workspace volume %s: %w", name, err)
+	}
+	labels := result.Volume.Labels
+	if labels[LabelRuntimeID] != string(id) {
+		return false, fmt.Errorf("%w: workspace volume runtime identity mismatch", ErrRuntimeStateConflict)
+	}
+	spec := RuntimeSpec{
+		ID: id, ConversationID: strings.TrimSpace(labels[LabelConversationID]),
+		Workspace: WorkspaceSpec{Persistent: true, VolumeName: name, MountPath: "/workspace"},
+	}
+	observed, err := m.resourceFromLabels(ResourceKindWorkspaceVolume, result.Volume.Name, result.Volume.Name, result.Volume.Labels, parseVolumeCreatedAt(result.Volume))
+	if err != nil || !sameManagedResource(workspaceManagedResource(spec), observed) {
+		return false, fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if labels[LabelSpecDigest] == "" {
+		return false, fmt.Errorf("%w: workspace volume specification label is missing", ErrRuntimeStateConflict)
+	}
+	if !sha256DigestPattern.MatchString(labels[LabelSpecDigest]) {
+		return false, fmt.Errorf("%w: workspace volume specification label is invalid", ErrRuntimeStateConflict)
+	}
+	if err := m.deleteOwnedVolumeResource(ctx, workspaceManagedResource(spec)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *DockerManager) operationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
@@ -339,6 +411,14 @@ func verifyObservedSecurityBaseline(actual mobycontainer.InspectResponse) error 
 }
 
 func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error) {
+	runtimeID := RuntimeID(strings.TrimSpace(labels[LabelRuntimeID]))
+	if err := validateRuntimeID(runtimeID); err != nil {
+		return RuntimeSpec{}, err
+	}
+	conversationID := strings.TrimSpace(labels[LabelConversationID])
+	if !generatedNamePattern.MatchString(conversationID) {
+		return RuntimeSpec{}, errors.New("invalid conversation label")
+	}
 	nanoCPUs, err := positiveLabelInt64(labels, LabelNanoCPUs)
 	if err != nil {
 		return RuntimeSpec{}, err
@@ -379,14 +459,33 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 	if workspacePath != "/workspace" {
 		return RuntimeSpec{}, errors.New("invalid workspace label")
 	}
+	persistentLabel := strings.TrimSpace(labels[LabelWorkspacePersistent])
+	// Containers created before workspace persistence was introduced have no
+	// persistence labels and are unambiguously ephemeral because they declare
+	// no named volume and still pass the tmpfs security baseline.
+	if persistentLabel == "" && strings.TrimSpace(labels[LabelWorkspaceVolume]) == "" {
+		persistentLabel = "false"
+	}
+	if persistentLabel != "true" && persistentLabel != "false" {
+		return RuntimeSpec{}, errors.New("invalid workspace persistence label")
+	}
+	persistent := persistentLabel == "true"
+	volumeName := strings.TrimSpace(labels[LabelWorkspaceVolume])
+	if persistent && volumeName != WorkspaceVolumeName(runtimeID) {
+		return RuntimeSpec{}, errors.New("invalid workspace volume label")
+	}
+	if !persistent && volumeName != "" {
+		return RuntimeSpec{}, errors.New("ephemeral workspace declares a volume label")
+	}
 	return RuntimeSpec{
+		ID: runtimeID, ConversationID: conversationID,
 		Resources: ResourceLimits{
 			NanoCPUs: nanoCPUs, MemoryBytes: memory, PIDs: pids,
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard,
 			WorkspaceBytes: workspaceBytes, LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles64),
 		},
 		Security:  SecurityProfile{TmpfsBytes: tmpfsBytes},
-		Workspace: WorkspaceSpec{MountPath: workspacePath},
+		Workspace: WorkspaceSpec{Persistent: persistent, VolumeName: volumeName, MountPath: workspacePath},
 	}, nil
 }
 

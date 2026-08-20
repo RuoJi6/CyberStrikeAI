@@ -49,9 +49,10 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	db, user := setupConversationRBACTest(t)
 	handler := NewConversationHandler(db, zap.NewNop())
 
-	w := performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]string{
-		"title":       "container conversation",
-		"runtimeMode": database.ConversationRuntimeModeContainer,
+	w := performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]interface{}{
+		"title":               "container conversation",
+		"runtimeMode":         database.ConversationRuntimeModeContainer,
+		"workspacePersistent": true,
 	}, handler.CreateConversation)
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
@@ -63,12 +64,18 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	if created.RuntimeMode != database.ConversationRuntimeModeContainer {
 		t.Fatalf("response runtimeMode = %q", created.RuntimeMode)
 	}
+	if !created.WorkspacePersistent {
+		t.Fatal("response workspacePersistent is false")
+	}
 	stored, err := db.GetConversationLite(created.ID)
 	if err != nil {
 		t.Fatalf("GetConversationLite: %v", err)
 	}
 	if stored.RuntimeMode != database.ConversationRuntimeModeContainer {
 		t.Fatalf("stored runtimeMode = %q", stored.RuntimeMode)
+	}
+	if !stored.WorkspacePersistent {
+		t.Fatal("stored workspacePersistent is false")
 	}
 
 	w = performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]string{
@@ -77,6 +84,13 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	}, handler.CreateConversation)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+
+	w = performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]interface{}{
+		"title": "invalid host persistence", "runtimeMode": "host", "workspacePersistent": true,
+	}, handler.CreateConversation)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("host persistence status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
 	}
 }
 
@@ -137,7 +151,7 @@ func setupConversationRBACTest(t *testing.T) (*database.DB, *database.RBACUser) 
 	return db, user
 }
 
-func performConversationRequest(user *database.RBACUser, method, path string, body map[string]string, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+func performConversationRequest(user *database.RBACUser, method, path string, body interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	payload, _ := json.Marshal(body)
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)

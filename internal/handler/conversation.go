@@ -87,9 +87,10 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 
 // CreateConversationRequest 创建对话请求
 type CreateConversationRequest struct {
-	Title       string `json:"title"`
-	ProjectID   string `json:"projectId,omitempty"`
-	RuntimeMode string `json:"runtimeMode,omitempty"`
+	Title               string `json:"title"`
+	ProjectID           string `json:"projectId,omitempty"`
+	RuntimeMode         string `json:"runtimeMode,omitempty"`
+	WorkspacePersistent bool   `json:"workspacePersistent,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -118,6 +119,11 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.RuntimeMode = runtimeMode
+	if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspacePersistent 只能用于 container 对话"})
+		return
+	}
+	meta.WorkspacePersistent = req.WorkspacePersistent
 	if !h.conversationProjectAllowed(c, meta.ProjectID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
 		return

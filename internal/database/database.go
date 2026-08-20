@@ -186,6 +186,7 @@ func (db *DB) initTables() error {
 		role_name TEXT NOT NULL DEFAULT '默认',
 		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
 		runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container')),
+		workspace_persistent INTEGER NOT NULL DEFAULT 0 CHECK (workspace_persistent IN (0, 1)),
 		last_react_input TEXT,
 		last_react_output TEXT
 	);`
@@ -1216,6 +1217,23 @@ func (db *DB) migrateConversationsTable() error {
 	}
 	if _, err := db.Exec("UPDATE conversations SET runtime_mode = 'host' WHERE runtime_mode IS NULL OR TRIM(runtime_mode) = ''"); err != nil {
 		return fmt.Errorf("迁移存量对话 runtime_mode 失败: %w", err)
+	}
+
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='workspace_persistent'").Scan(&count)
+	if err != nil {
+		if _, addErr := db.Exec("ALTER TABLE conversations ADD COLUMN workspace_persistent INTEGER NOT NULL DEFAULT 0 CHECK (workspace_persistent IN (0, 1))"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 conversations.workspace_persistent 字段失败: %w", addErr)
+			}
+		}
+	} else if count == 0 {
+		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN workspace_persistent INTEGER NOT NULL DEFAULT 0 CHECK (workspace_persistent IN (0, 1))"); err != nil {
+			return fmt.Errorf("添加 conversations.workspace_persistent 字段失败: %w", err)
+		}
+	}
+	if _, err := db.Exec("UPDATE conversations SET workspace_persistent = 0 WHERE workspace_persistent IS NULL"); err != nil {
+		return fmt.Errorf("迁移存量对话 workspace_persistent 失败: %w", err)
 	}
 
 	return nil

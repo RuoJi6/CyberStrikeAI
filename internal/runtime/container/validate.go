@@ -64,8 +64,8 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if spec.Workspace.Persistent && strings.TrimSpace(spec.Workspace.VolumeName) == "" {
 		return invalidSpec("persistent workspace requires a named volume")
 	}
-	if spec.Workspace.Persistent && (!generatedNamePattern.MatchString(spec.Workspace.VolumeName) || !strings.HasPrefix(spec.Workspace.VolumeName, "cyberstrike-workspace-")) {
-		return invalidSpec("persistent workspace requires a CyberStrikeAI-owned named volume")
+	if spec.Workspace.Persistent && spec.Workspace.VolumeName != WorkspaceVolumeName(spec.ID) {
+		return invalidSpec("persistent workspace volume name must be derived from the runtime id")
 	}
 	if !spec.Workspace.Persistent && strings.TrimSpace(spec.Workspace.VolumeName) != "" {
 		return invalidSpec("ephemeral workspace cannot declare a named volume")

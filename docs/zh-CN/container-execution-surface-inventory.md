@@ -46,6 +46,8 @@
 - 容器内读取和工作目录逐段拒绝符号链接；受控写入使用固定的非特权 exec stdin、逐段目录校验、大小核对和原子重命名。
 - 控制面上传仍持久化在 `chat_uploads/<date>/<conversationId>/...`，但 Agent 执行前会导入为 `/workspace/uploads/<date>/...`。异步初始化期间保存的附件会在容器就绪后的下一次执行前补同步。
 - 消息历史与模型上下文只暴露容器路径；跨对话附件路径、符号链接源和非普通文件失败关闭。超大命令输出继续固定为 `/workspace/.tool-output/<executionId>`。
+- 对话创建时可选择不可变的工作区策略。默认临时模式继续使用受限 tmpfs，并明确提示删除容器会删除文件；持久模式只使用系统生成的 `cyberstrike-workspace-<runtimeId>` named volume，不允许请求端提供 volume 或宿主 bind path。
+- named volume 与运行时都携带部署所有者、资源类型、runtime 和 conversation 标签；创建、复用、删除和孤儿扫描前均复核完整身份。运行时创建失败只回滚本次新建的 volume；正常删除容器默认保留持久 volume，显式删除工作区时才移除。
 
 ## 3. YAML 工具清单
 

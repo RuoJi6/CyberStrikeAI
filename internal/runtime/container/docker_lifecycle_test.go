@@ -9,6 +9,7 @@ import (
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobynetwork "github.com/moby/moby/api/types/network"
+	mobyvolume "github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -47,6 +48,68 @@ func TestDockerManagerLifecycleStartStopAndDelete(t *testing.T) {
 	}
 	if api.removedID != "provider-container-1" || api.removeOpts.Force || api.removeOpts.RemoveVolumes {
 		t.Fatalf("delete target/options = %q / %#v", api.removedID, api.removeOpts)
+	}
+}
+
+func TestDockerManagerDeletePersistentWorkspacePolicy(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		removeWorkspace bool
+		wantRemoved     bool
+	}{
+		{name: "retain by default", removeWorkspace: false, wantRemoved: false},
+		{name: "remove explicitly", removeWorkspace: true, wantRemoved: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			spec := creationSpec()
+			spec.Workspace.Persistent = true
+			spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+			api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+			api.volumes = map[string]mobyvolume.Volume{
+				spec.Workspace.VolumeName: {
+					Name: spec.Workspace.VolumeName, Driver: "local",
+					Labels: workspaceVolumeLabels("instance-01", spec),
+				},
+			}
+			manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := manager.Delete(context.Background(), spec.ID, DeleteOptions{RemoveWorkspace: test.removeWorkspace}); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			_, retained := api.volumes[spec.Workspace.VolumeName]
+			if retained == test.wantRemoved {
+				t.Fatalf("volume retained = %v, want removed = %v", retained, test.wantRemoved)
+			}
+			if api.removeOpts.RemoveVolumes {
+				t.Fatal("container removal relied on Docker named-volume side effects")
+			}
+		})
+	}
+}
+
+func TestDockerManagerDeleteCanRecoverOwnedVolumeAfterContainerDisappears(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.containerErr = containerderrdefs.ErrNotFound.WithMessage("container missing")
+	api.volumes = map[string]mobyvolume.Volume{
+		spec.Workspace.VolumeName: {
+			Name: spec.Workspace.VolumeName, Driver: "local",
+			Labels: workspaceVolumeLabels("instance-01", spec),
+		},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Delete(context.Background(), spec.ID, DeleteOptions{RemoveWorkspace: true}); err != nil {
+		t.Fatalf("recover volume delete: %v", err)
+	}
+	if _, ok := api.volumes[spec.Workspace.VolumeName]; ok {
+		t.Fatal("owned volume survived recovery delete")
 	}
 }
 

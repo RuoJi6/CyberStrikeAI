@@ -107,10 +107,16 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := conversationProperties["runtimeMode"]; !ok {
 		t.Fatal("Conversation schema is missing runtimeMode")
 	}
+	if _, ok := conversationProperties["workspacePersistent"]; !ok {
+		t.Fatal("Conversation schema is missing workspacePersistent")
+	}
 	createSchema := schemas["CreateConversationRequest"].(map[string]interface{})
 	createProperties := createSchema["properties"].(map[string]interface{})
 	if _, ok := createProperties["runtimeMode"]; !ok {
 		t.Fatal("CreateConversationRequest schema is missing runtimeMode")
+	}
+	if _, ok := createProperties["workspacePersistent"]; !ok {
+		t.Fatal("CreateConversationRequest schema is missing workspacePersistent")
 	}
 	gateSchema, ok := schemas["ContainerExecutionGateResponse"].(map[string]interface{})
 	if !ok {
@@ -131,6 +137,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		requestProperties := requestSchema["properties"].(map[string]interface{})
 		if _, ok := requestProperties["runtimeMode"]; !ok {
 			t.Fatalf("%s request schema is missing runtimeMode", route)
+		}
+		if _, ok := requestProperties["workspacePersistent"]; !ok {
+			t.Fatalf("%s request schema is missing workspacePersistent", route)
 		}
 	}
 	for _, route := range []string{"/api/eino-agent", "/api/multi-agent"} {

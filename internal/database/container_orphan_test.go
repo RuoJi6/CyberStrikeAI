@@ -103,3 +103,29 @@ func TestContainerResourceTombstoneRecoveryAndRuntimeClaims(t *testing.T) {
 		t.Fatalf("recovered tombstone = %#v, %v", tombstone, err)
 	}
 }
+
+func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, err := db.CreateConversation("persistent claims", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeName(spec.ID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := db.ListManagedResourceClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 2 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindWorkspaceVolume {
+		t.Fatalf("claims = %#v", claims)
+	}
+	if claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != spec.Workspace.VolumeName || claims[1].ConversationID != conversation.ID {
+		t.Fatalf("workspace claim = %#v", claims[1])
+	}
+}

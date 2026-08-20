@@ -16,9 +16,10 @@ func RegisterConversationCreateHook(s *Service) {
 	}
 	database.SetConversationCreateHook(func(conv *database.Conversation, meta database.ConversationCreateMeta) {
 		detail := map[string]interface{}{
-			"title":        conv.Title,
-			"source":       meta.Source,
-			"runtime_mode": conv.RuntimeMode,
+			"title":                conv.Title,
+			"source":               meta.Source,
+			"runtime_mode":         conv.RuntimeMode,
+			"workspace_persistent": conv.WorkspacePersistent,
 		}
 		if meta.WebShellConnectionID != "" {
 			detail["webshell_connection_id"] = meta.WebShellConnectionID

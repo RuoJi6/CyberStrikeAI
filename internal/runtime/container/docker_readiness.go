@@ -8,6 +8,7 @@ import (
 
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -59,7 +60,7 @@ func (m *DockerManager) ValidateReadiness(ctx context.Context, runtime Runtime, 
 	if err := verifyRuntimeSecurityBaseline(actual.HostConfig, spec); err != nil {
 		return ReadinessReport{}, fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 	}
-	if err := verifyReadinessIsolation(actual); err != nil {
+	if err := verifyReadinessIsolation(actual, spec); err != nil {
 		return ReadinessReport{}, err
 	}
 	if _, err := m.VerifyRuntimeImage(ctx, providerID, spec.Image); err != nil {
@@ -87,7 +88,7 @@ func (m *DockerManager) ValidateReadiness(ctx context.Context, runtime Runtime, 
 	}, nil
 }
 
-func verifyReadinessIsolation(actual mobycontainer.InspectResponse) error {
+func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec RuntimeSpec) error {
 	if actual.Config == nil || actual.HostConfig == nil {
 		return fmt.Errorf("%w: runtime configuration is incomplete", ErrRuntimeNotReady)
 	}
@@ -110,11 +111,19 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse) error {
 			}
 		}
 	}
+	if !spec.Workspace.Persistent && len(actual.Mounts) != 0 {
+		return fmt.Errorf("%w: ephemeral runtime has an unexpected mount", ErrRuntimeNotReady)
+	}
+	if spec.Workspace.Persistent && len(actual.Mounts) != 1 {
+		return fmt.Errorf("%w: persistent runtime does not have exactly one workspace volume", ErrRuntimeNotReady)
+	}
 	for _, mount := range actual.Mounts {
 		if strings.EqualFold(mount.Destination, "/var/run/docker.sock") || strings.EqualFold(mount.Destination, "/run/docker.sock") || strings.Contains(strings.ToLower(mount.Source), "docker.sock") {
 			return fmt.Errorf("%w: Docker Socket is mounted into the runtime", ErrRuntimeNotReady)
 		}
-		return fmt.Errorf("%w: unexpected runtime mount at %s", ErrRuntimeNotReady, mount.Destination)
+		if !spec.Workspace.Persistent || mount.Type != mobymount.TypeVolume || mount.Name != spec.Workspace.VolumeName || mount.Destination != spec.Workspace.MountPath || !mount.RW {
+			return fmt.Errorf("%w: unexpected runtime mount at %s", ErrRuntimeNotReady, mount.Destination)
+		}
 	}
 	for path := range actual.Config.Volumes {
 		if path == "/var/run/docker.sock" || path == "/run/docker.sock" {

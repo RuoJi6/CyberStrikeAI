@@ -14,36 +14,44 @@ import (
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/system"
+	mobyvolume "github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
 )
 
 type fakeDockerCreationAPI struct {
 	*fakeDockerInspectionAPI
-	createResult    mobyclient.ContainerCreateResult
-	createErr       error
-	createOpts      mobyclient.ContainerCreateOptions
-	removeErr       error
-	removedID       string
-	removeOpts      mobyclient.ContainerRemoveOptions
-	pathStats       map[string]mobycontainer.PathStat
-	pathStatErrs    map[string]error
-	listResult      mobyclient.ContainerListResult
-	listErr         error
-	startErr        error
-	stopErr         error
-	startedID       string
-	stoppedID       string
-	stopOpts        mobyclient.ContainerStopOptions
-	execCreateOpts  mobyclient.ExecCreateOptions
-	execContainerID string
-	execID          string
-	execStdout      string
-	execStderr      string
-	execStdin       []byte
-	execStdinBytes  int
-	execAttachOpts  mobyclient.ExecAttachOptions
-	execExitCode    int
-	execRunning     bool
+	createResult      mobyclient.ContainerCreateResult
+	createErr         error
+	createOpts        mobyclient.ContainerCreateOptions
+	removeErr         error
+	removedID         string
+	removeOpts        mobyclient.ContainerRemoveOptions
+	pathStats         map[string]mobycontainer.PathStat
+	pathStatErrs      map[string]error
+	listResult        mobyclient.ContainerListResult
+	listErr           error
+	startErr          error
+	stopErr           error
+	startedID         string
+	stoppedID         string
+	stopOpts          mobyclient.ContainerStopOptions
+	execCreateOpts    mobyclient.ExecCreateOptions
+	execContainerID   string
+	execID            string
+	execStdout        string
+	execStderr        string
+	execStdin         []byte
+	execStdinBytes    int
+	execAttachOpts    mobyclient.ExecAttachOptions
+	execExitCode      int
+	execRunning       bool
+	volumes           map[string]mobyvolume.Volume
+	volumeCreateOpts  mobyclient.VolumeCreateOptions
+	volumeCreateErr   error
+	volumeCreateCalls int
+	volumeInspectErr  error
+	volumeRemoved     string
+	volumeRemoveErr   error
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -55,6 +63,48 @@ func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, op
 	f.removedID = id
 	f.removeOpts = options
 	return mobyclient.ContainerRemoveResult{}, f.removeErr
+}
+
+func (f *fakeDockerCreationAPI) VolumeCreate(_ context.Context, options mobyclient.VolumeCreateOptions) (mobyclient.VolumeCreateResult, error) {
+	f.volumeCreateOpts = options
+	f.volumeCreateCalls++
+	if f.volumeCreateErr != nil {
+		return mobyclient.VolumeCreateResult{}, f.volumeCreateErr
+	}
+	if f.volumes == nil {
+		f.volumes = make(map[string]mobyvolume.Volume)
+	}
+	if existing, ok := f.volumes[options.Name]; ok {
+		return mobyclient.VolumeCreateResult{Volume: existing}, nil
+	}
+	created := mobyvolume.Volume{
+		Name: options.Name, Driver: options.Driver, Labels: options.Labels,
+		CreatedAt: time.Date(2026, 8, 21, 1, 0, 0, 0, time.UTC).Format(time.RFC3339Nano),
+	}
+	f.volumes[options.Name] = created
+	return mobyclient.VolumeCreateResult{Volume: created}, nil
+}
+
+func (f *fakeDockerCreationAPI) VolumeInspect(_ context.Context, name string, _ mobyclient.VolumeInspectOptions) (mobyclient.VolumeInspectResult, error) {
+	if f.volumeInspectErr != nil {
+		return mobyclient.VolumeInspectResult{}, f.volumeInspectErr
+	}
+	if volume, ok := f.volumes[name]; ok {
+		return mobyclient.VolumeInspectResult{Volume: volume}, nil
+	}
+	return mobyclient.VolumeInspectResult{}, containerderrdefs.ErrNotFound.WithMessage("volume not found")
+}
+
+func (f *fakeDockerCreationAPI) VolumeRemove(_ context.Context, name string, _ mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error) {
+	f.volumeRemoved = name
+	if f.volumeRemoveErr != nil {
+		return mobyclient.VolumeRemoveResult{}, f.volumeRemoveErr
+	}
+	if _, ok := f.volumes[name]; !ok {
+		return mobyclient.VolumeRemoveResult{}, containerderrdefs.ErrNotFound.WithMessage("volume not found")
+	}
+	delete(f.volumes, name)
+	return mobyclient.VolumeRemoveResult{}, nil
 }
 
 func (f *fakeDockerCreationAPI) ContainerList(_ context.Context, _ mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error) {
@@ -190,6 +240,71 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	}
 	if api.removedID != "" {
 		t.Fatalf("successful runtime was rolled back: %s", api.removedID)
+	}
+}
+
+func TestDockerManagerCreateUsesOwnedConversationVolume(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	ownerID := "instance-01"
+	api := newSuccessfulCreationAPI(spec, ownerID, "provider-container-1", "")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create persistent runtime: %v", err)
+	}
+	if api.volumeCreateCalls != 1 || api.volumeCreateOpts.Name != spec.Workspace.VolumeName || api.volumeCreateOpts.Driver != "local" {
+		t.Fatalf("volume create = %d / %#v", api.volumeCreateCalls, api.volumeCreateOpts)
+	}
+	if api.volumeCreateOpts.Labels[LabelOwner] != ownerID || api.volumeCreateOpts.Labels[LabelResourceKind] != ResourceKindWorkspaceVolume || api.volumeCreateOpts.Labels[LabelConversationID] != spec.ConversationID {
+		t.Fatalf("volume labels = %#v", api.volumeCreateOpts.Labels)
+	}
+	if _, ok := api.createOpts.HostConfig.Tmpfs[spec.Workspace.MountPath]; ok {
+		t.Fatal("persistent workspace was also configured as tmpfs")
+	}
+	if len(api.createOpts.HostConfig.Mounts) != 1 || api.createOpts.HostConfig.Mounts[0].Source != spec.Workspace.VolumeName || api.createOpts.HostConfig.Mounts[0].Target != "/workspace" {
+		t.Fatalf("workspace mount = %#v", api.createOpts.HostConfig.Mounts)
+	}
+}
+
+func TestDockerManagerCreateRejectsForeignWorkspaceVolume(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.volumes = map[string]mobyvolume.Volume{
+		spec.Workspace.VolumeName: {Name: spec.Workspace.VolumeName, Driver: "local", Labels: workspaceVolumeLabels("other-owner", spec)},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("foreign volume error = %v", err)
+	}
+	if api.createOpts.Name != "" || api.volumeCreateCalls != 0 {
+		t.Fatal("container or volume mutation reached foreign workspace volume")
+	}
+}
+
+func TestDockerManagerCreateRollsBackNewWorkspaceVolumeOnFailure(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.createErr = errors.New("engine create failed")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	if api.volumeRemoved != spec.Workspace.VolumeName {
+		t.Fatalf("rolled back volume = %q", api.volumeRemoved)
 	}
 }
 

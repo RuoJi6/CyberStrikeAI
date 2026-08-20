@@ -38,6 +38,11 @@ func (h *ConversationHandler) DeleteConversationContainer(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "容器生命周期服务未配置"})
 		return
 	}
+	workspacePersistent, err := h.db.GetConversationWorkspacePersistent(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		return
+	}
 	removeWorkspace := queryBoolean(c.Query("remove_workspace"))
 	if err := h.containerLifecycle.Delete(c.Request.Context(), id, removeWorkspace); err != nil {
 		h.writeContainerLifecycleError(c, id, "delete", err)
@@ -49,11 +54,21 @@ func (h *ConversationHandler) DeleteConversationContainer(c *gin.Context) {
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"success":          true,
-		"conversationId":   id,
-		"containerDeleted": true,
-		"workspaceDeleted": removeWorkspace,
+		"success":                  true,
+		"conversationId":           id,
+		"containerDeleted":         true,
+		"workspacePersistent":      workspacePersistent,
+		"workspaceDeleted":         !workspacePersistent || removeWorkspace,
+		"workspaceRetained":        workspacePersistent && !removeWorkspace,
+		"workspaceDeletionWarning": workspaceDeletionWarning(workspacePersistent),
 	})
+}
+
+func workspaceDeletionWarning(persistent bool) string {
+	if persistent {
+		return "该对话使用专属 Docker named volume；删除容器默认保留工作区，remove_workspace=true 时一并删除"
+	}
+	return "该对话未启用持久化；删除容器会永久删除 /workspace 中的全部文件"
 }
 
 type conversationContainerLifecycleCall func(context.Context, string) (containerruntime.InitializationRecord, error)

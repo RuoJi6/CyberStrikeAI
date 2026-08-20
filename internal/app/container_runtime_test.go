@@ -24,7 +24,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 			{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
 		},
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01")
+	spec, err := conversationContainerSpec(cfg, "conversation-01", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,5 +39,26 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	}
 	if !spec.Readiness.Enabled || spec.Readiness.InventoryDigest != cfg.Container.ToolInventoryDigest || len(spec.Readiness.Inventory.Tools) != 1 {
 		t.Fatalf("spec readiness = %#v", spec.Readiness)
+	}
+}
+
+func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
+	cfg := config.Default()
+	cfg.Container.Enabled = true
+	cfg.Container.ImageRepository = "ghcr.io/usestrix/strix-sandbox"
+	cfg.Container.ImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	cfg.Container.ImagePlatform = "linux/arm64"
+	cfg.Container.ToolInventoryDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	cfg.Container.ToolInventory = containerruntime.ToolInventory{
+		SchemaVersion: containerruntime.ToolInventorySchemaVersion,
+		ImageDigest:   cfg.Container.ImageDigest, ImagePlatform: cfg.Container.ImagePlatform,
+		Tools: []containerruntime.ToolInventoryEntry{{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"}},
+	}
+	spec, err := conversationContainerSpec(cfg, "conversation-01", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spec.Workspace.Persistent || spec.Workspace.VolumeName != "cyberstrike-workspace-conversation-conversation-01" {
+		t.Fatalf("workspace = %#v", spec.Workspace)
 	}
 }

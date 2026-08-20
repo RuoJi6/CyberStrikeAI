@@ -1225,6 +1225,16 @@
                                                     <div class="role-selection-checkmark-main runtime-mode-check">✓</div>
                                                 </button>
                                             </div>
+                                            <div id="workspace-persistence-option" class="workspace-persistence-option" hidden>
+                                                <label class="workspace-persistence-toggle" for="workspace-persistence-toggle">
+                                                    <span class="workspace-persistence-toggle-copy">
+                                                        <span class="workspace-persistence-toggle-title" data-i18n="chat.workspacePersistenceLabel">保留容器工作区文件</span>
+                                                        <span id="workspace-persistence-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.workspacePersistenceHintEphemeral">临时工作区：删除容器会永久删除 /workspace 中的全部文件</span>
+                                                    </span>
+                                                    <input type="checkbox" id="workspace-persistence-toggle" onchange="syncWorkspacePersistenceFromValue(this.checked)" aria-describedby="workspace-persistence-hint">
+                                                    <span class="workspace-persistence-switch" aria-hidden="true"></span>
+                                                </label>
+                                            </div>
                                         </div>
                                     </div>
                                     <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">

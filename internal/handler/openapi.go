@@ -51,6 +51,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"default":     "host",
 		"description": "仅在不提供 conversationId 并新建对话时生效；存量对话的执行位置不由后续消息修改",
 	}
+	workspacePersistenceRequestSchema := map[string]interface{}{
+		"type":        "boolean",
+		"default":     false,
+		"description": "仅在新建 container 对话时生效。false 使用临时 /workspace，删除容器即删除文件；true 使用系统生成的每对话 Docker named volume。创建后不可修改。",
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -96,6 +101,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"default":     "host",
 							"description": "对话创建时选定的执行位置；创建后不由后续消息修改",
 						},
+						"workspacePersistent": workspacePersistenceRequestSchema,
 					},
 				},
 				"SetConversationProjectRequest": map[string]interface{}{
@@ -204,6 +210,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"enum":        []string{"host", "container"},
 							"description": "对话创建时锁定的执行位置",
 						},
+						"workspacePersistent": map[string]interface{}{
+							"type":        "boolean",
+							"description": "是否使用该对话专属 Docker named volume；false 表示容器删除时临时工作区文件随之删除",
+						},
 					},
 				},
 				"ContainerInitialization": map[string]interface{}{
@@ -270,7 +280,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								"runtimeId":       map[string]interface{}{"type": "string"},
 								"status":          map[string]interface{}{"type": "string", "enum": []string{"queued", "creating", "created", "failed"}},
 								"readinessStatus": map[string]interface{}{"type": "string", "enum": []string{"not_required", "pending", "validating", "ready", "failed"}},
-								"attempt":          map[string]interface{}{"type": "integer", "minimum": 0},
+								"attempt":         map[string]interface{}{"type": "integer", "minimum": 0},
 							},
 						},
 					},
@@ -1786,6 +1796,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1806,15 +1817,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"202": map[string]interface{}{
 							"description": "container 对话已创建且后台初始化已排队；Agent 未执行且不回退宿主机。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"409": map[string]interface{}{
 							"description": "容器已就绪，但容器执行后端尚未接入；保持失败关闭。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"503": map[string]interface{}{
 							"description": "容器运行时或初始化不可用；保持失败关闭。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"400": map[string]interface{}{"description": "参数错误"},
 						"401": map[string]interface{}{"description": "未授权"},
@@ -1838,6 +1849,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1884,7 +1896,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 											"type":        "string",
 											"description": "对话 ID（可选，不提供则新建）",
 										},
-										"runtimeMode": runtimeModeRequestSchema,
+										"runtimeMode":         runtimeModeRequestSchema,
+										"workspacePersistent": workspacePersistenceRequestSchema,
 										"role": map[string]interface{}{
 											"type":        "string",
 											"description": "角色名称（可选）",
@@ -1916,15 +1929,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"202": map[string]interface{}{
 							"description": "container 对话已创建且后台初始化已排队；Agent 未执行且不回退宿主机。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"409": map[string]interface{}{
 							"description": "容器已就绪，但容器执行后端尚未接入；保持失败关闭。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"503": map[string]interface{}{
 							"description": "容器运行时或初始化不可用；保持失败关闭。",
-							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerExecutionGateResponse"}}},
 						},
 						"400": map[string]interface{}{"description": "参数错误"},
 						"401": map[string]interface{}{"description": "未授权"},
@@ -1949,6 +1962,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -7005,7 +7019,7 @@ func conversationContainerLifecycleOpenAPIOperation(summary, operationID string)
 
 func conversationContainerDeleteOpenAPIOperation() map[string]interface{} {
 	operation := conversationContainerLifecycleOpenAPIOperation("删除对话容器", "deleteConversationContainer")
-	operation["description"] = "删除停止状态的对话容器。默认保留持久化工作区；只有 remove_workspace=true 才一并删除工作区。"
+	operation["description"] = "删除停止状态的对话容器。未启用持久化时，删除容器会永久删除 /workspace 文件；启用后默认保留专属 named volume，只有 remove_workspace=true 才一并删除。"
 	operation["parameters"] = append(operation["parameters"].([]map[string]interface{}), map[string]interface{}{
 		"name": "remove_workspace", "in": "query", "required": false,
 		"description": "是否同时删除对话持久化工作区，默认 false",
@@ -7018,10 +7032,13 @@ func conversationContainerDeleteOpenAPIOperation() map[string]interface{} {
 				"schema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
-						"success":          map[string]interface{}{"type": "boolean"},
-						"conversationId":   map[string]interface{}{"type": "string"},
-						"containerDeleted": map[string]interface{}{"type": "boolean"},
-						"workspaceDeleted": map[string]interface{}{"type": "boolean"},
+						"success":                  map[string]interface{}{"type": "boolean"},
+						"conversationId":           map[string]interface{}{"type": "string"},
+						"containerDeleted":         map[string]interface{}{"type": "boolean"},
+						"workspacePersistent":      map[string]interface{}{"type": "boolean"},
+						"workspaceDeleted":         map[string]interface{}{"type": "boolean"},
+						"workspaceRetained":        map[string]interface{}{"type": "boolean"},
+						"workspaceDeletionWarning": map[string]interface{}{"type": "string"},
 					},
 				},
 			},

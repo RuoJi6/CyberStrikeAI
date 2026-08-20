@@ -65,6 +65,9 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		if runtimeModeErr != nil {
 			return nil, fmt.Errorf("新对话 runtimeMode 必须为 host 或 container")
 		}
+		if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
+			return nil, fmt.Errorf("新对话 workspacePersistent 只能用于 container")
+		}
 		title := safeTruncateString(req.Message, 50)
 		var err error
 		meta := audit.ConversationCreateMetaFromGin(c, source)
@@ -72,6 +75,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.RoleName = req.Role
 		meta.AgentMode = chatRequestAgentMode(req, source)
 		meta.RuntimeMode = runtimeMode
+		meta.WorkspacePersistent = req.WorkspacePersistent
 		if webshellID != "" {
 			meta.Source = source + "_webshell"
 			meta.WebShellConnectionID = webshellID

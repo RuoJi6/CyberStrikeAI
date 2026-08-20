@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -14,7 +15,8 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 	rows, err := db.QueryContext(ctx, `
 		SELECT runtime_id,
 			CASE WHEN initialization_status IN (?, ?) OR lifecycle_state = ? THEN '' ELSE provider_id END,
-			conversation_id
+			conversation_id,
+			spec_json
 		FROM conversation_container_runtimes
 		WHERE initialization_status IN (?, ?, ?)
 		ORDER BY runtime_id
@@ -28,10 +30,25 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 	for rows.Next() {
 		var claim containerruntime.ManagedResourceClaim
 		claim.Kind = containerruntime.ResourceKindAgent
-		if err := rows.Scan(&claim.LogicalID, &claim.ProviderID, &claim.ConversationID); err != nil {
+		var specJSON string
+		if err := rows.Scan(&claim.LogicalID, &claim.ProviderID, &claim.ConversationID, &specJSON); err != nil {
 			return nil, err
 		}
 		claims = append(claims, claim)
+		var spec containerruntime.RuntimeSpec
+		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+			return nil, fmt.Errorf("decode container workspace claim %s: %w", claim.LogicalID, err)
+		}
+		if spec.Workspace.Persistent {
+			expectedName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(claim.LogicalID))
+			if spec.Workspace.VolumeName != expectedName || string(spec.ID) != claim.LogicalID || spec.ConversationID != claim.ConversationID {
+				return nil, fmt.Errorf("%w: persistent workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
+			}
+			claims = append(claims, containerruntime.ManagedResourceClaim{
+				Kind: containerruntime.ResourceKindWorkspaceVolume, LogicalID: claim.LogicalID,
+				ProviderID: expectedName, ConversationID: claim.ConversationID,
+			})
+		}
 	}
 	return claims, rows.Err()
 }

@@ -28804,6 +28804,96 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
     display: flex;
 }
 
+.workspace-persistence-option {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.workspace-persistence-option[hidden] {
+    display: none;
+}
+
+.workspace-persistence-toggle {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    padding: 10px;
+    border-radius: 12px;
+    background: #f8fafc;
+}
+
+.workspace-persistence-option.locked .workspace-persistence-toggle {
+    cursor: default;
+}
+
+.workspace-persistence-toggle-copy {
+    min-width: 0;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.workspace-persistence-toggle-title {
+    color: #0f172a;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.workspace-persistence-toggle-hint {
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.workspace-persistence-toggle input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.workspace-persistence-switch {
+    position: relative;
+    width: 36px;
+    height: 20px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: #cbd5e1;
+    transition: background 0.18s ease;
+}
+
+.workspace-persistence-switch::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25);
+    transition: transform 0.18s ease;
+}
+
+.workspace-persistence-toggle input:checked + .workspace-persistence-switch {
+    background: #2563eb;
+}
+
+.workspace-persistence-toggle input:checked + .workspace-persistence-switch::after {
+    transform: translateX(16px);
+}
+
+.workspace-persistence-toggle input:focus-visible + .workspace-persistence-switch {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+.workspace-persistence-toggle input:disabled + .workspace-persistence-switch {
+    opacity: 0.68;
+}
+
 /* 与角色选择器共用 .role-selector-btn；此处仅包一层用于定位浮层 */
 .agent-mode-inner {
     position: relative;
@@ -37362,6 +37452,22 @@ html[data-theme="dark"] .agent-mode-panel-header,
 html[data-theme="dark"] .role-selection-panel-header {
     background: #111827 !important;
     border-bottom-color: #263244 !important;
+}
+
+html[data-theme="dark"] .workspace-persistence-option {
+    border-top-color: #263244;
+}
+
+html[data-theme="dark"] .workspace-persistence-toggle {
+    background: #0f172a;
+}
+
+html[data-theme="dark"] .workspace-persistence-toggle-title {
+    color: #e2e8f0;
+}
+
+html[data-theme="dark"] .workspace-persistence-toggle-hint {
+    color: #94a3b8;
 }
 
 html[data-theme="dark"] .role-selection-item-main,

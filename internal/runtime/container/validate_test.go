@@ -75,7 +75,7 @@ func validSpec() container.RuntimeSpec {
 		},
 		Workspace: container.WorkspaceSpec{
 			Persistent: true,
-			VolumeName: "cyberstrike-workspace-1",
+			VolumeName: "cyberstrike-workspace-runtime-1",
 			MountPath:  "/workspace",
 		},
 	}

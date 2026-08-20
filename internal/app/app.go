@@ -495,7 +495,11 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
-			spec, specErr := conversationContainerSpec(cfg, conversationID)
+			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
+			if policyErr != nil {
+				return containerruntime.InitializationRecord{}, policyErr
+			}
+			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}

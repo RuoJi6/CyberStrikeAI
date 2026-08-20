@@ -88,6 +88,13 @@ Related endpoints:
 
 Container mode accepts Agent file paths only inside `/workspace`. Relative paths are normalized against `/workspace`; absolute escapes, parent traversal, backslashes, NULs, symlinked paths, and cross-conversation attachment references fail closed. Oversized command output is always referenced as `/workspace/.tool-output/<executionId>`.
 
+When creating a conversation, `POST /api/conversations` and all four Agent message endpoints accept the immutable `workspacePersistent` field. It is valid only with `runtimeMode=container`:
+
+- `false` (default): `/workspace` is temporary tmpfs storage. Deleting the container permanently deletes every file in it, and the UI shows this warning before creation.
+- `true`: the control plane creates and mounts only the system-derived per-conversation Docker named volume `cyberstrike-workspace-<runtimeId>`. User-supplied volume names and host paths are never accepted.
+
+`DELETE /api/conversations/:id/container` keeps a persistent volume by default and deletes it only when `remove_workspace=true`, after revalidating ownership labels. An ephemeral workspace disappears with its container. The response fields `workspacePersistent`, `workspaceDeleted`, `workspaceRetained`, and `workspaceDeletionWarning` report the effective result.
+
 ## Asset Management and Bulk Import
 
 Asset endpoints:

@@ -12,6 +12,7 @@ import (
 
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobynetwork "github.com/moby/moby/api/types/network"
 )
 
@@ -88,6 +89,33 @@ func TestDockerManagerValidateReadinessChecksInventoryAndIsolation(t *testing.T)
 	}
 	if report.InventoryDigest != spec.Readiness.InventoryDigest || report.ToolCount != 2 {
 		t.Fatalf("report = %#v", report)
+	}
+}
+
+func TestDockerManagerValidateReadinessAllowsOnlyOwnedWorkspaceVolume(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	spec.Readiness = ReadinessPolicy{
+		Enabled: true, InventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Inventory: readinessInventory(),
+	}
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.containerResult.Container.Mounts = []mobycontainer.MountPoint{{
+		Type: mobymount.TypeVolume, Name: spec.Workspace.VolumeName,
+		Destination: spec.Workspace.MountPath, RW: true,
+	}}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := Runtime{ID: spec.ID, ConversationID: spec.ConversationID, ProviderID: "provider-container-1"}
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); err != nil {
+		t.Fatalf("persistent readiness: %v", err)
+	}
+	api.containerResult.Container.Mounts[0].Name = "foreign-volume"
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); !errors.Is(err, ErrRuntimeNotReady) {
+		t.Fatalf("foreign mount error = %v", err)
 	}
 }
 
