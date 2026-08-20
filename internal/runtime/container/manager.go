@@ -41,6 +41,7 @@ var (
 	ErrImageDigestMismatch  = errors.New("container image digest mismatch")
 	ErrRegistryUnavailable  = errors.New("container image registry unavailable")
 	ErrRuntimeStateConflict = errors.New("container runtime state conflict")
+	ErrEngineIncompatible   = errors.New("container engine does not satisfy the security baseline")
 )
 
 // EngineInfo is a read-only description of the connected container engine.
@@ -52,6 +53,9 @@ type EngineInfo struct {
 	RawArchitecture string
 	OperatingSys    string
 	CgroupVersion   string
+	MemoryLimit     bool
+	CPULimit        bool
+	PIDsLimit       bool
 	SecurityOptions []string
 }
 

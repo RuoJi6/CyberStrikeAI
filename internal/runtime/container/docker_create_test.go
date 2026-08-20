@@ -64,6 +64,18 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	if !api.createOpts.Config.NetworkDisabled || api.createOpts.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) {
 		t.Fatalf("network was not disabled: %#v / %#v", api.createOpts.Config, api.createOpts.HostConfig)
 	}
+	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || len(api.createOpts.HostConfig.CapAdd) != 0 {
+		t.Fatalf("privilege baseline = %#v", api.createOpts.HostConfig)
+	}
+	if !containsString(api.createOpts.HostConfig.SecurityOpt, "no-new-privileges") || api.createOpts.HostConfig.NanoCPUs != spec.Resources.NanoCPUs || api.createOpts.HostConfig.Memory != spec.Resources.MemoryBytes || api.createOpts.HostConfig.MemorySwap != spec.Resources.MemoryBytes {
+		t.Fatalf("resource/security options = %#v", api.createOpts.HostConfig)
+	}
+	if api.createOpts.HostConfig.PidsLimit == nil || *api.createOpts.HostConfig.PidsLimit != spec.Resources.PIDs || len(api.createOpts.HostConfig.Ulimits) != 1 || api.createOpts.HostConfig.Ulimits[0].Name != "nofile" {
+		t.Fatalf("pid/nofile options = %#v", api.createOpts.HostConfig.Resources)
+	}
+	if api.createOpts.HostConfig.Tmpfs["/tmp"] != "rw,nosuid,nodev,noexec,size=67108864" || api.createOpts.HostConfig.Tmpfs["/workspace"] != "rw,nosuid,nodev,size=1073741824" {
+		t.Fatalf("tmpfs options = %#v", api.createOpts.HostConfig.Tmpfs)
+	}
 	labels := api.createOpts.Config.Labels
 	if labels[LabelManaged] != "true" || labels[LabelOwner] != ownerID || labels[LabelRuntimeID] != string(spec.ID) || labels[LabelConversationID] != spec.ConversationID || labels[LabelImageDigest] != spec.Image.Digest {
 		t.Fatalf("labels = %#v", labels)
@@ -73,6 +85,23 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	}
 	if api.removedID != "" {
 		t.Fatalf("successful runtime was rolled back: %s", api.removedID)
+	}
+}
+
+func TestDockerManagerCreateRejectsMissingEngineSecurityFeature(t *testing.T) {
+	spec := creationSpec()
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.infoResult.Info.PidsLimit = false
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Create(context.Background(), spec)
+	if !errors.Is(err, ErrEngineIncompatible) {
+		t.Fatalf("engine baseline error = %v", err)
+	}
+	if api.createOpts.Name != "" {
+		t.Fatal("container create was called for an incompatible engine")
 	}
 }
 
@@ -116,6 +145,25 @@ func TestDockerManagerCreateRollsBackFailedVerification(t *testing.T) {
 	}
 }
 
+func TestDockerManagerCreateRollsBackSecurityMismatch(t *testing.T) {
+	spec := creationSpec()
+	ownerID := "instance-01"
+	providerID := "provider-container-1"
+	api := newSuccessfulCreationAPI(spec, ownerID, providerID, "")
+	api.containerResult.Container.HostConfig.ReadonlyRootfs = false
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Create(context.Background(), spec)
+	if !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("security verification error = %v", err)
+	}
+	if api.removedID != providerID {
+		t.Fatalf("unsafe runtime was not rolled back: %q", api.removedID)
+	}
+}
+
 func TestDockerManagerCreateMapsNameConflict(t *testing.T) {
 	spec := creationSpec()
 	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
@@ -137,6 +185,27 @@ func TestDockerManagerRequiresOwnerID(t *testing.T) {
 	}
 }
 
+func TestDockerManagerCreateAppliesOperationTimeout(t *testing.T) {
+	spec := creationSpec()
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.blockPing = true
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID:          "instance-01",
+		OperationTimeout: 10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	_, err = manager.Create(context.Background(), spec)
+	if !errors.Is(err, ErrEngineUnavailable) {
+		t.Fatalf("timeout error = %v", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("operation timeout was not applied: %v", elapsed)
+	}
+}
+
 func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned string) *fakeDockerCreationAPI {
 	if pinned == "" {
 		pinned, _ = pinnedImageReference(spec.Image)
@@ -146,9 +215,13 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 	inspection := &fakeDockerInspectionAPI{
 		pingResult: mobyclient.PingResult{APIVersion: "1.52", OSType: "linux"},
 		infoResult: mobyclient.SystemInfoResult{Info: system.Info{
-			ServerVersion: "29.1.3",
-			Architecture:  "arm64",
-			OSType:        "linux",
+			ServerVersion:   "29.1.3",
+			Architecture:    "arm64",
+			OSType:          "linux",
+			MemoryLimit:     true,
+			CPUCfsQuota:     true,
+			PidsLimit:       true,
+			SecurityOptions: []string{"name=seccomp,profile=builtin"},
 		}},
 		imageResult: mobyclient.ImageInspectResult{InspectResponse: mobyimage.InspectResponse{
 			ID:           imageID,
@@ -166,9 +239,10 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 			Config: &mobycontainer.Config{
 				Image:           pinned,
 				NetworkDisabled: true,
+				WorkingDir:      spec.Workspace.MountPath,
 				Labels:          runtimeLabels(ownerID, spec),
 			},
-			HostConfig: &mobycontainer.HostConfig{NetworkMode: mobycontainer.NetworkMode(NetworkNone)},
+			HostConfig: runtimeHostConfig(spec),
 		}},
 	}
 	return &fakeDockerCreationAPI{

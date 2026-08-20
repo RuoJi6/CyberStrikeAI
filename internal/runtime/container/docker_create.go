@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +23,9 @@ const (
 	LabelImageDigest    = "com.cyberstrike.image-digest"
 	LabelImagePlatform  = "com.cyberstrike.image-platform"
 	ResourceKindAgent   = "agent-runtime"
+
+	defaultDockerOperationTimeout = 30 * time.Second
+	rollbackTimeout               = 10 * time.Second
 )
 
 type dockerCreationAPI interface {
@@ -32,15 +36,17 @@ type dockerCreationAPI interface {
 
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
-	OwnerID string
+	OwnerID          string
+	OperationTimeout time.Duration
 }
 
 // DockerManager incrementally implements the RuntimeManager contract. At this
 // stage it supports read-only inspection and create-only lifecycle operations.
 type DockerManager struct {
 	*DockerInspector
-	api     dockerCreationAPI
-	ownerID string
+	api              dockerCreationAPI
+	ownerID          string
+	operationTimeout time.Duration
 }
 
 var _ RuntimeCreator = (*DockerManager)(nil)
@@ -64,8 +70,15 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	if !generatedNamePattern.MatchString(ownerID) {
 		return nil, fmt.Errorf("%w: owner id is required and must be label-safe", ErrInvalidSpecification)
 	}
+	operationTimeout := options.OperationTimeout
+	if operationTimeout == 0 {
+		operationTimeout = defaultDockerOperationTimeout
+	}
+	if operationTimeout < 0 {
+		return nil, fmt.Errorf("%w: operation timeout must be positive", ErrInvalidSpecification)
+	}
 	inspector := newDockerInspector(api)
-	return &DockerManager{DockerInspector: inspector, api: api, ownerID: ownerID}, nil
+	return &DockerManager{DockerInspector: inspector, api: api, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {
@@ -78,6 +91,8 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if spec.Workspace.Persistent {
 		return Runtime{}, invalidSpec("persistent workspace creation is not enabled in this rollout item")
 	}
+	ctx, cancel := context.WithTimeout(ctx, m.operationTimeout)
+	defer cancel()
 	engine, err := m.EngineInfo(ctx)
 	if err != nil {
 		return Runtime{}, err
@@ -88,6 +103,9 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	}
 	if engine.OperatingSys != platform[0] || engine.Architecture != platform[1] {
 		return Runtime{}, fmt.Errorf("%w: engine %s/%s cannot create %s", ErrArchitectureMismatch, engine.OperatingSys, engine.Architecture, spec.Image.Platform)
+	}
+	if err := verifyEngineSecurityBaseline(engine); err != nil {
+		return Runtime{}, err
 	}
 	if _, err := m.InspectLocalImage(ctx, spec.Image); err != nil {
 		return Runtime{}, err
@@ -109,9 +127,7 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 			WorkingDir:      "/workspace",
 			Labels:          labels,
 		},
-		HostConfig: &mobycontainer.HostConfig{
-			NetworkMode: mobycontainer.NetworkMode(NetworkNone),
-		},
+		HostConfig: runtimeHostConfig(spec),
 	})
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
@@ -124,7 +140,9 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if verifyErr == nil {
 		return runtime, nil
 	}
-	_, cleanupErr := m.api.ContainerRemove(ctx, createResult.ID, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: false})
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cleanupCancel()
+	_, cleanupErr := m.api.ContainerRemove(cleanupCtx, createResult.ID, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: false})
 	if cleanupErr != nil {
 		return Runtime{}, errors.Join(verifyErr, fmt.Errorf("rollback created runtime %s: %w", createResult.ID, cleanupErr))
 	}
@@ -149,6 +167,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if actual.Config == nil {
 		return Runtime{}, fmt.Errorf("%w: created runtime has no configuration", ErrRuntimeStateConflict)
 	}
+	if actual.Config.WorkingDir != spec.Workspace.MountPath {
+		return Runtime{}, fmt.Errorf("%w: created runtime working directory mismatch", ErrRuntimeStateConflict)
+	}
 	for key, expected := range expectedLabels {
 		if actual.Config.Labels[key] != expected {
 			return Runtime{}, fmt.Errorf("%w: created runtime label %s mismatch", ErrRuntimeStateConflict, key)
@@ -156,6 +177,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	}
 	if actual.HostConfig == nil || actual.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) || !actual.Config.NetworkDisabled {
 		return Runtime{}, fmt.Errorf("%w: created runtime network is not disabled", ErrRuntimeStateConflict)
+	}
+	if err := verifyRuntimeSecurityBaseline(actual.HostConfig, spec); err != nil {
+		return Runtime{}, err
 	}
 	image, err := m.VerifyRuntimeImage(ctx, createResult.ID, spec.Image)
 	if err != nil {
@@ -175,6 +199,106 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 		UpdatedAt:      createdAt.UTC(),
 		Warnings:       append([]string(nil), createResult.Warnings...),
 	}, nil
+}
+
+func verifyEngineSecurityBaseline(engine EngineInfo) error {
+	missing := make([]string, 0, 4)
+	if !engine.MemoryLimit {
+		missing = append(missing, "memory limits")
+	}
+	if !engine.CPULimit {
+		missing = append(missing, "CPU quota")
+	}
+	if !engine.PIDsLimit {
+		missing = append(missing, "PIDs limits")
+	}
+	if !hasSecurityOption(engine.SecurityOptions, "name=seccomp") {
+		missing = append(missing, "default seccomp")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%w: missing %s", ErrEngineIncompatible, strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func hasSecurityOption(options []string, expected string) bool {
+	for _, option := range options {
+		if option == expected || strings.HasPrefix(option, expected+",") {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
+	pidsLimit := spec.Resources.PIDs
+	return &mobycontainer.HostConfig{
+		NetworkMode:    mobycontainer.NetworkMode(NetworkNone),
+		RestartPolicy:  mobycontainer.RestartPolicy{Name: mobycontainer.RestartPolicyDisabled},
+		CapDrop:        []string{"ALL"},
+		ReadonlyRootfs: true,
+		SecurityOpt:    []string{"no-new-privileges"},
+		Tmpfs: map[string]string{
+			"/tmp":                   tmpfsOptions(spec.Security.TmpfsBytes, true),
+			spec.Workspace.MountPath: tmpfsOptions(spec.Resources.WorkspaceBytes, false),
+		},
+		Resources: mobycontainer.Resources{
+			NanoCPUs:   spec.Resources.NanoCPUs,
+			Memory:     spec.Resources.MemoryBytes,
+			MemorySwap: spec.Resources.MemoryBytes,
+			PidsLimit:  &pidsLimit,
+			Ulimits: []*mobycontainer.Ulimit{{
+				Name: "nofile",
+				Soft: int64(spec.Resources.NoFileSoft),
+				Hard: int64(spec.Resources.NoFileHard),
+			}},
+		},
+	}
+}
+
+func tmpfsOptions(sizeBytes int64, noexec bool) string {
+	options := "rw,nosuid,nodev"
+	if noexec {
+		options += ",noexec"
+	}
+	return options + ",size=" + strconv.FormatInt(sizeBytes, 10)
+}
+
+func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
+	expected := runtimeHostConfig(spec)
+	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Mounts) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 {
+		return fmt.Errorf("%w: created runtime has privileged access, host mounts, devices, or published ports", ErrRuntimeStateConflict)
+	}
+	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
+		return fmt.Errorf("%w: created runtime privilege restrictions mismatch", ErrRuntimeStateConflict)
+	}
+	if actual.RestartPolicy.Name != mobycontainer.RestartPolicyDisabled {
+		return fmt.Errorf("%w: created runtime restart policy mismatch", ErrRuntimeStateConflict)
+	}
+	if actual.NanoCPUs != expected.NanoCPUs || actual.Memory != expected.Memory || actual.MemorySwap != expected.MemorySwap || actual.PidsLimit == nil || *actual.PidsLimit != spec.Resources.PIDs {
+		return fmt.Errorf("%w: created runtime CPU, memory, swap, or PIDs limits mismatch", ErrRuntimeStateConflict)
+	}
+	if len(actual.Ulimits) != 1 || actual.Ulimits[0] == nil || actual.Ulimits[0].Name != "nofile" || actual.Ulimits[0].Soft != int64(spec.Resources.NoFileSoft) || actual.Ulimits[0].Hard != int64(spec.Resources.NoFileHard) {
+		return fmt.Errorf("%w: created runtime nofile limit mismatch", ErrRuntimeStateConflict)
+	}
+	if len(actual.Tmpfs) != len(expected.Tmpfs) {
+		return fmt.Errorf("%w: created runtime tmpfs mounts mismatch", ErrRuntimeStateConflict)
+	}
+	for path, options := range expected.Tmpfs {
+		if actual.Tmpfs[path] != options {
+			return fmt.Errorf("%w: created runtime tmpfs %s mismatch", ErrRuntimeStateConflict, path)
+		}
+	}
+	return nil
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 func runtimeContainerName(id RuntimeID) string {

@@ -73,6 +73,9 @@ func (d *DockerInspector) EngineInfo(ctx context.Context) (EngineInfo, error) {
 		RawArchitecture: info.Architecture,
 		OperatingSys:    info.OSType,
 		CgroupVersion:   info.CgroupVersion,
+		MemoryLimit:     info.MemoryLimit,
+		CPULimit:        info.CPUCfsQuota,
+		PIDsLimit:       info.PidsLimit,
 		SecurityOptions: append([]string(nil), info.SecurityOptions...),
 	}, nil
 }

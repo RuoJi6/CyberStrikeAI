@@ -3,6 +3,7 @@ package container
 import (
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strings"
 
@@ -36,6 +37,9 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if spec.Resources.NoFileSoft == 0 || spec.Resources.NoFileHard == 0 || spec.Resources.NoFileSoft > spec.Resources.NoFileHard {
 		return invalidSpec("nofile limits must be positive and ordered")
 	}
+	if spec.Resources.NoFileHard > math.MaxInt64 {
+		return invalidSpec("nofile limits exceed the engine range")
+	}
 	if spec.Resources.WorkspaceBytes <= 0 || spec.Resources.MaxConcurrentExec <= 0 {
 		return invalidSpec("workspace and exec limits must be positive")
 	}
@@ -48,8 +52,8 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if spec.Security.TmpfsBytes <= 0 {
 		return invalidSpec("tmpfs limit must be positive")
 	}
-	if strings.TrimSpace(spec.Security.SeccompProfile) == "" {
-		return invalidSpec("seccomp profile is required")
+	if strings.TrimSpace(spec.Security.SeccompProfile) != "default" {
+		return invalidSpec("phase 1 runtimes require the Docker default seccomp profile")
 	}
 	if spec.Workspace.MountPath != "/workspace" {
 		return invalidSpec("workspace mount path must be /workspace")

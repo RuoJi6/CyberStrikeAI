@@ -28,9 +28,14 @@ type fakeDockerInspectionAPI struct {
 	distributionRef    string
 	imageRef           string
 	containerID        string
+	blockPing          bool
 }
 
-func (f *fakeDockerInspectionAPI) Ping(context.Context, mobyclient.PingOptions) (mobyclient.PingResult, error) {
+func (f *fakeDockerInspectionAPI) Ping(ctx context.Context, _ mobyclient.PingOptions) (mobyclient.PingResult, error) {
+	if f.blockPing {
+		<-ctx.Done()
+		return mobyclient.PingResult{}, ctx.Err()
+	}
 	return f.pingResult, f.pingErr
 }
 
@@ -61,6 +66,9 @@ func TestDockerInspectorEngineInfo(t *testing.T) {
 			Architecture:    "aarch64",
 			OSType:          "linux",
 			CgroupVersion:   "2",
+			MemoryLimit:     true,
+			CPUCfsQuota:     true,
+			PidsLimit:       true,
 			SecurityOptions: []string{"name=apparmor", "name=seccomp,profile=builtin"},
 		}},
 	}
@@ -69,7 +77,7 @@ func TestDockerInspectorEngineInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("engine info: %v", err)
 	}
-	if !info.Available || info.Version != "29.1.3" || info.APIVersion != "1.52" || info.Architecture != "arm64" || info.RawArchitecture != "aarch64" || info.CgroupVersion != "2" {
+	if !info.Available || info.Version != "29.1.3" || info.APIVersion != "1.52" || info.Architecture != "arm64" || info.RawArchitecture != "aarch64" || info.CgroupVersion != "2" || !info.MemoryLimit || !info.CPULimit || !info.PIDsLimit {
 		t.Fatalf("engine info = %#v", info)
 	}
 }
