@@ -1625,7 +1625,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"delete": map[string]interface{}{
 					"tags":        []string{"对话管理"},
 					"summary":     "删除对话",
-					"description": "删除指定的对话及其会话数据（消息、攻击链等）。**漏洞记录会保留**，仅解除与会话的关联。**此操作不可恢复**。",
+					"description": "删除指定的对话及其会话数据（消息、攻击链等）。**漏洞记录会保留**，仅解除与会话的关联。对启用持久工作区的容器对话，必须显式选择保留或删除 named volume。**此操作不可恢复**。",
 					"operationId": "deleteConversation",
 					"parameters": []map[string]interface{}{
 						{
@@ -1635,6 +1635,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "对话ID",
 							"schema": map[string]interface{}{
 								"type": "string",
+							},
+						},
+						{
+							"name":        "workspace_action",
+							"in":          "query",
+							"required":    false,
+							"description": "持久工作区对话必填：retain 保留 named volume，delete 一并删除",
+							"schema": map[string]interface{}{
+								"type": "string", "enum": []string{"retain", "delete"},
 							},
 						},
 					},
@@ -1651,6 +1660,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 												"description": "成功消息",
 												"example":     "删除成功",
 											},
+											"conversationId":      map[string]interface{}{"type": "string"},
+											"workspaceAction":     map[string]interface{}{"type": "string", "enum": []string{"retain", "delete"}},
+											"workspacePersistent": map[string]interface{}{"type": "boolean"},
+											"workspaceRetained":   map[string]interface{}{"type": "boolean"},
+											"workspaceDeleted":    map[string]interface{}{"type": "boolean"},
 										},
 									},
 								},

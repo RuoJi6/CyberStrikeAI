@@ -35902,6 +35902,60 @@ html[data-theme="dark"] .projects-panel-count { color: var(--accent-color); back
 .projects-modal-footer .btn-primary {
     min-width: 100px;
 }
+.conversation-delete-workspace-dialog {
+    max-width: 560px;
+}
+.conversation-delete-workspace-name {
+    margin: 0 0 14px;
+    color: var(--text-primary, #0f172a);
+    font-size: 0.9375rem;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+.conversation-delete-workspace-notice {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px;
+    border: 1px solid;
+    border-radius: 12px;
+    font-size: 0.875rem;
+    line-height: 1.55;
+}
+.conversation-delete-workspace-notice[hidden] {
+    display: none;
+}
+.conversation-delete-workspace-notice strong {
+    font-size: 0.9375rem;
+}
+.conversation-delete-workspace-notice--persistent {
+    color: #1e3a8a;
+    background: #eff6ff;
+    border-color: #bfdbfe;
+}
+.conversation-delete-workspace-notice--ephemeral {
+    color: #9a3412;
+    background: #fff7ed;
+    border-color: #fed7aa;
+}
+.conversation-delete-workspace-footer {
+    align-items: center;
+    flex-wrap: wrap;
+}
+.conversation-delete-retain-btn {
+    color: #166534;
+    border-color: #86efac;
+    background: #f0fdf4;
+}
+.conversation-delete-retain-btn:hover {
+    color: #14532d;
+    border-color: #4ade80;
+    background: #dcfce7;
+}
+@media (max-width: 640px) {
+    .conversation-delete-workspace-footer > button {
+        width: 100%;
+    }
+}
 body.projects-modal-open,
 body.app-modal-open {
     overflow: hidden;
@@ -36241,6 +36295,34 @@ html[data-theme="dark"] .modal-header h2 {
 html[data-theme="dark"] .modal-footer {
     background: var(--bg-primary) !important;
     border-top-color: var(--border-color) !important;
+}
+
+html[data-theme="dark"] .conversation-delete-workspace-name {
+    color: var(--text-primary);
+}
+
+html[data-theme="dark"] .conversation-delete-workspace-notice--persistent {
+    color: #bfdbfe;
+    background: rgba(30, 64, 175, 0.18);
+    border-color: rgba(96, 165, 250, 0.42);
+}
+
+html[data-theme="dark"] .conversation-delete-workspace-notice--ephemeral {
+    color: #fed7aa;
+    background: rgba(154, 52, 18, 0.18);
+    border-color: rgba(251, 146, 60, 0.38);
+}
+
+html[data-theme="dark"] .conversation-delete-retain-btn {
+    color: #bbf7d0;
+    background: rgba(22, 101, 52, 0.2);
+    border-color: rgba(74, 222, 128, 0.42);
+}
+
+html[data-theme="dark"] .conversation-delete-retain-btn:hover {
+    color: #dcfce7;
+    background: rgba(22, 101, 52, 0.34);
+    border-color: #4ade80;
 }
 
 html[data-theme="dark"] .nav-item-content:hover,

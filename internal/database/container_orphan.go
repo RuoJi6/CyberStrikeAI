@@ -91,8 +91,45 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 			ProviderID:     containerruntime.WorkspaceVolumeName(runtimeID),
 			ConversationID: conversationID,
 		})
+		workspaceClaims[conversationID] = struct{}{}
 	}
-	return claims, persistentRows.Err()
+	if err := persistentRows.Err(); err != nil {
+		return nil, err
+	}
+	if err := persistentRows.Close(); err != nil {
+		return nil, err
+	}
+
+	retainedRows, err := db.QueryContext(ctx, `
+		SELECT original_conversation_id, runtime_id, volume_name
+		FROM retained_container_workspaces
+		ORDER BY original_conversation_id
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("list retained deleted-conversation workspace claims: %w", err)
+	}
+	defer retainedRows.Close()
+	for retainedRows.Next() {
+		var conversationID, runtimeID, volumeName string
+		if err := retainedRows.Scan(&conversationID, &runtimeID, &volumeName); err != nil {
+			return nil, err
+		}
+		expectedRuntimeID := containerruntime.RuntimeID("conversation-" + conversationID)
+		expectedVolumeName := containerruntime.WorkspaceVolumeName(expectedRuntimeID)
+		if runtimeID != string(expectedRuntimeID) || volumeName != expectedVolumeName {
+			return nil, fmt.Errorf("%w: retained workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
+		}
+		if _, exists := workspaceClaims[conversationID]; exists {
+			continue
+		}
+		claims = append(claims, containerruntime.ManagedResourceClaim{
+			Kind:           containerruntime.ResourceKindWorkspaceVolume,
+			LogicalID:      runtimeID,
+			ProviderID:     volumeName,
+			ConversationID: conversationID,
+		})
+	}
+	return claims, retainedRows.Err()
 }
 
 func (db *DB) DiscoverResourceTombstone(ctx context.Context, resource containerruntime.ManagedResource, now time.Time) (containerruntime.ResourceTombstone, bool, error) {

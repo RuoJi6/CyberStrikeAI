@@ -42,6 +42,10 @@ type ConversationContainerLifecycleController interface {
 	Reconcile(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 }
 
+type ConversationRetainedWorkspaceController interface {
+	DeleteRetainedWorkspace(ctx context.Context, conversationID string) error
+}
+
 // ConversationHandler 对话处理器
 type ConversationHandler struct {
 	db                       *database.DB
@@ -51,6 +55,7 @@ type ConversationHandler struct {
 	taskState                ConversationTaskStateProvider
 	containerInitializations ConversationContainerInitializationProvider
 	containerLifecycle       ConversationContainerLifecycleController
+	retainedWorkspace        ConversationRetainedWorkspaceController
 }
 
 // SetAudit wires platform audit logging.
@@ -75,6 +80,10 @@ func (h *ConversationHandler) SetContainerInitializationProvider(provider Conver
 
 func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {
 	h.containerLifecycle = controller
+}
+
+func (h *ConversationHandler) SetRetainedWorkspaceController(controller ConversationRetainedWorkspaceController) {
+	h.retainedWorkspace = controller
 }
 
 // NewConversationHandler 创建新的对话处理器
@@ -623,13 +632,43 @@ func (h *ConversationHandler) UpdateConversation(c *gin.Context) {
 
 // DeleteConversation 删除对话
 func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
-	id := c.Param("id")
+	id := strings.TrimSpace(c.Param("id"))
+	conversation, err := h.db.GetConversationLite(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		return
+	}
+	workspacePersistent := conversation.RuntimeMode == database.ConversationRuntimeModeContainer && conversation.WorkspacePersistent
+	workspaceAction := strings.ToLower(strings.TrimSpace(c.Query("workspace_action")))
+	if workspaceAction != "" && workspaceAction != "retain" && workspaceAction != "delete" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_action 必须为 retain 或 delete"})
+		return
+	}
+	if workspacePersistent && workspaceAction == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "删除持久工作区对话时必须明确选择 workspace_action=retain 或 delete"})
+		return
+	}
+	if !workspacePersistent && workspaceAction == "retain" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该对话没有可保留的持久工作区"})
+		return
+	}
+	if workspaceAction == "" {
+		workspaceAction = "delete"
+	}
 
 	if h.taskStopper != nil {
 		h.taskStopper.CancelRunningTaskForConversation(id)
 	}
 
-	if err := h.db.DeleteConversation(id); err != nil {
+	removeWorkspace := workspaceAction == "delete"
+	if conversation.RuntimeMode == database.ConversationRuntimeModeContainer {
+		if err := h.deleteConversationRuntime(c.Request.Context(), id, workspacePersistent, removeWorkspace); err != nil {
+			h.writeContainerLifecycleError(c, id, "delete_conversation", err)
+			return
+		}
+	}
+
+	if err := h.db.DeleteConversationWithWorkspaceRetention(id, workspacePersistent && !removeWorkspace); err != nil {
 		h.logger.Error("删除对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -643,10 +682,69 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 			ResourceType: "conversation",
 			ResourceID:   id,
 			Message:      "删除对话",
+			Detail: map[string]interface{}{
+				"workspace_action":     workspaceAction,
+				"workspace_persistent": workspacePersistent,
+				"workspace_retained":   workspacePersistent && !removeWorkspace,
+				"workspace_deleted":    workspacePersistent && removeWorkspace,
+			},
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
+	c.JSON(http.StatusOK, gin.H{
+		"message":             "删除成功",
+		"conversationId":      id,
+		"workspaceAction":     workspaceAction,
+		"workspacePersistent": workspacePersistent,
+		"workspaceRetained":   workspacePersistent && !removeWorkspace,
+		"workspaceDeleted":    workspacePersistent && removeWorkspace,
+	})
+}
+
+func (h *ConversationHandler) deleteConversationRuntime(ctx context.Context, conversationID string, workspacePersistent, removeWorkspace bool) error {
+	if h.containerInitializations == nil {
+		if workspacePersistent && removeWorkspace {
+			if h.retainedWorkspace == nil {
+				return containerruntime.ErrEngineUnavailable
+			}
+			return h.retainedWorkspace.DeleteRetainedWorkspace(ctx, conversationID)
+		}
+		return nil
+	}
+	record, err := h.containerInitializations.Get(ctx, conversationID)
+	if err != nil {
+		if !errors.Is(err, containerruntime.ErrNotFound) {
+			return err
+		}
+		if workspacePersistent && removeWorkspace {
+			if h.retainedWorkspace == nil {
+				return containerruntime.ErrEngineUnavailable
+			}
+			return h.retainedWorkspace.DeleteRetainedWorkspace(ctx, conversationID)
+		}
+		return nil
+	}
+	if record.Status == containerruntime.InitializationQueued || record.Status == containerruntime.InitializationCreating {
+		return fmt.Errorf("%w: runtime initialization is %s", containerruntime.ErrRuntimeStateConflict, record.Status)
+	}
+	if record.Status == containerruntime.InitializationFailed {
+		if workspacePersistent && removeWorkspace {
+			if h.retainedWorkspace == nil {
+				return containerruntime.ErrEngineUnavailable
+			}
+			return h.retainedWorkspace.DeleteRetainedWorkspace(ctx, conversationID)
+		}
+		return nil
+	}
+	if h.containerLifecycle == nil {
+		return containerruntime.ErrEngineUnavailable
+	}
+	if record.RuntimeStatus == containerruntime.StatusRunning || record.RuntimeStatus == containerruntime.StatusStarting {
+		if _, err := h.containerLifecycle.Stop(ctx, conversationID); err != nil {
+			return err
+		}
+	}
+	return h.containerLifecycle.Delete(ctx, conversationID, workspacePersistent && removeWorkspace)
 }
 
 // DeleteTurnRequest 删除一轮对话（POST /api/conversations/:id/delete-turn）

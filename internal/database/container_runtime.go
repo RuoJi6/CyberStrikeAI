@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS container_resource_tombstones (
 	CHECK (status IN ('pending', 'deleting', 'failed', 'completed'))
 );`
 
+const createRetainedContainerWorkspacesTable = `
+CREATE TABLE IF NOT EXISTS retained_container_workspaces (
+	original_conversation_id TEXT PRIMARY KEY,
+	conversation_title TEXT NOT NULL DEFAULT '',
+	runtime_id TEXT NOT NULL UNIQUE,
+	volume_name TEXT NOT NULL UNIQUE,
+	retained_at DATETIME NOT NULL
+);`
+
 func (db *DB) initContainerRuntimeTables() error {
 	if _, err := db.Exec(createConversationContainerRuntimesTable); err != nil {
 		return err
@@ -78,6 +87,9 @@ func (db *DB) initContainerRuntimeTables() error {
 		return err
 	}
 	if _, err := db.Exec(createContainerResourceTombstonesTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(createRetainedContainerWorkspacesTable); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_container_runtimes_status ON conversation_container_runtimes(initialization_status, updated_at)`); err != nil {

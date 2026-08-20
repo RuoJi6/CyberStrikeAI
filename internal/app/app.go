@@ -507,6 +507,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
+		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		if containerOrphan != nil {
 			orphanCtx, orphanCancel := context.WithCancel(context.Background())
 			app.containerOrphanCancel = orphanCancel

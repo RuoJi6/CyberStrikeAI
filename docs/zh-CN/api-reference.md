@@ -100,6 +100,13 @@ Content-Type: application/json
 - `false`（默认）：`/workspace` 是临时 tmpfs；删除容器会永久删除其中全部文件，界面会在创建前明确显示该警告。
 - `true`：控制面只创建并挂载系统派生的每对话 Docker named volume `cyberstrike-workspace-<runtimeId>`，不接受用户提供的 volume 名或宿主路径。
 
+删除对话时，`DELETE /api/conversations/:id` 通过查询参数 `workspace_action` 接受明确选择：
+
+- `retain`：删除对话和容器，保留该对话的受管 Docker named volume。
+- `delete`：删除对话、容器和持久工作区。
+
+启用持久工作区的容器对话必须传该参数，否则返回 `400`。非持久对话可省略（等价于 `delete`），且不允许传 `retain`。成功响应会返回 `workspaceAction`、`workspacePersistent`、`workspaceRetained` 和 `workspaceDeleted`。
+
 `DELETE /api/conversations/:id/container` 对持久工作区默认只删除容器并保留 volume；仅 `remove_workspace=true` 时删除受所有者标签复核的 volume。临时工作区随容器删除，响应中的 `workspacePersistent`、`workspaceDeleted`、`workspaceRetained` 和 `workspaceDeletionWarning` 会返回实际结果。
 
 ## 项目、漏洞、攻击链

@@ -175,6 +175,22 @@ func TestLifecycleControllerFinishesInterruptedDeleteWhenProviderIsGone(t *testi
 	}
 }
 
+func TestLifecycleControllerDeletesRetainedWorkspaceWithoutRuntimeRecord(t *testing.T) {
+	db, _, _, conversationID := lifecycleFixture(t)
+	manager := containertest.NewFakeManager(container.EngineInfo{Available: true})
+	controller, err := container.NewLifecycleController(manager, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := controller.DeleteRetainedWorkspace(context.Background(), conversationID); err != nil {
+		t.Fatalf("idempotent retained workspace delete: %v", err)
+	}
+	calls := manager.Calls()
+	if len(calls) != 1 || calls[0].Operation != containertest.OperationDelete || calls[0].RuntimeID != container.RuntimeID("conversation-"+conversationID) {
+		t.Fatalf("calls = %#v", calls)
+	}
+}
+
 func lifecycleFixture(t *testing.T) (*database.DB, *containertest.FakeManager, *container.LifecycleController, string) {
 	t.Helper()
 	db, err := database.NewDB(filepath.Join(t.TempDir(), "lifecycle.db"), zap.NewNop())

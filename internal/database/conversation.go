@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -864,33 +865,85 @@ func (db *DB) UpdateConversationTime(id string) error {
 // 漏洞记录会保留：vulnerabilities.conversation_id 使用 ON DELETE SET NULL，仅解除与会话的关联。
 // 注意：knowledge_retrieval_logs 在删除前会被显式清理。
 func (db *DB) DeleteConversation(id string) error {
-	// 删除对话前补全漏洞来源标签，便于在漏洞库中追溯已删除会话的发现。
-	_, err := db.Exec(`
-		UPDATE vulnerabilities
-		SET conversation_tag = COALESCE(NULLIF(TRIM(conversation_tag), ''), (SELECT title FROM conversations WHERE id = ?))
-		WHERE conversation_id = ?
-	`, id, id)
+	return db.DeleteConversationWithWorkspaceRetention(id, false)
+}
+
+// DeleteConversationWithWorkspaceRetention atomically preserves the managed
+// named-volume claim, when requested, before the conversation row and its
+// runtime record are cascade-deleted. The retained claim deliberately has no
+// foreign key to conversations because it must outlive the chat history.
+func (db *DB) DeleteConversationWithWorkspaceRetention(id string, retainWorkspace bool) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("对话 ID 不能为空")
+	}
+	tx, err := db.Begin()
 	if err != nil {
+		return fmt.Errorf("开始删除对话事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var title, runtimeMode string
+	var projectID sql.NullString
+	var workspacePersistent bool
+	if err := tx.QueryRow(`
+		SELECT title, project_id, runtime_mode, workspace_persistent
+		FROM conversations WHERE id = ?
+	`, id).Scan(&title, &projectID, &runtimeMode, &workspacePersistent); err != nil {
+		if err == sql.ErrNoRows {
+			return errors.New("对话不存在")
+		}
+		return fmt.Errorf("查询待删除对话失败: %w", err)
+	}
+	if retainWorkspace && (runtimeMode != ConversationRuntimeModeContainer || !workspacePersistent) {
+		return errors.New("只有启用持久工作区的容器对话可保留工作区")
+	}
+
+	// 删除对话前补全漏洞来源标签，便于在漏洞库中追溯已删除会话的发现。
+	if _, err := tx.Exec(`
+		UPDATE vulnerabilities
+		SET conversation_tag = COALESCE(NULLIF(TRIM(conversation_tag), ''), ?)
+		WHERE conversation_id = ?
+	`, title, id); err != nil {
 		db.logger.Warn("更新漏洞来源标签失败", zap.String("conversationId", id), zap.Error(err))
 	}
-
-	// 显式删除知识检索日志（虽然外键是SET NULL，但为了彻底清理，我们手动删除）
-	_, err = db.Exec("DELETE FROM knowledge_retrieval_logs WHERE conversation_id = ?", id)
-	if err != nil {
+	if _, err := tx.Exec("DELETE FROM knowledge_retrieval_logs WHERE conversation_id = ?", id); err != nil {
 		db.logger.Warn("删除知识检索日志失败", zap.String("conversationId", id), zap.Error(err))
-		// 不返回错误，继续删除对话
 	}
 
-	projectID, _ := db.GetConversationProjectID(id)
+	if retainWorkspace {
+		runtimeID := containerruntime.RuntimeID("conversation-" + id)
+		volumeName := containerruntime.WorkspaceVolumeName(runtimeID)
+		if _, err := tx.Exec(`
+			INSERT INTO retained_container_workspaces (
+				original_conversation_id, conversation_title, runtime_id, volume_name, retained_at
+			) VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(original_conversation_id) DO UPDATE SET
+				conversation_title = excluded.conversation_title,
+				runtime_id = excluded.runtime_id,
+				volume_name = excluded.volume_name,
+				retained_at = excluded.retained_at
+		`, id, title, string(runtimeID), volumeName, formatSQLiteUTC(time.Now())); err != nil {
+			return fmt.Errorf("保留对话工作区声明失败: %w", err)
+		}
+	} else if _, err := tx.Exec("DELETE FROM retained_container_workspaces WHERE original_conversation_id = ?", id); err != nil {
+		return fmt.Errorf("清理对话工作区声明失败: %w", err)
+	}
 
-	// 删除对话（外键CASCADE会自动删除其他相关数据）
-	_, err = db.Exec("DELETE FROM conversations WHERE id = ?", id)
+	result, err := tx.Exec("DELETE FROM conversations WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("删除对话失败: %w", err)
 	}
-	db.removeConversationScopedDirs(id, projectID)
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("对话不存在")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交删除对话事务失败: %w", err)
+	}
 
-	db.logger.Info("对话已删除（漏洞记录已保留）", zap.String("conversationId", id))
+	db.removeConversationScopedDirs(id, strings.TrimSpace(projectID.String))
+	db.logger.Info("对话已删除（漏洞记录已保留）",
+		zap.String("conversationId", id), zap.Bool("workspaceRetained", retainWorkspace))
 	return nil
 }
 

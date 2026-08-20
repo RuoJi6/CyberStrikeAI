@@ -6069,6 +6069,34 @@
         </div>
     </div>
 
+    <div id="conversation-delete-workspace-modal" class="projects-modal-overlay conversation-delete-workspace-modal" style="display: none;" role="dialog" aria-modal="true" aria-labelledby="conversation-delete-workspace-title">
+        <div class="projects-modal-dialog conversation-delete-workspace-dialog">
+            <div class="projects-modal-header">
+                <div class="projects-modal-header-text">
+                    <h3 id="conversation-delete-workspace-title" data-i18n="chat.deleteConversationTitle">删除对话</h3>
+                    <p class="projects-modal-subtitle" data-i18n="chat.deleteConversationSubtitle">对话消息无法恢复，已记录的漏洞仍会保留。</p>
+                </div>
+                <button type="button" class="projects-modal-close" onclick="closeConversationDeleteWorkspaceModal()" aria-label="取消" data-i18n="common.cancel" data-i18n-attr="aria-label">&times;</button>
+            </div>
+            <div class="projects-modal-body conversation-delete-workspace-body">
+                <p id="conversation-delete-workspace-name" class="conversation-delete-workspace-name"></p>
+                <div id="conversation-delete-workspace-persistent" class="conversation-delete-workspace-notice conversation-delete-workspace-notice--persistent" hidden>
+                    <strong data-i18n="chat.deleteConversationWorkspaceDecision">该对话使用专属持久工作区</strong>
+                    <span data-i18n="chat.deleteConversationWorkspaceDecisionHint">请明确选择保留 named volume，或与对话一并删除。</span>
+                </div>
+                <div id="conversation-delete-workspace-ephemeral" class="conversation-delete-workspace-notice conversation-delete-workspace-notice--ephemeral" hidden>
+                    <strong data-i18n="chat.deleteConversationEphemeralWarning">该对话没有持久工作区</strong>
+                    <span data-i18n="chat.deleteConversationEphemeralWarningHint">删除对话会删除容器，/workspace 中的临时文件将永久丢失。</span>
+                </div>
+            </div>
+            <div class="projects-modal-footer conversation-delete-workspace-footer">
+                <button type="button" class="btn-secondary" onclick="closeConversationDeleteWorkspaceModal()" data-i18n="common.cancel">取消</button>
+                <button id="conversation-delete-retain-btn" type="button" class="btn-secondary conversation-delete-retain-btn" onclick="resolveConversationDeleteWorkspaceChoice('retain')" data-i18n="chat.deleteConversationRetainWorkspace">删除对话，保留工作区</button>
+                <button id="conversation-delete-workspace-btn" type="button" class="btn-danger" onclick="resolveConversationDeleteWorkspaceChoice('delete')" data-i18n="chat.deleteConversationWithWorkspace">删除对话和工作区</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 上下文菜单 -->
     <div id="conversation-context-menu" class="context-menu" style="display: none;">
         <div id="attack-chain-menu-item" class="context-menu-item" onclick="showAttackChainFromContext()">

@@ -152,3 +152,49 @@ func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
 		t.Fatalf("retained workspace claims = %#v", claims)
 	}
 }
+
+func TestDeleteConversationCanRetainPersistentWorkspaceClaim(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, err := db.CreateConversation("retain workspace after chat deletion", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteConversationWithWorkspaceRetention(conversation.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetConversationLite(conversation.ID); err == nil {
+		t.Fatal("conversation still exists")
+	}
+	runtimeID := "conversation-" + conversation.ID
+	volumeName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(runtimeID))
+	var storedRuntimeID, storedVolumeName string
+	if err := db.QueryRow(`
+		SELECT runtime_id, volume_name FROM retained_container_workspaces
+		WHERE original_conversation_id = ?
+	`, conversation.ID).Scan(&storedRuntimeID, &storedVolumeName); err != nil {
+		t.Fatal(err)
+	}
+	if storedRuntimeID != runtimeID || storedVolumeName != volumeName {
+		t.Fatalf("retained identity = %q/%q", storedRuntimeID, storedVolumeName)
+	}
+	claims, err := db.ListManagedResourceClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Kind != containerruntime.ResourceKindWorkspaceVolume || claims[0].ConversationID != conversation.ID || claims[0].LogicalID != runtimeID || claims[0].ProviderID != volumeName {
+		t.Fatalf("retained claims = %#v", claims)
+	}
+
+	host, err := db.CreateConversation("host cannot retain workspace", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteConversationWithWorkspaceRetention(host.ID, true); err == nil {
+		t.Fatal("host conversation retained a nonexistent workspace")
+	}
+	if _, err := db.GetConversationLite(host.ID); err != nil {
+		t.Fatalf("rejected host conversation deletion removed row: %v", err)
+	}
+}

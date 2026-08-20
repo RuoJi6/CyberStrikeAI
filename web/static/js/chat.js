@@ -6747,17 +6747,87 @@ async function deleteConversationTurnFromUI(anchorBackendMessageId) {
     }
 }
 
+let conversationDeleteWorkspaceResolver = null;
+
+function settleConversationDeleteWorkspaceChoice(choice) {
+	const resolver = conversationDeleteWorkspaceResolver;
+	conversationDeleteWorkspaceResolver = null;
+	closeAppModal('conversation-delete-workspace-modal');
+	if (resolver) resolver(choice || null);
+}
+
+function closeConversationDeleteWorkspaceModal() {
+	settleConversationDeleteWorkspaceChoice(null);
+}
+
+function resolveConversationDeleteWorkspaceChoice(choice) {
+	if (choice !== 'retain' && choice !== 'delete') return;
+	settleConversationDeleteWorkspaceChoice(choice);
+}
+
+async function requestConversationDeleteWorkspaceChoice(conversationId, options = {}) {
+	let conversation = options.conversation || null;
+	if (!conversation && conversationId) {
+		const response = await apiFetch(`/api/conversations/${encodeURIComponent(conversationId)}`);
+		let payload = {};
+		try { payload = await response.json(); } catch (e) { /* ignore */ }
+		if (!response.ok) {
+			throw new Error(payload.error || chatTranslate('chat.deleteConversationLoadFailed', '无法读取对话工作区状态'));
+		}
+		conversation = payload;
+	}
+	conversation = conversation || {};
+	const hasPersistentWorkspace = options.hasPersistentWorkspace === true ||
+		(conversation.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && conversation.workspacePersistent === true);
+	const hasEphemeralWorkspace = options.hasEphemeralWorkspace === true ||
+		(conversation.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && !conversation.workspacePersistent);
+	const nameEl = document.getElementById('conversation-delete-workspace-name');
+	const persistentEl = document.getElementById('conversation-delete-workspace-persistent');
+	const ephemeralEl = document.getElementById('conversation-delete-workspace-ephemeral');
+	const retainBtn = document.getElementById('conversation-delete-retain-btn');
+	const deleteBtn = document.getElementById('conversation-delete-workspace-btn');
+	if (!nameEl || !persistentEl || !ephemeralEl || !retainBtn || !deleteBtn) {
+		return confirm(chatTranslate('chat.deleteConversationConfirm', '确定要删除此对话吗？')) ? 'delete' : null;
+	}
+	const count = Number(options.count || 0);
+	if (count > 0) {
+		const fallback = `将删除 ${count} 个对话`;
+		nameEl.textContent = typeof window.t === 'function' ? window.t('chat.deleteConversationBatchName', { count }) : fallback;
+	} else {
+		nameEl.textContent = String(conversation.title || conversationId || '').trim();
+	}
+	persistentEl.hidden = !hasPersistentWorkspace;
+	ephemeralEl.hidden = !hasEphemeralWorkspace;
+	retainBtn.hidden = !hasPersistentWorkspace;
+	const deleteKey = hasPersistentWorkspace ? 'chat.deleteConversationWithWorkspace' : 'chat.deleteConversationOnly';
+	deleteBtn.setAttribute('data-i18n', deleteKey);
+	deleteBtn.textContent = chatTranslate(deleteKey, hasPersistentWorkspace ? '删除对话和工作区' : '删除对话');
+	if (conversationDeleteWorkspaceResolver) {
+		conversationDeleteWorkspaceResolver(null);
+	}
+	return new Promise((resolve) => {
+		conversationDeleteWorkspaceResolver = resolve;
+		openAppModal('conversation-delete-workspace-modal', { focusEl: hasPersistentWorkspace ? retainBtn : deleteBtn });
+	});
+}
+
+window.requestConversationDeleteWorkspaceChoice = requestConversationDeleteWorkspaceChoice;
+
 // 删除对话
-async function deleteConversation(conversationId, skipConfirm = false) {
-    // 确认删除（如果调用者没有跳过确认）
-    if (!skipConfirm) {
-        if (!confirm('确定要删除这个对话吗？对话消息将不可恢复，但已记录的漏洞会保留在漏洞库中。')) {
-            return;
-        }
-    }
+async function deleteConversation(conversationId, skipConfirm = false, workspaceAction = '') {
+	if (!skipConfirm) {
+		try {
+			workspaceAction = await requestConversationDeleteWorkspaceChoice(conversationId);
+		} catch (error) {
+			alert(chatTranslate('chat.deleteConversationLoadFailed', '无法读取对话工作区状态') + ': ' + error.message);
+			return false;
+		}
+		if (!workspaceAction) return false;
+	}
+	workspaceAction = workspaceAction === 'retain' ? 'retain' : 'delete';
     
     try {
-        const response = await apiFetch(`/api/conversations/${conversationId}`, {
+		const response = await apiFetch(`/api/conversations/${conversationId}?workspace_action=${encodeURIComponent(workspaceAction)}`, {
             method: 'DELETE'
         });
         
@@ -6803,14 +6873,16 @@ async function deleteConversation(conversationId, skipConfirm = false) {
 
         // 批量管理弹窗打开时，同步刷新弹窗内列表
         const batchModal = document.getElementById('batch-manage-modal');
-        if (batchModal && isAppModalOpen('batch-manage-modal')) {
+		if (batchModal && isAppModalOpen('batch-manage-modal')) {
             allConversationsForBatch = allConversationsForBatch.filter(c => c.id !== conversationId);
             applyBatchConversationFilters();
-        }
+		}
+		return true;
 
     } catch (error) {
         console.error('删除对话失败:', error);
         alert('删除对话失败: ' + error.message);
+		return false;
     }
 }
 
@@ -11468,12 +11540,8 @@ function deleteConversationFromContext() {
     if (typeof requirePermission === 'function' && !requirePermission('chat:delete')) return;
     const convId = contextMenuConversationId;
     if (!convId) return;
-
-    const confirmMsg = typeof window.t === 'function' ? window.t('chat.deleteConversationConfirm') : '确定要删除此对话吗？';
-    if (confirm(confirmMsg)) {
-        deleteConversation(convId, true); // 跳过内部确认，因为这里已经确认过了
-    }
     closeContextMenu();
+    void deleteConversation(convId);
 }
 
 // 关闭上下文菜单
@@ -12025,16 +12093,29 @@ async function deleteSelectedConversations() {
         return;
     }
 
-    const confirmMsg = typeof window.t === 'function' ? window.t('batchManageModal.confirmDeleteN', { count: checkboxes.length }) : '确定要删除选中的 ' + checkboxes.length + ' 条对话吗？';
-    if (!confirm(confirmMsg)) {
-        return;
-    }
-
     const ids = Array.from(checkboxes).map(cb => cb.dataset.conversationId);
-    
+    const selectedIDSet = new Set(ids);
+    const selectedConversations = allConversationsForBatch.filter(conv => selectedIDSet.has(conv.id));
+    const persistentConversationIDs = new Set(selectedConversations
+        .filter(conv => conv.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && conv.workspacePersistent === true)
+        .map(conv => conv.id));
+    const hasPersistentWorkspace = persistentConversationIDs.size > 0;
+    const hasEphemeralWorkspace = selectedConversations.some(conv =>
+        conv.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && conv.workspacePersistent !== true
+    );
+
     try {
+        const workspaceAction = await requestConversationDeleteWorkspaceChoice('', {
+            count: ids.length,
+            hasPersistentWorkspace,
+            hasEphemeralWorkspace
+        });
+        if (!workspaceAction) return;
         for (const id of ids) {
-            await deleteConversation(id, true); // 跳过内部确认，因为批量删除时已经确认过了
+            const itemAction = workspaceAction === 'retain' && persistentConversationIDs.has(id)
+                ? 'retain'
+                : 'delete';
+            await deleteConversation(id, true, itemAction);
         }
         // 删除后保持弹窗打开，便于继续管理剩余对话
         const selectAll = document.getElementById('batch-select-all');

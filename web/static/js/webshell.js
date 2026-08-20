@@ -2352,25 +2352,37 @@ function fetchAndRenderWebshellAiConvList(conn, listEl) {
                 delBtn.className = 'btn-ghost btn-sm webshell-ai-conv-del';
                 delBtn.textContent = '×';
                 delBtn.title = wsT('webshell.aiDeleteConversation') || '删除对话';
-                delBtn.addEventListener('click', function (e) {
+                delBtn.addEventListener('click', async function (e) {
                     e.stopPropagation();
-                    if (!confirm(wsT('webshell.aiDeleteConversationConfirm') || '确定删除该对话？')) return;
                     var deletedId = item.id;
-                    apiFetch('/api/conversations/' + encodeURIComponent(deletedId), { method: 'DELETE' })
-                        .then(function (r) {
-                            if (r.ok) {
-                                if (webshellAiConvMap[conn.id] === deletedId) {
-                                    delete webshellAiConvMap[conn.id];
-                                    var msgs = document.getElementById('webshell-ai-messages');
-                                    if (msgs) msgs.innerHTML = '';
-                                }
-                                fetchAndRenderWebshellAiConvList(conn, listEl);
-                                try {
-                                    document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId: deletedId } }));
-                                } catch (err) { /* ignore */ }
-                            }
-                        })
-                        .catch(function (e) { console.warn('删除对话失败', e); });
+                    try {
+                        var workspaceAction;
+                        if (typeof window.requestConversationDeleteWorkspaceChoice === 'function') {
+                            workspaceAction = await window.requestConversationDeleteWorkspaceChoice(deletedId);
+                        } else {
+                            workspaceAction = confirm(wsT('webshell.aiDeleteConversationConfirm') || '确定删除该对话？') ? 'delete' : null;
+                        }
+                        if (!workspaceAction) return;
+                        var response = await apiFetch(
+                            '/api/conversations/' + encodeURIComponent(deletedId) + '?workspace_action=' + encodeURIComponent(workspaceAction),
+                            { method: 'DELETE' }
+                        );
+                        var payload = {};
+                        try { payload = await response.json(); } catch (err) { /* ignore */ }
+                        if (!response.ok) throw new Error(payload.error || '删除对话失败');
+                        if (webshellAiConvMap[conn.id] === deletedId) {
+                            delete webshellAiConvMap[conn.id];
+                            var msgs = document.getElementById('webshell-ai-messages');
+                            if (msgs) msgs.innerHTML = '';
+                        }
+                        fetchAndRenderWebshellAiConvList(conn, listEl);
+                        try {
+                            document.dispatchEvent(new CustomEvent('conversation-deleted', { detail: { conversationId: deletedId } }));
+                        } catch (err) { /* ignore */ }
+                    } catch (error) {
+                        console.warn('删除对话失败', error);
+                        alert((wsT('webshell.aiDeleteConversation') || '删除对话') + ': ' + (error.message || error));
+                    }
                 });
                 row.appendChild(delBtn);
                 listEl.appendChild(row);

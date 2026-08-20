@@ -93,6 +93,13 @@ When creating a conversation, `POST /api/conversations` and all four Agent messa
 - `false` (default): `/workspace` is temporary tmpfs storage. Deleting the container permanently deletes every file in it, and the UI shows this warning before creation.
 - `true`: the control plane creates and mounts only the system-derived per-conversation Docker named volume `cyberstrike-workspace-<runtimeId>`. User-supplied volume names and host paths are never accepted.
 
+When deleting a conversation, `DELETE /api/conversations/:id` accepts the explicit `workspace_action` query parameter:
+
+- `retain`: delete the chat and container while retaining its managed Docker named volume.
+- `delete`: delete the chat, container, and persistent workspace together.
+
+The parameter is required for a container conversation with a persistent workspace; omitting it returns `400`. Non-persistent conversations may omit it (equivalent to `delete`) and reject `retain`. A successful response reports `workspaceAction`, `workspacePersistent`, `workspaceRetained`, and `workspaceDeleted`.
+
 `DELETE /api/conversations/:id/container` keeps a persistent volume by default and deletes it only when `remove_workspace=true`, after revalidating ownership labels. An ephemeral workspace disappears with its container. The response fields `workspacePersistent`, `workspaceDeleted`, `workspaceRetained`, and `workspaceDeletionWarning` report the effective result.
 
 ## Asset Management and Bulk Import

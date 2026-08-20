@@ -211,6 +211,31 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 	return nil
 }
 
+// DeleteRetainedWorkspace removes the ownership-checked named volume after a
+// container lifecycle record has already been deleted. This is the explicit
+// "delete conversation and workspace" path; a missing volume is idempotent.
+func (c *LifecycleController) DeleteRetainedWorkspace(ctx context.Context, conversationID string) error {
+	if c == nil || c.manager == nil {
+		return fmt.Errorf("%w: lifecycle controller is not configured", ErrEngineUnavailable)
+	}
+	if ctx == nil {
+		return invalidSpec("context is required")
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return invalidSpec("conversation id is required")
+	}
+	runtimeID := RuntimeID("conversation-" + conversationID)
+	if err := validateRuntimeID(runtimeID); err != nil {
+		return err
+	}
+	err := c.manager.Delete(ctx, runtimeID, DeleteOptions{RemoveWorkspace: true})
+	if errors.Is(err, ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
 // Reconcile compares the durable desired record with the engine-observed
 // container. Missing or security-drifted providers are persisted as failed
 // state and returned as a successful reconciliation result for the UI.
