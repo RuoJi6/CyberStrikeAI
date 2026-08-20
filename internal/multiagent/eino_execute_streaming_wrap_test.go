@@ -259,6 +259,68 @@ func TestEinoExecuteRecvErrIsToolTimeout(t *testing.T) {
 	}
 }
 
+func TestEinoStreamingShellWrap_CancelEOFIsRecordedAsCancelled(t *testing.T) {
+	inner := &mockStreamingShellHanging{}
+	cancelCh := make(chan context.CancelFunc, 1)
+	type finishedExecution struct {
+		output  string
+		success bool
+		err     error
+	}
+	finishedCh := make(chan finishedExecution, 1)
+	wrap := &einoStreamingShellWrap{
+		inner: inner,
+		beginMonitor: func(string, string) string {
+			return "exec-cancel-eof"
+		},
+		registerCancelMonitor: func(executionID string, cancel context.CancelFunc) {
+			if executionID == "exec-cancel-eof" {
+				cancelCh <- cancel
+			}
+		},
+		finishMonitor: func(_ string, _ string, _ string, output string, success bool, invokeErr error) {
+			finishedCh <- finishedExecution{output: output, success: success, err: invokeErr}
+		},
+	}
+	sr, err := wrap.ExecuteStreaming(context.Background(), &filesystem.ExecuteRequest{Command: "sleep 600"})
+	if err != nil {
+		t.Fatalf("ExecuteStreaming: %v", err)
+	}
+	defer sr.Close()
+
+	select {
+	case cancel := <-cancelCh:
+		cancel()
+	case <-time.After(time.Second):
+		t.Fatal("expected execute cancellation registration")
+	}
+
+	var got strings.Builder
+	for {
+		resp, recvErr := sr.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("unexpected stream error: %v", recvErr)
+		}
+		if resp != nil {
+			got.WriteString(resp.Output)
+		}
+	}
+	if !strings.Contains(got.String(), "当前工具调用已停止") {
+		t.Fatalf("cancelled stream result = %q", got.String())
+	}
+	select {
+	case finished := <-finishedCh:
+		if finished.success || !errors.Is(finished.err, context.Canceled) || !strings.Contains(finished.output, "当前工具调用已停止") {
+			t.Fatalf("finished execution = %#v", finished)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cancelled execute was not finalized")
+	}
+}
+
 func TestEinoStreamingShellWrap_ToolTimeoutImmediateErrIsSoft(t *testing.T) {
 	inner := &mockStreamingShell{immediateErr: context.DeadlineExceeded}
 	wrap := &einoStreamingShellWrap{

@@ -332,6 +332,12 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 		if tctx != nil && errors.Is(tctx.Err(), context.DeadlineExceeded) {
 			success = false
 			invokeErr = context.DeadlineExceeded
+		} else if tctx != nil && errors.Is(tctx.Err(), context.Canceled) {
+			// Closing the inner stream on cancellation commonly surfaces as EOF.
+			// The execution context remains authoritative so a manually stopped
+			// command cannot be persisted or presented to the model as success.
+			success = false
+			invokeErr = context.Canceled
 		}
 		// 用户「中断并继续」终止 execute：合并说明进工具结果（与 MCP CancelToolExecutionWithNote 一致）。
 		partialStreamed := sb.String()
@@ -361,11 +367,23 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 			sb.WriteString(hint)
 		}
 		// 中断时循环内已逐行写入 stdout；此处只追加 USER INTERRUPT NOTE，避免整段输出重复。
-		if invokeErr != nil && errors.Is(invokeErr, context.Canceled) && abortNote != "" {
-			if partialStreamed != "" {
-				_ = sendOut(&filesystem.ExecuteResponse{Output: "\n\n" + mcp.AbortNoteBannerForModel + "\n" + abortNote}, nil)
-			} else if text := strings.TrimSpace(sb.String()); text != "" {
-				_ = sendOut(&filesystem.ExecuteResponse{Output: text + "\n"}, nil)
+		if invokeErr != nil && errors.Is(invokeErr, context.Canceled) {
+			if abortNote != "" {
+				if partialStreamed != "" {
+					_ = sendOut(&filesystem.ExecuteResponse{Output: "\n\n" + mcp.AbortNoteBannerForModel + "\n" + abortNote}, nil)
+				} else if text := strings.TrimSpace(sb.String()); text != "" {
+					_ = sendOut(&filesystem.ExecuteResponse{Output: text + "\n"}, nil)
+				}
+			} else {
+				const cancelledHint = "\n\n当前工具调用已停止。\n"
+				_ = sendOut(&filesystem.ExecuteResponse{Output: cancelledHint}, nil)
+				sb.WriteString(cancelledHint)
+				if w.appendPartialMonitor != nil && execID != "" {
+					w.appendPartialMonitor(execID, toolCallID, cancelledHint)
+				}
+				if w.outputChunk != nil && toolCallID != "" {
+					w.outputChunk("execute", toolCallID, cancelledHint)
+				}
 			}
 		}
 		rawOutput := sb.String()
