@@ -1,7 +1,7 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 2 第 3 项进行中（统一接入对话执行后端）
+> 当前阶段：阶段 2 第 4 项进行中（保留执行流、取消、超时、退出码与溢出语义）
 > 最后更新：2026-08-20  
 > 工作分支：`codex/docker-agent-runtime`
 
@@ -261,7 +261,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 
 - [x] 创建对话时可选 `host`/`container`，存量对话显式迁移为 `host`。
 - [x] 容器模式首次执行调用阶段 1 后台初始化协调器，未就绪前不将 OS 命令回退到宿主机，同时不冻结对话列表。
-- [ ] 将 `exec`、`execute`、脚本执行和命令型 YAML 工具统一路由到对话执行后端。
+- [x] 将 `exec`、`execute`、脚本执行和命令型 YAML 工具统一路由到对话执行后端。
 - [ ] 保留 stdout/stderr 流式输出、取消、超时、PTY 回退、退出码和输出溢出语义。
 - [ ] 将超大工具输出落到该对话 `/workspace/.tool-output/`，数据库和模型上下文只保留有界摘要与文件引用。
 - [ ] 将 Agent 输入、上传文件和命令输出路径规范化到 `/workspace`，防止路径穿越。
@@ -432,7 +432,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 已完成 | 2026-08-20 | `8c2c6bc` | Go 全量通过；前端 115/115 | 源码/文档已同步；服务 active；`GET /` 200 | `#chat` 非空白、无 console 错误；交互进入 `#dashboard` | 执行面全部归属；CGO 候选构建失败已回滚，当前服务健康 |
 | 1 | 已完成 | 2026-08-20 | `58ff685`（第 1 项）；`45e8da3` + `1645256`（第 2 项）；`36ab2d3`（第 3 项）；`7c17fd5`（第 4 项）；`49f0256`（第 5 项）；`338e047`（第 6 项）；`b4024d6`（第 7 项）；`45ef059`（第 8 项）；`93ff9a7`（第 9 项）；`b44f018`（第 10 项）；`99b3e10`（第 11 项） | Go 全包、`go vet ./...`、前端 115/115 及容器/数据库完整 race 通过；fake runtime 覆盖创建、就绪、生命周期、孤儿资源和空闲停止；真实验收发现并修复非 root 镜像的 tmpfs 工作区不可写问题 | 最终 Zig CGO Linux ARM64 服务 SHA-256 `93a33f7f…17c547b`，active / HTTP 200 / `NRestarts=0`；阶段探针 SHA-256 `f2ef6d69…bdc77c2`；仅使用测试机已有 `cyberstrike/agent` ARM64 镜像并跳过远端 manifest，未下载安全工具；两容器 provider 不同、无默认路由、无 Docker Socket、运行时工作区隔离、停止 A 不影响 B、未持久化 tmpfs 恢复后按设计重置，删除后容器/网络/卷残留均为 0 | 通过 SSH 本地转发访问同一测试机 `?qa=20260820-stage1-item11#dashboard`：URL/标题正确，仪表盘非空白，console 日志为空，截图成功；自动化未填写敏感密码 | 阶段 1 全部验收通过；阶段 2 开始后才持久化 host/container 选择、将 Agent 执行路由到容器并实现可选 named volume；当前仍不声称 Agent 已在容器执行；不实现 Agent 浏览器 |
-| 2 | 进行中 | - | `361ba97`（第 1 项）；`28d9ad2`（第 2 项） | Go 全包、`go vet ./...`、前端 120/120、初始化门禁定向 race 和 OpenAPI/Robot 回归通过；包级全量 race 另发现外部 MCP 配置展开与异步启动、MCP ExecutionService 等待与状态更新两处既存竞态，不属于本项改动且普通全量测试通过 | 第 1 项：Zig CGO Linux ARM64 服务 SHA-256 `e3f46090…e1ba49a`，数据库迁移和约束通过。第 2 项：ARM64 服务 SHA-256 `ef1bbd6b…894708f`，active / HTTP 200 / `NRestarts=0`；首次流式请求仅返回 `conversation/message_saved/container_initialization/done`，约 1.4 ms 结束且 Agent 活动任务为 0；初始化后容器为 ready，第二次请求以 HTTP 409 `execution_backend_pending` 失败关闭；容器固定镜像 digest、`network=none`、只读根文件系统、`cap-drop=ALL`、`no-new-privileges`、512 MiB/1 CPU/128 PIDs、无挂载；未下载或运行安全工具 | 第 1 项：执行位置选择组件和 console 验收通过。第 2 项：通过 SSH 本地转发访问 `?qa=20260820-stage2-item2#chat?conversation=af79b38c-e704-4663-b4e3-01feaf1b84b1`，两轮失败关闭消息恢复完整，执行位置锁定为“容器模式（待接入）”，页面无卡住，console error/warning 为空并成功截图 | 第 1、2 项验收通过；所有单/多智能体流式、非流式和 Robot 入口先经过门禁，消息先持久化，初始化异步执行；未就绪、初始化失败、运行时不可用和执行后端未接入均禁止回退宿主机。第 3 项开始统一路由 `exec`、`execute`、脚本和命令型 YAML 工具 |
+| 2 | 进行中 | - | `361ba97`（第 1 项）；`28d9ad2`（第 2 项）；`a292b52`（第 3 项） | 第 3 项：Go 全包并行与 `-p 1` 串行均通过，`go vet ./...`、前端 120/120、runtime/container、security、database、app、handler 定向 race 全部通过；此前第 1、2 项验收继续有效 | 第 1 项：Zig CGO Linux ARM64 服务 SHA-256 `e3f46090…e1ba49a`，数据库迁移和约束通过。第 2 项：ARM64 服务 SHA-256 `ef1bbd6b…894708f`，初始化门禁与失败关闭通过。第 3 项：ARM64 服务 SHA-256 `95afeea3…a48d1dd`，源码包 SHA-256 `794a290a…51cd534b`，active / HTTP 200 / `NRestarts=0`；真实对话 `12760984-d3fa-4aed-9cc6-f4611b9fca09` 首次请求 HTTP 202 且仅异步初始化，随后 Agent 调用 `execute`（execution `c8d45265-a515-49d9-b3fc-4b5c0070dfc6`）在 `/workspace` 生成标记并读取成功；容器由 `created` 自动启动为 `running`，`network=none`、挂载数 0，宿主 `/workspace` 与部署目录均无同名文件；未下载或运行安全工具 | 第 1、2 项证据继续有效。第 3 项：通过 SSH 本地转发访问 `?qa=20260820-stage2-item3#chat?conversation=12760984-d3fa-4aed-9cc6-f4611b9fca09`，执行位置显示“容器执行”，过程显示 `execute (1/1) · 已完成`，最终回复检查通过并恢复 `/workspace`、stderr 和文件内容；页面非空白，console error/warning 为 0，截图成功；自动化未填写敏感密码 | 第 1—3 项验收通过；容器执行解析器按对话模式选择 host/container，容器未就绪或运行异常时失败关闭且不回退宿主；停止容器在首次命令时自动启动；`exec`、Eino `execute`、脚本入口及命令型 YAML 工具使用同一后端。第 4 项开始校准流式输出、取消、超时、PTY 回退、退出码与溢出语义 |
 | 3 | 未开始 | - | - | - | - | - | - |
 | 4 | 未开始 | - | - | - | - | - | - |
 | 5 | 未开始 | - | - | - | - | - | - |
