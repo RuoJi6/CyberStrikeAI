@@ -375,7 +375,7 @@ func RunDeepAgent(
 	if agenticLoc != nil && agenticFSTools {
 		deepBackend = agenticLoc
 		deepShell = &einoStreamingShellWrap{
-			inner:                   security.NewEinoStreamingShellWithResolver(ag.ExecutionBackendResolver()),
+			inner:                   security.NewEinoStreamingShellWithResolverAndOutputLimit(ag.ExecutionBackendResolver(), toolMaxBytesFromMW(&ma.EinoMiddleware), ma.EinoMiddleware.ReductionRootDir),
 			invokeNotify:            toolInvokeNotify,
 			einoAgentName:           orchestratorName,
 			outputChunk:             nil,

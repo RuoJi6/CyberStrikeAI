@@ -191,7 +191,9 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 				idleWatch.Bump()
 			}
 			kept := collector.WriteStringLimited(string(chunk))
-			if kept != "" && request.Output != nil {
+			if request.Output != nil && len(chunk) > 0 {
+				// An empty callback still signals process activity after the
+				// model-facing byte budget has been exhausted.
 				request.Output(kept)
 			}
 			return nil

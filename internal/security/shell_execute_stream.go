@@ -8,6 +8,9 @@ import (
 	"sync"
 	"time"
 
+	"cyberstrike-ai/internal/mcp"
+	"cyberstrike-ai/internal/tooloutput"
+
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/schema"
 )
@@ -36,7 +39,9 @@ func TerminateShellCmdSession(session *ShellSession) {
 // 并发读取 stdout/stderr（定长块，非按行），避免官方 local.ExecuteStreaming 先排空 stdout
 // 导致 stderr 错误（如 sudo 密码提示）长时间不可见、UI 一直显示「执行中」。
 type EinoStreamingShell struct {
-	resolver ExecutionBackendResolver
+	resolver       ExecutionBackendResolver
+	maxOutputBytes int
+	spillRootDir   string
 }
 
 const ptyRetryProbeDelay = 250 * time.Millisecond
@@ -160,10 +165,23 @@ func NewEinoStreamingShell() *EinoStreamingShell {
 }
 
 func NewEinoStreamingShellWithResolver(resolver ExecutionBackendResolver) *EinoStreamingShell {
+	return NewEinoStreamingShellWithResolverAndOutputLimit(resolver, 0, "")
+}
+
+// NewEinoStreamingShellWithResolverAndOutputLimit keeps the execute tool's
+// model-facing stream bounded. The backend remains responsible for persisting
+// the complete output, which means container conversations can expose only a
+// /workspace/.tool-output reference while host conversations retain the
+// reduction-cache behavior.
+func NewEinoStreamingShellWithResolverAndOutputLimit(resolver ExecutionBackendResolver, maxOutputBytes int, spillRootDir string) *EinoStreamingShell {
 	if resolver == nil {
 		resolver = NewFixedExecutionBackendResolver(NewHostExecutionBackend())
 	}
-	return &EinoStreamingShell{resolver: resolver}
+	return &EinoStreamingShell{
+		resolver:       resolver,
+		maxOutputBytes: maxOutputBytes,
+		spillRootDir:   strings.TrimSpace(spillRootDir),
+	}
 }
 
 // ExecuteStreaming 实现 filesystem.StreamingShell。
@@ -187,7 +205,13 @@ func (s *EinoStreamingShell) ExecuteStreaming(ctx context.Context, input *filesy
 		go runShellInBackground(ctx, backend, input.Command, w)
 		return sr, nil
 	}
-	go streamShellForeground(ctx, backend, input.Command, w)
+	spill := tooloutput.SpillOpts{
+		RootDir:        s.spillRootDir,
+		ProjectID:      mcp.MCPProjectIDFromContext(ctx),
+		ConversationID: mcp.MCPConversationIDFromContext(ctx),
+		ExecutionID:    mcp.MCPExecutionIDFromContext(ctx),
+	}
+	go streamShellForeground(ctx, backend, input.Command, w, s.maxOutputBytes, spill)
 	return sr, nil
 }
 
@@ -203,10 +227,15 @@ func runShellInBackground(ctx context.Context, backend ExecutionBackend, command
 	_ = w.Send(&filesystem.ExecuteResponse{Output: "command started in background\n", ExitCode: &exitCode}, nil)
 }
 
-func streamShellForeground(ctx context.Context, backend ExecutionBackend, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse]) {
+func streamShellForeground(ctx context.Context, backend ExecutionBackend, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse], maxOutputBytes int, spill tooloutput.SpillOpts) {
 	defer w.Close()
 
 	command = PrepareShellCommandForExecute(command)
+	_, containerBoundedOutput := backend.(*containerExecutionBackend)
+	if maxOutputBytes > 0 && containerBoundedOutput {
+		streamShellForegroundBounded(ctx, backend, command, w, maxOutputBytes, spill)
+		return
+	}
 	gate := newStreamingOutputGate(func(chunk string) {
 		_ = w.Send(&filesystem.ExecuteResponse{Output: chunk}, nil)
 	})
@@ -218,6 +247,49 @@ func streamShellForeground(ctx context.Context, backend ExecutionBackend, comman
 		},
 	})
 	hadOutput := gate.Finish(result.Output)
+	if err == nil {
+		exitCode := result.ExitCode
+		_ = w.Send(&filesystem.ExecuteResponse{ExitCode: &exitCode}, nil)
+		return
+	}
+	if exitCode, ok := commandExitCode(err); ok {
+		resp := &filesystem.ExecuteResponse{ExitCode: &exitCode}
+		if !hadOutput {
+			resp.Output = FormatCommandFailureResult(exitCode, result.Output)
+		}
+		_ = w.Send(resp, nil)
+		return
+	}
+	_ = w.Send(nil, fmt.Errorf("command failed: %w", err))
+}
+
+// streamShellForegroundBounded deliberately withholds stdout/stderr text from
+// the ADK stream until the backend has either returned the complete small
+// result or replaced an oversized result with a durable reference. Empty
+// responses are activity heartbeats: the outer execute wrapper can preserve
+// inactivity-timeout semantics without persisting raw deltas in the database
+// or exposing them to the model context.
+func streamShellForegroundBounded(
+	ctx context.Context,
+	backend ExecutionBackend,
+	command string,
+	w *schema.StreamWriter[*filesystem.ExecuteResponse],
+	maxOutputBytes int,
+	spill tooloutput.SpillOpts,
+) {
+	result, err := backend.Execute(ctx, ExecutionRequest{
+		Command:        []string{"/bin/sh", "-c", command},
+		RetryWithPTY:   true,
+		MaxOutputBytes: maxOutputBytes,
+		Spill:          spill,
+		Output: func(string) {
+			_ = w.Send(&filesystem.ExecuteResponse{}, nil)
+		},
+	})
+	hadOutput := result.Output != ""
+	if hadOutput {
+		_ = w.Send(&filesystem.ExecuteResponse{Output: result.Output}, nil)
+	}
 	if err == nil {
 		exitCode := result.ExitCode
 		_ = w.Send(&filesystem.ExecuteResponse{ExitCode: &exitCode}, nil)

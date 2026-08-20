@@ -125,7 +125,7 @@ func subAgentAgenticFilesystemMiddleware(
 	mw, err := filesystem.NewTyped[*schema.AgenticMessage](ctx, &filesystem.MiddlewareConfig{
 		Backend: loc,
 		StreamingShell: &einoStreamingShellWrap{
-			inner:                   security.NewEinoStreamingShellWithResolver(executionBackends),
+			inner:                   security.NewEinoStreamingShellWithResolverAndOutputLimit(executionBackends, toolMaxBytes, reductionRootDir),
 			invokeNotify:            invokeNotify,
 			einoAgentName:           strings.TrimSpace(einoAgentName),
 			outputChunk:             outputChunk,

@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/mcp"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
+
 	"github.com/cloudwego/eino/adk/filesystem"
 )
 
@@ -78,6 +81,48 @@ func TestEinoStreamingShell_RetriesWithPTYWithoutLeakingProbeOutput(t *testing.T
 	}
 	if got := output.String(); got != "pty-ok" || strings.Contains(got, "not a tty") || exitCode != 0 {
 		t.Fatalf("output=%q exitCode=%d", got, exitCode)
+	}
+}
+
+func TestEinoStreamingShell_BoundsContainerOutputBeforeADKStream(t *testing.T) {
+	full := strings.Repeat("eino-container-output-", 256)
+	executor := &fakeContainerRuntimeExecutor{
+		result: containerruntime.ExecResult{ExecID: "exec-eino-spill", ExitCode: 0},
+		output: full,
+	}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell := NewEinoStreamingShellWithResolverAndOutputLimit(NewFixedExecutionBackendResolver(backend), 512, "")
+	ctx := mcp.WithMCPConversationID(context.Background(), "conversation-eino-spill")
+	ctx = mcp.WithMCPExecutionID(ctx, "monitor-eino-spill")
+	sr, err := shell.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{Command: "large-output"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sr.Close()
+
+	var output strings.Builder
+	for {
+		resp, recvErr := sr.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatal(recvErr)
+		}
+		if resp != nil {
+			output.WriteString(resp.Output)
+		}
+	}
+	wantPath := "/workspace/.tool-output/monitor-eino-spill"
+	got := output.String()
+	if len(got) > 512 || !strings.Contains(got, "<persisted-output>") || !strings.Contains(got, wantPath) || strings.Contains(got, full) {
+		t.Fatalf("bounded Eino output = %q", got)
+	}
+	if executor.writtenOutputPath != wantPath || executor.writtenOutput != full {
+		t.Fatalf("workspace output = %q (%d bytes), want %q (%d bytes)", executor.writtenOutputPath, len(executor.writtenOutput), wantPath, len(full))
 	}
 }
 

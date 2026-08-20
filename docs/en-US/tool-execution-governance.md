@@ -139,6 +139,8 @@ Preview (last …):
 
 The current strategy is “spill full text to the execution-scoped filesystem + bounded preview in context.” Container command output is written to that conversation's `/workspace/.tool-output/<execution_id>`; host-mode and external tools continue to use the local reduction tree. The agent, database, and monitor retain only the bounded preview and file reference, and the agent can recover the original via `read_file` in the corresponding execution location.
 
+For the Eino filesystem `execute` tool, the container backend emits text-free activity heartbeats until it has applied the byte cap and persisted any oversized output in the workspace. It then gives the ADK stream either the complete small result or the bounded `<persisted-output>` notice. Raw oversized text therefore cannot enter model context, process details, or monitor storage as `tool_result_delta` data before a second truncation pass.
+
 ## Database and Resume Context
 
 New results are written through this path:

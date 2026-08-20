@@ -21,10 +21,12 @@ type mockStreamingShell struct {
 	output       string
 	called       bool
 	lastCommand  string
+	executionID  string
 }
 
 func (m *mockStreamingShell) ExecuteStreaming(ctx context.Context, input *filesystem.ExecuteRequest) (*schema.StreamReader[*filesystem.ExecuteResponse], error) {
 	m.called = true
+	m.executionID = mcp.MCPExecutionIDFromContext(ctx)
 	if input != nil {
 		m.lastCommand = input.Command
 	}
@@ -42,6 +44,33 @@ func (m *mockStreamingShell) ExecuteStreaming(ctx context.Context, input *filesy
 		}
 	}()
 	return outR, nil
+}
+
+func TestEinoStreamingShellWrap_BindsMonitorExecutionIDToBackendContext(t *testing.T) {
+	inner := &mockStreamingShell{output: "ok\n"}
+	wrap := &einoStreamingShellWrap{
+		inner: inner,
+		beginMonitor: func(string, string) string {
+			return "monitor-execution-01"
+		},
+	}
+	sr, err := wrap.ExecuteStreaming(context.Background(), &filesystem.ExecuteRequest{Command: "echo ok"})
+	if err != nil {
+		t.Fatalf("ExecuteStreaming: %v", err)
+	}
+	defer sr.Close()
+	for {
+		_, recvErr := sr.Recv()
+		if errors.Is(recvErr, io.EOF) {
+			break
+		}
+		if recvErr != nil {
+			t.Fatalf("recv: %v", recvErr)
+		}
+	}
+	if inner.executionID != "monitor-execution-01" {
+		t.Fatalf("backend execution ID = %q", inner.executionID)
+	}
 }
 
 func TestEinoStreamingShellWrap_PreparesNonInteractiveCommand(t *testing.T) {

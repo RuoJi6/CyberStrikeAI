@@ -109,6 +109,9 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 	if w.toolTimeoutMinutes > 0 {
 		execCtx, timeoutCancel = context.WithTimeout(execCtx, time.Duration(w.toolTimeoutMinutes)*time.Minute)
 	}
+	if monitorExecID != "" {
+		execCtx = mcp.WithMCPExecutionID(execCtx, monitorExecID)
+	}
 	if monitorExecID != "" && w.registerCancelMonitor != nil {
 		w.registerCancelMonitor(monitorExecID, execCancel)
 	}
@@ -294,6 +297,11 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 					break recvLoop
 				}
 				if resp != nil {
+					// The bounded execution shell emits empty activity responses while
+					// withholding raw output until it has a durable reference.
+					if idleWatch != nil {
+						idleWatch.Bump()
+					}
 					if resp.ExitCode != nil {
 						hasExitCode = true
 						exitCode = *resp.ExitCode
@@ -303,9 +311,6 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 					if resp.Output != "" {
 						if security.IsLegacyShellExitNoise(resp.Output) {
 							continue
-						}
-						if idleWatch != nil {
-							idleWatch.Bump()
 						}
 						sb.WriteString(resp.Output)
 						appended = resp.Output
