@@ -132,6 +132,8 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 	if h.finishConversationContainerExecutionStream(prep, sendEvent) {
 		return
 	}
+	stopKeepalive := runSSEKeepalive(c, &sseWriteMu)
+	defer stopKeepalive()
 	h.activateHITLForConversation(conversationID, req.Hitl)
 	if h.hitlManager != nil {
 		defer h.hitlManager.DeactivateConversation(conversationID)
@@ -159,18 +161,6 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		"conversationId": conversationID,
 	})
 
-	stopKeepalive := runSSEKeepalive(c, &sseWriteMu)
-	defer stopKeepalive()
-	runCfg, _, err := h.configForAIChannel(req.AIChannelID)
-	if err != nil {
-		sendEvent("error", err.Error(), nil)
-		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
-		return
-	}
-
-	var result *multiagent.RunResult
-	var runErr error
-
 	baseCtx, cancelWithCause = context.WithCancelCause(detachedAgentContext(c.Request.Context()))
 	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
 
@@ -194,6 +184,25 @@ func (h *AgentHandler) MultiAgentLoopStream(c *gin.Context) {
 		return
 	}
 	taskOwned = true
+
+	if terminal, status := h.awaitConversationContainerExecution(taskCtx, prep, sendEvent); terminal {
+		taskStatus = status
+		timeoutCancel()
+		return
+	}
+
+	runCfg, _, err := h.configForAIChannel(req.AIChannelID)
+	if err != nil {
+		taskStatus = "failed"
+		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
+		sendEvent("error", err.Error(), nil)
+		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+		timeoutCancel()
+		return
+	}
+
+	var result *multiagent.RunResult
+	var runErr error
 
 	// 同一 HTTP 流内多段 Run（如中断并继续）合并 MCP execution id，供最终 response / 库表与工具芯片展示完整列表
 	var cumulativeMCPExecutionIDs []string

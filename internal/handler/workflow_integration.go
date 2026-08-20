@@ -88,6 +88,10 @@ func (h *AgentHandler) runRoleWorkflowStreamIfBound(
 		return true
 	}
 	taskOwned = true
+	if terminal, status := h.awaitConversationContainerExecution(taskCtx, prep, sendEvent); terminal {
+		taskStatus = status
+		return true
+	}
 
 	progress := h.createProgressCallback(taskCtx, cancelWithCause, conversationID, assistantMessageID, sendEvent)
 	result, err := workflowrunner.RunRoleBoundWorkflow(taskCtx, workflowrunner.RunArgs{

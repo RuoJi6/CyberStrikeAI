@@ -5134,7 +5134,13 @@ function syncAssistantTurnSummary(messageElementOrId) {
     const duration = formatAssistantTurnDuration(durationMs);
     let text;
     if (status === 'running') {
-        text = typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : '已处理 ' + duration;
+        if (messageElement.dataset.turnPhase === 'container_initializing') {
+            text = typeof window.t === 'function'
+                ? window.t('chat.containerStartingElapsed', { duration: duration })
+                : '容器启动中 · ' + duration;
+        } else {
+            text = typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : '已处理 ' + duration;
+        }
     } else if (status === 'cancelled') {
         text = typeof window.t === 'function' ? window.t('chat.turnElapsedCancelled', { duration: duration }) : '已中断 · 耗时 ' + duration;
     } else if (status === 'timeout') {
@@ -6536,6 +6542,12 @@ async function loadConversation(conversationId) {
                         const completedMs = assistantTurnTimestamp(completedAt);
                         const isRunning = isAssistantPlaceholder && !terminalState;
                         const status = terminalState ? terminalState.status : (isRunning ? 'running' : 'completed');
+                        const conversationTaskStatus = typeof window.getConversationExecutionStatus === 'function'
+                            ? window.getConversationExecutionStatus(conversation && conversation.id ? conversation.id : currentConversationId)
+                            : '';
+                        if (isRunning && conversationTaskStatus === 'initializing') {
+                            messageEl.dataset.turnPhase = 'container_initializing';
+                        }
                         window.setAssistantTurnTiming(messageEl, {
                             startedAt: startedAt,
                             completedAt: isRunning ? null : completedAt,

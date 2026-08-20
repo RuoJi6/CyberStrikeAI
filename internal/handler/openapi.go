@@ -719,7 +719,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"status": map[string]interface{}{
 							"type":        "string",
 							"description": "任务状态",
-							"enum":        []string{"running", "completed", "failed", "cancelled", "timeout"},
+							"enum":        []string{"initializing", "running", "cancelling", "completed", "failed", "cancelled", "timeout"},
 						},
 						"startedAt": map[string]interface{}{
 							"type":        "string",
@@ -1880,7 +1880,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								"text/event-stream": map[string]interface{}{
 									"schema": map[string]interface{}{
 										"type":        "string",
-										"description": "SSE 流。container 对话初始化时发送 conversation、message_saved、container_initialization、done，且不启动 Agent；正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
+										"description": "SSE 流。container 对话初始化时发送 state=initializing 的 container_initialization 事件并保持后台任务；就绪后发送 state=ready 并自动继续原请求，仅终态才发送 done。正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
 									},
 								},
 							},
@@ -1998,7 +1998,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 								"text/event-stream": map[string]interface{}{
 									"schema": map[string]interface{}{
 										"type":        "string",
-										"description": "SSE 流。container 对话初始化时发送 conversation、message_saved、container_initialization、done，且不启动 Agent；正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
+										"description": "SSE 流。container 对话初始化时发送 state=initializing 的 container_initialization 事件并保持后台任务；就绪后发送 state=ready 并自动继续原请求，仅终态才发送 done。正常执行的终态 response 事件 data 包含 finalized、finalizable、status、completionReason、evidenceVerified、evidenceRefs、pendingExecutionIds、missingChecks。",
 									},
 								},
 							},

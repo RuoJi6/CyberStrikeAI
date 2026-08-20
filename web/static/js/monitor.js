@@ -1075,9 +1075,11 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
 
 const conversationExecutionTracker = {
     activeConversations: new Set(),
+    statusByConversation: new Map(),
     ready: false,
     update(tasks = []) {
         this.activeConversations.clear();
+        this.statusByConversation.clear();
         tasks.forEach(task => {
             if (
                 task &&
@@ -1085,6 +1087,7 @@ const conversationExecutionTracker = {
                 !TASK_FINAL_STATUSES.has(task.status)
             ) {
                 this.activeConversations.add(task.conversationId);
+                this.statusByConversation.set(task.conversationId, String(task.status || 'running'));
             }
         });
         this.ready = true;
@@ -1092,10 +1095,14 @@ const conversationExecutionTracker = {
     isRunning(conversationId) {
         return !!conversationId && this.activeConversations.has(conversationId);
     },
+    status(conversationId) {
+        return conversationId ? (this.statusByConversation.get(conversationId) || '') : '';
+    },
     markRunning(conversationId) {
         const id = String(conversationId || '').trim();
         if (!id) return false;
         this.activeConversations.add(id);
+        this.statusByConversation.set(id, 'running');
         this.ready = true;
         return true;
     }
@@ -1138,6 +1145,9 @@ function initChatTaskSyncChannel() {
 
 initChatTaskSyncChannel();
 window.notifyConversationTaskStarted = notifyConversationTaskStarted;
+window.getConversationExecutionStatus = function (conversationId) {
+    return conversationExecutionTracker.status(String(conversationId || '').trim());
+};
 
 const hitlPendingInterruptTracker = {
     pendingById: new Map(),
@@ -1500,6 +1510,11 @@ function progressElapsedText(progressId) {
     const duration = typeof window.formatAssistantTurnDuration === 'function'
         ? window.formatAssistantTurnDuration(Number.isFinite(startedAt) ? Date.now() - startedAt : 0)
         : Math.max(0, Math.floor((Date.now() - (Number.isFinite(startedAt) ? startedAt : Date.now())) / 1000)) + ' 秒';
+    if (el && el.dataset && el.dataset.containerInitializationState === 'initializing') {
+        return typeof window.t === 'function'
+            ? window.t('chat.containerStartingElapsed', { duration: duration })
+            : '容器启动中 · ' + duration;
+    }
     return typeof window.t === 'function'
         ? window.t('chat.turnElapsedRunning', { duration: duration })
         : '已处理 ' + duration;
@@ -4079,13 +4094,17 @@ function handleStreamEvent(event, progressElement, progressId,
             break;
             
         case 'container_initialization': {
-            stopProgressElapsedClock(progressId);
             const initializationData = event.data || {};
             const initializationState = String(initializationData.state || 'initializing');
+            const initializationIsActive = initializationState === 'initializing' || initializationState === 'ready';
             let initializationTitle = typeof window.t === 'function'
                 ? window.t('chat.containerInitializingTitle')
                 : '📦 容器初始化中';
-            if (initializationState === 'failed' || initializationState === 'unavailable') {
+            if (initializationState === 'ready') {
+                initializationTitle = typeof window.t === 'function'
+                    ? window.t('chat.containerReadyContinuingTitle')
+                    : '✅ 容器已就绪，正在继续原请求';
+            } else if (initializationState === 'failed' || initializationState === 'unavailable') {
                 initializationTitle = typeof window.t === 'function'
                     ? window.t('chat.containerInitializationFailedTitle')
                     : '⚠️ 容器初始化不可用';
@@ -4104,19 +4123,58 @@ function handleStreamEvent(event, progressElement, progressId,
             }
             const initializationStage = document.querySelector(`#${progressId} .progress-stage`);
             if (initializationStage) initializationStage.textContent = initializationTitle;
-            if (progressTaskState.has(progressId)) {
-                finalizeProgressTask(progressId, initializationTitle);
+
+            const progressNode = document.getElementById(progressId);
+            if (progressNode && progressNode.dataset) {
+                if (initializationState === 'initializing') {
+                    progressNode.dataset.containerInitializationState = initializationState;
+                    const requestedAtMs = Date.parse(String(initializationData.requestedAt || initializationData.startedAt || ''));
+                    if (Number.isFinite(requestedAtMs)) {
+                        progressNode.dataset.turnStartedAtMs = String(requestedAtMs);
+                        progressNode.dataset.turnStartedAt = new Date(requestedAtMs).toISOString();
+                    }
+                    startProgressElapsedClock(progressId);
+                } else {
+                    delete progressNode.dataset.containerInitializationState;
+                    syncProgressElapsedSummary(progressId);
+                }
             }
-            const preferredMessageId = resolveEventBackendMessageId(initializationData) || null;
-            const { assistantId, assistantElement } = upsertTerminalAssistantMessage(event.message, preferredMessageId);
-            if (assistantId && preferredMessageId) {
-                applyBackendMessageIdToAssistantDom(assistantId, preferredMessageId);
+
+            const runningAssistantId = typeof getAssistantId === 'function' ? getAssistantId() : null;
+            const runningAssistant = runningAssistantId ? document.getElementById(runningAssistantId) : findLastAssistantMessageElInChat();
+            if (runningAssistant && runningAssistant.dataset) {
+                if (initializationState === 'initializing') {
+                    runningAssistant.dataset.turnPhase = 'container_initializing';
+                    if (typeof window.setAssistantTurnTiming === 'function') {
+                        window.setAssistantTurnTiming(runningAssistant, {
+                            startedAt: initializationData.requestedAt || initializationData.startedAt || runningAssistant.dataset.turnStartedAt,
+                            status: 'running'
+                        });
+                    }
+                } else if (runningAssistant.dataset.turnPhase === 'container_initializing') {
+                    delete runningAssistant.dataset.turnPhase;
+                    if (typeof window.syncAssistantTurnSummary === 'function') {
+                        window.syncAssistantTurnSummary(runningAssistant);
+                    }
+                }
             }
-            if (assistantElement) {
-                integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], 'deferred');
-                setTimeout(() => collapseAllProgressDetails(assistantId, progressId), 100);
+
+            if (!initializationIsActive) {
+                stopProgressElapsedClock(progressId);
+                if (progressTaskState.has(progressId)) {
+                    finalizeProgressTask(progressId, initializationTitle);
+                }
+                const preferredMessageId = resolveEventBackendMessageId(initializationData) || null;
+                const { assistantId, assistantElement } = upsertTerminalAssistantMessage(event.message, preferredMessageId);
+                if (assistantId && preferredMessageId) {
+                    applyBackendMessageIdToAssistantDom(assistantId, preferredMessageId);
+                }
+                if (assistantElement) {
+                    integrateProgressToMCPSection(progressId, assistantId, typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], 'failed');
+                    setTimeout(() => collapseAllProgressDetails(assistantId, progressId), 100);
+                }
+                hideProgressMessageForFinalReply(progressId);
             }
-            hideProgressMessageForFinalReply(progressId);
             if (typeof setChatRuntimeModeLocked === 'function') setChatRuntimeModeLocked(true);
             if (typeof loadConversationsWithGroups === 'function') {
                 setTimeout(() => loadConversationsWithGroups(), 100);
@@ -5655,7 +5713,7 @@ async function attachRunningTaskEventStream(conversationId) {
             if (!check.ok) return false;
             const j = await check.json().catch(function () { return {}; });
             const active = (j.tasks || []).some(function (t) {
-                return t && t.conversationId === conversationId && (t.status === 'running' || t.status === 'cancelling');
+                return t && t.conversationId === conversationId && (t.status === 'running' || t.status === 'initializing' || t.status === 'cancelling');
             });
             if (!active) {
                 const staleAssistant = findLastAssistantMessageElInChat();
@@ -7019,6 +7077,28 @@ function renderActiveTasks(tasks) {
     }
     syncVisibleConversationTaskReplay(normalizedTasks);
 
+    const visibleConversationId = String(window.currentConversationId || '').trim();
+    const visibleAssistant = visibleConversationId ? findLastAssistantMessageElInChat() : null;
+    const visibleTask = normalizedTasks.find(function (task) {
+        return task && String(task.conversationId || '') === visibleConversationId;
+    });
+    if (visibleAssistant && visibleAssistant.dataset) {
+        if (visibleTask && visibleTask.status === 'initializing') {
+            visibleAssistant.dataset.turnPhase = 'container_initializing';
+            if (typeof window.setAssistantTurnTiming === 'function') {
+                window.setAssistantTurnTiming(visibleAssistant, {
+                    startedAt: visibleTask.startedAt || visibleAssistant.dataset.turnStartedAt,
+                    status: 'running'
+                });
+            }
+        } else if (visibleAssistant.dataset.turnPhase === 'container_initializing') {
+            delete visibleAssistant.dataset.turnPhase;
+            if (typeof window.syncAssistantTurnSummary === 'function') {
+                window.syncAssistantTurnSummary(visibleAssistant);
+            }
+        }
+    }
+
     if (normalizedTasks.length === 0) {
         bar.style.display = 'none';
         bar.innerHTML = '';
@@ -7070,6 +7150,7 @@ function renderActiveTasks(tasks) {
 
         const _t = function (k) { return typeof window.t === 'function' ? window.t(k) : k; };
         const statusMap = {
+            'initializing': _t('tasks.statusInitializing'),
             'running': _t('tasks.statusRunning'),
             'cancelling': _t('tasks.statusCancelling'),
             'failed': _t('tasks.statusFailed'),

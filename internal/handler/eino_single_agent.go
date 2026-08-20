@@ -115,6 +115,8 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 	if h.finishConversationContainerExecutionStream(prep, sendEvent) {
 		return
 	}
+	stopKeepalive := runSSEKeepalive(c, &sseWriteMu)
+	defer stopKeepalive()
 	h.activateHITLForConversation(conversationID, req.Hitl)
 	if h.hitlManager != nil {
 		defer h.hitlManager.DeactivateConversation(conversationID)
@@ -142,28 +144,6 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		"conversationId": conversationID,
 	})
 
-	stopKeepalive := runSSEKeepalive(c, &sseWriteMu)
-	defer stopKeepalive()
-
-	if h.config == nil {
-		taskStatus = "failed"
-		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-		sendEvent("error", "服务器配置未加载", nil)
-		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
-		return
-	}
-	runCfg, resolvedAIChannelID, err := h.configForAIChannel(req.AIChannelID)
-	if err != nil {
-		taskStatus = "failed"
-		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
-		sendEvent("error", err.Error(), nil)
-		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
-		return
-	}
-
-	var result *multiagent.RunResult
-	var runErr error
-
 	baseCtx, cancelWithCause = context.WithCancelCause(detachedAgentContext(c.Request.Context()))
 	taskCtx, timeoutCancel := context.WithTimeout(baseCtx, 600*time.Minute)
 
@@ -187,6 +167,33 @@ func (h *AgentHandler) EinoSingleAgentLoopStream(c *gin.Context) {
 		return
 	}
 	taskOwned = true
+
+	if terminal, status := h.awaitConversationContainerExecution(taskCtx, prep, sendEvent); terminal {
+		taskStatus = status
+		timeoutCancel()
+		return
+	}
+
+	if h.config == nil {
+		taskStatus = "failed"
+		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
+		sendEvent("error", "服务器配置未加载", nil)
+		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+		timeoutCancel()
+		return
+	}
+	runCfg, resolvedAIChannelID, err := h.configForAIChannel(req.AIChannelID)
+	if err != nil {
+		taskStatus = "failed"
+		h.tasks.UpdateTaskStatus(conversationID, taskStatus)
+		sendEvent("error", err.Error(), nil)
+		sendEvent("done", "", map[string]interface{}{"conversationId": conversationID})
+		timeoutCancel()
+		return
+	}
+
+	var result *multiagent.RunResult
+	var runErr error
 
 	var cumulativeMCPExecutionIDs []string
 	// 同一请求内分段续跑时，主代理 iteration 事件按偏移累计，避免 UI 出现「第3轮 → 第1轮」回跳。

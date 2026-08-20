@@ -169,6 +169,22 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		if !strings.Contains(description, "container_initialization") {
 			t.Fatalf("%s SSE description does not document container_initialization: %q", route, description)
 		}
+		if !strings.Contains(description, "state=ready") || !strings.Contains(description, "自动继续原请求") {
+			t.Fatalf("%s SSE description does not document automatic continuation: %q", route, description)
+		}
+	}
+	agentTaskSchema := schemas["AgentTask"].(map[string]interface{})
+	agentTaskStatus := agentTaskSchema["properties"].(map[string]interface{})["status"].(map[string]interface{})
+	statusEnum := agentTaskStatus["enum"].([]interface{})
+	hasInitializing := false
+	for _, status := range statusEnum {
+		if status == containerGateInitializing {
+			hasInitializing = true
+			break
+		}
+	}
+	if !hasInitializing {
+		t.Fatalf("AgentTask status enum does not include %q: %#v", containerGateInitializing, statusEnum)
 	}
 	for path, method := range map[string]string{
 		"/api/conversations/{id}/container/start":     "post",
