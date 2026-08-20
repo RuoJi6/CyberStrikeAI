@@ -213,3 +213,23 @@ func TestRobotCannotBypassContainerInitializationGate(t *testing.T) {
 		t.Fatalf("assistant gate notice = %q", messages[1].Content)
 	}
 }
+
+func TestReadyContainerPassesGateOnlyAfterExecutionBackendWired(t *testing.T) {
+	h := &AgentHandler{logger: zap.NewNop()}
+	h.SetConversationContainerInitializationScheduler(ConversationContainerInitializationSchedulerFunc(func(_ context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+		return containerruntime.InitializationRecord{
+			ConversationID:  conversationID,
+			RuntimeID:       containerruntime.RuntimeID("conversation-" + conversationID),
+			Status:          containerruntime.InitializationCreated,
+			ReadinessStatus: containerruntime.ReadinessReady,
+		}, nil
+	}))
+	conversation := &database.Conversation{ID: "conversation-ready", RuntimeMode: database.ConversationRuntimeModeContainer}
+	if gate := h.prepareConversationContainerExecutionGate(context.Background(), conversation); gate == nil || gate.State != containerGateBackendPending {
+		t.Fatalf("unwired ready gate = %#v", gate)
+	}
+	h.SetConversationContainerExecutionReady(true)
+	if gate := h.prepareConversationContainerExecutionGate(context.Background(), conversation); gate != nil {
+		t.Fatalf("wired ready container remained gated: %#v", gate)
+	}
+}

@@ -2,11 +2,14 @@ package container
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
+	"net"
 	"testing"
 	"time"
 
 	containerderrdefs "github.com/containerd/errdefs"
+	mobystdcopy "github.com/moby/moby/api/pkg/stdcopy"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/api/types/system"
@@ -15,21 +18,28 @@ import (
 
 type fakeDockerCreationAPI struct {
 	*fakeDockerInspectionAPI
-	createResult mobyclient.ContainerCreateResult
-	createErr    error
-	createOpts   mobyclient.ContainerCreateOptions
-	removeErr    error
-	removedID    string
-	removeOpts   mobyclient.ContainerRemoveOptions
-	pathStats    map[string]mobycontainer.PathStat
-	pathStatErrs map[string]error
-	listResult   mobyclient.ContainerListResult
-	listErr      error
-	startErr     error
-	stopErr      error
-	startedID    string
-	stoppedID    string
-	stopOpts     mobyclient.ContainerStopOptions
+	createResult    mobyclient.ContainerCreateResult
+	createErr       error
+	createOpts      mobyclient.ContainerCreateOptions
+	removeErr       error
+	removedID       string
+	removeOpts      mobyclient.ContainerRemoveOptions
+	pathStats       map[string]mobycontainer.PathStat
+	pathStatErrs    map[string]error
+	listResult      mobyclient.ContainerListResult
+	listErr         error
+	startErr        error
+	stopErr         error
+	startedID       string
+	stoppedID       string
+	stopOpts        mobyclient.ContainerStopOptions
+	execCreateOpts  mobyclient.ExecCreateOptions
+	execContainerID string
+	execID          string
+	execStdout      string
+	execStderr      string
+	execExitCode    int
+	execRunning     bool
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -74,6 +84,40 @@ func (f *fakeDockerCreationAPI) ContainerStatPath(_ context.Context, _ string, o
 		return mobyclient.ContainerStatPathResult{Stat: stat}, nil
 	}
 	return mobyclient.ContainerStatPathResult{Stat: mobycontainer.PathStat{Name: options.Path, Mode: 0o755}}, nil
+}
+
+func (f *fakeDockerCreationAPI) ExecCreate(_ context.Context, containerID string, options mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error) {
+	f.execContainerID = containerID
+	f.execCreateOpts = options
+	if f.execID == "" {
+		f.execID = "exec-1"
+	}
+	return mobyclient.ExecCreateResult{ID: f.execID}, nil
+}
+
+func (f *fakeDockerCreationAPI) ExecAttach(_ context.Context, _ string, _ mobyclient.ExecAttachOptions) (mobyclient.ExecAttachResult, error) {
+	clientConn, serverConn := net.Pipe()
+	go func() {
+		writeFakeExecFrame(serverConn, mobystdcopy.Stdout, []byte(f.execStdout))
+		writeFakeExecFrame(serverConn, mobystdcopy.Stderr, []byte(f.execStderr))
+		_ = serverConn.Close()
+	}()
+	return mobyclient.ExecAttachResult{HijackedResponse: mobyclient.NewHijackedResponse(clientConn, "application/vnd.docker.multiplexed-stream")}, nil
+}
+
+func writeFakeExecFrame(conn net.Conn, stream mobystdcopy.StdType, payload []byte) {
+	if len(payload) == 0 {
+		return
+	}
+	header := make([]byte, 8)
+	header[0] = byte(stream)
+	binary.BigEndian.PutUint32(header[4:], uint32(len(payload)))
+	_, _ = conn.Write(header)
+	_, _ = conn.Write(payload)
+}
+
+func (f *fakeDockerCreationAPI) ExecInspect(_ context.Context, execID string, _ mobyclient.ExecInspectOptions) (mobyclient.ExecInspectResult, error) {
+	return mobyclient.ExecInspectResult{ID: execID, ContainerID: f.execContainerID, ExitCode: f.execExitCode, Running: f.execRunning}, nil
 }
 
 func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {

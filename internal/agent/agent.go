@@ -18,6 +18,7 @@ import (
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/openai"
+	"cyberstrike-ai/internal/security"
 
 	"go.uber.org/zap"
 )
@@ -35,6 +36,7 @@ type Agent struct {
 	toolNameMapping     map[string]string // 工具名称映射：OpenAI格式 -> 原始格式（用于外部MCP工具）
 	promptBaseDir       string            // 解析 system_prompt_path 时相对路径的基准目录（通常为 config.yaml 所在目录）
 	toolDescriptionMode string            // 工具描述模式: "short" | "full"，默认 short
+	executionBackends   security.ExecutionBackendResolver
 }
 
 type agentConversationIDKey struct{}
@@ -99,7 +101,30 @@ func NewAgent(cfg *config.OpenAIConfig, agentCfg *config.AgentConfig, mcpServer 
 		maxIterations:       maxIterations,
 		toolNameMapping:     make(map[string]string), // 初始化工具名称映射
 		toolDescriptionMode: "short",
+		executionBackends:   security.NewFixedExecutionBackendResolver(security.NewHostExecutionBackend()),
 	}
+}
+
+func (a *Agent) SetExecutionBackendResolver(resolver security.ExecutionBackendResolver) {
+	if a == nil || resolver == nil {
+		return
+	}
+	a.mu.Lock()
+	a.executionBackends = resolver
+	a.mu.Unlock()
+}
+
+func (a *Agent) ExecutionBackendResolver() security.ExecutionBackendResolver {
+	if a == nil {
+		return security.NewFixedExecutionBackendResolver(security.NewHostExecutionBackend())
+	}
+	a.mu.RLock()
+	resolver := a.executionBackends
+	a.mu.RUnlock()
+	if resolver == nil {
+		return security.NewFixedExecutionBackendResolver(security.NewHostExecutionBackend())
+	}
+	return resolver
 }
 
 // SetPromptBaseDir 设置单代理 system_prompt_path 相对路径的基准目录（一般为 config.yaml 所在目录）。

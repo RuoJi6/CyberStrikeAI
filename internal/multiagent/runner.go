@@ -16,6 +16,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/einomcp"
+	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/reasoning"
 	"cyberstrike-ai/internal/security"
@@ -83,6 +84,7 @@ func RunDeepAgent(
 	if appCfg == nil || ma == nil || ag == nil {
 		return nil, fmt.Errorf("multiagent: 配置或 Agent 为空")
 	}
+	ctx = mcp.WithMCPConversationID(ctx, conversationID)
 
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
@@ -233,7 +235,7 @@ func RunDeepAgent(
 			}
 			if agenticSkillMW != nil {
 				if agenticFSTools && agenticLoc != nil {
-					subFs, fsErr := subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, id, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), nil)
+					subFs, fsErr := subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, id, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
 					if fsErr != nil {
 						return nil, fmt.Errorf("子代理 %q filesystem 中间件: %w", id, fsErr)
 					}
@@ -373,7 +375,7 @@ func RunDeepAgent(
 	if agenticLoc != nil && agenticFSTools {
 		deepBackend = agenticLoc
 		deepShell = &einoStreamingShellWrap{
-			inner:                   security.NewEinoStreamingShell(),
+			inner:                   security.NewEinoStreamingShellWithResolver(ag.ExecutionBackendResolver()),
 			invokeNotify:            toolInvokeNotify,
 			einoAgentName:           orchestratorName,
 			outputChunk:             nil,
@@ -493,7 +495,7 @@ func RunDeepAgent(
 		}
 		var peFsMw adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]
 		if agenticSkillMW != nil && agenticFSTools && agenticLoc != nil {
-			peFsMw, err = subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, "executor", conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), nil)
+			peFsMw, err = subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, "executor", conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
 			if err != nil {
 				return nil, fmt.Errorf("plan_execute agentic filesystem 中间件: %w", err)
 			}

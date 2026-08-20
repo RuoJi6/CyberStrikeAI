@@ -116,6 +116,7 @@ func subAgentAgenticFilesystemMiddleware(
 	toolTimeoutMinutes int,
 	toolWaitTimeoutSeconds int,
 	shellNoOutputTimeoutSec int,
+	executionBackends security.ExecutionBackendResolver,
 	outputChunk func(toolName, toolCallID, chunk string),
 ) (adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage], error) {
 	if loc == nil {
@@ -124,7 +125,7 @@ func subAgentAgenticFilesystemMiddleware(
 	mw, err := filesystem.NewTyped[*schema.AgenticMessage](ctx, &filesystem.MiddlewareConfig{
 		Backend: loc,
 		StreamingShell: &einoStreamingShellWrap{
-			inner:                   security.NewEinoStreamingShell(),
+			inner:                   security.NewEinoStreamingShellWithResolver(executionBackends),
 			invokeNotify:            invokeNotify,
 			einoAgentName:           strings.TrimSpace(einoAgentName),
 			outputChunk:             outputChunk,

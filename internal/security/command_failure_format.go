@@ -1,9 +1,7 @@
 package security
 
 import (
-	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 )
 
@@ -25,9 +23,8 @@ func FormatCommandFailureFromErr(err error, output string) string {
 	if err == nil {
 		return strings.TrimSpace(output)
 	}
-	var exitError *exec.ExitError
-	if errors.As(err, &exitError) {
-		return FormatCommandFailureResult(exitError.ExitCode(), output)
+	if exitCode, ok := commandExitCode(err); ok {
+		return FormatCommandFailureResult(exitCode, output)
 	}
 	output = strings.TrimSpace(output)
 	if output == "" {

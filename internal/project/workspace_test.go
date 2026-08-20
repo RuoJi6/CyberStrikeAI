@@ -56,3 +56,16 @@ func TestBuildWorkspaceBlockMentionsPath(t *testing.T) {
 		t.Fatalf("block should warn about empty workspace confusion: %s", block)
 	}
 }
+
+func TestBuildContainerWorkspaceBlockMentionsOnlyContainerPath(t *testing.T) {
+	block := BuildContainerWorkspaceBlock()
+	if !strings.Contains(block, "/workspace") {
+		t.Fatalf("container block missing /workspace: %s", block)
+	}
+	if strings.Contains(block, "tmp/workspace") || strings.Contains(block, "/opt/csai") {
+		t.Fatalf("container block exposes host workspace: %s", block)
+	}
+	if !strings.Contains(block, "exec") || !strings.Contains(block, "execute") || !strings.Contains(block, "命令型工具") {
+		t.Fatalf("container block missing routed command tool guidance: %s", block)
+	}
+}

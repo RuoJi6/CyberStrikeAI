@@ -41,6 +41,10 @@ func TestConversationRuntimeModeCreateAndRead(t *testing.T) {
 	if got.RuntimeMode != ConversationRuntimeModeContainer {
 		t.Fatalf("stored runtime mode = %q", got.RuntimeMode)
 	}
+	mode, err := db.GetConversationRuntimeMode(containerConversation.ID)
+	if err != nil || mode != ConversationRuntimeModeContainer {
+		t.Fatalf("runtime-only lookup = %q, err=%v", mode, err)
+	}
 
 	list, err := db.ListConversations(20, 0, "", "", "")
 	if err != nil {

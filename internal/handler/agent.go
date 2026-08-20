@@ -202,6 +202,7 @@ type AgentHandler struct {
 	auditLLM                 *openai.Client
 	audit                    *audit.Service
 	containerInitializer     ConversationContainerInitializationScheduler
+	containerExecutionReady  bool
 }
 
 // SetAudit wires platform audit logging.
@@ -214,6 +215,10 @@ func (h *AgentHandler) SetAudit(s *audit.Service) {
 // this dependency is absent; they never fall back to host execution.
 func (h *AgentHandler) SetConversationContainerInitializationScheduler(s ConversationContainerInitializationScheduler) {
 	h.containerInitializer = s
+}
+
+func (h *AgentHandler) SetConversationContainerExecutionReady(ready bool) {
+	h.containerExecutionReady = ready
 }
 
 // TaskManager 返回 Agent 任务管理器（供 MCP 监控页终止 Eino execute 等）。

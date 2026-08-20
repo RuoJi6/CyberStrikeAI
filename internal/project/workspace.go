@@ -67,3 +67,16 @@ func BuildWorkspaceBlock(absPath string) string {
 - 读取下载产物或临时分析文件前，用 glob/grep/read_file **限定在该目录**下搜索，勿在 `+"`/tmp`"+` 盲目检索。
 - 当用户询问“当前目录”“项目根目录”或应用自身文件时，优先按服务进程当前工作目录理解；不要把空的会话工作目录误当成项目根目录。`, absPath, absPath)
 }
+
+// BuildContainerWorkspaceBlock instructs command-capable tools to use the
+// conversation container's private working directory. It deliberately does
+// not expose any host-side workspace path to a container conversation.
+func BuildContainerWorkspaceBlock() string {
+	return `## 对话容器工作目录
+
+当前对话的 exec、execute、脚本执行和命令型工具均在隔离容器中执行。
+
+- **必须使用** ` + "`/workspace`" + ` 保存 curl/wget 下载、脚本与命令产物。
+- 命令工作目录只能是 ` + "`/workspace`" + ` 或其子目录；不要使用宿主机路径。
+- 不要用本地文件系统工具读写容器产物；在容器文件后端启用前，使用容器内命令处理它们。`
+}

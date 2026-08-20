@@ -32,4 +32,9 @@ test('中英文文案明确区分执行位置与 Agent 编排', () => {
     }
     assert.notEqual(zh.chat.runtimeModePanelTitle, zh.chat.agentModePanelTitle);
     assert.notEqual(en.chat.runtimeModePanelTitle, en.chat.agentModePanelTitle);
+    assert.equal(zh.chat.runtimeModeContainer, '容器执行');
+    assert.match(zh.chat.runtimeModeContainerHint, /每对话隔离容器/);
+    assert.match(zh.chat.runtimeModeContainerHint, /失败关闭/);
+    assert.doesNotMatch(zh.chat.runtimeModeContainer + zh.chat.runtimeModeContainerHint, /待接入|后端未接入/);
+    assert.doesNotMatch(en.chat.runtimeModeContainer + en.chat.runtimeModeContainerHint, /pending|not wired/i);
 });

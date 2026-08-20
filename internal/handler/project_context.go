@@ -3,6 +3,7 @@ package handler
 import (
 	"strings"
 
+	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/project"
 	"go.uber.org/zap"
 )
@@ -27,6 +28,20 @@ func (h *AgentHandler) buildWorkspaceBlock(conversationID string) string {
 	conversationID = strings.TrimSpace(conversationID)
 	if conversationID == "" {
 		return ""
+	}
+	if h.db != nil {
+		runtimeMode, err := h.db.GetConversationRuntimeMode(conversationID)
+		if err != nil {
+			if h.logger != nil {
+				h.logger.Warn("读取对话执行位置失败",
+					zap.String("conversationId", conversationID),
+					zap.Error(err))
+			}
+			return ""
+		}
+		if runtimeMode == database.ConversationRuntimeModeContainer {
+			return project.BuildContainerWorkspaceBlock()
+		}
 	}
 	projectID := h.conversationProjectID(conversationID)
 	rel := project.WorkspaceRootDir(h.config.Agent.WorkspaceRootDir, projectID, conversationID)

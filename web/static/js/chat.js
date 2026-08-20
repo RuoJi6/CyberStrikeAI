@@ -925,7 +925,7 @@ function getRuntimeModeLabelForValue(mode) {
             ? 'chat.runtimeModeContainer'
             : 'chat.runtimeModeHost');
     }
-    return normalized === CHAT_RUNTIME_MODE_CONTAINER ? '容器模式（待接入）' : '本机执行';
+    return normalized === CHAT_RUNTIME_MODE_CONTAINER ? '容器执行' : '本机执行';
 }
 
 function setChatRuntimeModeLocked(locked) {

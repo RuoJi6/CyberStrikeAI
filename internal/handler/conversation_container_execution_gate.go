@@ -70,8 +70,9 @@ func (h *AgentHandler) prepareConversationContainerExecutionGate(ctx context.Con
 		gate.State = containerGateFailed
 	case record.Status == containerruntime.InitializationCreated &&
 		(record.ReadinessStatus == containerruntime.ReadinessReady || record.ReadinessStatus == containerruntime.ReadinessNotRequired):
-		// Stage 2 item 2 only establishes fail-closed initialization gating.
-		// Item 3 will install the container ExecutionBackend and remove this gate.
+		if h.containerExecutionReady {
+			return nil
+		}
 		gate.State = containerGateBackendPending
 		gate.Retryable = false
 	default:

@@ -403,6 +403,28 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	return &conv, nil
 }
 
+// GetConversationRuntimeMode reads only the immutable execution location. Tool
+// routing calls this for every OS command, so it must not load conversation
+// messages or process details.
+func (db *DB) GetConversationRuntimeMode(id string) (string, error) {
+	if db == nil {
+		return "", fmt.Errorf("对话数据库未配置")
+	}
+	var runtimeMode sql.NullString
+	err := db.QueryRow("SELECT runtime_mode FROM conversations WHERE id = ?", strings.TrimSpace(id)).Scan(&runtimeMode)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "", fmt.Errorf("对话不存在")
+		}
+		return "", fmt.Errorf("查询对话执行位置失败: %w", err)
+	}
+	mode, err := NormalizeConversationRuntimeMode(runtimeMode.String)
+	if err != nil {
+		return "", fmt.Errorf("对话执行位置无效: %w", err)
+	}
+	return mode, nil
+}
+
 func normalizeConversationRoleName(roleName string) string {
 	roleName = strings.TrimSpace(roleName)
 	if roleName == "" {

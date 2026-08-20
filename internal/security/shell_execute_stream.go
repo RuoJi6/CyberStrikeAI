@@ -2,11 +2,8 @@ package security
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os/exec"
-	"sync"
 
 	"github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/schema"
@@ -35,11 +32,20 @@ func TerminateShellCmdSession(session *ShellSession) {
 // EinoStreamingShell 为 Eino ADK execute 工具提供流式 shell，行为与 exec 对齐：
 // 并发读取 stdout/stderr（定长块，非按行），避免官方 local.ExecuteStreaming 先排空 stdout
 // 导致 stderr 错误（如 sudo 密码提示）长时间不可见、UI 一直显示「执行中」。
-type EinoStreamingShell struct{}
+type EinoStreamingShell struct {
+	resolver ExecutionBackendResolver
+}
 
 // NewEinoStreamingShell 创建 execute 流式 shell 实现。
 func NewEinoStreamingShell() *EinoStreamingShell {
-	return &EinoStreamingShell{}
+	return NewEinoStreamingShellWithResolver(NewFixedExecutionBackendResolver(NewHostExecutionBackend()))
+}
+
+func NewEinoStreamingShellWithResolver(resolver ExecutionBackendResolver) *EinoStreamingShell {
+	if resolver == nil {
+		resolver = NewFixedExecutionBackendResolver(NewHostExecutionBackend())
+	}
+	return &EinoStreamingShell{resolver: resolver}
 }
 
 // ExecuteStreaming 实现 filesystem.StreamingShell。
@@ -47,165 +53,65 @@ func (s *EinoStreamingShell) ExecuteStreaming(ctx context.Context, input *filesy
 	if input == nil || input.Command == "" {
 		return nil, fmt.Errorf("command is required")
 	}
+	if s == nil || s.resolver == nil {
+		return nil, fmt.Errorf("execution backend resolver is not configured")
+	}
+	backend, err := s.resolver.ResolveExecutionBackend(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if backend == nil {
+		return nil, fmt.Errorf("execution backend resolver returned no backend")
+	}
 
 	sr, w := schema.Pipe[*filesystem.ExecuteResponse](100)
 	if input.RunInBackendGround {
-		go runShellInBackground(ctx, input.Command, w)
+		go runShellInBackground(ctx, backend, input.Command, w)
 		return sr, nil
 	}
-	go streamShellForeground(ctx, input.Command, w)
+	go streamShellForeground(ctx, backend, input.Command, w)
 	return sr, nil
 }
 
-func runShellInBackground(ctx context.Context, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse]) {
+func runShellInBackground(ctx context.Context, backend ExecutionBackend, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse]) {
+	defer w.Close()
+	prepared := PrepareShellCommandForExecute(command)
+	result, err := backend.Execute(ctx, ExecutionRequest{Command: []string{"/bin/sh", "-c", prepared}})
+	if err != nil {
+		_ = w.Send(nil, err)
+		return
+	}
+	exitCode := result.ExitCode
+	_ = w.Send(&filesystem.ExecuteResponse{Output: "command started in background\n", ExitCode: &exitCode}, nil)
+}
+
+func streamShellForeground(ctx context.Context, backend ExecutionBackend, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse]) {
 	defer w.Close()
 
 	command = PrepareShellCommandForExecute(command)
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	applyDefaultTerminalEnv(cmd)
-	attachNonInteractiveStdin(cmd)
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = w.Send(nil, fmt.Errorf("failed to create stdout pipe: %w", err))
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdout.Close()
-		_ = w.Send(nil, fmt.Errorf("failed to create stderr pipe: %w", err))
-		return
-	}
-	session, err := StartShellSession(cmd)
-	if err != nil {
-		_ = stdout.Close()
-		_ = stderr.Close()
-		_ = w.Send(nil, fmt.Errorf("failed to start command: %w", err))
-		return
-	}
-
-	done := make(chan struct{})
-	go func() {
-		drainShellPipes(stdout, stderr)
-		_ = session.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-	case <-ctx.Done():
-		TerminateShellCmdSession(session)
-	}
-
-	exitCode := 0
-	_ = w.Send(&filesystem.ExecuteResponse{
-		Output:   "command started in background\n",
-		ExitCode: &exitCode,
-	}, nil)
-}
-
-func drainShellPipes(stdout, stderr io.Reader) {
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(io.Discard, stdout)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(io.Discard, stderr)
-	}()
-	wg.Wait()
-}
-
-func streamShellForeground(ctx context.Context, command string, w *schema.StreamWriter[*filesystem.ExecuteResponse]) {
-	defer w.Close()
-
-	command = PrepareShellCommandForExecute(command)
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", command)
-	applyDefaultTerminalEnv(cmd)
-	attachNonInteractiveStdin(cmd)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = w.Send(nil, fmt.Errorf("failed to create stdout pipe: %w", err))
-		return
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdoutPipe.Close()
-		_ = w.Send(nil, fmt.Errorf("failed to create stderr pipe: %w", err))
-		return
-	}
-	session, err := StartShellSession(cmd)
-	if err != nil {
-		_ = stdoutPipe.Close()
-		_ = stderrPipe.Close()
-		_ = w.Send(nil, fmt.Errorf("failed to start command: %w", err))
-		return
-	}
-
-	stopWatch := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			TerminateShellCmdSession(session)
-		case <-stopWatch:
-		}
-	}()
-	defer close(stopWatch)
-
-	chunks := make(chan string, 64)
-	var wg sync.WaitGroup
-	readFn := func(r io.Reader) {
-		defer wg.Done()
-		buf := make([]byte, 8192)
-		for {
-			n, readErr := r.Read(buf)
-			if n > 0 {
-				chunks <- string(buf[:n])
-			}
-			if readErr != nil {
+	hadOutput := false
+	result, err := backend.Execute(ctx, ExecutionRequest{
+		Command: []string{"/bin/sh", "-c", command},
+		Output: func(chunk string) {
+			if chunk == "" {
 				return
 			}
-		}
-	}
-
-	wg.Add(2)
-	go readFn(stdoutPipe)
-	go readFn(stderrPipe)
-	go func() {
-		wg.Wait()
-		close(chunks)
-	}()
-
-	hadOutput := false
-	for chunk := range chunks {
-		if chunk == "" {
-			continue
-		}
-		hadOutput = true
-		if w.Send(&filesystem.ExecuteResponse{Output: chunk}, nil) {
-			TerminateShellCmdSession(session)
-			return
-		}
-	}
-
-	waitErr := session.Wait()
-	if waitErr == nil {
-		exitCode := 0
+			hadOutput = true
+			_ = w.Send(&filesystem.ExecuteResponse{Output: chunk}, nil)
+		},
+	})
+	if err == nil {
+		exitCode := result.ExitCode
 		_ = w.Send(&filesystem.ExecuteResponse{ExitCode: &exitCode}, nil)
 		return
 	}
-
-	var exitError *exec.ExitError
-	if errors.As(waitErr, &exitError) {
-		exitCode := exitError.ExitCode()
+	if exitCode, ok := commandExitCode(err); ok {
 		resp := &filesystem.ExecuteResponse{ExitCode: &exitCode}
 		if !hadOutput {
-			resp.Output = FormatCommandFailureResult(exitCode, "")
+			resp.Output = FormatCommandFailureResult(exitCode, result.Output)
 		}
 		_ = w.Send(resp, nil)
 		return
 	}
-	_ = w.Send(nil, fmt.Errorf("command failed: %w", waitErr))
+	_ = w.Send(nil, fmt.Errorf("command failed: %w", err))
 }

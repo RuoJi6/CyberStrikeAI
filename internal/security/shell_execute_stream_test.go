@@ -44,8 +44,17 @@ func TestEinoStreamingShell_StreamsStderrBeforeStdoutEOF(t *testing.T) {
 
 func TestEinoStreamingShell_SudoFailsFast(t *testing.T) {
 	shell := NewEinoStreamingShell()
-	cmd := PrepareNonInteractiveShellCommand("sudo whoami && sudo cat /etc/os-release")
-	sr, err := shell.ExecuteStreaming(context.Background(), &filesystem.ExecuteRequest{Command: cmd})
+	// Do not invoke the host's real sudo: PAM failure throttling is process-external
+	// state and makes the package test depend on earlier sudo attempts. A shell
+	// function preserves the stderr/exit behavior this streaming test exercises.
+	cmd := PrepareNonInteractiveShellCommand(`sudo() {
+		printf 'sudo: a terminal is required to read the password\n' >&2
+		return 1
+	}
+	sudo whoami && sudo cat /etc/os-release`)
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	sr, err := shell.ExecuteStreaming(ctx, &filesystem.ExecuteRequest{Command: cmd})
 	if err != nil {
 		t.Fatalf("ExecuteStreaming: %v", err)
 	}

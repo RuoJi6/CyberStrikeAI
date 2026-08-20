@@ -168,6 +168,41 @@ type RebuildOptions struct {
 	RemoveWorkspace bool
 }
 
+// ExecStream identifies the Docker multiplexed output stream without exposing
+// engine-specific frame types outside this package.
+type ExecStream string
+
+const (
+	ExecStreamStdout ExecStream = "stdout"
+	ExecStreamStderr ExecStream = "stderr"
+)
+
+// ExecRequest is an argv-based, non-interactive command request for one
+// already-initialized conversation runtime. Callers never provide a Docker
+// provider ID; RuntimeSpec is used to verify the durable immutable identity.
+type ExecRequest struct {
+	Command    []string
+	WorkingDir string
+	Env        []string
+}
+
+// ExecResult contains only engine-observed process metadata. Output is sent to
+// the supplied sink so upper layers can retain their existing bounded streaming
+// and spill behavior.
+type ExecResult struct {
+	ExecID   string
+	ExitCode int
+}
+
+type ExecOutputSink func(stream ExecStream, chunk []byte) error
+
+// RuntimeExecutor is deliberately separate from RuntimeManager so lifecycle
+// fakes and read-only collaborators do not accidentally become command
+// execution surfaces.
+type RuntimeExecutor interface {
+	Exec(ctx context.Context, spec RuntimeSpec, request ExecRequest, sink ExecOutputSink) (ExecResult, error)
+}
+
 // RuntimeInspector exposes read-only engine and image checks. Keeping this
 // boundary separate allows health/readiness code to be tested before lifecycle
 // mutations are enabled.

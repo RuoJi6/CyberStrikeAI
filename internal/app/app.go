@@ -535,6 +535,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			}
 		}
 	}
+	var containerExecutor containerruntime.RuntimeExecutor
+	if containerManager != nil {
+		containerExecutor = containerManager
+	}
+	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle)
+	executor.SetExecutionBackendResolver(executionBackendResolver)
+	agent.SetExecutionBackendResolver(executionBackendResolver)
+	agentHandler.SetConversationContainerExecutionReady(containerExecutor != nil && containerLifecycle != nil && containerErr == nil)
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()
 	alertCtx, alertCancel := context.WithCancel(context.Background())

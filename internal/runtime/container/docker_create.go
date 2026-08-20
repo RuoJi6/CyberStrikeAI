@@ -38,6 +38,8 @@ const (
 
 	defaultDockerOperationTimeout = 30 * time.Second
 	rollbackTimeout               = 10 * time.Second
+	defaultGlobalConcurrentExec   = 32
+	defaultGlobalQueuedExec       = 128
 	runtimeKeepaliveScript        = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 )
 
@@ -64,8 +66,10 @@ type dockerManagedResourceAPI interface {
 
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
-	OwnerID          string
-	OperationTimeout time.Duration
+	OwnerID              string
+	OperationTimeout     time.Duration
+	GlobalConcurrentExec int
+	GlobalQueuedExec     int
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -74,12 +78,15 @@ type DockerManagerOptions struct {
 type DockerManager struct {
 	*DockerInspector
 	api              dockerCreationAPI
+	execAPI          dockerExecAPI
+	execLimiter      *ExecLimiter
 	resourceAPI      dockerManagedResourceAPI
 	ownerID          string
 	operationTimeout time.Duration
 }
 
 var _ RuntimeManager = (*DockerManager)(nil)
+var _ RuntimeExecutor = (*DockerManager)(nil)
 
 func NewDockerManagerFromEnvironment(options DockerManagerOptions) (*DockerManager, error) {
 	api, err := mobyclient.New(mobyclient.FromEnv)
@@ -107,9 +114,22 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	if operationTimeout < 0 {
 		return nil, fmt.Errorf("%w: operation timeout must be positive", ErrInvalidSpecification)
 	}
+	globalConcurrent := options.GlobalConcurrentExec
+	if globalConcurrent == 0 {
+		globalConcurrent = defaultGlobalConcurrentExec
+	}
+	globalQueued := options.GlobalQueuedExec
+	if globalQueued == 0 {
+		globalQueued = defaultGlobalQueuedExec
+	}
+	limiter, err := NewExecLimiter(ExecLimiterOptions{MaxConcurrent: globalConcurrent, MaxQueued: globalQueued})
+	if err != nil {
+		return nil, err
+	}
 	inspector := newDockerInspector(api)
+	execAPI, _ := api.(dockerExecAPI)
 	resourceAPI, _ := api.(dockerManagedResourceAPI)
-	return &DockerManager{DockerInspector: inspector, api: api, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {

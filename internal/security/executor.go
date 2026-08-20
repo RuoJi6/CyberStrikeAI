@@ -1,7 +1,6 @@
 package security
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -41,15 +40,17 @@ type Executor struct {
 	shellNoOutputTimeoutSec int // execute/exec 无新输出空闲秒数；0=默认 300；-1=关闭（见 SetShellNoOutputTimeoutSeconds）
 	toolOutputMaxBytes      int
 	spillRootDir            string
+	backendResolver         ExecutionBackendResolver
 }
 
 // NewExecutor 创建新的执行器
 func NewExecutor(cfg *config.SecurityConfig, mcpServer *mcp.Server, logger *zap.Logger) *Executor {
 	executor := &Executor{
-		config:    cfg,
-		toolIndex: make(map[string]*config.ToolConfig),
-		mcpServer: mcpServer,
-		logger:    logger,
+		config:          cfg,
+		toolIndex:       make(map[string]*config.ToolConfig),
+		mcpServer:       mcpServer,
+		logger:          logger,
+		backendResolver: NewFixedExecutionBackendResolver(NewHostExecutionBackend()),
 	}
 	// 构建工具索引
 	executor.buildToolIndex()
@@ -72,6 +73,44 @@ func (e *Executor) SetToolOutputMaxBytes(maxBytes int) {
 // exec stdout/stderr when the in-memory bound is exceeded (empty → tmp/reduction).
 func (e *Executor) SetToolOutputSpillRoot(rootDir string) {
 	e.spillRootDir = strings.TrimSpace(rootDir)
+}
+
+// SetExecutionBackendResolver installs the trusted conversation-aware router.
+// A nil resolver is rejected by leaving the current fail-safe resolver intact.
+func (e *Executor) SetExecutionBackendResolver(resolver ExecutionBackendResolver) {
+	if e == nil || resolver == nil {
+		return
+	}
+	e.backendResolver = resolver
+}
+
+func (e *Executor) executeWithBackend(ctx context.Context, command []string, workDir string, retryPTY bool) (ExecutionResult, error) {
+	if e == nil || e.backendResolver == nil {
+		return ExecutionResult{ExitCode: -1}, fmt.Errorf("execution backend resolver is not configured")
+	}
+	backend, err := e.backendResolver.ResolveExecutionBackend(ctx)
+	if err != nil {
+		return ExecutionResult{ExitCode: -1}, err
+	}
+	if backend == nil {
+		return ExecutionResult{ExitCode: -1}, fmt.Errorf("execution backend resolver returned no backend")
+	}
+	var cb ToolOutputCallback
+	if value, ok := ctx.Value(ToolOutputCallbackCtxKey).(ToolOutputCallback); ok {
+		cb = value
+	}
+	if cb != nil || mcp.MCPExecutionIDFromContext(ctx) != "" {
+		cb = e.wrapToolOutputCallback(ctx, cb)
+	}
+	return backend.Execute(ctx, ExecutionRequest{
+		Command:            append([]string(nil), command...),
+		WorkingDir:         strings.TrimSpace(workDir),
+		Output:             cb,
+		NoOutputTimeoutSec: ResolveShellNoOutputTimeoutSeconds(e.shellNoOutputTimeoutSec),
+		MaxOutputBytes:     e.toolOutputMaxBytes,
+		Spill:              e.spillOptsFromContext(ctx),
+		RetryWithPTY:       retryPTY,
+	})
 }
 
 func (e *Executor) wrapToolOutputCallback(ctx context.Context, cb ToolOutputCallback) ToolOutputCallback {
@@ -185,46 +224,13 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 		}, nil
 	}
 
-	// 执行命令
-	cmd := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
-	applyDefaultTerminalEnv(cmd)
-	attachNonInteractiveStdin(cmd)
-	_ = prepareShellCmdSession(cmd)
-
 	e.logger.Debug("执行安全工具",
 		zap.String("tool", toolName),
 		zap.Strings("args", cmdArgs),
 	)
 
-	var output string
-	var err error
-	spill := e.spillOptsFromContext(ctx)
-	// 如果上层提供了 stdout/stderr 增量回调，或当前处于 MCP execution 中，则边执行边读取并回调。
-	if cb, ok := ctx.Value(ToolOutputCallbackCtxKey).(ToolOutputCallback); (ok && cb != nil) || mcp.MCPExecutionIDFromContext(ctx) != "" {
-		cb = e.wrapToolOutputCallback(ctx, cb)
-		output, err = streamCommandOutput(ctx, cmd, cb, ResolveShellNoOutputTimeoutSeconds(e.shellNoOutputTimeoutSec), e.toolOutputMaxBytes, spill)
-		if err != nil && shouldRetryWithPTY(output) {
-			e.logger.Info("检测到工具需要 TTY，使用 PTY 重试",
-				zap.String("tool", toolName),
-			)
-			cmd2 := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
-			applyDefaultTerminalEnv(cmd2)
-			_ = prepareShellCmdSession(cmd2)
-			output, err = runCommandWithPTY(ctx, cmd2, cb, e.toolOutputMaxBytes, spill)
-		}
-	} else {
-		// 非流式：内存缓冲 + ctx 取消杀进程组；行为对齐原 CombinedOutput，避免双流管道 fan-in 死锁。
-		output, err = combinedOutputCancellableWithLimit(ctx, cmd, e.toolOutputMaxBytes, spill)
-		if err != nil && shouldRetryWithPTY(output) {
-			e.logger.Info("检测到工具需要 TTY，使用 PTY 重试",
-				zap.String("tool", toolName),
-			)
-			cmd2 := exec.CommandContext(ctx, toolConfig.Command, cmdArgs...)
-			applyDefaultTerminalEnv(cmd2)
-			_ = prepareShellCmdSession(cmd2)
-			output, err = runCommandWithPTY(ctx, cmd2, nil, e.toolOutputMaxBytes, spill)
-		}
-	}
+	result, err := e.executeWithBackend(ctx, append([]string{toolConfig.Command}, cmdArgs...), "", true)
+	output := result.Output
 	if err != nil {
 		// 检查退出码是否在允许列表中
 		exitCode := getExitCode(err)
@@ -818,16 +824,6 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 	// 检测是否为后台命令（包含 & 符号，但不在引号内）
 	isBackground := IsBackgroundShellCommand(command)
 
-	// 构建命令
-	var cmd *exec.Cmd
-	if workDir != "" {
-		cmd = exec.CommandContext(ctx, shell, "-c", command)
-		cmd.Dir = workDir
-	} else {
-		cmd = exec.CommandContext(ctx, shell, "-c", command)
-	}
-	ConfigureShellCmdForAgentExecute(cmd)
-
 	// 执行命令
 	e.logger.Info("执行系统命令",
 		zap.String("command", command),
@@ -844,105 +840,15 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 
 		// 构建新命令：后台作业重定向标准流后 echo $pid（与 RedirectBackgroundJobStdio 一致）。
 		pidCommand := RedirectBackgroundJobStdio(commandWithoutAmpersand+" &") + " pid=$!; echo $pid"
-
-		// 创建新命令来获取PID
-		var pidCmd *exec.Cmd
-		if workDir != "" {
-			pidCmd = exec.CommandContext(ctx, shell, "-c", pidCommand)
-			pidCmd.Dir = workDir
-		} else {
-			pidCmd = exec.CommandContext(ctx, shell, "-c", pidCommand)
-		}
-		ConfigureShellCmdForAgentExecute(pidCmd)
-
-		// 获取stdout管道
-		stdout, err := pidCmd.StdoutPipe()
+		result, err := e.executeWithBackend(ctx, []string{shell, "-c", pidCommand}, workDir, false)
 		if err != nil {
-			e.logger.Error("创建stdout管道失败",
-				zap.String("command", command),
-				zap.Error(err),
-			)
-			// 如果创建管道失败，使用shell进程的PID作为fallback
-			if err := pidCmd.Start(); err != nil {
-				return &mcp.ToolResult{
-					Content: []mcp.Content{
-						{
-							Type: "text",
-							Text: fmt.Sprintf("后台命令启动失败: %v", err),
-						},
-					},
-					IsError: true,
-				}, nil
-			}
-			pid := pidCmd.Process.Pid
-			go pidCmd.Wait() // 在后台等待，避免僵尸进程
-			return &mcp.ToolResult{
-				Content: []mcp.Content{
-					{
-						Type: "text",
-						Text: fmt.Sprintf("后台命令已启动\n命令: %s\n进程ID: %d (可能不准确，获取PID失败)\n\n注意: 后台进程将继续运行，不会等待其完成。", command, pid),
-					},
-				},
-				IsError: false,
-			}, nil
+			return &mcp.ToolResult{Content: []mcp.Content{{Type: "text", Text: fmt.Sprintf("后台命令启动失败: %v", err)}}, IsError: true}, nil
 		}
-
-		// 启动命令
-		if err := pidCmd.Start(); err != nil {
-			stdout.Close()
-			e.logger.Error("后台命令启动失败",
-				zap.String("command", command),
-				zap.Error(err),
-			)
-			return &mcp.ToolResult{
-				Content: []mcp.Content{
-					{
-						Type: "text",
-						Text: fmt.Sprintf("后台命令启动失败: %v", err),
-					},
-				},
-				IsError: true,
-			}, nil
+		pidLine := strings.TrimSpace(result.Output)
+		actualPid, parseErr := strconv.Atoi(pidLine)
+		if parseErr != nil {
+			return &mcp.ToolResult{Content: []mcp.Content{{Type: "text", Text: fmt.Sprintf("后台命令已启动，但无法解析进程 ID: %s", pidLine)}}, IsError: true}, nil
 		}
-
-		// 读取第一行输出（PID）
-		reader := bufio.NewReader(stdout)
-		pidLine, err := reader.ReadString('\n')
-		stdout.Close()
-
-		var actualPid int
-		if err != nil && err != io.EOF {
-			e.logger.Warn("读取后台进程PID失败",
-				zap.String("command", command),
-				zap.Error(err),
-			)
-			// 如果读取失败，使用shell进程的PID
-			actualPid = pidCmd.Process.Pid
-		} else {
-			// 解析PID
-			pidStr := strings.TrimSpace(pidLine)
-			if parsedPid, err := strconv.Atoi(pidStr); err == nil {
-				actualPid = parsedPid
-			} else {
-				e.logger.Warn("解析后台进程PID失败",
-					zap.String("command", command),
-					zap.String("pidLine", pidStr),
-					zap.Error(err),
-				)
-				// 如果解析失败，使用shell进程的PID
-				actualPid = pidCmd.Process.Pid
-			}
-		}
-
-		// 在goroutine中等待shell进程，避免僵尸进程
-		go func() {
-			if err := pidCmd.Wait(); err != nil {
-				e.logger.Debug("后台命令shell进程执行完成",
-					zap.String("command", command),
-					zap.Error(err),
-				)
-			}
-		}()
 
 		e.logger.Info("后台命令已启动",
 			zap.String("command", command),
@@ -960,35 +866,9 @@ func (e *Executor) executeSystemCommand(ctx context.Context, args map[string]int
 		}, nil
 	}
 
-	// 非后台命令：等待输出
-	var output string
-	var err error
-	spill := e.spillOptsFromContext(ctx)
-	// 若上层提供工具输出增量回调，或当前处于 MCP execution 中，则边执行边流式读取。
-	if cb, ok := ctx.Value(ToolOutputCallbackCtxKey).(ToolOutputCallback); (ok && cb != nil) || mcp.MCPExecutionIDFromContext(ctx) != "" {
-		cb = e.wrapToolOutputCallback(ctx, cb)
-		output, err = streamCommandOutput(ctx, cmd, cb, ResolveShellNoOutputTimeoutSeconds(e.shellNoOutputTimeoutSec), e.toolOutputMaxBytes, spill)
-		if err != nil && shouldRetryWithPTY(output) {
-			e.logger.Info("检测到系统命令需要 TTY，使用 PTY 重试")
-			cmd2 := exec.CommandContext(ctx, shell, "-c", command)
-			if workDir != "" {
-				cmd2.Dir = workDir
-			}
-			ConfigureShellCmdForAgentExecute(cmd2)
-			output, err = runCommandWithPTY(ctx, cmd2, cb, e.toolOutputMaxBytes, spill)
-		}
-	} else {
-		output, err = combinedOutputCancellableWithLimit(ctx, cmd, e.toolOutputMaxBytes, spill)
-		if err != nil && shouldRetryWithPTY(output) {
-			e.logger.Info("检测到系统命令需要 TTY，使用 PTY 重试")
-			cmd2 := exec.CommandContext(ctx, shell, "-c", command)
-			if workDir != "" {
-				cmd2.Dir = workDir
-			}
-			ConfigureShellCmdForAgentExecute(cmd2)
-			output, err = runCommandWithPTY(ctx, cmd2, nil, e.toolOutputMaxBytes, spill)
-		}
-	}
+	// 非后台命令：由对话后端选择宿主机或容器执行。
+	result, err := e.executeWithBackend(ctx, []string{shell, "-c", command}, workDir, true)
+	output := result.Output
 	if err != nil {
 		e.logger.Error("系统命令执行失败",
 			zap.String("command", command),
@@ -1314,6 +1194,8 @@ func streamCommandOutput(ctx context.Context, cmd *exec.Cmd, cb ToolOutputCallba
 	if idleWatch != nil {
 		defer idleWatch.Stop()
 	}
+	flushTicker := time.NewTicker(200 * time.Millisecond)
+	defer flushTicker.Stop()
 
 	fireInactivity := func() {
 		TerminateShellCmdSession(session)
@@ -1340,6 +1222,8 @@ chunksLoop:
 		case <-idleCh:
 			fireInactivity()
 			return finalizeBoundedOutput(outBuilder, maxBytes, tee), fmt.Errorf("shell inactivity timeout (%ds)", idleWatch.Sec)
+		case <-flushTicker.C:
+			flush()
 		case chunk, ok := <-chunks:
 			if !ok {
 				break chunksLoop
@@ -1608,11 +1492,8 @@ func getExitCode(err error) *int {
 	if err == nil {
 		return nil
 	}
-	if exitError, ok := err.(*exec.ExitError); ok {
-		if exitError.ProcessState != nil {
-			exitCode := exitError.ExitCode()
-			return &exitCode
-		}
+	if exitCode, ok := commandExitCode(err); ok {
+		return &exitCode
 	}
 	return nil
 }

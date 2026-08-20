@@ -9,6 +9,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/einomcp"
+	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/project"
 	"cyberstrike-ai/internal/reasoning"
 
@@ -45,6 +46,7 @@ func RunEinoSingleChatModelAgent(
 	if ma == nil {
 		return nil, fmt.Errorf("eino single: multi_agent 配置为空")
 	}
+	ctx = mcp.WithMCPConversationID(ctx, conversationID)
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
 	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger)
@@ -120,7 +122,7 @@ func RunEinoSingleChatModelAgent(
 	}
 	if einoSkillMW != nil {
 		if einoFSTools && einoLoc != nil {
-			fsMw, fsErr := subAgentAgenticFilesystemMiddleware(ctx, einoLoc, toolInvokeNotify, einoSingleAgentName, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), nil)
+			fsMw, fsErr := subAgentAgenticFilesystemMiddleware(ctx, einoLoc, toolInvokeNotify, einoSingleAgentName, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
 			if fsErr != nil {
 				return nil, fmt.Errorf("eino single filesystem 中间件: %w", fsErr)
 			}
