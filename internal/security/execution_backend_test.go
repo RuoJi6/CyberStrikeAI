@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,10 +18,13 @@ import (
 )
 
 type fakeContainerRuntimeExecutor struct {
-	request containerruntime.ExecRequest
-	result  containerruntime.ExecResult
-	err     error
-	output  string
+	request            containerruntime.ExecRequest
+	result             containerruntime.ExecResult
+	err                error
+	output             string
+	writtenOutputPath  string
+	writtenOutput      string
+	writeToolOutputErr error
 }
 
 func (f *fakeContainerRuntimeExecutor) Exec(_ context.Context, _ containerruntime.RuntimeSpec, request containerruntime.ExecRequest, sink containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {
@@ -31,6 +33,22 @@ func (f *fakeContainerRuntimeExecutor) Exec(_ context.Context, _ containerruntim
 		_ = sink(containerruntime.ExecStreamStdout, []byte(f.output))
 	}
 	return f.result, f.err
+}
+
+func (f *fakeContainerRuntimeExecutor) WriteToolOutput(_ context.Context, _ containerruntime.RuntimeSpec, request containerruntime.ToolOutputWriteRequest) (string, error) {
+	if f.writeToolOutputErr != nil {
+		return "", f.writeToolOutputErr
+	}
+	body, err := io.ReadAll(request.Content)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) != request.Size {
+		return "", errors.New("tool output size mismatch")
+	}
+	f.writtenOutput = string(body)
+	f.writtenOutputPath = "/workspace/.tool-output/" + request.FileName
+	return f.writtenOutputPath, nil
 }
 
 func TestContainerExecutionBackendStreamsAndPreservesExitCode(t *testing.T) {
@@ -169,12 +187,10 @@ func TestContainerExecutionBackendSpillsOversizedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root := t.TempDir()
 	result, err := backend.Execute(context.Background(), ExecutionRequest{
 		Command:        []string{"large-output"},
 		MaxOutputBytes: 512,
 		Spill: tooloutput.SpillOpts{
-			RootDir:        root,
 			ConversationID: "conversation-01",
 			ExecutionID:    "execution-01",
 		},
@@ -182,16 +198,38 @@ func TestContainerExecutionBackendSpillsOversizedOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPath := filepath.Join(root, "conversations", "conversation-01", "trunc", "execution-01")
+	wantPath := "/workspace/.tool-output/execution-01"
 	if len(result.Output) > 512 || !strings.Contains(result.Output, "<persisted-output>") || !strings.Contains(result.Output, wantPath) {
 		t.Fatalf("bounded output = %q", result.Output)
 	}
-	data, err := os.ReadFile(wantPath)
+	if executor.writtenOutputPath != wantPath || executor.writtenOutput != full {
+		t.Fatalf("workspace output = %q (%d bytes), want %q (%d bytes)", executor.writtenOutputPath, len(executor.writtenOutput), wantPath, len(full))
+	}
+	if strings.Contains(result.Output, full) {
+		t.Fatal("full output leaked into the bounded model-facing result")
+	}
+}
+
+func TestContainerExecutionBackendFailsClosedWhenWorkspaceOutputCannotBeWritten(t *testing.T) {
+	executor := &fakeContainerRuntimeExecutor{
+		result:             containerruntime.ExecResult{ExecID: "exec-spill-failed", ExitCode: 0},
+		output:             strings.Repeat("container-output-", 256),
+		writeToolOutputErr: errors.New("archive unavailable"),
+	}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != full {
-		t.Fatalf("spilled bytes = %d, want %d", len(data), len(full))
+	result, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command:        []string{"large-output"},
+		MaxOutputBytes: 256,
+		Spill:          tooloutput.SpillOpts{ExecutionID: "execution-failed"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "persist oversized container output") {
+		t.Fatalf("persistence error = %v", err)
+	}
+	if result.ExitCode != -1 || len(result.Output) > 256 || strings.Contains(result.Output, "/workspace/.tool-output/") {
+		t.Fatalf("failed-closed result = %#v", result)
 	}
 }
 

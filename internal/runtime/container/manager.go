@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"time"
 )
 
@@ -204,6 +205,21 @@ type ExecOutputSink func(stream ExecStream, chunk []byte) error
 // execution surfaces.
 type RuntimeExecutor interface {
 	Exec(ctx context.Context, spec RuntimeSpec, request ExecRequest, sink ExecOutputSink) (ExecResult, error)
+}
+
+// ToolOutputWriteRequest contains a complete oversized tool output stream. The
+// runtime implementation owns the destination and never accepts a host path or
+// arbitrary container path from the request.
+type ToolOutputWriteRequest struct {
+	FileName string
+	Content  io.Reader
+	Size     int64
+}
+
+// RuntimeToolOutputWriter persists oversized output inside the verified
+// conversation workspace and returns the container-visible file reference.
+type RuntimeToolOutputWriter interface {
+	WriteToolOutput(ctx context.Context, spec RuntimeSpec, request ToolOutputWriteRequest) (string, error)
 }
 
 // RuntimeInspector exposes read-only engine and image checks. Keeping this

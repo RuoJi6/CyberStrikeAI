@@ -156,3 +156,41 @@ func TestExecutionServiceStoresGuardedResult(t *testing.T) {
 		t.Fatalf("unexpected spill body len=%d", len(body))
 	}
 }
+
+func TestExecutionServiceStoresContainerWorkspaceReferenceUnchanged(t *testing.T) {
+	storage := newInMemoryMonitorStorage()
+	service := NewExecutionService(storage, zap.NewNop())
+	service.ConfigureToolResultMaxBytes(400)
+	spillRoot := t.TempDir()
+	service.ConfigureToolResultSpillRoot(spillRoot)
+	const bounded = "<persisted-output>\nOutput too large (258000). Full output saved to: /workspace/.tool-output/execution-01\nUse read_file to read.\n</persisted-output>"
+	handle, err := service.Submit(context.Background(), ExecutionRequest{
+		ID:             "execution-01",
+		ToolName:       "exec",
+		ConversationID: "container-conversation",
+		Run: func(context.Context) (*ToolResult, error) {
+			return &ToolResult{Content: []Content{{Type: "text", Text: bounded}}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := service.Wait(context.Background(), handle.ID, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ToolResultPlainText(snapshot.Execution.Result); got != bounded {
+		t.Fatalf("model-facing result = %q", got)
+	}
+	stored := storage.executions[handle.ID]
+	if stored == nil || ToolResultPlainText(stored.Result) != bounded {
+		t.Fatalf("stored result = %#v", stored)
+	}
+	entries, err := os.ReadDir(spillRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("bounded container reference was re-spilled on host: %#v", entries)
+	}
+}

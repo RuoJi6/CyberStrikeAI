@@ -120,13 +120,13 @@ multi_agent:
 | PTY 执行路径 | 同样受上限控制 |
 | 前端详情弹窗 | 额外有 UI 展示截断保护 |
 
-触发上限后，完整输出先写入本地 trunc 文件，Agent 侧只保留计入预算的 `<persisted-output>` 预览（含绝对路径）。因此阈值为 50000 时，上下文文本不会超过该上限。
+触发上限后，完整输出先写入受控文件，Agent 侧只保留计入预算的 `<persisted-output>` 预览（含绝对路径）。容器模式的命令型工具写入该对话容器 `/workspace/.tool-output/<execution_id>`；host 模式及不属于对话容器执行面的工具继续使用本地 reduction trunc 文件。因此阈值为 50000 时，上下文文本不会超过该上限。
 
 示例：
 
 ```text
 <persisted-output>
-Output too large (200000). Full output saved to: /path/to/tmp/reduction/conversations/<id>/trunc/<execution_id>
+Output too large (200000). Full output saved to: /workspace/.tool-output/<execution_id>
 Use read_file with offset/limit to read parts of the file.
 Preview (first …):
 …
@@ -137,7 +137,7 @@ Preview (last …):
 </persisted-output>
 ```
 
-当前策略是「全文落盘 + 上下文预览」：超过 `reduction_max_length_for_trunc` 时，完整输出写入本地文件（默认 `tmp/reduction/conversations/<会话ID>/trunc/<execution_id>`），Agent/DB/监控拿到的是带绝对路径的 `<persisted-output>` 预览；可用 `read_file` 按 offset/limit 回读全文。
+当前策略是「全文落盘 + 上下文预览」：超过 `reduction_max_length_for_trunc` 时，容器命令的完整输出写入该对话 `/workspace/.tool-output/<execution_id>`，host 模式及外部工具默认写入 `tmp/reduction/conversations/<会话ID>/trunc/<execution_id>`。Agent、数据库和监控只拿到有界的 `<persisted-output>` 预览与对应绝对路径；可用执行位置内的 `read_file` 按 offset/limit 回读全文。
 
 ## DB 与恢复上下文
 
@@ -220,4 +220,4 @@ PY
 ## 当前边界
 
 - 外部 MCP 的远端 server 内部如何采集输出不由 CyberStrikeAI 控制；CyberStrikeAI 会在结果进入本系统后统一兜底、限并发和熔断。
-- 超长工具输出会在截断前写入本地 `tmp/reduction/.../trunc/<id>`（或 `reduction_root_dir`），bounded result 中包含可 `read_file` 的绝对路径。
+- 超长容器命令输出会在截断前写入该对话 `/workspace/.tool-output/<execution_id>`；host/外部工具写入本地 `tmp/reduction/.../trunc/<id>`（或 `reduction_root_dir`）。bounded result 中只包含预览和可在对应执行位置用 `read_file` 读取的绝对路径。

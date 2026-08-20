@@ -126,7 +126,7 @@ Example:
 
 ```text
 <persisted-output>
-Output too large (200000). Full output saved to: /path/to/tmp/reduction/conversations/<id>/trunc/<execution_id>
+Output too large (200000). Full output saved to: /workspace/.tool-output/<execution_id>
 Use read_file with offset/limit to read parts of the file.
 Preview (first …):
 …
@@ -137,7 +137,7 @@ Preview (last …):
 </persisted-output>
 ```
 
-The current strategy is “spill full text to disk + bounded preview in context.” Agents can recover the original via `read_file`.
+The current strategy is “spill full text to the execution-scoped filesystem + bounded preview in context.” Container command output is written to that conversation's `/workspace/.tool-output/<execution_id>`; host-mode and external tools continue to use the local reduction tree. The agent, database, and monitor retain only the bounded preview and file reference, and the agent can recover the original via `read_file` in the corresponding execution location.
 
 ## Database and Resume Context
 
@@ -218,4 +218,4 @@ Expected behavior:
 ## Boundaries
 
 - CyberStrikeAI cannot control how a remote external MCP server collects output internally; it caps results after they enter CyberStrikeAI and protects calls with concurrency limits and circuit breakers.
-- Oversized tool output is spilled to local `tmp/reduction/.../trunc/<id>` (or `reduction_root_dir`) before truncation; the bounded result includes an absolute path for `read_file`.
+- Oversized container command output is written to that conversation's `/workspace/.tool-output/<execution_id>` before truncation. Host-mode and external tools use local `tmp/reduction/.../trunc/<id>` (or `reduction_root_dir`). The bounded result includes only a preview and an absolute `read_file` reference for the corresponding execution location.

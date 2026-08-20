@@ -56,3 +56,39 @@ func TestTeeThenFormatPersistedFromFile(t *testing.T) {
 		t.Fatalf("missing path in notice: %q", notice)
 	}
 }
+
+func TestTemporaryTeeFormatsWorkspaceReference(t *testing.T) {
+	tee := NewTemporaryTee()
+	full := strings.Repeat("container-data-", 100)
+	if _, err := tee.Write([]byte(full)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tee.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stagingPath := tee.Path()
+	t.Cleanup(func() { _ = os.Remove(stagingPath) })
+	workspacePath := WorkspaceOutputPath("../unsafe/execution")
+	if workspacePath != "/workspace/.tool-output/__-unsafe-execution" {
+		t.Fatalf("workspace output path = %q", workspacePath)
+	}
+	notice := FormatPersistedFromSourceFile(stagingPath, workspacePath, len(full), 512)
+	if len(notice) > 512 || !strings.Contains(notice, workspacePath) || strings.Contains(notice, stagingPath) {
+		t.Fatalf("workspace notice = %q", notice)
+	}
+}
+
+func TestReadFilePreviewKeepsBoundedHeadAndTail(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "large-output")
+	full := "HEAD" + strings.Repeat("x", 10000) + "TAIL"
+	if err := os.WriteFile(filePath, []byte(full), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	preview, err := readFilePreview(filePath, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(preview) != 64 || !strings.HasPrefix(string(preview), "HEAD") || !strings.HasSuffix(string(preview), "TAIL") {
+		t.Fatalf("preview = %q", preview)
+	}
+}

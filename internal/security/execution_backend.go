@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strings"
 
 	containerruntime "cyberstrike-ai/internal/runtime/container"
@@ -158,7 +159,7 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 	run := func(tty bool) (ExecutionResult, error) {
 		var tee *tooloutput.Tee
 		if request.MaxOutputBytes > 0 {
-			tee = tooloutput.NewTee(request.Spill)
+			tee = tooloutput.NewTemporaryTee()
 		}
 		collector := newBoundedOutputCollector(request.MaxOutputBytes, tee)
 
@@ -223,7 +224,10 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 			result.ExitCode = -1
 		default:
 		}
-		output := finalizeBoundedOutput(collector, request.MaxOutputBytes, tee)
+		output, persistErr := finalizeContainerBoundedOutput(ctx, collector, request.MaxOutputBytes, tee, b.executor, b.spec, request.Spill)
+		if persistErr != nil {
+			err = errors.Join(err, persistErr)
+		}
 		executionResult := ExecutionResult{
 			Output:         output,
 			ExitCode:       result.ExitCode,
@@ -248,4 +252,63 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 		return run(true)
 	}
 	return result, err
+}
+
+func finalizeContainerBoundedOutput(
+	ctx context.Context,
+	collector *boundedOutputCollector,
+	maxBytes int,
+	tee *tooloutput.Tee,
+	executor containerruntime.RuntimeExecutor,
+	spec containerruntime.RuntimeSpec,
+	spill tooloutput.SpillOpts,
+) (string, error) {
+	if tee != nil {
+		_ = tee.Close()
+	}
+	if collector == nil {
+		return "", nil
+	}
+	stagingPath := ""
+	if tee != nil {
+		stagingPath = tee.Path()
+	}
+	if stagingPath != "" {
+		defer os.Remove(stagingPath)
+	}
+	if !collector.truncated || maxBytes <= 0 {
+		return collector.String(), nil
+	}
+	if stagingPath == "" {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("persist oversized container output: staging file unavailable")
+	}
+	writer, ok := executor.(containerruntime.RuntimeToolOutputWriter)
+	if !ok {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("persist oversized container output: runtime writer is unavailable")
+	}
+	file, err := os.Open(stagingPath)
+	if err != nil {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("open oversized container output staging file: %w", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("stat oversized container output staging file: %w", err)
+	}
+	if info.Size() != int64(collector.seenBytes) {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("persist oversized container output: staged %d bytes, observed %d", info.Size(), collector.seenBytes)
+	}
+	expectedRef := tooloutput.WorkspaceOutputPath(spill.ExecutionID)
+	ref, err := writer.WriteToolOutput(ctx, spec, containerruntime.ToolOutputWriteRequest{
+		FileName: path.Base(expectedRef),
+		Content:  file,
+		Size:     info.Size(),
+	})
+	if err != nil {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("persist oversized container output: %w", err)
+	}
+	if ref != expectedRef {
+		return truncateStringBytes(collector.String(), maxBytes), fmt.Errorf("persist oversized container output: runtime returned unexpected reference %q", ref)
+	}
+	return tooloutput.FormatPersistedFromSourceFile(stagingPath, ref, collector.seenBytes, maxBytes), nil
 }

@@ -5,7 +5,9 @@ package tooloutput
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,8 +17,9 @@ import (
 )
 
 const (
-	defaultRootDir = "tmp/reduction"
-	readFileHint   = "read_file"
+	defaultRootDir     = "tmp/reduction"
+	readFileHint       = "read_file"
+	workspaceOutputDir = "/workspace/.tool-output"
 )
 
 // SpillOpts scopes where a trunc file is written (mirrors reduction RootDir layout).
@@ -89,14 +92,64 @@ func FormatPersistedOutput(full, filePath string, maxBytes int) string {
 // FormatPersistedFromFile builds the notice using previews read from an already
 // spilled file (streaming collectors that never kept the full string in memory).
 func FormatPersistedFromFile(filePath string, originalSize, maxBytes int) string {
+	return FormatPersistedFromSourceFile(filePath, filePath, originalSize, maxBytes)
+}
+
+// FormatPersistedFromSourceFile builds a notice from a local staging file while
+// exposing a different durable reference to the agent. Container execution uses
+// this after copying the staging file into /workspace/.tool-output/.
+func FormatPersistedFromSourceFile(sourcePath, referencePath string, originalSize, maxBytes int) string {
 	previewSrc := ""
-	if data, err := os.ReadFile(filePath); err == nil {
+	if data, err := readFilePreview(sourcePath, 4000); err == nil {
 		previewSrc = string(data)
 		if originalSize <= 0 {
-			originalSize = len(data)
+			if info, statErr := os.Stat(sourcePath); statErr == nil {
+				originalSize = int(info.Size())
+			}
 		}
 	}
-	return formatPersisted(originalSize, filePath, previewSrc, maxBytes)
+	return formatPersisted(originalSize, referencePath, previewSrc, maxBytes)
+}
+
+func readFilePreview(filePath string, maxBytes int) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, nil
+	}
+	file, err := os.Open(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() <= int64(maxBytes) {
+		return io.ReadAll(io.LimitReader(file, int64(maxBytes)))
+	}
+	headSize := maxBytes / 2
+	tailSize := maxBytes - headSize
+	preview := make([]byte, maxBytes)
+	if _, err := io.ReadFull(file, preview[:headSize]); err != nil {
+		return nil, err
+	}
+	if _, err := file.Seek(-int64(tailSize), io.SeekEnd); err != nil {
+		return nil, err
+	}
+	if _, err := io.ReadFull(file, preview[headSize:]); err != nil {
+		return nil, err
+	}
+	return preview, nil
+}
+
+// WorkspaceOutputPath returns the only model-facing path used for oversized
+// output produced by a conversation container.
+func WorkspaceOutputPath(executionID string) string {
+	id := strings.TrimSpace(executionID)
+	if id == "" {
+		id = uuid.NewString()
+	}
+	return path.Join(workspaceOutputDir, sanitizeSegment(id))
 }
 
 func formatPersisted(originalSize int, filePath, previewSrc string, maxBytes int) string {
@@ -206,17 +259,24 @@ func sanitizeSegment(s string) string {
 // Tee writes every byte to a trunc file while callers keep only a bounded
 // in-memory prefix. Safe for concurrent stdout/stderr writers.
 type Tee struct {
-	mu   sync.Mutex
-	opts SpillOpts
-	file *os.File
-	path string
-	err  error
-	open bool
+	mu        sync.Mutex
+	opts      SpillOpts
+	file      *os.File
+	path      string
+	err       error
+	open      bool
+	temporary bool
 }
 
 // NewTee prepares a lazy spill file (created on first Write).
 func NewTee(opts SpillOpts) *Tee {
 	return &Tee{opts: opts}
+}
+
+// NewTemporaryTee creates a lazy, mode-0600 staging file outside the reduction
+// tree. Callers must remove Path() after the durable destination is written.
+func NewTemporaryTee() *Tee {
+	return &Tee{temporary: true}
 }
 
 // Write appends to the spill file, creating it on first use.
@@ -241,6 +301,22 @@ func (t *Tee) ensureOpenLocked() error {
 		return t.err
 	}
 	t.open = true
+	if t.temporary {
+		f, err := os.CreateTemp("", ".cyberstrike-tool-output-*")
+		if err != nil {
+			t.err = err
+			return err
+		}
+		if err := f.Chmod(0o600); err != nil {
+			_ = f.Close()
+			_ = os.Remove(f.Name())
+			t.err = err
+			return err
+		}
+		t.file = f
+		t.path = f.Name()
+		return nil
+	}
 	session := SessionRoot(t.opts.RootDir, t.opts.ProjectID, t.opts.ConversationID)
 	id := strings.TrimSpace(t.opts.ExecutionID)
 	if id == "" {
