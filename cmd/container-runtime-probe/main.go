@@ -22,6 +22,7 @@ type probeResult struct {
 	Created        *containerruntime.Runtime              `json:"created_runtime,omitempty"`
 	Lifecycle      *lifecycleProbeResult                  `json:"lifecycle,omitempty"`
 	IdleStop       *idleStopProbeResult                   `json:"idle_stop,omitempty"`
+	Isolation      *isolationProbeResult                  `json:"isolation,omitempty"`
 	OrphanScan     *containerruntime.OrphanScanReport     `json:"orphan_scan,omitempty"`
 	Error          string                                 `json:"error,omitempty"`
 }
@@ -60,6 +61,7 @@ func run() int {
 	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
 	exerciseLifecycle := flag.Bool("exercise-lifecycle", false, "after creation, start, stop, rebuild, restart, restop and delete the runtime")
 	exerciseIdleStop := flag.Bool("exercise-idle-stop", false, "after creation, auto-stop an idle runtime, verify it remains, then clean it up")
+	exerciseIsolation := flag.Bool("exercise-isolation", false, "create two runtimes and verify lifecycle, workspace, network and Docker socket isolation")
 	scanOrphans := flag.Bool("scan-orphans", false, "scan and delete only resources carrying this probe owner id")
 	inventoryFile := flag.String("inventory-file", "", "trusted tool inventory JSON for readiness validation")
 	inventoryDigest := flag.String("inventory-digest", "", "expected sha256 digest of the tool inventory JSON")
@@ -67,8 +69,8 @@ func run() int {
 	skipManifest := flag.Bool("skip-manifest", false, "diagnostic only: skip remote registry manifest inspection")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall probe timeout")
 	flag.Parse()
-	if *exerciseLifecycle && *exerciseIdleStop {
-		return writeResult(probeResult{Error: "exercise-lifecycle and exercise-idle-stop are mutually exclusive"}, 1)
+	if enabledCount(*exerciseLifecycle, *exerciseIdleStop, *exerciseIsolation) > 1 {
+		return writeResult(probeResult{Error: "lifecycle, idle-stop and isolation exercises are mutually exclusive"}, 1)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
@@ -174,6 +176,15 @@ func run() int {
 	}
 	if creator != nil {
 		spec := diagnosticRuntimeSpec(strings.TrimSpace(*createRuntimeID), strings.TrimSpace(*conversationID), image, readiness)
+		if *exerciseIsolation {
+			isolation, isolationErr := exerciseRuntimeIsolation(ctx, manager, spec)
+			result.Isolation = &isolation
+			if isolationErr != nil {
+				result.Error = isolationErr.Error()
+				return writeResult(result, 1)
+			}
+			return writeResult(result, 0)
+		}
 		if *backgroundCreate {
 			store := newProbeInitializationStore()
 			initializer, initializeErr := containerruntime.NewInitializer(creator, store, containerruntime.InitializerOptions{
@@ -226,11 +237,21 @@ func run() int {
 				return writeResult(result, 1)
 			}
 		}
-	} else if *exerciseLifecycle || *exerciseIdleStop {
+	} else if *exerciseLifecycle || *exerciseIdleStop || *exerciseIsolation {
 		result.Error = "lifecycle exercises require create-runtime-id"
 		return writeResult(result, 1)
 	}
 	return writeResult(result, 0)
+}
+
+func enabledCount(values ...bool) int {
+	count := 0
+	for _, value := range values {
+		if value {
+			count++
+		}
+	}
+	return count
 }
 
 type probeIdleStore struct {

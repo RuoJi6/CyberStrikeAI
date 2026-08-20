@@ -118,7 +118,7 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	if api.createOpts.HostConfig.PidsLimit == nil || *api.createOpts.HostConfig.PidsLimit != spec.Resources.PIDs || len(api.createOpts.HostConfig.Ulimits) != 1 || api.createOpts.HostConfig.Ulimits[0].Name != "nofile" {
 		t.Fatalf("pid/nofile options = %#v", api.createOpts.HostConfig.Resources)
 	}
-	if api.createOpts.HostConfig.Tmpfs["/tmp"] != "rw,nosuid,nodev,noexec,size=67108864" || api.createOpts.HostConfig.Tmpfs["/workspace"] != "rw,nosuid,nodev,size=1073741824" {
+	if api.createOpts.HostConfig.Tmpfs["/tmp"] != "rw,nosuid,nodev,mode=1777,noexec,size=67108864" || api.createOpts.HostConfig.Tmpfs["/workspace"] != "rw,nosuid,nodev,mode=1777,size=1073741824" {
 		t.Fatalf("tmpfs options = %#v", api.createOpts.HostConfig.Tmpfs)
 	}
 	if api.createOpts.HostConfig.LogConfig.Type != "local" || api.createOpts.HostConfig.LogConfig.Config["max-size"] != "10485760" || api.createOpts.HostConfig.LogConfig.Config["max-file"] != "3" || api.createOpts.HostConfig.LogConfig.Config["compress"] != "true" {

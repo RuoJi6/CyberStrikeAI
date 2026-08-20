@@ -309,7 +309,10 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 }
 
 func tmpfsOptions(sizeBytes int64, noexec bool) string {
-	options := "rw,nosuid,nodev"
+	// Images may declare a non-root USER. tmpfs defaults are owned by root, so
+	// both scratch locations need an explicit sticky, world-writable mode while
+	// retaining nosuid/nodev (and noexec for /tmp).
+	options := "rw,nosuid,nodev,mode=1777"
 	if noexec {
 		options += ",noexec"
 	}
