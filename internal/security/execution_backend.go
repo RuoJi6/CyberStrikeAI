@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
@@ -40,6 +41,18 @@ type ExecutionBackend interface {
 	Execute(context.Context, ExecutionRequest) (ExecutionResult, error)
 }
 
+// ExecutionLocationReporter lets filesystem middleware select its host or
+// container implementation from trusted backend state rather than user input.
+type ExecutionLocationReporter interface {
+	ExecutionLocation() string
+}
+
+// WorkspaceFileWriter exposes a normalized /workspace write without exposing
+// Docker provider IDs or arbitrary host destinations.
+type WorkspaceFileWriter interface {
+	WriteWorkspaceFile(context.Context, string, io.Reader, int64) (string, error)
+}
+
 // ExecutionBackendResolver chooses host or container from trusted conversation
 // state already carried in context. A resolver error is fail-closed.
 type ExecutionBackendResolver interface {
@@ -68,6 +81,8 @@ func NewFixedExecutionBackendResolver(backend ExecutionBackend) ExecutionBackend
 }
 
 type hostExecutionBackend struct{}
+
+func (hostExecutionBackend) ExecutionLocation() string { return "host" }
 
 func (hostExecutionBackend) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	if len(request.Command) == 0 || strings.TrimSpace(request.Command[0]) == "" {
@@ -131,6 +146,21 @@ type containerExecutionBackend struct {
 	spec     containerruntime.RuntimeSpec
 }
 
+func (*containerExecutionBackend) ExecutionLocation() string { return "container" }
+
+func (b *containerExecutionBackend) WriteWorkspaceFile(ctx context.Context, filePath string, content io.Reader, size int64) (string, error) {
+	if b == nil || b.executor == nil {
+		return "", fmt.Errorf("container execution backend is not configured")
+	}
+	writer, ok := b.executor.(containerruntime.RuntimeWorkspaceFileWriter)
+	if !ok {
+		return "", fmt.Errorf("container workspace writer is unavailable")
+	}
+	return writer.WriteWorkspaceFile(ctx, b.spec, containerruntime.WorkspaceFileWriteRequest{
+		Path: filePath, Content: content, Size: size,
+	})
+}
+
 func NewContainerExecutionBackend(executor containerruntime.RuntimeExecutor, spec containerruntime.RuntimeSpec) (ExecutionBackend, error) {
 	if executor == nil {
 		return nil, fmt.Errorf("container execution backend is not configured")
@@ -156,6 +186,10 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 		"SYSTEMD_PAGER=cat",
 		"DEBIAN_FRONTEND=noninteractive",
 	}, request.Env...)
+	workingDir, err := containerruntime.NormalizeWorkspacePath(b.spec.Workspace.MountPath, request.WorkingDir)
+	if err != nil {
+		return ExecutionResult{Location: "container", ExitCode: -1}, err
+	}
 	run := func(tty bool) (ExecutionResult, error) {
 		var tee *tooloutput.Tee
 		if request.MaxOutputBytes > 0 {
@@ -200,7 +234,7 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 		}
 		result, err := b.executor.Exec(execCtx, b.spec, containerruntime.ExecRequest{
 			Command:    append([]string(nil), request.Command...),
-			WorkingDir: strings.TrimSpace(request.WorkingDir),
+			WorkingDir: workingDir,
 			Env:        env,
 			TTY:        tty,
 		}, sink)

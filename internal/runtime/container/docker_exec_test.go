@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -51,11 +53,37 @@ func TestDockerManagerExecUsesOwnedRunningRuntime(t *testing.T) {
 	if api.execContainerID != "provider-container-1" || api.execCreateOpts.Privileged || api.execCreateOpts.TTY || api.execCreateOpts.AttachStdin || !api.execCreateOpts.AttachStdout || !api.execCreateOpts.AttachStderr {
 		t.Fatalf("unsafe exec target/options: %q %#v", api.execContainerID, api.execCreateOpts)
 	}
-	if !wrappedExecEndsWith(api.execCreateOpts.Cmd, []string{"/bin/sh", "-c", "printf ok"}) || api.execCreateOpts.WorkingDir != "/workspace/subdir" {
+	if !wrappedExecEndsWith(api.execCreateOpts.Cmd, []string{"/bin/sh", "-c", "printf ok"}) || api.execCreateOpts.WorkingDir != "/workspace" || len(api.execCreateOpts.Cmd) < 8 || api.execCreateOpts.Cmd[6] != "/workspace/subdir" {
 		t.Fatalf("exec command/workdir = %q / %q", strings.Join(api.execCreateOpts.Cmd, "\x00"), api.execCreateOpts.WorkingDir)
 	}
-	if len(api.execCreateOpts.Cmd) < 6 || api.execCreateOpts.Cmd[0] != "/bin/sh" || api.execCreateOpts.Cmd[1] != "-c" || api.execCreateOpts.Cmd[2] != containerExecWrapperScript || api.execCreateOpts.Cmd[3] != "cyberstrike-exec" || !strings.HasPrefix(api.execCreateOpts.Cmd[4], "/tmp/.cyberstrike-exec-") {
+	if len(api.execCreateOpts.Cmd) < 8 || api.execCreateOpts.Cmd[0] != "/bin/sh" || api.execCreateOpts.Cmd[1] != "-c" || api.execCreateOpts.Cmd[2] != containerExecWrapperScript || api.execCreateOpts.Cmd[3] != "cyberstrike-exec" || !strings.HasPrefix(api.execCreateOpts.Cmd[4], "/tmp/.cyberstrike-exec-") || api.execCreateOpts.Cmd[5] != "/workspace" {
 		t.Fatalf("exec cancellation wrapper = %#v", api.execCreateOpts.Cmd)
+	}
+}
+
+func TestContainerExecWrapperRejectsSymlinkedWorkingDirectory(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe := filepath.Join(workspace, "safe")
+	if err := os.Mkdir(safe, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pidfile := filepath.Join(t.TempDir(), "exec.pid")
+	run := exec.Command("/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", pidfile, workspace, safe, "pwd")
+	output, err := run.CombinedOutput()
+	if err != nil || strings.TrimSpace(string(output)) != safe {
+		t.Fatalf("safe working directory output/error = %q / %v", output, err)
+	}
+
+	symlink := filepath.Join(workspace, "linked")
+	if err := os.Symlink(t.TempDir(), symlink); err != nil {
+		t.Fatal(err)
+	}
+	escape := exec.Command("/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", pidfile, workspace, symlink, "pwd")
+	if output, err := escape.CombinedOutput(); err == nil {
+		t.Fatalf("symlinked working directory should fail: %q", output)
 	}
 }
 

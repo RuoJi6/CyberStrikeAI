@@ -203,6 +203,7 @@ type AgentHandler struct {
 	audit                    *audit.Service
 	containerInitializer     ConversationContainerInitializationScheduler
 	containerExecutionReady  bool
+	containerUploadImporter  ConversationWorkspaceUploadImporter
 }
 
 // SetAudit wires platform audit logging.
@@ -219,6 +220,10 @@ func (h *AgentHandler) SetConversationContainerInitializationScheduler(s Convers
 
 func (h *AgentHandler) SetConversationContainerExecutionReady(ready bool) {
 	h.containerExecutionReady = ready
+}
+
+func (h *AgentHandler) SetConversationWorkspaceUploadImporter(importer ConversationWorkspaceUploadImporter) {
+	h.containerUploadImporter = importer
 }
 
 // TaskManager 返回 Agent 任务管理器（供 MCP 监控页终止 Eino execute 等）。
@@ -448,12 +453,23 @@ func validateChatAttachmentServerPath(abs string) (string, error) {
 	if pathAbs != rootAbs && !strings.HasPrefix(pathAbs, rootAbs+sep) {
 		return "", fmt.Errorf("path outside chat_uploads")
 	}
-	st, err := os.Stat(pathAbs)
+	st, err := os.Lstat(pathAbs)
 	if err != nil {
 		return "", err
 	}
-	if st.IsDir() {
+	if !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 {
 		return "", fmt.Errorf("not a regular file")
+	}
+	resolvedRoot, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve chat_uploads root: %w", err)
+	}
+	resolvedPath, err := filepath.EvalSymlinks(pathAbs)
+	if err != nil {
+		return "", fmt.Errorf("resolve attachment path: %w", err)
+	}
+	if resolvedPath != resolvedRoot && !strings.HasPrefix(resolvedPath, resolvedRoot+sep) {
+		return "", fmt.Errorf("path escapes chat_uploads through symlink")
 	}
 	return pathAbs, nil
 }
@@ -578,11 +594,7 @@ func saveAttachmentsToDateAndConversationDir(attachments []ChatAttachment, conve
 		if decErr != nil {
 			return nil, fmt.Errorf("附件 %s 解码失败: %w", a.FileName, decErr)
 		}
-		baseName := filepath.Base(a.FileName)
-		if baseName == "" || baseName == "." {
-			baseName = "file"
-		}
-		baseName = strings.ReplaceAll(baseName, string(filepath.Separator), "_")
+		baseName := safeChatUploadBaseName(a.FileName)
 		ext := filepath.Ext(baseName)
 		nameNoExt := strings.TrimSuffix(baseName, ext)
 		suffix := fmt.Sprintf("_%s_%s", time.Now().Format("150405"), shortRand(6))
@@ -886,6 +898,9 @@ func (h *AgentHandler) ProcessMessageForRobot(ctx context.Context, platform stri
 			"deferred":                true,
 		})
 		return gateMessage, conversationID, nil
+	}
+	if err := h.syncConversationUploadsToWorkspace(ctx, conversation); err != nil {
+		return "", conversationID, fmt.Errorf("同步附件到容器工作区失败: %w", err)
 	}
 
 	// 注册运行中任务并向 taskEventBus 镜像进度事件，供 Web 端 task-events 补流。

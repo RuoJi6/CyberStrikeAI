@@ -222,6 +222,22 @@ type RuntimeToolOutputWriter interface {
 	WriteToolOutput(ctx context.Context, spec RuntimeSpec, request ToolOutputWriteRequest) (string, error)
 }
 
+// WorkspaceFileWriteRequest carries bytes for one container-visible file.
+// Path may be relative to the workspace or an absolute /workspace path; the
+// runtime normalizes it and rejects traversal before contacting the engine.
+type WorkspaceFileWriteRequest struct {
+	Path    string
+	Content io.Reader
+	Size    int64
+}
+
+// RuntimeWorkspaceFileWriter is the controlled control-plane-to-workspace
+// import boundary used by chat uploads and container filesystem tools.
+// Implementations must never accept a provider/container ID from callers.
+type RuntimeWorkspaceFileWriter interface {
+	WriteWorkspaceFile(ctx context.Context, spec RuntimeSpec, request WorkspaceFileWriteRequest) (string, error)
+}
+
 // RuntimeInspector exposes read-only engine and image checks. Keeping this
 // boundary separate allows health/readiness code to be tested before lifecycle
 // mutations are enabled.

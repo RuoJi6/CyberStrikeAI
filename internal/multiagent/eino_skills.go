@@ -15,6 +15,7 @@ import (
 
 	localbk "github.com/cloudwego/eino-ext/adk/backend/local"
 	"github.com/cloudwego/eino/adk"
+	adkfilesystem "github.com/cloudwego/eino/adk/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/components/tool"
@@ -100,7 +101,7 @@ func prepareEinoAgenticSkills(
 
 func subAgentAgenticFilesystemMiddleware(
 	ctx context.Context,
-	loc *localbk.Local,
+	loc adkfilesystem.Backend,
 	invokeNotify *einomcp.ToolInvokeNotifyHolder,
 	einoAgentName string,
 	conversationID string,

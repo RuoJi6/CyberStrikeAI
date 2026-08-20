@@ -160,6 +160,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			roleTools = role.Tools
 		}
 	}
+	containerExecutionGate := h.prepareConversationContainerExecutionGate(c.Request.Context(), conv)
 
 	var savedPaths []string
 	if len(req.Attachments) > 0 {
@@ -169,9 +170,21 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			return nil, fmt.Errorf("保存上传文件失败: %w", aerr)
 		}
 	}
-	finalMessage = appendAttachmentsToMessage(finalMessage, req.Attachments, savedPaths)
+	visiblePaths := savedPaths
+	if conv.RuntimeMode == database.ConversationRuntimeModeContainer {
+		visiblePaths, err = containerVisibleAttachmentPaths(savedPaths, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("规范化容器附件路径失败: %w", err)
+		}
+		if containerExecutionGate == nil {
+			if err := h.syncConversationUploadsToWorkspace(c.Request.Context(), conv); err != nil {
+				return nil, fmt.Errorf("同步附件到容器工作区失败: %w", err)
+			}
+		}
+	}
+	finalMessage = appendAttachmentsToMessage(finalMessage, req.Attachments, visiblePaths)
 
-	userContent := userMessageContentForStorage(req.Message, req.Attachments, savedPaths)
+	userContent := userMessageContentForStorage(req.Message, req.Attachments, visiblePaths)
 	userMsgRow, uerr := h.db.AddMessage(conversationID, "user", userContent, nil)
 	if uerr != nil {
 		h.logger.Error("保存用户消息失败", zap.Error(uerr))
@@ -189,8 +202,6 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 	} else if assistantMsg != nil {
 		assistantMessageID = assistantMsg.ID
 	}
-
-	containerExecutionGate := h.prepareConversationContainerExecutionGate(c.Request.Context(), conv)
 
 	return &multiAgentPrepared{
 		ConversationID:         conversationID,

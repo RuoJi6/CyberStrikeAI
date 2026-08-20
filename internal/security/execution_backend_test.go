@@ -83,6 +83,22 @@ func TestContainerExecutionBackendStreamsAndPreservesExitCode(t *testing.T) {
 	}
 }
 
+func TestContainerExecutionBackendNormalizesRelativeWorkingDirectory(t *testing.T) {
+	executor := &fakeContainerRuntimeExecutor{}
+	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command: []string{"true"}, WorkingDir: "results/../nested",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if executor.request.WorkingDir != "/workspace/nested" {
+		t.Fatalf("normalized workdir = %q", executor.request.WorkingDir)
+	}
+}
+
 type blockingContainerRuntimeExecutor struct{}
 
 func (blockingContainerRuntimeExecutor) Exec(ctx context.Context, _ containerruntime.RuntimeSpec, _ containerruntime.ExecRequest, _ containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {

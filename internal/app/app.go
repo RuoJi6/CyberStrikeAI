@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"database/sql"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -542,6 +543,17 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle)
 	executor.SetExecutionBackendResolver(executionBackendResolver)
 	agent.SetExecutionBackendResolver(executionBackendResolver)
+	agentHandler.SetConversationWorkspaceUploadImporter(handler.ConversationWorkspaceUploadImporterFunc(func(ctx context.Context, conversationID, workspacePath string, content io.Reader, size int64) (string, error) {
+		backend, err := executionBackendResolver.ResolveExecutionBackend(mcp.WithMCPConversationID(ctx, conversationID))
+		if err != nil {
+			return "", err
+		}
+		writer, ok := backend.(security.WorkspaceFileWriter)
+		if !ok {
+			return "", fmt.Errorf("conversation %s does not have a container workspace writer", conversationID)
+		}
+		return writer.WriteWorkspaceFile(ctx, workspacePath, content, size)
+	}))
 	agentHandler.SetConversationContainerExecutionReady(containerExecutor != nil && containerLifecycle != nil && containerErr == nil)
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()

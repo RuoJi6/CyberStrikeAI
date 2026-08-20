@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path"
 	"strings"
 	"time"
 
@@ -23,8 +22,35 @@ const (
 // container PID before waiting. Docker has no "kill exec" endpoint; the
 // control file lets a second, ownership-verified exec terminate only this
 // command tree without stopping the conversation container.
-const containerExecWrapperScript = `pidfile=$1
-shift
+const containerExecWrapperScript = `guard_working_directory() {
+  guard_workspace=$1
+  guard_workingdir=$2
+  case "$guard_workingdir" in
+    "$guard_workspace"|"$guard_workspace"/*) ;;
+    *) return 64 ;;
+  esac
+  guard_relative=${guard_workingdir#"$guard_workspace"}
+  guard_relative=${guard_relative#/}
+  guard_current=$guard_workspace
+  set -f
+  guard_old_ifs=$IFS
+  IFS=/
+  set -- $guard_relative
+  IFS=$guard_old_ifs
+  for guard_segment in "$@"; do
+    [ -n "$guard_segment" ] || continue
+    guard_current="$guard_current/$guard_segment"
+    [ ! -L "$guard_current" ] || return 65
+  done
+  set +f
+  [ -d "$guard_workingdir" ] || return 66
+}
+pidfile=$1
+workspace=$2
+workingdir=$3
+guard_working_directory "$workspace" "$workingdir" || exit $?
+shift 3
+CDPATH= cd "$workingdir" || exit 66
 set -m 2>/dev/null || true
 "$@" &
 child=$!
@@ -247,11 +273,12 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 	}
 
 	workingDir := strings.TrimSpace(request.WorkingDir)
-	if workingDir == "" {
-		workingDir = spec.Workspace.MountPath
+	workingDir, err = NormalizeWorkspacePath(spec.Workspace.MountPath, workingDir)
+	if err != nil {
+		return ExecResult{}, err
 	}
 	controlFile := "/tmp/.cyberstrike-exec-" + uuid.NewString() + ".pid"
-	wrappedCommand := []string{"/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", controlFile}
+	wrappedCommand := []string{"/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", controlFile, spec.Workspace.MountPath, workingDir}
 	wrappedCommand = append(wrappedCommand, request.Command...)
 	created, err := m.execAPI.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
@@ -260,7 +287,7 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 		AttachStdout: true,
 		AttachStderr: true,
 		Env:          append([]string(nil), request.Env...),
-		WorkingDir:   workingDir,
+		WorkingDir:   spec.Workspace.MountPath,
 		Cmd:          wrappedCommand,
 	})
 	if err != nil {
@@ -396,9 +423,7 @@ func validateExecRequest(spec RuntimeSpec, request ExecRequest) error {
 	}
 	workingDir := strings.TrimSpace(request.WorkingDir)
 	if workingDir != "" {
-		clean := path.Clean(workingDir)
-		workspace := path.Clean(spec.Workspace.MountPath)
-		if !path.IsAbs(clean) || (clean != workspace && !strings.HasPrefix(clean, workspace+"/")) {
+		if _, err := NormalizeWorkspacePath(spec.Workspace.MountPath, workingDir); err != nil {
 			return invalidSpec("exec working directory must stay inside the conversation workspace")
 		}
 	}

@@ -1458,11 +1458,7 @@ func (h *ChatUploadsHandler) Upload(c *gin.Context) {
 			return
 		}
 	}
-	baseName := filepath.Base(fh.Filename)
-	if baseName == "" || baseName == "." {
-		baseName = "file"
-	}
-	baseName = strings.ReplaceAll(baseName, string(filepath.Separator), "_")
+	baseName := safeChatUploadBaseName(fh.Filename)
 	ext := filepath.Ext(baseName)
 	nameNoExt := strings.TrimSuffix(baseName, ext)
 	suffix := fmt.Sprintf("_%s_%s", time.Now().Format("150405"), chatUploadShortRand(6))

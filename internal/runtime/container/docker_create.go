@@ -88,6 +88,7 @@ type DockerManager struct {
 var _ RuntimeManager = (*DockerManager)(nil)
 var _ RuntimeExecutor = (*DockerManager)(nil)
 var _ RuntimeToolOutputWriter = (*DockerManager)(nil)
+var _ RuntimeWorkspaceFileWriter = (*DockerManager)(nil)
 
 func NewDockerManagerFromEnvironment(options DockerManagerOptions) (*DockerManager, error) {
 	api, err := mobyclient.New(mobyclient.FromEnv)

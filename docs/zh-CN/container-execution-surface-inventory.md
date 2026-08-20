@@ -37,6 +37,16 @@
 | 上传文件 | `internal/handler/chat_uploads.go` 接收并持久化 | `control-plane` | 控制面接收 + 受控导入 `container` | 执行前复制到 `/workspace`，严禁将任意宿主路径 bind mount 进容器 |
 | 超大工具输出 | `internal/tooloutput/` 当前落宿主机 reduction 目录 | `control-plane` | `container` 工作区 | 容器执行改为 `/workspace/.tool-output/`，控制面只保存摘要和引用 |
 
+### 2.1 阶段 2 路径边界增量
+
+容器会话现已将命令工作目录和 Eino 文件工具统一绑定到 `/workspace`：
+
+- 空或相对路径会规范化为 `/workspace` 或其子路径；绝对宿主路径、`..` 越界、反斜杠和 NUL 在触达 Docker 前拒绝。
+- `read_file`、`write_file`、`edit_file`、`ls`、`glob`、`grep` 根据可信对话运行模式选择 backend。宿主模式保留本地 backend；容器模式通过该对话的执行 backend 操作 `/workspace`，不再读取控制面同名路径。
+- 容器内读取和工作目录逐段拒绝符号链接；受控写入使用固定的非特权 exec stdin、逐段目录校验、大小核对和原子重命名。
+- 控制面上传仍持久化在 `chat_uploads/<date>/<conversationId>/...`，但 Agent 执行前会导入为 `/workspace/uploads/<date>/...`。异步初始化期间保存的附件会在容器就绪后的下一次执行前补同步。
+- 消息历史与模型上下文只暴露容器路径；跨对话附件路径、符号链接源和非普通文件失败关闭。超大命令输出继续固定为 `/workspace/.tool-output/<executionId>`。
+
 ## 3. YAML 工具清单
 
 基线共有 90 个 `tools/*.yaml`：89 个有外部 `command`，目标位置统一为 `container`；1 个内部查询工具为 `control-plane`。

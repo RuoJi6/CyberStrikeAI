@@ -76,7 +76,7 @@ The file management page and `GET /api/chat-uploads` group conversation-related 
 | Workspace files | `workspace` | `tmp/workspace/projects/<projectId>/...`, `tmp/workspace/conversations/<conversationId>/...` | The Agent workspace for downloaded files, analysis scripts, intermediate results, and generated CSV/XLSX/Markdown files. If an AI-generated file is missing from the UI, check this source first. | Read-only listing; supports copy path, download, and export. |
 | Conversation artifacts | `conversation_artifact` | `data/conversation_artifacts/<conversationId>/...` | Conversation-scoped deliverables or archived artifacts such as summaries, reports, or middleware-generated artifacts. | Read-only listing; supports copy path, download, and export. |
 | Tool outputs | `reduction` | `tmp/reduction/projects/<projectId>/...`, `tmp/reduction/conversations/<conversationId>/...` | Persisted full tool outputs, scan raw data, or outputs saved before truncation. Useful for reviewing long command or scan results. | Read-only listing; supports copy path, download, and export. |
-| Chat uploads | `upload` | `chat_uploads/<date>/<conversationId>/...` | Files manually uploaded in chat or from the file management page. Copy the server absolute path into chat when the AI should reference a file. | Supports upload, mkdir, text edit, rename, delete, copy path, download, and export. |
+| Chat uploads | `upload` | `chat_uploads/<date>/<conversationId>/...` | Files manually uploaded in chat or from the file management page. Host conversations continue to reference the control-plane path. Before a container Agent runs, uploads are imported through a controlled writer as `/workspace/uploads/<date>/...`; messages and model context do not expose the host absolute path. | Supports upload, mkdir, text edit, rename, delete, copy path, download, and export. |
 
 Related endpoints:
 
@@ -85,6 +85,8 @@ Related endpoints:
 - `GET /api/chat-uploads/download`: download a file.
 - `GET /api/chat-uploads/export`: export the current filtered result as a ZIP.
 - `POST /api/chat-uploads`: upload into the chat uploads directory.
+
+Container mode accepts Agent file paths only inside `/workspace`. Relative paths are normalized against `/workspace`; absolute escapes, parent traversal, backslashes, NULs, symlinked paths, and cross-conversation attachment references fail closed. Oversized command output is always referenced as `/workspace/.tool-output/<executionId>`.
 
 ## Asset Management and Bulk Import
 

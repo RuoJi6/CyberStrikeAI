@@ -126,6 +126,7 @@ func RunDeepAgent(
 	if einoErr != nil {
 		return nil, einoErr
 	}
+	agenticConversationFS := security.NewConversationFilesystemBackend(agenticLoc, ag.ExecutionBackendResolver())
 
 	holder := &einomcp.ConversationHolder{}
 	holder.Set(conversationID)
@@ -235,7 +236,7 @@ func RunDeepAgent(
 			}
 			if agenticSkillMW != nil {
 				if agenticFSTools && agenticLoc != nil {
-					subFs, fsErr := subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, id, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
+					subFs, fsErr := subAgentAgenticFilesystemMiddleware(ctx, agenticConversationFS, toolInvokeNotify, id, conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
 					if fsErr != nil {
 						return nil, fmt.Errorf("子代理 %q filesystem 中间件: %w", id, fsErr)
 					}
@@ -373,7 +374,7 @@ func RunDeepAgent(
 	var deepBackend filesystem.Backend
 	var deepShell filesystem.StreamingShell
 	if agenticLoc != nil && agenticFSTools {
-		deepBackend = agenticLoc
+		deepBackend = agenticConversationFS
 		deepShell = &einoStreamingShellWrap{
 			inner:                   security.NewEinoStreamingShellWithResolverAndOutputLimit(ag.ExecutionBackendResolver(), toolMaxBytesFromMW(&ma.EinoMiddleware), ma.EinoMiddleware.ReductionRootDir),
 			invokeNotify:            toolInvokeNotify,
@@ -495,7 +496,7 @@ func RunDeepAgent(
 		}
 		var peFsMw adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage]
 		if agenticSkillMW != nil && agenticFSTools && agenticLoc != nil {
-			peFsMw, err = subAgentAgenticFilesystemMiddleware(ctx, agenticLoc, toolInvokeNotify, "executor", conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
+			peFsMw, err = subAgentAgenticFilesystemMiddleware(ctx, agenticConversationFS, toolInvokeNotify, "executor", conversationID, projectID, ma.EinoMiddleware.ReductionRootDir, toolMaxBytesFromMW(&ma.EinoMiddleware), mcpExecBinder, einoExecBegin, einoExecAppendPartial, einoExecRegisterCancel, einoExecUnregisterCancel, einoExecFinish, agentToolTimeoutMinutes(appCfg), agentToolWaitTimeoutSeconds(appCfg), agentShellNoOutputTimeoutSeconds(appCfg), ag.ExecutionBackendResolver(), nil)
 			if err != nil {
 				return nil, fmt.Errorf("plan_execute agentic filesystem 中间件: %w", err)
 			}
