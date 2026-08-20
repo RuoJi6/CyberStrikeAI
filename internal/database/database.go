@@ -797,6 +797,9 @@ func (db *DB) initTables() error {
 	if _, err := db.Exec(createConversationsTable); err != nil {
 		return fmt.Errorf("创建conversations表失败: %w", err)
 	}
+	if err := db.initContainerRuntimeTables(); err != nil {
+		return fmt.Errorf("创建对话容器运行时表失败: %w", err)
+	}
 
 	if _, err := db.Exec(createMessagesTable); err != nil {
 		return fmt.Errorf("创建messages表失败: %w", err)

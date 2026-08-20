@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -27,13 +30,18 @@ type ConversationTaskStateProvider interface {
 	ConversationTaskRuntimeState(conversationID string) (running bool, startedAt time.Time)
 }
 
+type ConversationContainerInitializationProvider interface {
+	Get(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+}
+
 // ConversationHandler 对话处理器
 type ConversationHandler struct {
-	db          *database.DB
-	logger      *zap.Logger
-	audit       *audit.Service
-	taskStopper ConversationTaskStopper
-	taskState   ConversationTaskStateProvider
+	db                       *database.DB
+	logger                   *zap.Logger
+	audit                    *audit.Service
+	taskStopper              ConversationTaskStopper
+	taskState                ConversationTaskStateProvider
+	containerInitializations ConversationContainerInitializationProvider
 }
 
 // SetAudit wires platform audit logging.
@@ -50,6 +58,10 @@ func (h *ConversationHandler) SetTaskStopper(stopper ConversationTaskStopper) {
 // conversation UI such as the agent-maintained plan list.
 func (h *ConversationHandler) SetTaskStateProvider(provider ConversationTaskStateProvider) {
 	h.taskState = provider
+}
+
+func (h *ConversationHandler) SetContainerInitializationProvider(provider ConversationContainerInitializationProvider) {
+	h.containerInitializations = provider
 }
 
 // NewConversationHandler 创建新的对话处理器
@@ -220,6 +232,39 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, conv)
+}
+
+// GetContainerInitialization returns durable background creation state without
+// loading conversation messages or waiting for Docker operations.
+func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	session, ok := security.CurrentSession(c)
+	if !ok || !h.db.UserCanAccessResource(session.UserID, session.Scope, "conversation", id) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该对话"})
+		return
+	}
+	if _, err := h.db.GetConversationLite(id); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		return
+	}
+	if h.containerInitializations == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "容器初始化状态服务未配置"})
+		return
+	}
+	record, err := h.containerInitializations.Get(c.Request.Context(), id)
+	if errors.Is(err, containerruntime.ErrNotFound) {
+		c.JSON(http.StatusOK, gin.H{
+			"conversationId": id,
+			"status":         "not_requested",
+		})
+		return
+	}
+	if err != nil {
+		h.logger.Error("获取容器初始化状态失败", zap.String("conversationId", id), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取容器初始化状态失败"})
+		return
+	}
+	c.JSON(http.StatusOK, record)
 }
 
 // GetConversationPlanTasks returns the task list maintained by the agent's

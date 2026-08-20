@@ -31,6 +31,7 @@ import (
 	"cyberstrike-ai/internal/monitor"
 	"cyberstrike-ai/internal/multiagent"
 	"cyberstrike-ai/internal/robot"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/skillpackage"
 
@@ -42,36 +43,38 @@ import (
 
 // App 应用
 type App struct {
-	config             *config.Config
-	logger             *logger.Logger
-	router             *gin.Engine
-	mcpServer          *mcp.Server
-	externalMCPMgr     *mcp.ExternalMCPManager
-	agent              *agent.Agent
-	executor           *security.Executor
-	db                 *database.DB
-	knowledgeDB        *database.DB // 知识库数据库连接（如果使用独立数据库）
-	auth               *security.AuthManager
-	knowledgeManager   *knowledge.Manager        // 知识库管理器（用于动态初始化）
-	knowledgeRetriever *knowledge.Retriever      // 知识库检索器（用于动态初始化）
-	knowledgeIndexer   *knowledge.Indexer        // 知识库索引器（用于动态初始化）
-	knowledgeHandler   *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
-	agentHandler       *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
-	robotHandler       *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
-	robotMu            sync.Mutex                // 保护机器人长连接的 cancel
-	dingCancel         context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
-	larkCancel         context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
-	wechatCancel       context.CancelFunc        // 微信 iLink 长轮询取消函数
-	telegramCancel     context.CancelFunc        // Telegram 长轮询取消函数
-	slackCancel        context.CancelFunc        // Slack Socket Mode 取消函数
-	discordCancel      context.CancelFunc        // Discord Gateway 取消函数
-	qqCancel           context.CancelFunc        // QQ WebSocket 取消函数
-	alertCancel        context.CancelFunc        // 漏洞提醒持久化投递 worker
-	c2Manager          *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
-	c2Watchdog         *c2.SessionWatchdog       // C2 会话看门狗
-	c2WatchdogCancel   context.CancelFunc        // 看门狗取消函数
-	c2Handler          *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
-	auditSvc           *audit.Service
+	config               *config.Config
+	logger               *logger.Logger
+	router               *gin.Engine
+	mcpServer            *mcp.Server
+	externalMCPMgr       *mcp.ExternalMCPManager
+	agent                *agent.Agent
+	executor             *security.Executor
+	db                   *database.DB
+	knowledgeDB          *database.DB // 知识库数据库连接（如果使用独立数据库）
+	auth                 *security.AuthManager
+	knowledgeManager     *knowledge.Manager        // 知识库管理器（用于动态初始化）
+	knowledgeRetriever   *knowledge.Retriever      // 知识库检索器（用于动态初始化）
+	knowledgeIndexer     *knowledge.Indexer        // 知识库索引器（用于动态初始化）
+	knowledgeHandler     *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
+	agentHandler         *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
+	robotHandler         *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
+	robotMu              sync.Mutex                // 保护机器人长连接的 cancel
+	dingCancel           context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
+	larkCancel           context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
+	wechatCancel         context.CancelFunc        // 微信 iLink 长轮询取消函数
+	telegramCancel       context.CancelFunc        // Telegram 长轮询取消函数
+	slackCancel          context.CancelFunc        // Slack Socket Mode 取消函数
+	discordCancel        context.CancelFunc        // Discord Gateway 取消函数
+	qqCancel             context.CancelFunc        // QQ WebSocket 取消函数
+	alertCancel          context.CancelFunc        // 漏洞提醒持久化投递 worker
+	c2Manager            *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
+	c2Watchdog           *c2.SessionWatchdog       // C2 会话看门狗
+	c2WatchdogCancel     context.CancelFunc        // 看门狗取消函数
+	c2Handler            *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
+	auditSvc             *audit.Service
+	containerInitializer *containerruntime.Initializer
+	containerManager     *containerruntime.DockerManager
 }
 
 // New 创建新应用
@@ -444,6 +447,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	conversationHandler.SetAudit(auditSvc)
 	conversationHandler.SetTaskStopper(agentHandler)
 	conversationHandler.SetTaskStateProvider(agentHandler)
+	conversationHandler.SetContainerInitializationProvider(db)
 	auditHandler := handler.NewAuditHandler(db, auditSvc, log.Logger)
 	robotHandler := handler.NewRobotHandler(cfg, db, agentHandler, log.Logger)
 	robotHandler.SetAudit(auditSvc)
@@ -473,6 +477,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2WatchdogCancel:   watchdogCancel,
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
+	}
+	containerInitializer, containerManager, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
+	if containerErr != nil {
+		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
+	} else if containerInitializer != nil {
+		app.containerInitializer = containerInitializer
+		app.containerManager = containerManager
+		conversationHandler.SetContainerInitializationProvider(containerInitializer)
 	}
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()
@@ -760,6 +772,20 @@ func (a *App) Shutdown() {
 	a.robotMu.Unlock()
 
 	a.shutdownC2()
+	if a.containerInitializer != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := a.containerInitializer.Close(ctx); err != nil {
+			a.logger.Logger.Warn("关闭对话容器初始化器失败", zap.Error(err))
+		}
+		cancel()
+		a.containerInitializer = nil
+	}
+	if a.containerManager != nil {
+		if err := a.containerManager.Close(); err != nil {
+			a.logger.Logger.Warn("关闭 Docker Engine 客户端失败", zap.Error(err))
+		}
+		a.containerManager = nil
+	}
 
 	// 停止所有外部MCP客户端
 	if a.externalMCPMgr != nil {
@@ -1030,6 +1056,7 @@ func setupRoutes(
 		protected.POST("/conversations", conversationHandler.CreateConversation)
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
+		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
 		protected.GET("/conversations/:id/plan-tasks", conversationHandler.GetConversationPlanTasks)
 		protected.GET("/messages/:id/process-details", conversationHandler.GetMessageProcessDetails)
 		protected.GET("/process-details/:id", conversationHandler.GetProcessDetail)

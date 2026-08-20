@@ -189,6 +189,29 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 					},
 				},
+				"ContainerInitialization": map[string]interface{}{
+					"type":        "object",
+					"description": "对话容器后台创建的持久状态。created 仅表示已安全创建停止状态的容器，不代表工具就绪或 Agent 已在容器执行。",
+					"properties": map[string]interface{}{
+						"conversationId": map[string]interface{}{"type": "string"},
+						"runtimeId":      map[string]interface{}{"type": "string"},
+						"status": map[string]interface{}{
+							"type": "string",
+							"enum": []string{"not_requested", "queued", "creating", "created", "failed"},
+						},
+						"attempt":       map[string]interface{}{"type": "integer", "minimum": 0},
+						"providerId":    map[string]interface{}{"type": "string"},
+						"runtimeStatus": map[string]interface{}{"type": "string"},
+						"imageDigest":   map[string]interface{}{"type": "string"},
+						"imagePlatform": map[string]interface{}{"type": "string"},
+						"lastError":     map[string]interface{}{"type": "string"},
+						"requestedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+						"startedAt":     map[string]interface{}{"type": "string", "format": "date-time"},
+						"completedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+						"updatedAt":     map[string]interface{}{"type": "string", "format": "date-time"},
+					},
+					"required": []string{"conversationId", "status"},
+				},
 				"ConversationDetail": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1568,6 +1591,35 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"500": map[string]interface{}{
 							"description": "服务器内部错误",
 						},
+					},
+				},
+			},
+			"/api/conversations/{id}/container-initialization": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"对话管理"},
+					"summary":     "查看对话容器后台初始化状态",
+					"description": "返回持久化状态，不加载对话消息，也不等待 Docker 操作。未请求过初始化时返回 not_requested。",
+					"operationId": "getConversationContainerInitialization",
+					"parameters": []map[string]interface{}{
+						{
+							"name": "id", "in": "path", "required": true,
+							"description": "对话ID",
+							"schema":      map[string]interface{}{"type": "string"},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "查询成功",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerInitialization"},
+								},
+							},
+						},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权访问该对话"},
+						"404": map[string]interface{}{"description": "对话不存在"},
+						"500": map[string]interface{}{"description": "状态存储查询失败"},
 					},
 				},
 			},

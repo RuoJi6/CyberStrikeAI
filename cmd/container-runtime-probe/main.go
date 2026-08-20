@@ -13,12 +13,13 @@ import (
 )
 
 type probeResult struct {
-	Engine       containerruntime.EngineInfo       `json:"engine"`
-	Manifest     *containerruntime.ImageInspection `json:"manifest,omitempty"`
-	LocalImage   *containerruntime.ImageInspection `json:"local_image,omitempty"`
-	RuntimeImage *containerruntime.ImageInspection `json:"runtime_image,omitempty"`
-	Created      *containerruntime.Runtime         `json:"created_runtime,omitempty"`
-	Error        string                            `json:"error,omitempty"`
+	Engine         containerruntime.EngineInfo            `json:"engine"`
+	Manifest       *containerruntime.ImageInspection      `json:"manifest,omitempty"`
+	LocalImage     *containerruntime.ImageInspection      `json:"local_image,omitempty"`
+	RuntimeImage   *containerruntime.ImageInspection      `json:"runtime_image,omitempty"`
+	Initialization *containerruntime.InitializationRecord `json:"initialization,omitempty"`
+	Created        *containerruntime.Runtime              `json:"created_runtime,omitempty"`
+	Error          string                                 `json:"error,omitempty"`
 }
 
 func main() {
@@ -33,6 +34,7 @@ func run() int {
 	createRuntimeID := flag.String("create-runtime-id", "", "diagnostic: create a stopped runtime with this system ID")
 	conversationID := flag.String("conversation-id", "", "conversation ID for diagnostic runtime creation")
 	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
+	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
 	requiredPlatforms := flag.String("require-platforms", "", "comma-separated platforms required in the remote manifest")
 	skipManifest := flag.Bool("skip-manifest", false, "diagnostic only: skip remote registry manifest inspection")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall probe timeout")
@@ -111,14 +113,66 @@ func run() int {
 	}
 	if creator != nil {
 		spec := diagnosticRuntimeSpec(strings.TrimSpace(*createRuntimeID), strings.TrimSpace(*conversationID), image)
-		created, createErr := creator.Create(ctx, spec)
-		if createErr != nil {
-			result.Error = createErr.Error()
-			return writeResult(result, 1)
+		if *backgroundCreate {
+			store := newProbeInitializationStore()
+			initializer, initializeErr := containerruntime.NewInitializer(creator, store, containerruntime.InitializerOptions{
+				Workers:       1,
+				QueueCapacity: 4,
+				CreateTimeout: *timeout,
+			})
+			if initializeErr != nil {
+				result.Error = initializeErr.Error()
+				return writeResult(result, 1)
+			}
+			defer func() {
+				closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer closeCancel()
+				_ = initializer.Close(closeCtx)
+			}()
+			queued, ensureErr := initializer.EnsureAsync(ctx, spec)
+			if ensureErr != nil {
+				result.Initialization = &queued
+				result.Error = ensureErr.Error()
+				return writeResult(result, 1)
+			}
+			initialized, waitErr := waitForInitialization(ctx, initializer, spec.ConversationID)
+			result.Initialization = &initialized
+			if waitErr != nil {
+				result.Error = waitErr.Error()
+				return writeResult(result, 1)
+			}
+		} else {
+			created, createErr := creator.Create(ctx, spec)
+			if createErr != nil {
+				result.Error = createErr.Error()
+				return writeResult(result, 1)
+			}
+			result.Created = &created
 		}
-		result.Created = &created
 	}
 	return writeResult(result, 0)
+}
+
+func waitForInitialization(ctx context.Context, initializer *containerruntime.Initializer, conversationID string) (containerruntime.InitializationRecord, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		record, err := initializer.Get(ctx, conversationID)
+		if err != nil {
+			return record, err
+		}
+		switch record.Status {
+		case containerruntime.InitializationCreated:
+			return record, nil
+		case containerruntime.InitializationFailed:
+			return record, fmt.Errorf("container initialization failed: %s", record.LastError)
+		}
+		select {
+		case <-ctx.Done():
+			return record, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func diagnosticRuntimeSpec(runtimeID, conversationID string, image containerruntime.ImageReference) containerruntime.RuntimeSpec {

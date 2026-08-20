@@ -130,6 +130,27 @@ agent:
   # system_prompt_path: prompts/single-agent.md # 可选：单代理系统提示文件（相对本配置文件所在目录）；非空且可读时替换内置提示
 
   system_prompt_path: ""
+# 对话容器运行时（默认关闭；启用时镜像必须固定 digest）
+container:
+  enabled: false
+  owner_id: "" # 启用时必填；每个 CyberStrikeAI 部署唯一，用于 Docker 所有者标签
+  image_repository: ghcr.io/usestrix/strix-sandbox
+  image_digest: "" # 填 sha256:... 不可变 digest，不接受 latest/tag
+  image_platform: linux/arm64 # ARM 主机用 linux/arm64，AMD/Intel 主机用 linux/amd64
+  initializer_workers: 2
+  queue_capacity: 64
+  create_timeout_seconds: 120
+  nano_cpus: 1000000000 # 1 CPU
+  memory_bytes: 536870912 # 512 MiB
+  pids: 128
+  nofile_soft: 1024
+  nofile_hard: 2048
+  workspace_bytes: 1073741824 # 非持久化 /workspace tmpfs 上限 1 GiB
+  tmpfs_bytes: 67108864 # /tmp 上限 64 MiB
+  max_concurrent_exec: 2
+  max_queued_exec: 8
+  log_max_bytes: 10485760 # 每个日志文件 10 MiB
+  log_max_files: 3
 # 人机协同（HITL）全局白名单：此处列出的工具始终免审批，与对话页「白名单工具（免审批，逗号分隔）」合并为并集；侧栏「应用」可合并写入本列表并立即生效。
 # 非白名单工具在审批方=审计 Agent 时，按会话 HITL 模式选用提示词：
 #   approval → audit_agent_prompt

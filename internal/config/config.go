@@ -11,40 +11,42 @@ import (
 	"strconv"
 	"strings"
 
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/termout"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	Version     string                `yaml:"version,omitempty" json:"version,omitempty"` // 前端显示的版本号，如 v1.3.3
-	Server      ServerConfig          `yaml:"server"`
-	Log         LogConfig             `yaml:"log"`
-	MCP         MCPConfig             `yaml:"mcp"`
-	AI          AIConfig              `yaml:"ai,omitempty" json:"ai,omitempty"`
-	OpenAI      OpenAIConfig          `yaml:"openai,omitempty" json:"openai,omitempty"`
-	FOFA        FofaConfig            `yaml:"fofa,omitempty" json:"fofa,omitempty"`
-	ZoomEye     SpaceSearchConfig     `yaml:"zoomeye,omitempty" json:"zoomeye,omitempty"`
-	Quake       SpaceSearchConfig     `yaml:"quake,omitempty" json:"quake,omitempty"`
-	Shodan      SpaceSearchConfig     `yaml:"shodan,omitempty" json:"shodan,omitempty"`
-	Agent       AgentConfig           `yaml:"agent"`
-	Hitl        HitlConfig            `yaml:"hitl,omitempty" json:"hitl,omitempty"`
-	Security    SecurityConfig        `yaml:"security"`
-	Database    DatabaseConfig        `yaml:"database"`
-	Auth        AuthConfig            `yaml:"auth"`
-	Audit       AuditConfig           `yaml:"audit,omitempty" json:"audit,omitempty"`
-	Monitor     MonitorConfig         `yaml:"monitor,omitempty" json:"monitor,omitempty"`
-	ExternalMCP ExternalMCPConfig     `yaml:"external_mcp,omitempty"`
-	Knowledge   KnowledgeConfig       `yaml:"knowledge,omitempty"`
-	C2          C2Config              `yaml:"c2,omitempty" json:"c2,omitempty"`                 // 内置 C2 总开关；未配置时默认启用
-	Robots      RobotsConfig          `yaml:"robots,omitempty" json:"robots,omitempty"`         // 企业微信/钉钉/飞书等机器人配置
-	RolesDir    string                `yaml:"roles_dir,omitempty" json:"roles_dir,omitempty"`   // 角色配置文件目录（新方式）
-	Roles       map[string]RoleConfig `yaml:"roles,omitempty" json:"roles,omitempty"`           // 向后兼容：支持在主配置文件中定义角色
-	SkillsDir   string                `yaml:"skills_dir,omitempty" json:"skills_dir,omitempty"` // Skills配置文件目录
-	AgentsDir   string                `yaml:"agents_dir,omitempty" json:"agents_dir,omitempty"` // 多代理子 Agent Markdown 定义目录（*.md，YAML front matter）
-	MultiAgent  MultiAgentConfig      `yaml:"multi_agent,omitempty" json:"multi_agent,omitempty"`
-	Project     ProjectConfig         `yaml:"project,omitempty" json:"project,omitempty"`
-	Vision      VisionConfig          `yaml:"vision,omitempty" json:"vision,omitempty"`
+	Version     string                 `yaml:"version,omitempty" json:"version,omitempty"` // 前端显示的版本号，如 v1.3.3
+	Server      ServerConfig           `yaml:"server"`
+	Log         LogConfig              `yaml:"log"`
+	MCP         MCPConfig              `yaml:"mcp"`
+	AI          AIConfig               `yaml:"ai,omitempty" json:"ai,omitempty"`
+	OpenAI      OpenAIConfig           `yaml:"openai,omitempty" json:"openai,omitempty"`
+	FOFA        FofaConfig             `yaml:"fofa,omitempty" json:"fofa,omitempty"`
+	ZoomEye     SpaceSearchConfig      `yaml:"zoomeye,omitempty" json:"zoomeye,omitempty"`
+	Quake       SpaceSearchConfig      `yaml:"quake,omitempty" json:"quake,omitempty"`
+	Shodan      SpaceSearchConfig      `yaml:"shodan,omitempty" json:"shodan,omitempty"`
+	Agent       AgentConfig            `yaml:"agent"`
+	Container   ContainerRuntimeConfig `yaml:"container,omitempty" json:"container,omitempty"`
+	Hitl        HitlConfig             `yaml:"hitl,omitempty" json:"hitl,omitempty"`
+	Security    SecurityConfig         `yaml:"security"`
+	Database    DatabaseConfig         `yaml:"database"`
+	Auth        AuthConfig             `yaml:"auth"`
+	Audit       AuditConfig            `yaml:"audit,omitempty" json:"audit,omitempty"`
+	Monitor     MonitorConfig          `yaml:"monitor,omitempty" json:"monitor,omitempty"`
+	ExternalMCP ExternalMCPConfig      `yaml:"external_mcp,omitempty"`
+	Knowledge   KnowledgeConfig        `yaml:"knowledge,omitempty"`
+	C2          C2Config               `yaml:"c2,omitempty" json:"c2,omitempty"`                 // 内置 C2 总开关；未配置时默认启用
+	Robots      RobotsConfig           `yaml:"robots,omitempty" json:"robots,omitempty"`         // 企业微信/钉钉/飞书等机器人配置
+	RolesDir    string                 `yaml:"roles_dir,omitempty" json:"roles_dir,omitempty"`   // 角色配置文件目录（新方式）
+	Roles       map[string]RoleConfig  `yaml:"roles,omitempty" json:"roles,omitempty"`           // 向后兼容：支持在主配置文件中定义角色
+	SkillsDir   string                 `yaml:"skills_dir,omitempty" json:"skills_dir,omitempty"` // Skills配置文件目录
+	AgentsDir   string                 `yaml:"agents_dir,omitempty" json:"agents_dir,omitempty"` // 多代理子 Agent Markdown 定义目录（*.md，YAML front matter）
+	MultiAgent  MultiAgentConfig       `yaml:"multi_agent,omitempty" json:"multi_agent,omitempty"`
+	Project     ProjectConfig          `yaml:"project,omitempty" json:"project,omitempty"`
+	Vision      VisionConfig           `yaml:"vision,omitempty" json:"vision,omitempty"`
 }
 
 type EnsureLocalConfigResult struct {
@@ -1048,6 +1050,114 @@ type AgentConfig struct {
 	SystemPromptPath string `yaml:"system_prompt_path,omitempty" json:"system_prompt_path,omitempty"`
 }
 
+// ContainerRuntimeConfig is disabled unless explicitly enabled. Image identity
+// is immutable and resource values are control-plane policy, not request data.
+type ContainerRuntimeConfig struct {
+	Enabled              bool   `yaml:"enabled" json:"enabled"`
+	OwnerID              string `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
+	ImageRepository      string `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
+	ImageDigest          string `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
+	ImagePlatform        string `yaml:"image_platform,omitempty" json:"image_platform,omitempty"`
+	InitializerWorkers   int    `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
+	QueueCapacity        int    `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
+	CreateTimeoutSeconds int    `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
+	NanoCPUs             int64  `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
+	MemoryBytes          int64  `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
+	PIDs                 int64  `yaml:"pids,omitempty" json:"pids,omitempty"`
+	NoFileSoft           uint64 `yaml:"nofile_soft,omitempty" json:"nofile_soft,omitempty"`
+	NoFileHard           uint64 `yaml:"nofile_hard,omitempty" json:"nofile_hard,omitempty"`
+	WorkspaceBytes       int64  `yaml:"workspace_bytes,omitempty" json:"workspace_bytes,omitempty"`
+	TmpfsBytes           int64  `yaml:"tmpfs_bytes,omitempty" json:"tmpfs_bytes,omitempty"`
+	MaxConcurrentExec    int    `yaml:"max_concurrent_exec,omitempty" json:"max_concurrent_exec,omitempty"`
+	MaxQueuedExec        int    `yaml:"max_queued_exec,omitempty" json:"max_queued_exec,omitempty"`
+	LogMaxBytes          int64  `yaml:"log_max_bytes,omitempty" json:"log_max_bytes,omitempty"`
+	LogMaxFiles          int    `yaml:"log_max_files,omitempty" json:"log_max_files,omitempty"`
+}
+
+func (c *ContainerRuntimeConfig) applyDefaults() {
+	if c.InitializerWorkers == 0 {
+		c.InitializerWorkers = 2
+	}
+	if c.QueueCapacity == 0 {
+		c.QueueCapacity = 64
+	}
+	if c.CreateTimeoutSeconds == 0 {
+		c.CreateTimeoutSeconds = 120
+	}
+	if c.NanoCPUs == 0 {
+		c.NanoCPUs = 1_000_000_000
+	}
+	if c.MemoryBytes == 0 {
+		c.MemoryBytes = 512 << 20
+	}
+	if c.PIDs == 0 {
+		c.PIDs = 128
+	}
+	if c.NoFileSoft == 0 {
+		c.NoFileSoft = 1024
+	}
+	if c.NoFileHard == 0 {
+		c.NoFileHard = 2048
+	}
+	if c.WorkspaceBytes == 0 {
+		c.WorkspaceBytes = 1 << 30
+	}
+	if c.TmpfsBytes == 0 {
+		c.TmpfsBytes = 64 << 20
+	}
+	if c.MaxConcurrentExec == 0 {
+		c.MaxConcurrentExec = 2
+	}
+	if c.MaxQueuedExec == 0 {
+		c.MaxQueuedExec = 8
+	}
+	if c.LogMaxBytes == 0 {
+		c.LogMaxBytes = 10 << 20
+	}
+	if c.LogMaxFiles == 0 {
+		c.LogMaxFiles = 3
+	}
+}
+
+func (c ContainerRuntimeConfig) validateEnabled() error {
+	if !c.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(c.OwnerID) == "" {
+		return fmt.Errorf("container.owner_id is required when the container runtime is enabled")
+	}
+	if strings.TrimSpace(c.ImageRepository) == "" || strings.TrimSpace(c.ImageDigest) == "" || strings.TrimSpace(c.ImagePlatform) == "" {
+		return fmt.Errorf("container image_repository, image_digest and image_platform are required when enabled")
+	}
+	if c.InitializerWorkers <= 0 || c.QueueCapacity <= 0 || c.CreateTimeoutSeconds <= 0 {
+		return fmt.Errorf("container initializer_workers, queue_capacity and create_timeout_seconds must be positive")
+	}
+	spec := containerruntime.RuntimeSpec{
+		ID:             "config-validation",
+		ConversationID: "config-validation",
+		Image: containerruntime.ImageReference{
+			Repository: strings.TrimSpace(c.ImageRepository),
+			Digest:     strings.TrimSpace(c.ImageDigest),
+			Platform:   strings.TrimSpace(c.ImagePlatform),
+		},
+		Resources: containerruntime.ResourceLimits{
+			NanoCPUs: c.NanoCPUs, MemoryBytes: c.MemoryBytes, PIDs: c.PIDs,
+			NoFileSoft: c.NoFileSoft, NoFileHard: c.NoFileHard, WorkspaceBytes: c.WorkspaceBytes,
+			MaxConcurrentExec: c.MaxConcurrentExec, MaxQueuedExec: c.MaxQueuedExec,
+			LogMaxBytes: c.LogMaxBytes, LogMaxFiles: c.LogMaxFiles,
+		},
+		Security: containerruntime.SecurityProfile{
+			ReadOnlyRootFS: true, NoNewPrivileges: true, DropAllCapabilities: true,
+			NetworkMode: containerruntime.NetworkNone, SeccompProfile: "default", TmpfsBytes: c.TmpfsBytes,
+		},
+		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+	}
+	if err := containerruntime.ValidateSpec(spec); err != nil {
+		return fmt.Errorf("container runtime policy is invalid: %w", err)
+	}
+	return nil
+}
+
 // HitlConfig 人机协同全局选项；与会话侧栏/API 中的白名单合并为并集后参与判定。
 // tool_whitelist 可在侧栏「应用」时合并写入 config.yaml 并立即生效。
 // audit_agent_prompt / audit_agent_prompt_review_edit 可在人机协同页编辑并立即生效；空则使用内置默认。
@@ -1371,6 +1481,10 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Audit.MaxDetailBytes <= 0 {
 		cfg.Audit.MaxDetailBytes = 8192
+	}
+	cfg.Container.applyDefaults()
+	if err := cfg.Container.validateEnabled(); err != nil {
+		return nil, err
 	}
 	cfg.ApplyDefaultAIChannel()
 	if err := validateOpenAIOutputLimits(cfg.OpenAI); err != nil {
@@ -1880,6 +1994,12 @@ func Default() *Config {
 			ExternalMCPCircuitFailureThreshold: 3,   // 单个 server 连续 3 次失败后临时熔断
 			ExternalMCPCircuitCooldownSeconds:  60,  // 熔断默认冷却 60 秒
 			ShellNoOutputTimeoutSeconds:        300, // execute/exec 无新输出空闲终止（秒）；-1 关闭
+		},
+		Container: ContainerRuntimeConfig{
+			InitializerWorkers: 2, QueueCapacity: 64, CreateTimeoutSeconds: 120,
+			NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
+			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30, TmpfsBytes: 64 << 20,
+			MaxConcurrentExec: 2, MaxQueuedExec: 8, LogMaxBytes: 10 << 20, LogMaxFiles: 3,
 		},
 		Security: SecurityConfig{
 			Tools:    []ToolConfig{}, // 工具配置应该从 config.yaml 或 tools/ 目录加载
