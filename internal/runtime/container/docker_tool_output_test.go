@@ -1,11 +1,12 @@
 package container
 
 import (
-	"archive/tar"
-	"bytes"
 	"context"
 	"errors"
-	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -13,7 +14,69 @@ import (
 	mobynetwork "github.com/moby/moby/api/types/network"
 )
 
-func TestDockerManagerWritesToolOutputIntoOwnedWorkspace(t *testing.T) {
+func TestToolOutputWriteScriptWritesExactFileAndRejectsSizeMismatch(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(workspace, toolOutputDirectory)
+	destination := filepath.Join(directory, "execution-script")
+	full := strings.Repeat("script-output-", 16)
+	run := func(expected int) error {
+		cmd := exec.Command("/bin/sh", "-c", toolOutputWriteScript, "cyberstrike-tool-output", destination, strconv.Itoa(expected), workspace)
+		cmd.Stdin = strings.NewReader(full)
+		return cmd.Run()
+	}
+	if err := run(len(full)); err != nil {
+		t.Fatalf("tool output script: %v", err)
+	}
+	data, err := os.ReadFile(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != full || info.Mode().Perm() != 0o644 {
+		t.Fatalf("script output = %d bytes mode %o", len(data), info.Mode().Perm())
+	}
+	if err := os.Remove(destination); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(len(full) + 1); err == nil {
+		t.Fatal("size mismatch should fail")
+	}
+	if _, err := os.Stat(destination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("mismatched output should not be installed: %v", err)
+	}
+}
+
+func TestToolOutputWriteScriptRejectsSymlinkedOutputDirectory(t *testing.T) {
+	workspace, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Join(workspace, toolOutputDirectory)
+	if err := os.Symlink(outside, directory); err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(directory, "execution-symlink")
+	cmd := exec.Command("/bin/sh", "-c", toolOutputWriteScript, "cyberstrike-tool-output", destination, "1", workspace)
+	cmd.Stdin = strings.NewReader("x")
+	if err := cmd.Run(); err == nil {
+		t.Fatal("symlinked output directory should fail")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "execution-symlink")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("output escaped through symlink: %v", err)
+	}
+}
+
+func TestDockerManagerWritesToolOutputThroughOwnedWorkspaceExec(t *testing.T) {
 	spec := creationSpec()
 	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
 	api.containerResult.Container.State.Status = mobycontainer.StateRunning
@@ -25,6 +88,7 @@ func TestDockerManagerWritesToolOutputIntoOwnedWorkspace(t *testing.T) {
 	}
 
 	full := strings.Repeat("oversized-container-output-", 32)
+	api.execStdinBytes = len(full)
 	ref, err := manager.WriteToolOutput(context.Background(), spec, ToolOutputWriteRequest{
 		FileName: "execution-01",
 		Content:  strings.NewReader(full),
@@ -33,37 +97,21 @@ func TestDockerManagerWritesToolOutputIntoOwnedWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ref != "/workspace/.tool-output/execution-01" || api.copyContainerID != "provider-container-1" {
-		t.Fatalf("reference/container = %q / %q", ref, api.copyContainerID)
+	if ref != "/workspace/.tool-output/execution-01" || api.execContainerID != "provider-container-1" {
+		t.Fatalf("reference/container = %q / %q", ref, api.execContainerID)
 	}
-	if api.copyOptions.DestinationPath != "/workspace" || api.copyOptions.CopyUIDGID || api.copyOptions.AllowOverwriteDirWithFile {
-		t.Fatalf("copy options = %#v", api.copyOptions)
+	options := api.execCreateOpts
+	if options.Privileged || options.TTY || !options.AttachStdin || !options.AttachStdout || !options.AttachStderr || options.WorkingDir != "/workspace" {
+		t.Fatalf("tool output exec options = %#v", options)
 	}
-
-	entries := map[string][]byte{}
-	reader := tar.NewReader(bytes.NewReader(api.copyContent))
-	for {
-		header, nextErr := reader.Next()
-		if errors.Is(nextErr, io.EOF) {
-			break
-		}
-		if nextErr != nil {
-			t.Fatal(nextErr)
-		}
-		body, readErr := io.ReadAll(reader)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		entries[header.Name] = body
-		if header.Name == ".tool-output" && header.Mode != 0o755 {
-			t.Fatalf("directory mode = %o", header.Mode)
-		}
-		if header.Name == ".tool-output/execution-01" && header.Mode != 0o644 {
-			t.Fatalf("file mode = %o", header.Mode)
-		}
+	if api.execAttachOpts.TTY {
+		t.Fatalf("tool output attach options = %#v", api.execAttachOpts)
 	}
-	if string(entries[".tool-output/execution-01"]) != full {
-		t.Fatalf("archived output length = %d, want %d", len(entries[".tool-output/execution-01"]), len(full))
+	if len(options.Cmd) != 7 || options.Cmd[0] != "/bin/sh" || options.Cmd[1] != "-c" || options.Cmd[2] != toolOutputWriteScript || options.Cmd[4] != "/workspace/.tool-output/execution-01" || options.Cmd[5] != strconv.Itoa(len(full)) || options.Cmd[6] != "/workspace" {
+		t.Fatalf("tool output command = %#v", options.Cmd)
+	}
+	if string(api.execStdin) != full {
+		t.Fatalf("streamed output length = %d, want %d", len(api.execStdin), len(full))
 	}
 }
 
@@ -79,7 +127,30 @@ func TestDockerManagerRejectsUnsafeToolOutputNameBeforeDockerWrite(t *testing.T)
 		Content:  strings.NewReader("x"),
 		Size:     1,
 	})
-	if !errors.Is(err, ErrInvalidSpecification) || api.copyContainerID != "" {
-		t.Fatalf("unsafe write error/container = %v / %q", err, api.copyContainerID)
+	if !errors.Is(err, ErrInvalidSpecification) || api.execContainerID != "" {
+		t.Fatalf("unsafe write error/container = %v / %q", err, api.execContainerID)
+	}
+}
+
+func TestDockerManagerReportsToolOutputWriterFailure(t *testing.T) {
+	spec := creationSpec()
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.containerResult.Container.State.Status = mobycontainer.StateRunning
+	api.containerResult.Container.State.Running = true
+	api.containerResult.Container.NetworkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{"none": {}}}
+	api.execStdinBytes = 1
+	api.execExitCode = 1
+	api.execStderr = "workspace write denied"
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.WriteToolOutput(context.Background(), spec, ToolOutputWriteRequest{
+		FileName: "execution-failed",
+		Content:  strings.NewReader("x"),
+		Size:     1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "exited with code 1") || !strings.Contains(err.Error(), "workspace write denied") {
+		t.Fatalf("tool output writer error = %v", err)
 	}
 }

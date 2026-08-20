@@ -64,10 +64,6 @@ type dockerManagedResourceAPI interface {
 	VolumeRemove(context.Context, string, mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error)
 }
 
-type dockerToolOutputAPI interface {
-	CopyToContainer(context.Context, string, mobyclient.CopyToContainerOptions) (mobyclient.CopyToContainerResult, error)
-}
-
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
 	OwnerID              string
@@ -83,7 +79,6 @@ type DockerManager struct {
 	*DockerInspector
 	api              dockerCreationAPI
 	execAPI          dockerExecAPI
-	toolOutputAPI    dockerToolOutputAPI
 	execLimiter      *ExecLimiter
 	resourceAPI      dockerManagedResourceAPI
 	ownerID          string
@@ -134,9 +129,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	}
 	inspector := newDockerInspector(api)
 	execAPI, _ := api.(dockerExecAPI)
-	toolOutputAPI, _ := api.(dockerToolOutputAPI)
 	resourceAPI, _ := api.(dockerManagedResourceAPI)
-	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, toolOutputAPI: toolOutputAPI, execLimiter: limiter, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {

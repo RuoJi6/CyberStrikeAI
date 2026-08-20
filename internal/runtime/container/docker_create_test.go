@@ -39,12 +39,11 @@ type fakeDockerCreationAPI struct {
 	execID          string
 	execStdout      string
 	execStderr      string
+	execStdin       []byte
+	execStdinBytes  int
+	execAttachOpts  mobyclient.ExecAttachOptions
 	execExitCode    int
 	execRunning     bool
-	copyContainerID string
-	copyOptions     mobyclient.CopyToContainerOptions
-	copyContent     []byte
-	copyErr         error
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -101,8 +100,13 @@ func (f *fakeDockerCreationAPI) ExecCreate(_ context.Context, containerID string
 }
 
 func (f *fakeDockerCreationAPI) ExecAttach(_ context.Context, _ string, options mobyclient.ExecAttachOptions) (mobyclient.ExecAttachResult, error) {
+	f.execAttachOpts = options
 	clientConn, serverConn := net.Pipe()
 	go func() {
+		if f.execCreateOpts.AttachStdin {
+			f.execStdin = make([]byte, f.execStdinBytes)
+			_, _ = io.ReadFull(serverConn, f.execStdin)
+		}
 		if options.TTY {
 			_, _ = serverConn.Write([]byte(f.execStdout + f.execStderr))
 		} else {
@@ -127,15 +131,6 @@ func writeFakeExecFrame(conn net.Conn, stream mobystdcopy.StdType, payload []byt
 
 func (f *fakeDockerCreationAPI) ExecInspect(_ context.Context, execID string, _ mobyclient.ExecInspectOptions) (mobyclient.ExecInspectResult, error) {
 	return mobyclient.ExecInspectResult{ID: execID, ContainerID: f.execContainerID, ExitCode: f.execExitCode, Running: f.execRunning}, nil
-}
-
-func (f *fakeDockerCreationAPI) CopyToContainer(_ context.Context, containerID string, options mobyclient.CopyToContainerOptions) (mobyclient.CopyToContainerResult, error) {
-	f.copyContainerID = containerID
-	f.copyOptions = options
-	if options.Content != nil {
-		f.copyContent, _ = io.ReadAll(options.Content)
-	}
-	return mobyclient.CopyToContainerResult{}, f.copyErr
 }
 
 func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {

@@ -140,6 +140,7 @@ Preview (last …):
 当前策略是「全文落盘 + 上下文预览」：超过 `reduction_max_length_for_trunc` 时，容器命令的完整输出写入该对话 `/workspace/.tool-output/<execution_id>`，host 模式及外部工具默认写入 `tmp/reduction/conversations/<会话ID>/trunc/<execution_id>`。Agent、数据库和监控只拿到有界的 `<persisted-output>` 预览与对应绝对路径；可用执行位置内的 `read_file` 按 offset/limit 回读全文。
 
 对 Eino filesystem `execute` 工具，容器后端在完成上限判定和工作区落盘前只发送不含输出文本的活动心跳；最终只将完整的小结果或有界的 `<persisted-output>` 摘要交给 ADK 消息流。因此原始大输出不会先作为 `tool_result_delta` 进入模型、过程详情或监控库后再被二次截断。
+完整文件通过所有权重验后的非特权 Docker exec 标准输入写入固定工作区路径，从而兼容「只读 rootfs + 可写 `/workspace` tmpfs」的容器基线；接口不接受请求端容器 ID 或任意目标路径。
 
 ## DB 与恢复上下文
 
