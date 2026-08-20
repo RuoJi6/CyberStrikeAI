@@ -113,6 +113,7 @@ func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := databaseRuntimeSpec(conversation.ID)
+	spec.ID = containerruntime.RuntimeID("conversation-" + conversation.ID)
 	spec.Workspace.Persistent = true
 	spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeName(spec.ID)
 	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
@@ -127,5 +128,27 @@ func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
 	}
 	if claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != spec.Workspace.VolumeName || claims[1].ConversationID != conversation.ID {
 		t.Fatalf("workspace claim = %#v", claims[1])
+	}
+
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(context.Background(), conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-persistent-01", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(context.Background(), conversation.ID, containerruntime.LifecycleOperationDelete); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLifecycle(context.Background(), conversation.ID, containerruntime.LifecycleOperationDelete); err != nil {
+		t.Fatal(err)
+	}
+	claims, err = db.ListManagedResourceClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Kind != containerruntime.ResourceKindWorkspaceVolume || claims[0].LogicalID != string(spec.ID) || claims[0].ProviderID != spec.Workspace.VolumeName || claims[0].ConversationID != conversation.ID {
+		t.Fatalf("retained workspace claims = %#v", claims)
 	}
 }

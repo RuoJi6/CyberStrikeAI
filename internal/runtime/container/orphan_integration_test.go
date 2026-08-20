@@ -105,6 +105,36 @@ func TestOrphanScannerRetainsClaimsAndDeletesOnlyOrphans(t *testing.T) {
 	}
 }
 
+func TestOrphanScannerRetainsPersistentWorkspaceAfterRuntimeDeletion(t *testing.T) {
+	db := newOrphanIntegrationDB(t)
+	conversation, err := db.CreateConversation("retained persistent workspace", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeID := "conversation-" + conversation.ID
+	volume := managedNamedResource(container.ResourceKindWorkspaceVolume, runtimeID, conversation.ID)
+	manager := newFakeManagedResourceManager(volume)
+	scanner, err := container.NewOrphanScanner(manager, db, container.OrphanScannerOptions{
+		Clock: func() time.Time { return time.Date(2026, 8, 21, 1, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := scanner.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Observed != 1 || report.Retained != 1 || report.Discovered != 0 || report.Deleted != 0 {
+		t.Fatalf("report = %#v", report)
+	}
+	remaining, err := manager.ListOwnedResources(context.Background())
+	if err != nil || len(remaining) != 1 || remaining[0].ProviderID != volume.ProviderID {
+		t.Fatalf("remaining = %#v, %v", remaining, err)
+	}
+}
+
 func TestOrphanScannerPersistsFailureAndRetries(t *testing.T) {
 	db := newOrphanIntegrationDB(t)
 	resource := managedNamedResource(container.ResourceKindConversationNetwork, "retry-network", "retry-conversation")

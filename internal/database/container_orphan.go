@@ -25,32 +25,74 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 	if err != nil {
 		return nil, fmt.Errorf("list container resource claims: %w", err)
 	}
-	defer rows.Close()
 	claims := make([]containerruntime.ManagedResourceClaim, 0)
+	workspaceClaims := make(map[string]struct{})
 	for rows.Next() {
 		var claim containerruntime.ManagedResourceClaim
 		claim.Kind = containerruntime.ResourceKindAgent
 		var specJSON string
 		if err := rows.Scan(&claim.LogicalID, &claim.ProviderID, &claim.ConversationID, &specJSON); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		claims = append(claims, claim)
 		var spec containerruntime.RuntimeSpec
 		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
+			_ = rows.Close()
 			return nil, fmt.Errorf("decode container workspace claim %s: %w", claim.LogicalID, err)
 		}
 		if spec.Workspace.Persistent {
 			expectedName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(claim.LogicalID))
 			if spec.Workspace.VolumeName != expectedName || string(spec.ID) != claim.LogicalID || spec.ConversationID != claim.ConversationID {
+				_ = rows.Close()
 				return nil, fmt.Errorf("%w: persistent workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
 			}
 			claims = append(claims, containerruntime.ManagedResourceClaim{
 				Kind: containerruntime.ResourceKindWorkspaceVolume, LogicalID: claim.LogicalID,
 				ProviderID: expectedName, ConversationID: claim.ConversationID,
 			})
+			workspaceClaims[claim.ConversationID] = struct{}{}
 		}
 	}
-	return claims, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	// A persistent workspace outlives its container lifecycle record. Keep a
+	// control-plane claim for every persistent container conversation so the
+	// orphan scanner cannot delete a deliberately retained named volume between
+	// container deletion and recreation.
+	persistentRows, err := db.QueryContext(ctx, `
+		SELECT id
+		FROM conversations
+		WHERE runtime_mode = ? AND workspace_persistent = 1
+		ORDER BY id
+	`, ConversationRuntimeModeContainer)
+	if err != nil {
+		return nil, fmt.Errorf("list retained workspace claims: %w", err)
+	}
+	defer persistentRows.Close()
+	for persistentRows.Next() {
+		var conversationID string
+		if err := persistentRows.Scan(&conversationID); err != nil {
+			return nil, err
+		}
+		if _, exists := workspaceClaims[conversationID]; exists {
+			continue
+		}
+		runtimeID := containerruntime.RuntimeID("conversation-" + conversationID)
+		claims = append(claims, containerruntime.ManagedResourceClaim{
+			Kind:           containerruntime.ResourceKindWorkspaceVolume,
+			LogicalID:      string(runtimeID),
+			ProviderID:     containerruntime.WorkspaceVolumeName(runtimeID),
+			ConversationID: conversationID,
+		})
+	}
+	return claims, persistentRows.Err()
 }
 
 func (db *DB) DiscoverResourceTombstone(ctx context.Context, resource containerruntime.ManagedResource, now time.Time) (containerruntime.ResourceTombstone, bool, error) {
