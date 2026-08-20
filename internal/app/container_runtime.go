@@ -12,16 +12,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, error) {
+func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, error) {
 	if cfg == nil || !cfg.Container.Enabled {
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil
 	}
 	manager, err := containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{
 		OwnerID:          strings.TrimSpace(cfg.Container.OwnerID),
 		OperationTimeout: time.Duration(cfg.Container.CreateTimeoutSeconds) * time.Second,
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	initializer, err := containerruntime.NewInitializer(manager, db, containerruntime.InitializerOptions{
 		Workers:       cfg.Container.InitializerWorkers,
@@ -30,13 +30,19 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 	})
 	if err != nil {
 		_ = manager.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	controller, err := containerruntime.NewLifecycleController(manager, db)
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
+	}
+	orphanScanner, err := containerruntime.NewOrphanScanner(manager, db, containerruntime.OrphanScannerOptions{})
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, nil, err
 	}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = initializer.Recover(recoverCtx)
@@ -50,6 +56,10 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 	if err != nil {
 		logger.Warn("恢复并对账对话容器生命周期未全部成功", zap.Error(err))
 	}
+	orphanCtx, orphanCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	orphanReport, orphanErr := orphanScanner.Reconcile(orphanCtx)
+	orphanCancel()
+	logContainerOrphanScan(logger, orphanReport, orphanErr)
 	logger.Info("对话容器后台初始化器已启用",
 		zap.Int("workers", cfg.Container.InitializerWorkers),
 		zap.Int("queueCapacity", cfg.Container.QueueCapacity),
@@ -59,7 +69,22 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		zap.String("toolInventoryDigest", cfg.Container.ToolInventoryDigest),
 		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
-	return initializer, manager, controller, nil
+	return initializer, manager, controller, orphanScanner, nil
+}
+
+func logContainerOrphanScan(logger *zap.Logger, report containerruntime.OrphanScanReport, err error) {
+	fields := []zap.Field{
+		zap.Int("observed", report.Observed), zap.Int("retained", report.Retained),
+		zap.Int("discovered", report.Discovered), zap.Int("attempted", report.Attempted),
+		zap.Int("deleted", report.Deleted), zap.Int("missing", report.Missing), zap.Int("failed", report.Failed),
+	}
+	if err != nil {
+		logger.Warn("对账所有者标签孤儿资源未全部成功", append(fields, zap.Error(err))...)
+		return
+	}
+	if report.Discovered > 0 || report.Attempted > 0 {
+		logger.Info("对账所有者标签孤儿资源完成", fields...)
+	}
 }
 
 // conversationContainerSpec converts trusted configuration into the immutable

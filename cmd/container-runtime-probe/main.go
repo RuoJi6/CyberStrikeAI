@@ -21,6 +21,7 @@ type probeResult struct {
 	Initialization *containerruntime.InitializationRecord `json:"initialization,omitempty"`
 	Created        *containerruntime.Runtime              `json:"created_runtime,omitempty"`
 	Lifecycle      *lifecycleProbeResult                  `json:"lifecycle,omitempty"`
+	OrphanScan     *containerruntime.OrphanScanReport     `json:"orphan_scan,omitempty"`
 	Error          string                                 `json:"error,omitempty"`
 }
 
@@ -49,6 +50,7 @@ func run() int {
 	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
 	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
 	exerciseLifecycle := flag.Bool("exercise-lifecycle", false, "after creation, start, stop, rebuild, restart, restop and delete the runtime")
+	scanOrphans := flag.Bool("scan-orphans", false, "scan and delete only resources carrying this probe owner id")
 	inventoryFile := flag.String("inventory-file", "", "trusted tool inventory JSON for readiness validation")
 	inventoryDigest := flag.String("inventory-digest", "", "expected sha256 digest of the tool inventory JSON")
 	requiredPlatforms := flag.String("require-platforms", "", "comma-separated platforms required in the remote manifest")
@@ -64,7 +66,7 @@ func run() int {
 	var manager *containerruntime.DockerManager
 	var closeInspector func() error
 	var err error
-	if strings.TrimSpace(*createRuntimeID) != "" {
+	if strings.TrimSpace(*createRuntimeID) != "" || *scanOrphans {
 		manager, err = containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{OwnerID: strings.TrimSpace(*ownerID)})
 		if err != nil {
 			return writeResult(probeResult{Error: err.Error()}, 1)
@@ -87,6 +89,22 @@ func run() int {
 	if err != nil {
 		result.Error = err.Error()
 		return writeResult(result, 1)
+	}
+	if *scanOrphans {
+		scanner, scannerErr := containerruntime.NewOrphanScanner(manager, newProbeOrphanStore(), containerruntime.OrphanScannerOptions{
+			RetryBase: time.Millisecond,
+			RetryMax:  time.Second,
+		})
+		if scannerErr != nil {
+			result.Error = scannerErr.Error()
+			return writeResult(result, 1)
+		}
+		report, scanErr := scanner.Reconcile(ctx)
+		result.OrphanScan = &report
+		if scanErr != nil {
+			result.Error = scanErr.Error()
+			return writeResult(result, 1)
+		}
 	}
 	if strings.TrimSpace(*repository) == "" && strings.TrimSpace(*digest) == "" && strings.TrimSpace(*platform) == "" {
 		return writeResult(result, 0)

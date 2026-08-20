@@ -49,6 +49,27 @@ CREATE TABLE IF NOT EXISTS conversation_container_runtimes (
 	CHECK (lifecycle_state IN ('idle', 'in_progress', 'failed'))
 );`
 
+const createContainerResourceTombstonesTable = `
+CREATE TABLE IF NOT EXISTS container_resource_tombstones (
+	resource_kind TEXT NOT NULL,
+	logical_id TEXT NOT NULL,
+	provider_id TEXT NOT NULL,
+	resource_name TEXT NOT NULL,
+	conversation_id TEXT NOT NULL,
+	resource_created_at DATETIME,
+	status TEXT NOT NULL DEFAULT 'pending',
+	attempt INTEGER NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	discovered_at DATETIME NOT NULL,
+	last_attempt_at DATETIME,
+	next_retry_at DATETIME,
+	completed_at DATETIME,
+	updated_at DATETIME NOT NULL,
+	PRIMARY KEY (resource_kind, provider_id),
+	CHECK (resource_kind IN ('agent-runtime', 'conversation-network', 'workspace-volume')),
+	CHECK (status IN ('pending', 'deleting', 'failed', 'completed'))
+);`
+
 func (db *DB) initContainerRuntimeTables() error {
 	if _, err := db.Exec(createConversationContainerRuntimesTable); err != nil {
 		return err
@@ -56,7 +77,13 @@ func (db *DB) initContainerRuntimeTables() error {
 	if err := db.ensureContainerRuntimeColumns(); err != nil {
 		return err
 	}
-	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_container_runtimes_status ON conversation_container_runtimes(initialization_status, updated_at)`)
+	if _, err := db.Exec(createContainerResourceTombstonesTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_container_runtimes_status ON conversation_container_runtimes(initialization_status, updated_at)`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_container_resource_tombstones_retry ON container_resource_tombstones(status, next_retry_at, updated_at)`)
 	return err
 }
 

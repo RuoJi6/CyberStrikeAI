@@ -20,6 +20,7 @@ const (
 	LabelRuntimeID      = "com.cyberstrike.runtime-id"
 	LabelConversationID = "com.cyberstrike.conversation-id"
 	LabelResourceKind   = "com.cyberstrike.resource-kind"
+	LabelResourceID     = "com.cyberstrike.resource-id"
 	LabelImageDigest    = "com.cyberstrike.image-digest"
 	LabelImagePlatform  = "com.cyberstrike.image-platform"
 	LabelSpecDigest     = "com.cyberstrike.spec-digest"
@@ -52,6 +53,15 @@ type dockerCreationAPI interface {
 	ContainerStatPath(context.Context, string, mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error)
 }
 
+type dockerManagedResourceAPI interface {
+	NetworkList(context.Context, mobyclient.NetworkListOptions) (mobyclient.NetworkListResult, error)
+	NetworkInspect(context.Context, string, mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error)
+	NetworkRemove(context.Context, string, mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error)
+	VolumeList(context.Context, mobyclient.VolumeListOptions) (mobyclient.VolumeListResult, error)
+	VolumeInspect(context.Context, string, mobyclient.VolumeInspectOptions) (mobyclient.VolumeInspectResult, error)
+	VolumeRemove(context.Context, string, mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error)
+}
+
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
 	OwnerID          string
@@ -64,6 +74,7 @@ type DockerManagerOptions struct {
 type DockerManager struct {
 	*DockerInspector
 	api              dockerCreationAPI
+	resourceAPI      dockerManagedResourceAPI
 	ownerID          string
 	operationTimeout time.Duration
 }
@@ -97,7 +108,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 		return nil, fmt.Errorf("%w: operation timeout must be positive", ErrInvalidSpecification)
 	}
 	inspector := newDockerInspector(api)
-	return &DockerManager{DockerInspector: inspector, api: api, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	resourceAPI, _ := api.(dockerManagedResourceAPI)
+	return &DockerManager{DockerInspector: inspector, api: api, resourceAPI: resourceAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {
