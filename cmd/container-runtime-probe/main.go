@@ -17,6 +17,7 @@ type probeResult struct {
 	Manifest     *containerruntime.ImageInspection `json:"manifest,omitempty"`
 	LocalImage   *containerruntime.ImageInspection `json:"local_image,omitempty"`
 	RuntimeImage *containerruntime.ImageInspection `json:"runtime_image,omitempty"`
+	Created      *containerruntime.Runtime         `json:"created_runtime,omitempty"`
 	Error        string                            `json:"error,omitempty"`
 }
 
@@ -29,6 +30,9 @@ func run() int {
 	digest := flag.String("digest", "", "expected sha256 manifest digest")
 	platform := flag.String("platform", "", "expected linux platform")
 	containerID := flag.String("container", "", "optional provider container ID to verify")
+	createRuntimeID := flag.String("create-runtime-id", "", "diagnostic: create a stopped runtime with this system ID")
+	conversationID := flag.String("conversation-id", "", "conversation ID for diagnostic runtime creation")
+	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
 	requiredPlatforms := flag.String("require-platforms", "", "comma-separated platforms required in the remote manifest")
 	skipManifest := flag.Bool("skip-manifest", false, "diagnostic only: skip remote registry manifest inspection")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall probe timeout")
@@ -37,13 +41,29 @@ func run() int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	inspector, err := containerruntime.NewDockerInspectorFromEnvironment()
-	if err != nil {
-		return writeResult(probeResult{Error: err.Error()}, 1)
+	var inspector containerruntime.RuntimeInspector
+	var creator containerruntime.RuntimeCreator
+	var closeInspector func() error
+	if strings.TrimSpace(*createRuntimeID) != "" {
+		manager, err := containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{OwnerID: strings.TrimSpace(*ownerID)})
+		if err != nil {
+			return writeResult(probeResult{Error: err.Error()}, 1)
+		}
+		inspector = manager
+		creator = manager
+		closeInspector = manager.Close
+	} else {
+		dockerInspector, err := containerruntime.NewDockerInspectorFromEnvironment()
+		if err != nil {
+			return writeResult(probeResult{Error: err.Error()}, 1)
+		}
+		inspector = dockerInspector
+		closeInspector = dockerInspector.Close
 	}
-	defer inspector.Close()
+	defer closeInspector()
 
 	result := probeResult{}
+	var err error
 	result.Engine, err = inspector.EngineInfo(ctx)
 	if err != nil {
 		result.Error = err.Error()
@@ -89,7 +109,42 @@ func run() int {
 		}
 		result.RuntimeImage = &verified
 	}
+	if creator != nil {
+		spec := diagnosticRuntimeSpec(strings.TrimSpace(*createRuntimeID), strings.TrimSpace(*conversationID), image)
+		created, createErr := creator.Create(ctx, spec)
+		if createErr != nil {
+			result.Error = createErr.Error()
+			return writeResult(result, 1)
+		}
+		result.Created = &created
+	}
 	return writeResult(result, 0)
+}
+
+func diagnosticRuntimeSpec(runtimeID, conversationID string, image containerruntime.ImageReference) containerruntime.RuntimeSpec {
+	return containerruntime.RuntimeSpec{
+		ID:             containerruntime.RuntimeID(runtimeID),
+		ConversationID: conversationID,
+		Image:          image,
+		Resources: containerruntime.ResourceLimits{
+			NanoCPUs:          250_000_000,
+			MemoryBytes:       64 << 20,
+			PIDs:              32,
+			NoFileSoft:        256,
+			NoFileHard:        512,
+			WorkspaceBytes:    64 << 20,
+			MaxConcurrentExec: 1,
+		},
+		Security: containerruntime.SecurityProfile{
+			ReadOnlyRootFS:      true,
+			NoNewPrivileges:     true,
+			DropAllCapabilities: true,
+			NetworkMode:         containerruntime.NetworkNone,
+			SeccompProfile:      "default",
+			TmpfsBytes:          8 << 20,
+		},
+		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+	}
 }
 
 func splitPlatforms(value string) []string {

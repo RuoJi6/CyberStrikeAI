@@ -129,6 +129,7 @@ type Runtime struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 	LastError      string
+	Warnings       []string
 }
 
 type StopOptions struct {
@@ -152,6 +153,13 @@ type RuntimeInspector interface {
 	InspectManifest(ctx context.Context, image ImageReference) (ImageInspection, error)
 	InspectLocalImage(ctx context.Context, image ImageReference) (ImageInspection, error)
 	VerifyRuntimeImage(ctx context.Context, providerID string, image ImageReference) (ImageInspection, error)
+}
+
+// RuntimeCreator is the accepted phase-1 creation slice. It deliberately does
+// not expose start/stop mutations until their individual safety checks land.
+type RuntimeCreator interface {
+	RuntimeInspector
+	Create(ctx context.Context, spec RuntimeSpec) (Runtime, error)
 }
 
 // RuntimeManager is the only lifecycle boundary the application may use for

@@ -24,6 +24,9 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if strings.TrimSpace(spec.ConversationID) == "" {
 		return invalidSpec("conversation id is required")
 	}
+	if !generatedNamePattern.MatchString(spec.ConversationID) {
+		return invalidSpec("conversation id contains unsupported characters")
+	}
 	if err := ValidateImageReference(spec.Image); err != nil {
 		return err
 	}
