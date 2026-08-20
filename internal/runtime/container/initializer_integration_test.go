@@ -14,12 +14,28 @@ import (
 )
 
 type blockingRuntimeCreator struct {
-	mu            sync.Mutex
-	calls         int
-	failRemaining int
-	started       chan struct{}
-	release       chan struct{}
-	startOnce     sync.Once
+	mu                     sync.Mutex
+	calls                  int
+	failRemaining          int
+	readinessCalls         int
+	readinessFailRemaining int
+	started                chan struct{}
+	release                chan struct{}
+	startOnce              sync.Once
+}
+
+func (f *blockingRuntimeCreator) ValidateReadiness(_ context.Context, _ containerruntime.Runtime, spec containerruntime.RuntimeSpec) (containerruntime.ReadinessReport, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readinessCalls++
+	if f.readinessFailRemaining > 0 {
+		f.readinessFailRemaining--
+		return containerruntime.ReadinessReport{}, errors.New("synthetic readiness failure")
+	}
+	return containerruntime.ReadinessReport{
+		InventoryDigest: spec.Readiness.InventoryDigest,
+		ToolCount:       len(spec.Readiness.Inventory.Tools),
+	}, nil
 }
 
 func (f *blockingRuntimeCreator) EngineInfo(context.Context) (containerruntime.EngineInfo, error) {
@@ -72,6 +88,60 @@ func (f *blockingRuntimeCreator) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
+}
+
+func (f *blockingRuntimeCreator) readinessCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readinessCalls
+}
+
+func TestInitializerValidatesReadinessAndRetriesWithoutRecreating(t *testing.T) {
+	db, conversationID := newInitializerDB(t)
+	creator := &blockingRuntimeCreator{started: make(chan struct{}), readinessFailRemaining: 1}
+	initializer := newTestInitializer(t, creator, db)
+	spec := initializerReadinessSpec(conversationID)
+	if _, err := initializer.EnsureAsync(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	failed := waitReadinessStatus(t, db, conversationID, containerruntime.ReadinessFailed)
+	if failed.Status != containerruntime.InitializationCreated || failed.ReadinessError != "synthetic readiness failure" || creator.callCount() != 1 || creator.readinessCallCount() != 1 {
+		t.Fatalf("failed readiness = %#v, create calls = %d, readiness calls = %d", failed, creator.callCount(), creator.readinessCallCount())
+	}
+	if _, err := initializer.RetryAsync(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	ready := waitReadinessStatus(t, db, conversationID, containerruntime.ReadinessReady)
+	if ready.Attempt != 1 || ready.InventoryDigest != spec.Readiness.InventoryDigest || ready.ToolCount != 1 || creator.callCount() != 1 || creator.readinessCallCount() != 2 {
+		t.Fatalf("retried readiness = %#v, create calls = %d, readiness calls = %d", ready, creator.callCount(), creator.readinessCallCount())
+	}
+}
+
+func TestInitializerRecoversInterruptedReadinessWithoutRecreating(t *testing.T) {
+	db, conversationID := newInitializerDB(t)
+	spec := initializerReadinessSpec(conversationID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversationID); err != nil || !claimed {
+		t.Fatalf("claim creation = %v, %v", claimed, err)
+	}
+	runtime := containerruntime.Runtime{ID: spec.ID, ConversationID: conversationID, ProviderID: "provider-recovery", Status: containerruntime.StatusStopped}
+	if _, err := db.Complete(context.Background(), conversationID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.ClaimReadiness(context.Background(), conversationID); err != nil || !claimed {
+		t.Fatalf("claim readiness = %v, %v", claimed, err)
+	}
+	creator := &blockingRuntimeCreator{started: make(chan struct{})}
+	initializer := newTestInitializer(t, creator, db)
+	if err := initializer.Recover(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ready := waitReadinessStatus(t, db, conversationID, containerruntime.ReadinessReady)
+	if ready.Attempt != 1 || creator.callCount() != 0 || creator.readinessCallCount() != 1 {
+		t.Fatalf("recovered readiness = %#v, create calls = %d, readiness calls = %d", ready, creator.callCount(), creator.readinessCallCount())
+	}
 }
 
 func TestInitializerReturnsBeforeDockerAndDeduplicates(t *testing.T) {
@@ -265,6 +335,21 @@ func waitInitializationStatus(t *testing.T, db *database.DB, conversationID stri
 	return containerruntime.InitializationRecord{}
 }
 
+func waitReadinessStatus(t *testing.T, db *database.DB, conversationID string, expected containerruntime.ReadinessStatus) containerruntime.InitializationRecord {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		record, err := db.GetContainerInitialization(context.Background(), conversationID)
+		if err == nil && record.ReadinessStatus == expected {
+			return record
+		}
+		time.Sleep(time.Millisecond)
+	}
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	t.Fatalf("readiness did not reach %s: %#v, %v", expected, record, err)
+	return containerruntime.InitializationRecord{}
+}
+
 func initializerSpec(conversationID string) containerruntime.RuntimeSpec {
 	return containerruntime.RuntimeSpec{
 		ID:             containerruntime.RuntimeID("runtime-" + conversationID),
@@ -285,4 +370,21 @@ func initializerSpec(conversationID string) containerruntime.RuntimeSpec {
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
 	}
+}
+
+func initializerReadinessSpec(conversationID string) containerruntime.RuntimeSpec {
+	spec := initializerSpec(conversationID)
+	spec.Readiness = containerruntime.ReadinessPolicy{
+		Enabled:         true,
+		InventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Inventory: containerruntime.ToolInventory{
+			SchemaVersion: containerruntime.ToolInventorySchemaVersion,
+			ImageDigest:   spec.Image.Digest,
+			ImagePlatform: spec.Image.Platform,
+			Tools: []containerruntime.ToolInventoryEntry{
+				{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
+			},
+		},
+	}
+	return spec
 }

@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -11,6 +12,123 @@ import (
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
 )
+
+func TestContainerInitializationReadinessLifecycleRetryAndRecovery(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, err := db.CreateConversation("readiness lifecycle", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseReadinessRuntimeSpec(conversation.ID)
+	record, enqueued, err := db.Queue(context.Background(), spec, false)
+	if err != nil || !enqueued || record.ReadinessStatus != containerruntime.ReadinessPending {
+		t.Fatalf("queue readiness = %#v, %v, %v", record, enqueued, err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim creation = %v, %v", claimed, err)
+	}
+	runtime := containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-readiness", Status: containerruntime.StatusStopped}
+	if _, err := db.Complete(context.Background(), conversation.ID, runtime); err != nil {
+		t.Fatal(err)
+	}
+	record, claimed, err := db.ClaimReadiness(context.Background(), conversation.ID)
+	if err != nil || !claimed || record.ReadinessStatus != containerruntime.ReadinessValidating || record.ReadinessStartedAt == nil {
+		t.Fatalf("claim readiness = %#v, %v, %v", record, claimed, err)
+	}
+	record, err = db.FailReadiness(context.Background(), conversation.ID, "missing /bin/sh")
+	if err != nil || record.Status != containerruntime.InitializationCreated || record.ReadinessStatus != containerruntime.ReadinessFailed || record.ReadinessError == "" || record.ReadinessCompletedAt == nil {
+		t.Fatalf("fail readiness = %#v, %v", record, err)
+	}
+	record, enqueued, err = db.Queue(context.Background(), spec, true)
+	if err != nil || !enqueued || record.Status != containerruntime.InitializationCreated || record.ReadinessStatus != containerruntime.ReadinessPending || record.ProviderID != runtime.ProviderID || record.Attempt != 1 {
+		t.Fatalf("retry readiness = %#v, %v, %v", record, enqueued, err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || claimed {
+		t.Fatalf("readiness retry recreated container = %v, %v", claimed, err)
+	}
+	if _, claimed, err := db.ClaimReadiness(context.Background(), conversation.ID); err != nil || !claimed {
+		t.Fatalf("reclaim readiness = %v, %v", claimed, err)
+	}
+	record, err = db.Ready(context.Background(), conversation.ID, containerruntime.ReadinessReport{
+		InventoryDigest: spec.Readiness.InventoryDigest,
+		ToolCount:       len(spec.Readiness.Inventory.Tools),
+	})
+	if err != nil || record.ReadinessStatus != containerruntime.ReadinessReady || record.InventoryDigest != spec.Readiness.InventoryDigest || record.ToolCount != 1 || record.ReadinessCompletedAt == nil {
+		t.Fatalf("ready = %#v, %v", record, err)
+	}
+	if _, enqueued, err := db.Queue(context.Background(), spec, true); err != nil || enqueued {
+		t.Fatalf("ready retry = %v, %v", enqueued, err)
+	}
+
+	interruptedConversation, err := db.CreateConversation("readiness interrupted", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	interruptedSpec := databaseReadinessRuntimeSpec(interruptedConversation.ID)
+	if _, _, err := db.Queue(context.Background(), interruptedSpec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), interruptedConversation.ID); err != nil || !claimed {
+		t.Fatalf("claim interrupted creation = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(context.Background(), interruptedConversation.ID, containerruntime.Runtime{ID: interruptedSpec.ID, ProviderID: "provider-interrupted", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.ClaimReadiness(context.Background(), interruptedConversation.ID); err != nil || !claimed {
+		t.Fatalf("claim interrupted readiness = %v, %v", claimed, err)
+	}
+	recovered, err := db.RecoverInterrupted(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recovered) != 1 || recovered[0].ConversationID != interruptedConversation.ID || recovered[0].Status != containerruntime.InitializationCreated || recovered[0].ReadinessStatus != containerruntime.ReadinessPending || recovered[0].ReadinessStartedAt != nil {
+		t.Fatalf("recovered readiness = %#v", recovered)
+	}
+}
+
+func TestContainerRuntimeTableMigratesPreReadinessSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pre-readiness.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`CREATE TABLE conversation_container_runtimes (
+		conversation_id TEXT PRIMARY KEY, runtime_id TEXT NOT NULL UNIQUE,
+		initialization_status TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0,
+		provider_id TEXT NOT NULL DEFAULT '', runtime_status TEXT NOT NULL DEFAULT '',
+		image_digest TEXT NOT NULL, image_platform TEXT NOT NULL, spec_json TEXT NOT NULL,
+		last_error TEXT NOT NULL DEFAULT '', requested_at DATETIME NOT NULL,
+		started_at DATETIME, completed_at DATETIME, updated_at DATETIME NOT NULL
+	)`)
+	if closeErr := raw.Close(); err != nil || closeErr != nil {
+		t.Fatalf("create old schema: %v, close: %v", err, closeErr)
+	}
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`PRAGMA table_info(conversation_container_runtimes)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue interface{}
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	for _, name := range []string{"readiness_status", "readiness_error", "inventory_digest", "tool_count", "readiness_started_at", "readiness_completed_at"} {
+		if !columns[name] {
+			t.Fatalf("migration did not add %s: %#v", name, columns)
+		}
+	}
+}
 
 func TestContainerInitializationStoreLifecycleAndCascade(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
@@ -194,4 +312,21 @@ func databaseRuntimeSpec(conversationID string) containerruntime.RuntimeSpec {
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
 	}
+}
+
+func databaseReadinessRuntimeSpec(conversationID string) containerruntime.RuntimeSpec {
+	spec := databaseRuntimeSpec(conversationID)
+	spec.Readiness = containerruntime.ReadinessPolicy{
+		Enabled:         true,
+		InventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Inventory: containerruntime.ToolInventory{
+			SchemaVersion: containerruntime.ToolInventorySchemaVersion,
+			ImageDigest:   spec.Image.Digest,
+			ImagePlatform: spec.Image.Platform,
+			Tools: []containerruntime.ToolInventoryEntry{
+				{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
+			},
+		},
+	}
+	return spec
 }

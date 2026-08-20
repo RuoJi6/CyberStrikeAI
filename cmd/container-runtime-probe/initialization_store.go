@@ -48,6 +48,18 @@ func (s *probeInitializationStore) Queue(ctx context.Context, spec containerrunt
 		if !reflect.DeepEqual(record.Spec, spec) {
 			return record, false, fmt.Errorf("%w: probe runtime specification is immutable", containerruntime.ErrRuntimeStateConflict)
 		}
+		if retryFailed && record.Status == containerruntime.InitializationCreated && record.ReadinessStatus == containerruntime.ReadinessFailed {
+			now := time.Now().UTC()
+			record.ReadinessStatus = containerruntime.ReadinessPending
+			record.ReadinessError = ""
+			record.InventoryDigest = ""
+			record.ToolCount = 0
+			record.ReadinessStartedAt = nil
+			record.ReadinessCompletedAt = nil
+			record.UpdatedAt = now
+			s.records[spec.ConversationID] = record
+			return record, true, nil
+		}
 		if retryFailed && record.Status == containerruntime.InitializationFailed {
 			now := time.Now().UTC()
 			record.Status = containerruntime.InitializationQueued
@@ -57,6 +69,12 @@ func (s *probeInitializationStore) Queue(ctx context.Context, spec containerrunt
 			record.RequestedAt = now
 			record.StartedAt = nil
 			record.CompletedAt = nil
+			record.ReadinessStatus = readinessStatus(spec)
+			record.ReadinessError = ""
+			record.InventoryDigest = ""
+			record.ToolCount = 0
+			record.ReadinessStartedAt = nil
+			record.ReadinessCompletedAt = nil
 			record.UpdatedAt = now
 			s.records[spec.ConversationID] = record
 			return record, true, nil
@@ -65,17 +83,67 @@ func (s *probeInitializationStore) Queue(ctx context.Context, spec containerrunt
 	}
 	now := time.Now().UTC()
 	record := containerruntime.InitializationRecord{
-		ConversationID: spec.ConversationID,
-		RuntimeID:      spec.ID,
-		Status:         containerruntime.InitializationQueued,
-		ImageDigest:    spec.Image.Digest,
-		ImagePlatform:  spec.Image.Platform,
-		Spec:           spec,
-		RequestedAt:    now,
-		UpdatedAt:      now,
+		ConversationID:  spec.ConversationID,
+		RuntimeID:       spec.ID,
+		Status:          containerruntime.InitializationQueued,
+		ImageDigest:     spec.Image.Digest,
+		ImagePlatform:   spec.Image.Platform,
+		ReadinessStatus: readinessStatus(spec),
+		Spec:            spec,
+		RequestedAt:     now,
+		UpdatedAt:       now,
 	}
 	s.records[spec.ConversationID] = record
 	return record, true, nil
+}
+
+func (s *probeInitializationStore) ClaimReadiness(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, bool, error) {
+	if err := contextError(ctx); err != nil {
+		return containerruntime.InitializationRecord{}, false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.records[conversationID]
+	if !ok {
+		return record, false, fmt.Errorf("%w: probe container initialization", containerruntime.ErrNotFound)
+	}
+	if record.Status != containerruntime.InitializationCreated || record.ReadinessStatus != containerruntime.ReadinessPending {
+		return record, false, nil
+	}
+	now := time.Now().UTC()
+	record.ReadinessStatus = containerruntime.ReadinessValidating
+	record.ReadinessError = ""
+	record.ReadinessStartedAt = &now
+	record.ReadinessCompletedAt = nil
+	record.UpdatedAt = now
+	s.records[conversationID] = record
+	return record, true, nil
+}
+
+func (s *probeInitializationStore) Ready(ctx context.Context, conversationID string, report containerruntime.ReadinessReport) (containerruntime.InitializationRecord, error) {
+	return s.finish(ctx, conversationID, func(record *containerruntime.InitializationRecord, now time.Time) error {
+		if record.Status != containerruntime.InitializationCreated || record.ReadinessStatus != containerruntime.ReadinessValidating {
+			return fmt.Errorf("%w: cannot complete probe readiness", containerruntime.ErrRuntimeStateConflict)
+		}
+		record.ReadinessStatus = containerruntime.ReadinessReady
+		record.ReadinessError = ""
+		record.InventoryDigest = report.InventoryDigest
+		record.ToolCount = report.ToolCount
+		record.ReadinessCompletedAt = &now
+		return nil
+	})
+}
+
+func (s *probeInitializationStore) FailReadiness(ctx context.Context, conversationID, message string) (containerruntime.InitializationRecord, error) {
+	return s.finish(ctx, conversationID, func(record *containerruntime.InitializationRecord, now time.Time) error {
+		if record.Status != containerruntime.InitializationCreated || record.ReadinessStatus != containerruntime.ReadinessValidating {
+			return fmt.Errorf("%w: cannot fail probe readiness", containerruntime.ErrRuntimeStateConflict)
+		}
+		record.ReadinessStatus = containerruntime.ReadinessFailed
+		record.ReadinessError = message
+		record.ReadinessCompletedAt = &now
+		return nil
+	})
 }
 
 func (s *probeInitializationStore) Claim(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, bool, error) {
@@ -143,11 +211,25 @@ func (s *probeInitializationStore) RecoverInterrupted(ctx context.Context) ([]co
 			record.UpdatedAt = time.Now().UTC()
 			s.records[conversationID] = record
 		}
-		if record.Status == containerruntime.InitializationQueued {
+		if record.Status == containerruntime.InitializationCreated && record.ReadinessStatus == containerruntime.ReadinessValidating {
+			record.ReadinessStatus = containerruntime.ReadinessPending
+			record.ReadinessStartedAt = nil
+			record.ReadinessCompletedAt = nil
+			record.UpdatedAt = time.Now().UTC()
+			s.records[conversationID] = record
+		}
+		if record.Status == containerruntime.InitializationQueued || (record.Status == containerruntime.InitializationCreated && record.ReadinessStatus == containerruntime.ReadinessPending) {
 			records = append(records, record)
 		}
 	}
 	return records, nil
+}
+
+func readinessStatus(spec containerruntime.RuntimeSpec) containerruntime.ReadinessStatus {
+	if spec.Readiness.Enabled {
+		return containerruntime.ReadinessPending
+	}
+	return containerruntime.ReadinessNotRequired
 }
 
 func (s *probeInitializationStore) finish(ctx context.Context, conversationID string, mutate func(*containerruntime.InitializationRecord, time.Time) error) (containerruntime.InitializationRecord, error) {

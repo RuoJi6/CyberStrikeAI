@@ -32,6 +32,7 @@ type dockerCreationAPI interface {
 	dockerInspectionAPI
 	ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error)
 	ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error)
+	ContainerStatPath(context.Context, string, mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error)
 }
 
 // DockerManagerOptions contains control-plane identity, never request data.

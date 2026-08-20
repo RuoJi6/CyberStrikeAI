@@ -1053,25 +1053,28 @@ type AgentConfig struct {
 // ContainerRuntimeConfig is disabled unless explicitly enabled. Image identity
 // is immutable and resource values are control-plane policy, not request data.
 type ContainerRuntimeConfig struct {
-	Enabled              bool   `yaml:"enabled" json:"enabled"`
-	OwnerID              string `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
-	ImageRepository      string `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
-	ImageDigest          string `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
-	ImagePlatform        string `yaml:"image_platform,omitempty" json:"image_platform,omitempty"`
-	InitializerWorkers   int    `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
-	QueueCapacity        int    `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
-	CreateTimeoutSeconds int    `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
-	NanoCPUs             int64  `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
-	MemoryBytes          int64  `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
-	PIDs                 int64  `yaml:"pids,omitempty" json:"pids,omitempty"`
-	NoFileSoft           uint64 `yaml:"nofile_soft,omitempty" json:"nofile_soft,omitempty"`
-	NoFileHard           uint64 `yaml:"nofile_hard,omitempty" json:"nofile_hard,omitempty"`
-	WorkspaceBytes       int64  `yaml:"workspace_bytes,omitempty" json:"workspace_bytes,omitempty"`
-	TmpfsBytes           int64  `yaml:"tmpfs_bytes,omitempty" json:"tmpfs_bytes,omitempty"`
-	MaxConcurrentExec    int    `yaml:"max_concurrent_exec,omitempty" json:"max_concurrent_exec,omitempty"`
-	MaxQueuedExec        int    `yaml:"max_queued_exec,omitempty" json:"max_queued_exec,omitempty"`
-	LogMaxBytes          int64  `yaml:"log_max_bytes,omitempty" json:"log_max_bytes,omitempty"`
-	LogMaxFiles          int    `yaml:"log_max_files,omitempty" json:"log_max_files,omitempty"`
+	Enabled              bool                           `yaml:"enabled" json:"enabled"`
+	OwnerID              string                         `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
+	ImageRepository      string                         `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
+	ImageDigest          string                         `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
+	ImagePlatform        string                         `yaml:"image_platform,omitempty" json:"image_platform,omitempty"`
+	InitializerWorkers   int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
+	QueueCapacity        int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
+	CreateTimeoutSeconds int                            `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
+	NanoCPUs             int64                          `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
+	MemoryBytes          int64                          `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
+	PIDs                 int64                          `yaml:"pids,omitempty" json:"pids,omitempty"`
+	NoFileSoft           uint64                         `yaml:"nofile_soft,omitempty" json:"nofile_soft,omitempty"`
+	NoFileHard           uint64                         `yaml:"nofile_hard,omitempty" json:"nofile_hard,omitempty"`
+	WorkspaceBytes       int64                          `yaml:"workspace_bytes,omitempty" json:"workspace_bytes,omitempty"`
+	TmpfsBytes           int64                          `yaml:"tmpfs_bytes,omitempty" json:"tmpfs_bytes,omitempty"`
+	MaxConcurrentExec    int                            `yaml:"max_concurrent_exec,omitempty" json:"max_concurrent_exec,omitempty"`
+	MaxQueuedExec        int                            `yaml:"max_queued_exec,omitempty" json:"max_queued_exec,omitempty"`
+	LogMaxBytes          int64                          `yaml:"log_max_bytes,omitempty" json:"log_max_bytes,omitempty"`
+	LogMaxFiles          int                            `yaml:"log_max_files,omitempty" json:"log_max_files,omitempty"`
+	ToolInventoryPath    string                         `yaml:"tool_inventory_path,omitempty" json:"tool_inventory_path,omitempty"`
+	ToolInventoryDigest  string                         `yaml:"tool_inventory_digest,omitempty" json:"tool_inventory_digest,omitempty"`
+	ToolInventory        containerruntime.ToolInventory `yaml:"-" json:"-"`
 }
 
 func (c *ContainerRuntimeConfig) applyDefaults() {
@@ -1129,6 +1132,9 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	if strings.TrimSpace(c.ImageRepository) == "" || strings.TrimSpace(c.ImageDigest) == "" || strings.TrimSpace(c.ImagePlatform) == "" {
 		return fmt.Errorf("container image_repository, image_digest and image_platform are required when enabled")
 	}
+	if strings.TrimSpace(c.ToolInventoryPath) == "" || strings.TrimSpace(c.ToolInventoryDigest) == "" {
+		return fmt.Errorf("container tool_inventory_path and tool_inventory_digest are required when enabled")
+	}
 	if c.InitializerWorkers <= 0 || c.QueueCapacity <= 0 || c.CreateTimeoutSeconds <= 0 {
 		return fmt.Errorf("container initializer_workers, queue_capacity and create_timeout_seconds must be positive")
 	}
@@ -1151,10 +1157,37 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 			NetworkMode: containerruntime.NetworkNone, SeccompProfile: "default", TmpfsBytes: c.TmpfsBytes,
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+		Readiness: containerruntime.ReadinessPolicy{
+			Enabled:         true,
+			InventoryDigest: strings.TrimSpace(c.ToolInventoryDigest),
+			Inventory:       c.ToolInventory,
+		},
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return fmt.Errorf("container runtime policy is invalid: %w", err)
 	}
+	return nil
+}
+
+func (c *ContainerRuntimeConfig) loadToolInventory(configPath string) error {
+	if c == nil || !c.Enabled {
+		return nil
+	}
+	path := strings.TrimSpace(c.ToolInventoryPath)
+	if path == "" {
+		return fmt.Errorf("container.tool_inventory_path is required when enabled")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(filepath.Dir(configPath), path)
+	}
+	path = filepath.Clean(path)
+	inventory, digest, err := containerruntime.LoadToolInventory(path, strings.TrimSpace(c.ToolInventoryDigest))
+	if err != nil {
+		return fmt.Errorf("load container tool inventory: %w", err)
+	}
+	c.ToolInventoryPath = path
+	c.ToolInventoryDigest = digest
+	c.ToolInventory = inventory
 	return nil
 }
 
@@ -1483,6 +1516,9 @@ func Load(path string) (*Config, error) {
 		cfg.Audit.MaxDetailBytes = 8192
 	}
 	cfg.Container.applyDefaults()
+	if err := cfg.Container.loadToolInventory(path); err != nil {
+		return nil, err
+	}
 	if err := cfg.Container.validateEnabled(); err != nil {
 		return nil, err
 	}

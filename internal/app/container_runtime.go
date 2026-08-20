@@ -44,6 +44,8 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		zap.String("imageRepository", cfg.Container.ImageRepository),
 		zap.String("imageDigest", cfg.Container.ImageDigest),
 		zap.String("imagePlatform", cfg.Container.ImagePlatform),
+		zap.String("toolInventoryDigest", cfg.Container.ToolInventoryDigest),
+		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
 	return initializer, manager, nil
 }
@@ -84,6 +86,11 @@ func conversationContainerSpec(cfg *config.Config, conversationID string) (conta
 			TmpfsBytes:          cfg.Container.TmpfsBytes,
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+		Readiness: containerruntime.ReadinessPolicy{
+			Enabled:         true,
+			InventoryDigest: strings.TrimSpace(cfg.Container.ToolInventoryDigest),
+			Inventory:       cfg.Container.ToolInventory,
+		},
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return containerruntime.RuntimeSpec{}, err

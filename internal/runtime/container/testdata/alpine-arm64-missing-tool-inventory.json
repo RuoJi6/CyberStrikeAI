@@ -1,0 +1,1 @@
+{"schemaVersion":1,"imageDigest":"sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce","imagePlatform":"linux/arm64","tools":[{"name":"missing-runtime-tool","path":"/usr/local/bin/cyberstrike-readiness-missing","version":"test-only","category":"readiness-negative-test"}]}

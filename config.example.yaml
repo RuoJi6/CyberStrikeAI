@@ -151,6 +151,8 @@ container:
   max_queued_exec: 8
   log_max_bytes: 10485760 # 每个日志文件 10 MiB
   log_max_files: 3
+  tool_inventory_path: container/tool-inventory.json # 启用时必填；与锁定镜像同版本发布的受信工具清单
+  tool_inventory_digest: "" # 启用时必填；清单文件内容的 sha256:... 摘要
 # 人机协同（HITL）全局白名单：此处列出的工具始终免审批，与对话页「白名单工具（免审批，逗号分隔）」合并为并集；侧栏「应用」可合并写入本列表并立即生效。
 # 非白名单工具在审批方=审计 Agent 时，按会话 HITL 模式选用提示词：
 #   approval → audit_agent_prompt

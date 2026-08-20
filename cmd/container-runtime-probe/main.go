@@ -35,6 +35,8 @@ func run() int {
 	conversationID := flag.String("conversation-id", "", "conversation ID for diagnostic runtime creation")
 	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
 	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
+	inventoryFile := flag.String("inventory-file", "", "trusted tool inventory JSON for readiness validation")
+	inventoryDigest := flag.String("inventory-digest", "", "expected sha256 digest of the tool inventory JSON")
 	requiredPlatforms := flag.String("require-platforms", "", "comma-separated platforms required in the remote manifest")
 	skipManifest := flag.Bool("skip-manifest", false, "diagnostic only: skip remote registry manifest inspection")
 	timeout := flag.Duration("timeout", 20*time.Second, "overall probe timeout")
@@ -80,6 +82,19 @@ func run() int {
 		Digest:     strings.TrimSpace(*digest),
 		Platform:   strings.TrimSpace(*platform),
 	}
+	readiness := containerruntime.ReadinessPolicy{}
+	if strings.TrimSpace(*inventoryFile) != "" || strings.TrimSpace(*inventoryDigest) != "" {
+		if strings.TrimSpace(*inventoryFile) == "" || strings.TrimSpace(*inventoryDigest) == "" {
+			result.Error = "inventory-file and inventory-digest must be provided together"
+			return writeResult(result, 1)
+		}
+		inventory, actualDigest, loadErr := containerruntime.LoadToolInventory(strings.TrimSpace(*inventoryFile), strings.TrimSpace(*inventoryDigest))
+		if loadErr != nil {
+			result.Error = loadErr.Error()
+			return writeResult(result, 1)
+		}
+		readiness = containerruntime.ReadinessPolicy{Enabled: true, InventoryDigest: actualDigest, Inventory: inventory}
+	}
 	if !*skipManifest {
 		inspection, inspectErr := inspector.InspectManifest(ctx, image)
 		if inspectErr != nil {
@@ -112,7 +127,7 @@ func run() int {
 		result.RuntimeImage = &verified
 	}
 	if creator != nil {
-		spec := diagnosticRuntimeSpec(strings.TrimSpace(*createRuntimeID), strings.TrimSpace(*conversationID), image)
+		spec := diagnosticRuntimeSpec(strings.TrimSpace(*createRuntimeID), strings.TrimSpace(*conversationID), image, readiness)
 		if *backgroundCreate {
 			store := newProbeInitializationStore()
 			initializer, initializeErr := containerruntime.NewInitializer(creator, store, containerruntime.InitializerOptions{
@@ -163,7 +178,12 @@ func waitForInitialization(ctx context.Context, initializer *containerruntime.In
 		}
 		switch record.Status {
 		case containerruntime.InitializationCreated:
-			return record, nil
+			switch record.ReadinessStatus {
+			case containerruntime.ReadinessNotRequired, containerruntime.ReadinessReady:
+				return record, nil
+			case containerruntime.ReadinessFailed:
+				return record, fmt.Errorf("container readiness failed: %s", record.ReadinessError)
+			}
 		case containerruntime.InitializationFailed:
 			return record, fmt.Errorf("container initialization failed: %s", record.LastError)
 		}
@@ -175,11 +195,12 @@ func waitForInitialization(ctx context.Context, initializer *containerruntime.In
 	}
 }
 
-func diagnosticRuntimeSpec(runtimeID, conversationID string, image containerruntime.ImageReference) containerruntime.RuntimeSpec {
+func diagnosticRuntimeSpec(runtimeID, conversationID string, image containerruntime.ImageReference, readiness containerruntime.ReadinessPolicy) containerruntime.RuntimeSpec {
 	return containerruntime.RuntimeSpec{
 		ID:             containerruntime.RuntimeID(runtimeID),
 		ConversationID: conversationID,
 		Image:          image,
+		Readiness:      readiness,
 		Resources: containerruntime.ResourceLimits{
 			NanoCPUs:          250_000_000,
 			MemoryBytes:       64 << 20,

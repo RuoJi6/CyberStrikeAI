@@ -1,17 +1,26 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 )
 
 func TestContainerRuntimeConfigDefaultsAndValidation(t *testing.T) {
 	config := ContainerRuntimeConfig{
-		Enabled:         true,
-		OwnerID:         "deployment-01",
-		ImageRepository: "ghcr.io/usestrix/strix-sandbox",
-		ImageDigest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		ImagePlatform:   "linux/arm64",
+		Enabled:             true,
+		OwnerID:             "deployment-01",
+		ImageRepository:     "ghcr.io/usestrix/strix-sandbox",
+		ImageDigest:         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ImagePlatform:       "linux/arm64",
+		ToolInventoryPath:   "inventory.json",
+		ToolInventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ToolInventory:       testContainerToolInventory(),
 	}
 	config.applyDefaults()
 	if err := config.validateEnabled(); err != nil {
@@ -33,14 +42,21 @@ func TestContainerRuntimeConfigFailsClosedWhenEnabled(t *testing.T) {
 		{name: "platform", mutate: func(config *ContainerRuntimeConfig) { config.ImagePlatform = "linux/aarch64" }, want: "canonical"},
 		{name: "negative queue", mutate: func(config *ContainerRuntimeConfig) { config.QueueCapacity = -1 }, want: "queue_capacity"},
 		{name: "nofile", mutate: func(config *ContainerRuntimeConfig) { config.NoFileSoft = 4096; config.NoFileHard = 1024 }, want: "nofile"},
+		{name: "inventory digest", mutate: func(config *ContainerRuntimeConfig) { config.ToolInventoryDigest = "latest" }, want: "inventory digest"},
+		{name: "inventory image", mutate: func(config *ContainerRuntimeConfig) {
+			config.ToolInventory.ImageDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		}, want: "image identity"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := ContainerRuntimeConfig{
 				Enabled: true, OwnerID: "deployment-01",
-				ImageRepository: "ghcr.io/usestrix/strix-sandbox",
-				ImageDigest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-				ImagePlatform:   "linux/arm64",
+				ImageRepository:     "ghcr.io/usestrix/strix-sandbox",
+				ImageDigest:         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				ImagePlatform:       "linux/arm64",
+				ToolInventoryPath:   "inventory.json",
+				ToolInventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+				ToolInventory:       testContainerToolInventory(),
 			}
 			config.applyDefaults()
 			test.mutate(&config)
@@ -49,5 +65,35 @@ func TestContainerRuntimeConfigFailsClosedWhenEnabled(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, test.want)
 			}
 		})
+	}
+}
+
+func TestContainerRuntimeConfigLoadsPinnedInventoryRelativeToConfig(t *testing.T) {
+	directory := t.TempDir()
+	raw := []byte(`{"schemaVersion":1,"imageDigest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","imagePlatform":"linux/arm64","tools":[{"name":"sh","path":"/bin/sh","version":"busybox-1","category":"runtime"}]}`)
+	digest := sha256.Sum256(raw)
+	expected := "sha256:" + hex.EncodeToString(digest[:])
+	if err := os.WriteFile(filepath.Join(directory, "inventory.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := ContainerRuntimeConfig{
+		Enabled: true, ToolInventoryPath: "inventory.json", ToolInventoryDigest: expected,
+	}
+	if err := config.loadToolInventory(filepath.Join(directory, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if config.ToolInventoryDigest != expected || config.ToolInventoryPath != filepath.Join(directory, "inventory.json") || len(config.ToolInventory.Tools) != 1 {
+		t.Fatalf("loaded inventory = %#v", config)
+	}
+}
+
+func testContainerToolInventory() containerruntime.ToolInventory {
+	return containerruntime.ToolInventory{
+		SchemaVersion: containerruntime.ToolInventorySchemaVersion,
+		ImageDigest:   "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ImagePlatform: "linux/arm64",
+		Tools: []containerruntime.ToolInventoryEntry{
+			{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
+		},
 	}
 }

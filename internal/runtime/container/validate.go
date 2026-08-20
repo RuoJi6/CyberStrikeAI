@@ -70,6 +70,9 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if !spec.Workspace.Persistent && strings.TrimSpace(spec.Workspace.VolumeName) != "" {
 		return invalidSpec("ephemeral workspace cannot declare a named volume")
 	}
+	if err := ValidateReadinessPolicy(spec.Readiness, spec.Image); err != nil {
+		return err
+	}
 	return nil
 }
 

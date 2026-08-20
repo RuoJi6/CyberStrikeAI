@@ -14,6 +14,16 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	cfg.Container.ImageRepository = "ghcr.io/usestrix/strix-sandbox"
 	cfg.Container.ImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cfg.Container.ImagePlatform = "linux/arm64"
+	cfg.Container.ToolInventoryPath = "inventory.json"
+	cfg.Container.ToolInventoryDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	cfg.Container.ToolInventory = containerruntime.ToolInventory{
+		SchemaVersion: containerruntime.ToolInventorySchemaVersion,
+		ImageDigest:   cfg.Container.ImageDigest,
+		ImagePlatform: cfg.Container.ImagePlatform,
+		Tools: []containerruntime.ToolInventoryEntry{
+			{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
+		},
+	}
 	spec, err := conversationContainerSpec(cfg, "conversation-01")
 	if err != nil {
 		t.Fatal(err)
@@ -26,5 +36,8 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	}
 	if spec.Resources.MemoryBytes != 512<<20 || spec.Resources.MaxConcurrentExec != 2 || spec.Resources.MaxQueuedExec != 8 || spec.Resources.LogMaxFiles != 3 {
 		t.Fatalf("spec resources = %#v", spec.Resources)
+	}
+	if !spec.Readiness.Enabled || spec.Readiness.InventoryDigest != cfg.Container.ToolInventoryDigest || len(spec.Readiness.Inventory.Tools) != 1 {
+		t.Fatalf("spec readiness = %#v", spec.Readiness)
 	}
 }

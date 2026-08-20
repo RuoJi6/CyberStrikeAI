@@ -21,6 +21,8 @@ type fakeDockerCreationAPI struct {
 	removeErr    error
 	removedID    string
 	removeOpts   mobyclient.ContainerRemoveOptions
+	pathStats    map[string]mobycontainer.PathStat
+	pathStatErrs map[string]error
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -32,6 +34,16 @@ func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, op
 	f.removedID = id
 	f.removeOpts = options
 	return mobyclient.ContainerRemoveResult{}, f.removeErr
+}
+
+func (f *fakeDockerCreationAPI) ContainerStatPath(_ context.Context, _ string, options mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error) {
+	if err := f.pathStatErrs[options.Path]; err != nil {
+		return mobyclient.ContainerStatPathResult{}, err
+	}
+	if stat, ok := f.pathStats[options.Path]; ok {
+		return mobyclient.ContainerStatPathResult{Stat: stat}, nil
+	}
+	return mobyclient.ContainerStatPathResult{Stat: mobycontainer.PathStat{Name: options.Path, Mode: 0o755}}, nil
 }
 
 func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {

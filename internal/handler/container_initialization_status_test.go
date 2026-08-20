@@ -87,8 +87,15 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	}
 	components := spec["components"].(map[string]interface{})
 	schemas := components["schemas"].(map[string]interface{})
-	if _, ok := schemas["ContainerInitialization"]; !ok {
+	initializationSchema, ok := schemas["ContainerInitialization"].(map[string]interface{})
+	if !ok {
 		t.Fatal("ContainerInitialization schema is missing")
+	}
+	properties := initializationSchema["properties"].(map[string]interface{})
+	for _, field := range []string{"readinessStatus", "readinessError", "inventoryDigest", "toolCount", "readinessStartedAt", "readinessCompletedAt"} {
+		if _, ok := properties[field]; !ok {
+			t.Fatalf("ContainerInitialization schema is missing %s", field)
+		}
 	}
 }
 

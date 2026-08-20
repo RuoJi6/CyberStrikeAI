@@ -43,6 +43,7 @@ var (
 	ErrRuntimeStateConflict = errors.New("container runtime state conflict")
 	ErrEngineIncompatible   = errors.New("container engine does not satisfy the security baseline")
 	ErrExecQueueFull        = errors.New("container exec queue is full")
+	ErrRuntimeNotReady      = errors.New("container runtime readiness validation failed")
 )
 
 // EngineInfo is a read-only description of the connected container engine.
@@ -125,6 +126,7 @@ type RuntimeSpec struct {
 	Resources      ResourceLimits
 	Security       SecurityProfile
 	Workspace      WorkspaceSpec
+	Readiness      ReadinessPolicy
 }
 
 // Runtime is the engine-observed state returned to the control plane.
@@ -168,6 +170,12 @@ type RuntimeInspector interface {
 type RuntimeCreator interface {
 	RuntimeInspector
 	Create(ctx context.Context, spec RuntimeSpec) (Runtime, error)
+}
+
+// RuntimeReadinessChecker validates engine-observed state and the trusted
+// image inventory before a created runtime can be exposed as ready.
+type RuntimeReadinessChecker interface {
+	ValidateReadiness(ctx context.Context, runtime Runtime, spec RuntimeSpec) (ReadinessReport, error)
 }
 
 // RuntimeManager is the only lifecycle boundary the application may use for
