@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -19,7 +20,19 @@ type probeResult struct {
 	RuntimeImage   *containerruntime.ImageInspection      `json:"runtime_image,omitempty"`
 	Initialization *containerruntime.InitializationRecord `json:"initialization,omitempty"`
 	Created        *containerruntime.Runtime              `json:"created_runtime,omitempty"`
+	Lifecycle      *lifecycleProbeResult                  `json:"lifecycle,omitempty"`
 	Error          string                                 `json:"error,omitempty"`
+}
+
+type lifecycleProbeResult struct {
+	BeforeStart        containerruntime.Runtime `json:"before_start"`
+	Started            containerruntime.Runtime `json:"started"`
+	Stopped            containerruntime.Runtime `json:"stopped"`
+	Rebuilt            containerruntime.Runtime `json:"rebuilt"`
+	Restarted          containerruntime.Runtime `json:"restarted"`
+	Restopped          containerruntime.Runtime `json:"restopped"`
+	Deleted            bool                     `json:"deleted"`
+	MissingAfterDelete bool                     `json:"missing_after_delete"`
 }
 
 func main() {
@@ -35,6 +48,7 @@ func run() int {
 	conversationID := flag.String("conversation-id", "", "conversation ID for diagnostic runtime creation")
 	ownerID := flag.String("owner-id", "", "control-plane owner ID for diagnostic runtime creation")
 	backgroundCreate := flag.Bool("background-create", false, "create through the bounded asynchronous initializer")
+	exerciseLifecycle := flag.Bool("exercise-lifecycle", false, "after creation, start, stop, rebuild, restart, restop and delete the runtime")
 	inventoryFile := flag.String("inventory-file", "", "trusted tool inventory JSON for readiness validation")
 	inventoryDigest := flag.String("inventory-digest", "", "expected sha256 digest of the tool inventory JSON")
 	requiredPlatforms := flag.String("require-platforms", "", "comma-separated platforms required in the remote manifest")
@@ -47,9 +61,11 @@ func run() int {
 
 	var inspector containerruntime.RuntimeInspector
 	var creator containerruntime.RuntimeCreator
+	var manager *containerruntime.DockerManager
 	var closeInspector func() error
+	var err error
 	if strings.TrimSpace(*createRuntimeID) != "" {
-		manager, err := containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{OwnerID: strings.TrimSpace(*ownerID)})
+		manager, err = containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{OwnerID: strings.TrimSpace(*ownerID)})
 		if err != nil {
 			return writeResult(probeResult{Error: err.Error()}, 1)
 		}
@@ -67,7 +83,6 @@ func run() int {
 	defer closeInspector()
 
 	result := probeResult{}
-	var err error
 	result.Engine, err = inspector.EngineInfo(ctx)
 	if err != nil {
 		result.Error = err.Error()
@@ -164,8 +179,73 @@ func run() int {
 			}
 			result.Created = &created
 		}
+		if *exerciseLifecycle {
+			lifecycle, lifecycleErr := exerciseRuntimeLifecycle(ctx, manager, spec)
+			result.Lifecycle = &lifecycle
+			if lifecycleErr != nil {
+				result.Error = lifecycleErr.Error()
+				return writeResult(result, 1)
+			}
+		}
+	} else if *exerciseLifecycle {
+		result.Error = "exercise-lifecycle requires create-runtime-id"
+		return writeResult(result, 1)
 	}
 	return writeResult(result, 0)
+}
+
+func exerciseRuntimeLifecycle(ctx context.Context, manager containerruntime.RuntimeManager, spec containerruntime.RuntimeSpec) (lifecycleProbeResult, error) {
+	var result lifecycleProbeResult
+	if manager == nil {
+		return result, fmt.Errorf("%w: lifecycle manager is not configured", containerruntime.ErrEngineUnavailable)
+	}
+	var err error
+	result.BeforeStart, err = manager.Inspect(ctx, spec.ID)
+	if err != nil {
+		return result, fmt.Errorf("inspect before start: %w", err)
+	}
+	result.Started, err = manager.Start(ctx, spec.ID)
+	if err != nil {
+		return result, fmt.Errorf("start: %w", err)
+	}
+	result.Stopped, err = manager.Stop(ctx, spec.ID, containerruntime.StopOptions{})
+	if err != nil {
+		return result, fmt.Errorf("stop: %w", err)
+	}
+	result.Rebuilt, err = manager.Rebuild(ctx, spec.ID, containerruntime.RebuildOptions{Spec: spec})
+	if err != nil {
+		return result, fmt.Errorf("rebuild: %w", err)
+	}
+	if spec.Readiness.Enabled {
+		checker, ok := manager.(containerruntime.RuntimeReadinessChecker)
+		if !ok {
+			return result, fmt.Errorf("%w: manager has no readiness checker", containerruntime.ErrRuntimeNotReady)
+		}
+		if _, err := checker.ValidateReadiness(ctx, result.Rebuilt, spec); err != nil {
+			return result, fmt.Errorf("validate rebuilt runtime: %w", err)
+		}
+	}
+	result.Restarted, err = manager.Start(ctx, spec.ID)
+	if err != nil {
+		return result, fmt.Errorf("restart rebuilt runtime: %w", err)
+	}
+	result.Restopped, err = manager.Stop(ctx, spec.ID, containerruntime.StopOptions{})
+	if err != nil {
+		return result, fmt.Errorf("restop rebuilt runtime: %w", err)
+	}
+	if err := manager.Delete(ctx, spec.ID, containerruntime.DeleteOptions{}); err != nil {
+		return result, fmt.Errorf("delete: %w", err)
+	}
+	result.Deleted = true
+	_, err = manager.Inspect(ctx, spec.ID)
+	if errors.Is(err, containerruntime.ErrNotFound) {
+		result.MissingAfterDelete = true
+		return result, nil
+	}
+	if err != nil {
+		return result, fmt.Errorf("inspect after delete: %w", err)
+	}
+	return result, fmt.Errorf("%w: runtime still exists after deletion", containerruntime.ErrRuntimeStateConflict)
 }
 
 func waitForInitialization(ctx context.Context, initializer *containerruntime.Initializer, conversationID string) (containerruntime.InitializationRecord, error) {

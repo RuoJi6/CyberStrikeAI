@@ -2,6 +2,9 @@ package container
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -140,6 +143,16 @@ type Runtime struct {
 	UpdatedAt      time.Time
 	LastError      string
 	Warnings       []string
+	SpecDigest     string
+}
+
+// RuntimeSpecDigest is the stable digest embedded in an immutable container
+// label and compared with the durable database specification during every
+// lifecycle operation.
+func RuntimeSpecDigest(spec RuntimeSpec) string {
+	encoded, _ := json.Marshal(spec)
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 type StopOptions struct {
@@ -165,8 +178,8 @@ type RuntimeInspector interface {
 	VerifyRuntimeImage(ctx context.Context, providerID string, image ImageReference) (ImageInspection, error)
 }
 
-// RuntimeCreator is the accepted phase-1 creation slice. It deliberately does
-// not expose start/stop mutations until their individual safety checks land.
+// RuntimeCreator is the narrow creation slice used by the asynchronous
+// initializer. Lifecycle handlers depend on RuntimeManager instead.
 type RuntimeCreator interface {
 	RuntimeInspector
 	Create(ctx context.Context, spec RuntimeSpec) (Runtime, error)

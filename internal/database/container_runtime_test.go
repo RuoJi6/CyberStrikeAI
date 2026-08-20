@@ -123,7 +123,11 @@ func TestContainerRuntimeTableMigratesPreReadinessSchema(t *testing.T) {
 		}
 		columns[name] = true
 	}
-	for _, name := range []string{"readiness_status", "readiness_error", "inventory_digest", "tool_count", "readiness_started_at", "readiness_completed_at"} {
+	for _, name := range []string{
+		"readiness_status", "readiness_error", "inventory_digest", "tool_count", "readiness_started_at", "readiness_completed_at",
+		"lifecycle_operation", "lifecycle_state", "lifecycle_error", "runtime_generation", "runtime_observed_at",
+		"lifecycle_started_at", "lifecycle_completed_at", "runtime_drift",
+	} {
 		if !columns[name] {
 			t.Fatalf("migration did not add %s: %#v", name, columns)
 		}

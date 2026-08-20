@@ -75,6 +75,7 @@ type App struct {
 	auditSvc             *audit.Service
 	containerInitializer *containerruntime.Initializer
 	containerManager     *containerruntime.DockerManager
+	containerLifecycle   *containerruntime.LifecycleController
 }
 
 // New 创建新应用
@@ -478,13 +479,15 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
 		app.containerInitializer = containerInitializer
 		app.containerManager = containerManager
+		app.containerLifecycle = containerLifecycle
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
+		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 	}
 	// 飞书/钉钉长连接（无需公网），启用时在后台启动；后续前端应用配置时会通过 RestartRobotConnections 重启
 	app.startRobotConnections()
@@ -786,6 +789,7 @@ func (a *App) Shutdown() {
 		}
 		a.containerManager = nil
 	}
+	a.containerLifecycle = nil
 
 	// 停止所有外部MCP客户端
 	if a.externalMCPMgr != nil {
@@ -1057,6 +1061,11 @@ func setupRoutes(
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
 		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
+		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
+		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)
+		protected.POST("/conversations/:id/container/rebuild", conversationHandler.RebuildConversationContainer)
+		protected.POST("/conversations/:id/container/reconcile", conversationHandler.ReconcileConversationContainer)
+		protected.DELETE("/conversations/:id/container", conversationHandler.DeleteConversationContainer)
 		protected.GET("/conversations/:id/plan-tasks", conversationHandler.GetConversationPlanTasks)
 		protected.GET("/messages/:id/process-details", conversationHandler.GetMessageProcessDetails)
 		protected.GET("/process-details/:id", conversationHandler.GetProcessDetail)

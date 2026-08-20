@@ -218,6 +218,18 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"updatedAt":            map[string]interface{}{"type": "string", "format": "date-time"},
 						"readinessStartedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
 						"readinessCompletedAt": map[string]interface{}{"type": "string", "format": "date-time"},
+						"lifecycleOperation": map[string]interface{}{
+							"type": "string", "enum": []string{"none", "start", "stop", "rebuild", "delete", "reconcile"},
+						},
+						"lifecycleState": map[string]interface{}{
+							"type": "string", "enum": []string{"idle", "in_progress", "failed"},
+						},
+						"lifecycleError":       map[string]interface{}{"type": "string"},
+						"runtimeGeneration":    map[string]interface{}{"type": "integer", "minimum": 0},
+						"runtimeObservedAt":    map[string]interface{}{"type": "string", "format": "date-time"},
+						"lifecycleStartedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+						"lifecycleCompletedAt": map[string]interface{}{"type": "string", "format": "date-time"},
+						"runtimeDrift":         map[string]interface{}{"type": "string"},
 					},
 					"required": []string{"conversationId", "status"},
 				},
@@ -1631,6 +1643,21 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"500": map[string]interface{}{"description": "状态存储查询失败"},
 					},
 				},
+			},
+			"/api/conversations/{id}/container/start": map[string]interface{}{
+				"post": conversationContainerLifecycleOpenAPIOperation("启动对话容器", "startConversationContainer"),
+			},
+			"/api/conversations/{id}/container/stop": map[string]interface{}{
+				"post": conversationContainerLifecycleOpenAPIOperation("停止对话容器", "stopConversationContainer"),
+			},
+			"/api/conversations/{id}/container/rebuild": map[string]interface{}{
+				"post": conversationContainerLifecycleOpenAPIOperation("按不可变规格重建对话容器", "rebuildConversationContainer"),
+			},
+			"/api/conversations/{id}/container/reconcile": map[string]interface{}{
+				"post": conversationContainerLifecycleOpenAPIOperation("对账控制面与容器引擎状态", "reconcileConversationContainer"),
+			},
+			"/api/conversations/{id}/container": map[string]interface{}{
+				"delete": conversationContainerDeleteOpenAPIOperation(),
 			},
 			"/api/conversations/{id}/project": map[string]interface{}{
 				"put": map[string]interface{}{
@@ -6871,6 +6898,65 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 
 	enrichSpecWithI18nKeys(spec)
 	c.JSON(http.StatusOK, spec)
+}
+
+func conversationContainerLifecycleOpenAPIOperation(summary, operationID string) map[string]interface{} {
+	return map[string]interface{}{
+		"tags":        []string{"对话管理"},
+		"summary":     summary,
+		"description": "操作只使用控制面保存的对话运行时 ID 和不可变规格；不会接受客户端提供的 Docker 容器 ID。并发操作返回 409。",
+		"operationId": operationID,
+		"parameters": []map[string]interface{}{
+			{
+				"name": "id", "in": "path", "required": true, "description": "对话ID",
+				"schema": map[string]interface{}{"type": "string"},
+			},
+		},
+		"responses": map[string]interface{}{
+			"200": map[string]interface{}{
+				"description": "操作完成并返回持久化运行时状态",
+				"content": map[string]interface{}{
+					"application/json": map[string]interface{}{
+						"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerInitialization"},
+					},
+				},
+			},
+			"400": map[string]interface{}{"description": "规格无效"},
+			"401": map[string]interface{}{"description": "未授权"},
+			"403": map[string]interface{}{"description": "无权访问该对话"},
+			"404": map[string]interface{}{"description": "对话或容器不存在"},
+			"409": map[string]interface{}{"description": "容器状态冲突或尚未就绪"},
+			"503": map[string]interface{}{"description": "容器运行时不可用"},
+			"504": map[string]interface{}{"description": "容器操作超时"},
+		},
+	}
+}
+
+func conversationContainerDeleteOpenAPIOperation() map[string]interface{} {
+	operation := conversationContainerLifecycleOpenAPIOperation("删除对话容器", "deleteConversationContainer")
+	operation["description"] = "删除停止状态的对话容器。默认保留持久化工作区；只有 remove_workspace=true 才一并删除工作区。"
+	operation["parameters"] = append(operation["parameters"].([]map[string]interface{}), map[string]interface{}{
+		"name": "remove_workspace", "in": "query", "required": false,
+		"description": "是否同时删除对话持久化工作区，默认 false",
+		"schema":      map[string]interface{}{"type": "boolean", "default": false},
+	})
+	operation["responses"].(map[string]interface{})["200"] = map[string]interface{}{
+		"description": "容器删除成功",
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"success":          map[string]interface{}{"type": "boolean"},
+						"conversationId":   map[string]interface{}{"type": "string"},
+						"containerDeleted": map[string]interface{}{"type": "boolean"},
+						"workspaceDeleted": map[string]interface{}{"type": "boolean"},
+					},
+				},
+			},
+		},
+	}
+	return operation
 }
 
 // GetConversationResults 获取对话结果（OpenAPI端点）

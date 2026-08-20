@@ -34,6 +34,14 @@ type ConversationContainerInitializationProvider interface {
 	Get(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 }
 
+type ConversationContainerLifecycleController interface {
+	Start(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+	Stop(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+	Rebuild(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+	Delete(ctx context.Context, conversationID string, removeWorkspace bool) error
+	Reconcile(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+}
+
 // ConversationHandler 对话处理器
 type ConversationHandler struct {
 	db                       *database.DB
@@ -42,6 +50,7 @@ type ConversationHandler struct {
 	taskStopper              ConversationTaskStopper
 	taskState                ConversationTaskStateProvider
 	containerInitializations ConversationContainerInitializationProvider
+	containerLifecycle       ConversationContainerLifecycleController
 }
 
 // SetAudit wires platform audit logging.
@@ -62,6 +71,10 @@ func (h *ConversationHandler) SetTaskStateProvider(provider ConversationTaskStat
 
 func (h *ConversationHandler) SetContainerInitializationProvider(provider ConversationContainerInitializationProvider) {
 	h.containerInitializations = provider
+}
+
+func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {
+	h.containerLifecycle = controller
 }
 
 // NewConversationHandler 创建新的对话处理器

@@ -12,16 +12,16 @@ import (
 	"go.uber.org/zap"
 )
 
-func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, error) {
+func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, error) {
 	if cfg == nil || !cfg.Container.Enabled {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	manager, err := containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{
 		OwnerID:          strings.TrimSpace(cfg.Container.OwnerID),
 		OperationTimeout: time.Duration(cfg.Container.CreateTimeoutSeconds) * time.Second,
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	initializer, err := containerruntime.NewInitializer(manager, db, containerruntime.InitializerOptions{
 		Workers:       cfg.Container.InitializerWorkers,
@@ -30,13 +30,25 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 	})
 	if err != nil {
 		_ = manager.Close()
-		return nil, nil, err
+		return nil, nil, nil, err
+	}
+	controller, err := containerruntime.NewLifecycleController(manager, db)
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, err
 	}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = initializer.Recover(recoverCtx)
 	cancel()
 	if err != nil {
 		logger.Warn("恢复容器后台初始化任务未全部成功", zap.Error(err))
+	}
+	reconcileCtx, reconcileCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = controller.Recover(reconcileCtx)
+	reconcileCancel()
+	if err != nil {
+		logger.Warn("恢复并对账对话容器生命周期未全部成功", zap.Error(err))
 	}
 	logger.Info("对话容器后台初始化器已启用",
 		zap.Int("workers", cfg.Container.InitializerWorkers),
@@ -47,7 +59,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		zap.String("toolInventoryDigest", cfg.Container.ToolInventoryDigest),
 		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
-	return initializer, manager, nil
+	return initializer, manager, controller, nil
 }
 
 // conversationContainerSpec converts trusted configuration into the immutable

@@ -52,6 +52,14 @@ type InitializationRecord struct {
 	UpdatedAt            time.Time            `json:"updatedAt"`
 	ReadinessStartedAt   *time.Time           `json:"readinessStartedAt,omitempty"`
 	ReadinessCompletedAt *time.Time           `json:"readinessCompletedAt,omitempty"`
+	LifecycleOperation   LifecycleOperation   `json:"lifecycleOperation"`
+	LifecycleState       LifecycleState       `json:"lifecycleState"`
+	LifecycleError       string               `json:"lifecycleError,omitempty"`
+	RuntimeGeneration    int                  `json:"runtimeGeneration"`
+	RuntimeObservedAt    *time.Time           `json:"runtimeObservedAt,omitempty"`
+	LifecycleStartedAt   *time.Time           `json:"lifecycleStartedAt,omitempty"`
+	LifecycleCompletedAt *time.Time           `json:"lifecycleCompletedAt,omitempty"`
+	RuntimeDrift         string               `json:"runtimeDrift,omitempty"`
 }
 
 // InitializationStore must make Queue and Claim atomic so duplicate requests

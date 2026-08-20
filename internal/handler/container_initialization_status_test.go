@@ -92,9 +92,25 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatal("ContainerInitialization schema is missing")
 	}
 	properties := initializationSchema["properties"].(map[string]interface{})
-	for _, field := range []string{"readinessStatus", "readinessError", "inventoryDigest", "toolCount", "readinessStartedAt", "readinessCompletedAt"} {
+	for _, field := range []string{
+		"readinessStatus", "readinessError", "inventoryDigest", "toolCount", "readinessStartedAt", "readinessCompletedAt",
+		"lifecycleOperation", "lifecycleState", "lifecycleError", "runtimeGeneration", "runtimeObservedAt",
+		"lifecycleStartedAt", "lifecycleCompletedAt", "runtimeDrift",
+	} {
 		if _, ok := properties[field]; !ok {
 			t.Fatalf("ContainerInitialization schema is missing %s", field)
+		}
+	}
+	for path, method := range map[string]string{
+		"/api/conversations/{id}/container/start":     "post",
+		"/api/conversations/{id}/container/stop":      "post",
+		"/api/conversations/{id}/container/rebuild":   "post",
+		"/api/conversations/{id}/container/reconcile": "post",
+		"/api/conversations/{id}/container":           "delete",
+	} {
+		item, ok := paths[path].(map[string]interface{})
+		if !ok || item[method] == nil {
+			t.Fatalf("container lifecycle path %s %s = %#v", method, path, item)
 		}
 	}
 }

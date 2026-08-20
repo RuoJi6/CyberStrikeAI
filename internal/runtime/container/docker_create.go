@@ -22,15 +22,32 @@ const (
 	LabelResourceKind   = "com.cyberstrike.resource-kind"
 	LabelImageDigest    = "com.cyberstrike.image-digest"
 	LabelImagePlatform  = "com.cyberstrike.image-platform"
+	LabelSpecDigest     = "com.cyberstrike.spec-digest"
+	LabelNanoCPUs       = "com.cyberstrike.limit.nano-cpus"
+	LabelMemoryBytes    = "com.cyberstrike.limit.memory-bytes"
+	LabelPIDs           = "com.cyberstrike.limit.pids"
+	LabelNoFileSoft     = "com.cyberstrike.limit.nofile-soft"
+	LabelNoFileHard     = "com.cyberstrike.limit.nofile-hard"
+	LabelWorkspaceBytes = "com.cyberstrike.limit.workspace-bytes"
+	LabelTmpfsBytes     = "com.cyberstrike.limit.tmpfs-bytes"
+	LabelLogMaxBytes    = "com.cyberstrike.limit.log-max-bytes"
+	LabelLogMaxFiles    = "com.cyberstrike.limit.log-max-files"
+	LabelWorkspacePath  = "com.cyberstrike.workspace-path"
 	ResourceKindAgent   = "agent-runtime"
 
 	defaultDockerOperationTimeout = 30 * time.Second
 	rollbackTimeout               = 10 * time.Second
+	runtimeKeepaliveScript        = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 )
+
+var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
 
 type dockerCreationAPI interface {
 	dockerInspectionAPI
 	ContainerCreate(context.Context, mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error)
+	ContainerList(context.Context, mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error)
+	ContainerStart(context.Context, string, mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error)
+	ContainerStop(context.Context, string, mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error)
 	ContainerRemove(context.Context, string, mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error)
 	ContainerStatPath(context.Context, string, mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error)
 }
@@ -41,8 +58,9 @@ type DockerManagerOptions struct {
 	OperationTimeout time.Duration
 }
 
-// DockerManager incrementally implements the RuntimeManager contract. At this
-// stage it supports read-only inspection and create-only lifecycle operations.
+// DockerManager is the production RuntimeManager backed by the official Moby
+// client. All lifecycle mutations resolve system-generated names and verify
+// ownership labels before touching a container.
 type DockerManager struct {
 	*DockerInspector
 	api              dockerCreationAPI
@@ -50,7 +68,7 @@ type DockerManager struct {
 	operationTimeout time.Duration
 }
 
-var _ RuntimeCreator = (*DockerManager)(nil)
+var _ RuntimeManager = (*DockerManager)(nil)
 
 func NewDockerManagerFromEnvironment(options DockerManagerOptions) (*DockerManager, error) {
 	api, err := mobyclient.New(mobyclient.FromEnv)
@@ -126,6 +144,8 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 		Config: &mobycontainer.Config{
 			NetworkDisabled: true,
 			WorkingDir:      "/workspace",
+			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
+			Cmd:             []string{runtimeKeepaliveScript},
 			Labels:          labels,
 		},
 		HostConfig: runtimeHostConfig(spec),
@@ -171,6 +191,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if actual.Config.WorkingDir != spec.Workspace.MountPath {
 		return Runtime{}, fmt.Errorf("%w: created runtime working directory mismatch", ErrRuntimeStateConflict)
 	}
+	if !matchesRuntimeKeepalive(actual.Config) {
+		return Runtime{}, fmt.Errorf("%w: created runtime keepalive process mismatch", ErrRuntimeStateConflict)
+	}
 	for key, expected := range expectedLabels {
 		if actual.Config.Labels[key] != expected {
 			return Runtime{}, fmt.Errorf("%w: created runtime label %s mismatch", ErrRuntimeStateConflict, key)
@@ -199,7 +222,15 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 		CreatedAt:      createdAt.UTC(),
 		UpdatedAt:      createdAt.UTC(),
 		Warnings:       append([]string(nil), createResult.Warnings...),
+		SpecDigest:     expectedLabels[LabelSpecDigest],
 	}, nil
+}
+
+func matchesRuntimeKeepalive(config *mobycontainer.Config) bool {
+	return config != nil && len(config.Entrypoint) == 2 &&
+		config.Entrypoint[0] == runtimeKeepaliveEntrypoint[0] &&
+		config.Entrypoint[1] == runtimeKeepaliveEntrypoint[1] &&
+		len(config.Cmd) == 1 && config.Cmd[0] == runtimeKeepaliveScript
 }
 
 func verifyEngineSecurityBaseline(engine EngineInfo) error {
@@ -275,7 +306,7 @@ func tmpfsOptions(sizeBytes int64, noexec bool) string {
 
 func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
 	expected := runtimeHostConfig(spec)
-	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Mounts) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 {
+	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Mounts) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: created runtime has privileged access, host mounts, devices, or published ports", ErrRuntimeStateConflict)
 	}
 	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
@@ -331,5 +362,16 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		LabelResourceKind:   ResourceKindAgent,
 		LabelImageDigest:    spec.Image.Digest,
 		LabelImagePlatform:  spec.Image.Platform,
+		LabelSpecDigest:     RuntimeSpecDigest(spec),
+		LabelNanoCPUs:       strconv.FormatInt(spec.Resources.NanoCPUs, 10),
+		LabelMemoryBytes:    strconv.FormatInt(spec.Resources.MemoryBytes, 10),
+		LabelPIDs:           strconv.FormatInt(spec.Resources.PIDs, 10),
+		LabelNoFileSoft:     strconv.FormatUint(spec.Resources.NoFileSoft, 10),
+		LabelNoFileHard:     strconv.FormatUint(spec.Resources.NoFileHard, 10),
+		LabelWorkspaceBytes: strconv.FormatInt(spec.Resources.WorkspaceBytes, 10),
+		LabelTmpfsBytes:     strconv.FormatInt(spec.Security.TmpfsBytes, 10),
+		LabelLogMaxBytes:    strconv.FormatInt(spec.Resources.LogMaxBytes, 10),
+		LabelLogMaxFiles:    strconv.Itoa(spec.Resources.LogMaxFiles),
+		LabelWorkspacePath:  spec.Workspace.MountPath,
 	}
 }

@@ -23,6 +23,13 @@ type fakeDockerCreationAPI struct {
 	removeOpts   mobyclient.ContainerRemoveOptions
 	pathStats    map[string]mobycontainer.PathStat
 	pathStatErrs map[string]error
+	listResult   mobyclient.ContainerListResult
+	listErr      error
+	startErr     error
+	stopErr      error
+	startedID    string
+	stoppedID    string
+	stopOpts     mobyclient.ContainerStopOptions
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -34,6 +41,29 @@ func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, op
 	f.removedID = id
 	f.removeOpts = options
 	return mobyclient.ContainerRemoveResult{}, f.removeErr
+}
+
+func (f *fakeDockerCreationAPI) ContainerList(_ context.Context, _ mobyclient.ContainerListOptions) (mobyclient.ContainerListResult, error) {
+	return f.listResult, f.listErr
+}
+
+func (f *fakeDockerCreationAPI) ContainerStart(_ context.Context, id string, _ mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error) {
+	f.startedID = id
+	if f.startErr == nil && f.containerResult.Container.State != nil {
+		f.containerResult.Container.State.Status = mobycontainer.StateRunning
+		f.containerResult.Container.State.Running = true
+	}
+	return mobyclient.ContainerStartResult{}, f.startErr
+}
+
+func (f *fakeDockerCreationAPI) ContainerStop(_ context.Context, id string, options mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error) {
+	f.stoppedID = id
+	f.stopOpts = options
+	if f.stopErr == nil && f.containerResult.Container.State != nil {
+		f.containerResult.Container.State.Status = mobycontainer.StateExited
+		f.containerResult.Container.State.Running = false
+	}
+	return mobyclient.ContainerStopResult{}, f.stopErr
 }
 
 func (f *fakeDockerCreationAPI) ContainerStatPath(_ context.Context, _ string, options mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error) {
@@ -75,6 +105,9 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	}
 	if !api.createOpts.Config.NetworkDisabled || api.createOpts.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) {
 		t.Fatalf("network was not disabled: %#v / %#v", api.createOpts.Config, api.createOpts.HostConfig)
+	}
+	if !matchesRuntimeKeepalive(api.createOpts.Config) {
+		t.Fatalf("fixed keepalive process was not configured: %#v", api.createOpts.Config)
 	}
 	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || len(api.createOpts.HostConfig.CapAdd) != 0 {
 		t.Fatalf("privilege baseline = %#v", api.createOpts.HostConfig)
@@ -255,6 +288,8 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 				Image:           pinned,
 				NetworkDisabled: true,
 				WorkingDir:      spec.Workspace.MountPath,
+				Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
+				Cmd:             []string{runtimeKeepaliveScript},
 				Labels:          runtimeLabels(ownerID, spec),
 			},
 			HostConfig: runtimeHostConfig(spec),

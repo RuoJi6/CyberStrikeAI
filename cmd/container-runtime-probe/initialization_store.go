@@ -56,6 +56,14 @@ func (s *probeInitializationStore) Queue(ctx context.Context, spec containerrunt
 			record.ToolCount = 0
 			record.ReadinessStartedAt = nil
 			record.ReadinessCompletedAt = nil
+			record.LifecycleOperation = containerruntime.LifecycleOperationNone
+			record.LifecycleState = containerruntime.LifecycleIdle
+			record.LifecycleError = ""
+			record.RuntimeGeneration = 0
+			record.RuntimeObservedAt = nil
+			record.LifecycleStartedAt = nil
+			record.LifecycleCompletedAt = nil
+			record.RuntimeDrift = ""
 			record.UpdatedAt = now
 			s.records[spec.ConversationID] = record
 			return record, true, nil
@@ -83,15 +91,17 @@ func (s *probeInitializationStore) Queue(ctx context.Context, spec containerrunt
 	}
 	now := time.Now().UTC()
 	record := containerruntime.InitializationRecord{
-		ConversationID:  spec.ConversationID,
-		RuntimeID:       spec.ID,
-		Status:          containerruntime.InitializationQueued,
-		ImageDigest:     spec.Image.Digest,
-		ImagePlatform:   spec.Image.Platform,
-		ReadinessStatus: readinessStatus(spec),
-		Spec:            spec,
-		RequestedAt:     now,
-		UpdatedAt:       now,
+		ConversationID:     spec.ConversationID,
+		RuntimeID:          spec.ID,
+		Status:             containerruntime.InitializationQueued,
+		ImageDigest:        spec.Image.Digest,
+		ImagePlatform:      spec.Image.Platform,
+		ReadinessStatus:    readinessStatus(spec),
+		LifecycleOperation: containerruntime.LifecycleOperationNone,
+		LifecycleState:     containerruntime.LifecycleIdle,
+		Spec:               spec,
+		RequestedAt:        now,
+		UpdatedAt:          now,
 	}
 	s.records[spec.ConversationID] = record
 	return record, true, nil
@@ -180,6 +190,11 @@ func (s *probeInitializationStore) Complete(ctx context.Context, conversationID 
 		record.RuntimeStatus = runtime.Status
 		record.LastError = ""
 		record.CompletedAt = &now
+		record.LifecycleOperation = containerruntime.LifecycleOperationNone
+		record.LifecycleState = containerruntime.LifecycleIdle
+		record.RuntimeGeneration = 1
+		record.RuntimeObservedAt = &now
+		record.LifecycleCompletedAt = &now
 		return nil
 	})
 }
