@@ -42,6 +42,7 @@ var (
 	ErrRegistryUnavailable  = errors.New("container image registry unavailable")
 	ErrRuntimeStateConflict = errors.New("container runtime state conflict")
 	ErrEngineIncompatible   = errors.New("container engine does not satisfy the security baseline")
+	ErrExecQueueFull        = errors.New("container exec queue is full")
 )
 
 // EngineInfo is a read-only description of the connected container engine.
@@ -91,6 +92,9 @@ type ResourceLimits struct {
 	NoFileHard        uint64
 	WorkspaceBytes    int64
 	MaxConcurrentExec int
+	MaxQueuedExec     int
+	LogMaxBytes       int64
+	LogMaxFiles       int
 }
 
 // SecurityProfile describes non-negotiable container isolation controls.

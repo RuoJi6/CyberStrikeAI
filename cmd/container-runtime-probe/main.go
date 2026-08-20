@@ -134,6 +134,9 @@ func diagnosticRuntimeSpec(runtimeID, conversationID string, image containerrunt
 			NoFileHard:        512,
 			WorkspaceBytes:    64 << 20,
 			MaxConcurrentExec: 1,
+			MaxQueuedExec:     4,
+			LogMaxBytes:       4 << 20,
+			LogMaxFiles:       2,
 		},
 		Security: containerruntime.SecurityProfile{
 			ReadOnlyRootFS:      true,

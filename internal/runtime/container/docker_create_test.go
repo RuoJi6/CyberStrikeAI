@@ -76,6 +76,9 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	if api.createOpts.HostConfig.Tmpfs["/tmp"] != "rw,nosuid,nodev,noexec,size=67108864" || api.createOpts.HostConfig.Tmpfs["/workspace"] != "rw,nosuid,nodev,size=1073741824" {
 		t.Fatalf("tmpfs options = %#v", api.createOpts.HostConfig.Tmpfs)
 	}
+	if api.createOpts.HostConfig.LogConfig.Type != "local" || api.createOpts.HostConfig.LogConfig.Config["max-size"] != "10485760" || api.createOpts.HostConfig.LogConfig.Config["max-file"] != "3" || api.createOpts.HostConfig.LogConfig.Config["compress"] != "true" {
+		t.Fatalf("log rotation options = %#v", api.createOpts.HostConfig.LogConfig)
+	}
 	labels := api.createOpts.Config.Labels
 	if labels[LabelManaged] != "true" || labels[LabelOwner] != ownerID || labels[LabelRuntimeID] != string(spec.ID) || labels[LabelConversationID] != spec.ConversationID || labels[LabelImageDigest] != spec.Image.Digest {
 		t.Fatalf("labels = %#v", labels)
@@ -268,6 +271,9 @@ func creationSpec() RuntimeSpec {
 			NoFileHard:        2048,
 			WorkspaceBytes:    1 << 30,
 			MaxConcurrentExec: 2,
+			MaxQueuedExec:     8,
+			LogMaxBytes:       10 << 20,
+			LogMaxFiles:       3,
 		},
 		Security: SecurityProfile{
 			ReadOnlyRootFS:      true,

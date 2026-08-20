@@ -40,8 +40,11 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if spec.Resources.NoFileHard > math.MaxInt64 {
 		return invalidSpec("nofile limits exceed the engine range")
 	}
-	if spec.Resources.WorkspaceBytes <= 0 || spec.Resources.MaxConcurrentExec <= 0 {
-		return invalidSpec("workspace and exec limits must be positive")
+	if spec.Resources.WorkspaceBytes <= 0 || spec.Resources.MaxConcurrentExec <= 0 || spec.Resources.MaxQueuedExec <= 0 {
+		return invalidSpec("workspace, exec concurrency and exec queue limits must be positive")
+	}
+	if spec.Resources.LogMaxBytes <= 0 || spec.Resources.LogMaxFiles <= 0 {
+		return invalidSpec("container log rotation limits must be positive")
 	}
 	if !spec.Security.ReadOnlyRootFS || !spec.Security.NoNewPrivileges || !spec.Security.DropAllCapabilities {
 		return invalidSpec("read-only rootfs, no-new-privileges and capability drop are required")

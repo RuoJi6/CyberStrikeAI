@@ -233,7 +233,15 @@ func hasSecurityOption(options []string, expected string) bool {
 func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	pidsLimit := spec.Resources.PIDs
 	return &mobycontainer.HostConfig{
-		NetworkMode:    mobycontainer.NetworkMode(NetworkNone),
+		NetworkMode: mobycontainer.NetworkMode(NetworkNone),
+		LogConfig: mobycontainer.LogConfig{
+			Type: "local",
+			Config: map[string]string{
+				"max-size": strconv.FormatInt(spec.Resources.LogMaxBytes, 10),
+				"max-file": strconv.Itoa(spec.Resources.LogMaxFiles),
+				"compress": "true",
+			},
+		},
 		RestartPolicy:  mobycontainer.RestartPolicy{Name: mobycontainer.RestartPolicyDisabled},
 		CapDrop:        []string{"ALL"},
 		ReadonlyRootfs: true,
@@ -274,6 +282,14 @@ func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec Runtim
 	}
 	if actual.RestartPolicy.Name != mobycontainer.RestartPolicyDisabled {
 		return fmt.Errorf("%w: created runtime restart policy mismatch", ErrRuntimeStateConflict)
+	}
+	if actual.LogConfig.Type != expected.LogConfig.Type || len(actual.LogConfig.Config) != len(expected.LogConfig.Config) {
+		return fmt.Errorf("%w: created runtime log rotation driver mismatch", ErrRuntimeStateConflict)
+	}
+	for key, value := range expected.LogConfig.Config {
+		if actual.LogConfig.Config[key] != value {
+			return fmt.Errorf("%w: created runtime log rotation option %s mismatch", ErrRuntimeStateConflict, key)
+		}
 	}
 	if actual.NanoCPUs != expected.NanoCPUs || actual.Memory != expected.Memory || actual.MemorySwap != expected.MemorySwap || actual.PidsLimit == nil || *actual.PidsLimit != spec.Resources.PIDs {
 		return fmt.Errorf("%w: created runtime CPU, memory, swap, or PIDs limits mismatch", ErrRuntimeStateConflict)

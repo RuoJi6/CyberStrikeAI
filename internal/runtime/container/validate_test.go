@@ -61,6 +61,9 @@ func validSpec() container.RuntimeSpec {
 			NoFileHard:        2048,
 			WorkspaceBytes:    1 << 30,
 			MaxConcurrentExec: 2,
+			MaxQueuedExec:     8,
+			LogMaxBytes:       10 << 20,
+			LogMaxFiles:       3,
 		},
 		Security: container.SecurityProfile{
 			ReadOnlyRootFS:      true,
