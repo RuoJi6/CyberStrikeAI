@@ -17,17 +17,23 @@ import (
 // ProjectFilterUnbound 列表 API 中 project_id=__none__ 表示仅未绑定项目的对话。
 const ProjectFilterUnbound = "__none__"
 
+const (
+	ConversationRuntimeModeHost      = "host"
+	ConversationRuntimeModeContainer = "container"
+)
+
 // Conversation 对话
 type Conversation struct {
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	ProjectID string    `json:"projectId,omitempty"`
-	RoleName  string    `json:"roleName,omitempty"`
-	AgentMode string    `json:"agentMode,omitempty"`
-	Pinned    bool      `json:"pinned"`
-	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt"`
-	Messages  []Message `json:"messages,omitempty"`
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	ProjectID   string    `json:"projectId,omitempty"`
+	RoleName    string    `json:"roleName,omitempty"`
+	AgentMode   string    `json:"agentMode,omitempty"`
+	RuntimeMode string    `json:"runtimeMode"`
+	Pinned      bool      `json:"pinned"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+	Messages    []Message `json:"messages,omitempty"`
 }
 
 // Message 消息
@@ -61,29 +67,32 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	}
 	roleName := normalizeConversationRoleName(meta.RoleName)
 	agentMode := normalizeConversationAgentMode(meta.AgentMode)
+	runtimeMode, err := NormalizeConversationRuntimeMode(meta.RuntimeMode)
+	if err != nil {
+		return nil, err
+	}
 
-	var err error
 	wsID := strings.TrimSpace(webshellConnectionID)
 	switch {
 	case wsID != "" && projectID != "":
 		_, err = db.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, wsID, projectID, roleName, agentMode,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode,
 		)
 	case wsID != "":
 		_, err = db.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, wsID, roleName, agentMode,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			id, title, now, now, wsID, roleName, agentMode, runtimeMode,
 		)
 	case projectID != "":
 		_, err = db.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode) VALUES (?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, projectID, roleName, agentMode,
+			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+			id, title, now, now, projectID, roleName, agentMode, runtimeMode,
 		)
 	default:
 		_, err = db.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode) VALUES (?, ?, ?, ?, ?, ?)",
-			id, title, now, now, roleName, agentMode,
+			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode) VALUES (?, ?, ?, ?, ?, ?, ?)",
+			id, title, now, now, roleName, agentMode, runtimeMode,
 		)
 	}
 	if err != nil {
@@ -91,13 +100,14 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	}
 
 	conv := &Conversation{
-		ID:        id,
-		Title:     title,
-		ProjectID: projectID,
-		RoleName:  roleName,
-		AgentMode: agentMode,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          id,
+		Title:       title,
+		ProjectID:   projectID,
+		RoleName:    roleName,
+		AgentMode:   agentMode,
+		RuntimeMode: runtimeMode,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 	if wsID != "" {
 		meta.WebShellConnectionID = wsID
@@ -114,16 +124,18 @@ func (db *DB) GetConversationByWebshellConnectionID(connectionID string) (*Conve
 	var conv Conversation
 	var createdAt, updatedAt string
 	var pinned int
+	var runtimeMode sql.NullString
 	err := db.QueryRow(
-		"SELECT id, title, pinned, created_at, updated_at FROM conversations WHERE webshell_connection_id = ? ORDER BY updated_at DESC LIMIT 1",
+		"SELECT id, title, pinned, created_at, updated_at, runtime_mode FROM conversations WHERE webshell_connection_id = ? ORDER BY updated_at DESC LIMIT 1",
 		connectionID,
-	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt)
+	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &runtimeMode)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("查询对话失败: %w", err)
 	}
+	conv.RuntimeMode, _ = NormalizeConversationRuntimeMode(runtimeMode.String)
 	conv.Pinned = pinned != 0
 	if t, e := time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAt); e == nil {
 		conv.CreatedAt = t
@@ -244,10 +256,11 @@ func (db *DB) GetConversation(id string) (*Conversation, error) {
 	var projectID sql.NullString
 	var roleName sql.NullString
 	var agentMode sql.NullString
+	var runtimeMode sql.NullString
 	err := db.QueryRow(
-		"SELECT id, title, pinned, created_at, updated_at, project_id, role_name, agent_mode FROM conversations WHERE id = ?",
+		"SELECT id, title, pinned, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode FROM conversations WHERE id = ?",
 		id,
-	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode)
+	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode, &runtimeMode)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("对话不存在")
@@ -263,6 +276,7 @@ func (db *DB) GetConversation(id string) (*Conversation, error) {
 	if agentMode.Valid {
 		conv.AgentMode = normalizeConversationAgentMode(agentMode.String)
 	}
+	conv.RuntimeMode, _ = NormalizeConversationRuntimeMode(runtimeMode.String)
 
 	// 尝试多种时间格式解析
 	var err1, err2 error
@@ -338,10 +352,11 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	var projectID sql.NullString
 	var roleName sql.NullString
 	var agentMode sql.NullString
+	var runtimeMode sql.NullString
 	err := db.QueryRow(
-		"SELECT id, title, pinned, created_at, updated_at, project_id, role_name, agent_mode FROM conversations WHERE id = ?",
+		"SELECT id, title, pinned, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode FROM conversations WHERE id = ?",
 		id,
-	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode)
+	).Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode, &runtimeMode)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("对话不存在")
@@ -357,6 +372,7 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	if agentMode.Valid {
 		conv.AgentMode = normalizeConversationAgentMode(agentMode.String)
 	}
+	conv.RuntimeMode, _ = NormalizeConversationRuntimeMode(runtimeMode.String)
 
 	// 尝试多种时间格式解析
 	var err1, err2 error
@@ -403,6 +419,21 @@ func normalizeConversationAgentMode(agentMode string) string {
 		return agentMode
 	default:
 		return "eino_single"
+	}
+}
+
+// NormalizeConversationRuntimeMode validates the immutable execution location chosen when a
+// conversation is created. An empty value is intentionally compatible with historical callers.
+func NormalizeConversationRuntimeMode(runtimeMode string) (string, error) {
+	runtimeMode = strings.ToLower(strings.TrimSpace(runtimeMode))
+	if runtimeMode == "" {
+		return ConversationRuntimeModeHost, nil
+	}
+	switch runtimeMode {
+	case ConversationRuntimeModeHost, ConversationRuntimeModeContainer:
+		return runtimeMode, nil
+	default:
+		return "", fmt.Errorf("invalid conversation runtime mode %q: must be host or container", runtimeMode)
 	}
 }
 
@@ -554,7 +585,7 @@ func (db *DB) ListConversations(limit, offset int, search, sortBy, projectID str
 		where, args = appendConversationProjectFilter(where, args, projectID, "c")
 		args = append(args, limit, offset)
 		rows, err = db.Query(
-			`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode
+			`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode
 			 FROM conversations c`+where+`
 			 `+orderClause+`
 			 LIMIT ? OFFSET ?`,
@@ -570,7 +601,7 @@ func (db *DB) ListConversations(limit, offset int, search, sortBy, projectID str
 		}
 		args = append(args, limit, offset)
 		rows, err = db.Query(
-			"SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name, agent_mode FROM conversations"+where+" "+orderClause+" LIMIT ? OFFSET ?",
+			"SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name, agent_mode, runtime_mode FROM conversations"+where+" "+orderClause+" LIMIT ? OFFSET ?",
 			args...,
 		)
 	}
@@ -598,7 +629,7 @@ func (db *DB) ListConversationsForAccess(limit, offset int, search, sortBy, proj
 		where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
 		args = append(args, limit, offset)
 		rows, err = db.Query(
-			`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode
+			`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode
 			 FROM conversations c`+where+`
 			 `+orderClause+`
 			 LIMIT ? OFFSET ?`, args...)
@@ -613,7 +644,7 @@ func (db *DB) ListConversationsForAccess(limit, offset int, search, sortBy, proj
 		}
 		args = append(args, limit, offset)
 		rows, err = db.Query(
-			"SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name, agent_mode FROM conversations"+where+" "+orderClause+" LIMIT ? OFFSET ?",
+			"SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name, agent_mode, runtime_mode FROM conversations"+where+" "+orderClause+" LIMIT ? OFFSET ?",
 			args...)
 	}
 	if err != nil {
@@ -632,7 +663,8 @@ func scanConversationRows(rows *sql.Rows) ([]*Conversation, error) {
 		var projectID sql.NullString
 		var roleName sql.NullString
 		var agentMode sql.NullString
-		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode); err != nil {
+		var runtimeMode sql.NullString
+		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &projectID, &roleName, &agentMode, &runtimeMode); err != nil {
 			return nil, fmt.Errorf("扫描对话失败: %w", err)
 		}
 		if projectID.Valid {
@@ -644,6 +676,7 @@ func scanConversationRows(rows *sql.Rows) ([]*Conversation, error) {
 		if agentMode.Valid {
 			conv.AgentMode = normalizeConversationAgentMode(agentMode.String)
 		}
+		conv.RuntimeMode, _ = NormalizeConversationRuntimeMode(runtimeMode.String)
 		var err1, err2 error
 		conv.CreatedAt, err1 = time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAt)
 		if err1 != nil {
@@ -703,7 +736,7 @@ func (db *DB) ListUngroupedConversations(limit, offset int, sortBy, projectID st
 	where, args = appendConversationProjectFilter(where, args, projectID, "c")
 	args = append(args, limit, offset)
 	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode `+
+		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode `+
 			where+`
 		 `+orderClause+`
 		 LIMIT ? OFFSET ?`,
@@ -727,7 +760,7 @@ func (db *DB) ListUngroupedConversationsForAccess(limit, offset int, sortBy, pro
 	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
 	args = append(args, limit, offset)
 	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode `+
+		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode `+
 			where+`
 		 `+orderClause+`
 		 LIMIT ? OFFSET ?`,

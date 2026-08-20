@@ -59,6 +59,10 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 	}
 	createdNew := false
 	if conversationID == "" {
+		runtimeMode, runtimeModeErr := database.NormalizeConversationRuntimeMode(req.RuntimeMode)
+		if runtimeModeErr != nil {
+			return nil, fmt.Errorf("新对话 runtimeMode 必须为 host 或 container")
+		}
 		title := safeTruncateString(req.Message, 50)
 		var conv *database.Conversation
 		var err error
@@ -66,6 +70,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.ProjectID = projectID
 		meta.RoleName = req.Role
 		meta.AgentMode = chatRequestAgentMode(req, source)
+		meta.RuntimeMode = runtimeMode
 		if webshellID != "" {
 			meta.Source = source + "_webshell"
 			meta.WebShellConnectionID = webshellID

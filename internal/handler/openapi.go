@@ -45,6 +45,12 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 		},
 	}
+	runtimeModeRequestSchema := map[string]interface{}{
+		"type":        "string",
+		"enum":        []string{"host", "container"},
+		"default":     "host",
+		"description": "仅在不提供 conversationId 并新建对话时生效；存量对话的执行位置不由后续消息修改",
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -83,6 +89,12 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"projectId": map[string]interface{}{
 							"type":        "string",
 							"description": "绑定的项目 ID（可选，共享事实黑板）",
+						},
+						"runtimeMode": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"host", "container"},
+							"default":     "host",
+							"description": "对话创建时选定的执行位置；创建后不由后续消息修改",
 						},
 					},
 				},
@@ -186,6 +198,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"projectId": map[string]interface{}{
 							"type":        "string",
 							"description": "绑定的项目 ID（可选）",
+						},
+						"runtimeMode": map[string]interface{}{
+							"type":        "string",
+							"enum":        []string{"host", "container"},
+							"description": "对话创建时锁定的执行位置",
 						},
 					},
 				},
@@ -1742,6 +1759,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"properties": map[string]interface{}{
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
+										"runtimeMode":          runtimeModeRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1781,6 +1799,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"properties": map[string]interface{}{
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
+										"runtimeMode":          runtimeModeRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1827,6 +1846,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 											"type":        "string",
 											"description": "对话 ID（可选，不提供则新建）",
 										},
+										"runtimeMode": runtimeModeRequestSchema,
 										"role": map[string]interface{}{
 											"type":        "string",
 											"description": "角色名称（可选）",
@@ -1878,6 +1898,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									"properties": map[string]interface{}{
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
+										"runtimeMode":          runtimeModeRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,

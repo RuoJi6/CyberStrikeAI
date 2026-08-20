@@ -44,6 +44,42 @@ func TestCreateConversationRequiresProjectAccess(t *testing.T) {
 	}
 }
 
+func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, user := setupConversationRBACTest(t)
+	handler := NewConversationHandler(db, zap.NewNop())
+
+	w := performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]string{
+		"title":       "container conversation",
+		"runtimeMode": database.ConversationRuntimeModeContainer,
+	}, handler.CreateConversation)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var created database.Conversation
+	if err := json.Unmarshal(w.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if created.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("response runtimeMode = %q", created.RuntimeMode)
+	}
+	stored, err := db.GetConversationLite(created.ID)
+	if err != nil {
+		t.Fatalf("GetConversationLite: %v", err)
+	}
+	if stored.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("stored runtimeMode = %q", stored.RuntimeMode)
+	}
+
+	w = performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]string{
+		"title":       "invalid",
+		"runtimeMode": "docker",
+	}, handler.CreateConversation)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("invalid status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+}
+
 func TestSetConversationProjectRequiresProjectAccess(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, user := setupConversationRBACTest(t)

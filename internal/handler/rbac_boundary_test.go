@@ -295,11 +295,64 @@ func TestPrepareMultiAgentSessionRejectsForeignConversation(t *testing.T) {
 	hidden, _ := db.CreateConversation("hidden", database.ConversationCreateMeta{})
 	h := &AgentHandler{db: db, logger: zap.NewNop()}
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/eino-agent/stream", nil)
 	c.Set(security.ContextSessionKey, security.Session{UserID: user.ID, Scope: database.RBACScopeAssigned, Permissions: map[string]bool{"chat:write": true}})
 
 	_, err := h.prepareMultiAgentSession(&ChatRequest{ConversationID: hidden.ID, Message: "write"}, c, "test")
 	if err == nil || err.Error() != "无权访问该对话" {
 		t.Fatalf("err = %v, want unauthorized conversation", err)
+	}
+}
+
+func TestPrepareMultiAgentSessionPersistsRuntimeModeOnlyWhenCreating(t *testing.T) {
+	db, user := setupConversationRBACTest(t)
+	h := &AgentHandler{db: db, logger: zap.NewNop()}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/eino-agent/stream", nil)
+	c.Set(security.ContextSessionKey, security.Session{
+		UserID:      user.ID,
+		Scope:       database.RBACScopeAssigned,
+		Permissions: map[string]bool{"chat:write": true},
+	})
+
+	prepared, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:     "create container conversation",
+		RuntimeMode: database.ConversationRuntimeModeContainer,
+	}, c, "test")
+	if err != nil {
+		t.Fatalf("prepare new conversation: %v", err)
+	}
+	if !prepared.CreatedNew {
+		t.Fatal("expected a newly created conversation")
+	}
+	conversation, err := db.GetConversationLite(prepared.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversationLite: %v", err)
+	}
+	if conversation.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("runtime mode = %q", conversation.RuntimeMode)
+	}
+
+	if _, err := h.prepareMultiAgentSession(&ChatRequest{
+		ConversationID: prepared.ConversationID,
+		Message:        "keep immutable mode",
+		RuntimeMode:    database.ConversationRuntimeModeHost,
+	}, c, "test"); err != nil {
+		t.Fatalf("prepare existing conversation: %v", err)
+	}
+	conversation, err = db.GetConversationLite(prepared.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversationLite after existing request: %v", err)
+	}
+	if conversation.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("existing conversation runtime mode changed to %q", conversation.RuntimeMode)
+	}
+
+	if _, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:     "invalid",
+		RuntimeMode: "docker",
+	}, c, "test"); err == nil {
+		t.Fatal("invalid new-conversation runtime mode was accepted")
 	}
 }
 

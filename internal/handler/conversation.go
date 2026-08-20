@@ -87,8 +87,9 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 
 // CreateConversationRequest 创建对话请求
 type CreateConversationRequest struct {
-	Title     string `json:"title"`
-	ProjectID string `json:"projectId,omitempty"`
+	Title       string `json:"title"`
+	ProjectID   string `json:"projectId,omitempty"`
+	RuntimeMode string `json:"runtimeMode,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -111,6 +112,12 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 
 	meta := audit.ConversationCreateMetaFromGin(c, "api")
 	meta.ProjectID = strings.TrimSpace(req.ProjectID)
+	runtimeMode, err := database.NormalizeConversationRuntimeMode(req.RuntimeMode)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeMode 必须为 host 或 container"})
+		return
+	}
+	meta.RuntimeMode = runtimeMode
 	if !h.conversationProjectAllowed(c, meta.ProjectID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
 		return

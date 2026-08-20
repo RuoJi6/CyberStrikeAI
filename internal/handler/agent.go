@@ -366,8 +366,9 @@ type ChatFinalizationRequest struct {
 type ChatRequest struct {
 	Message              string                  `json:"message" binding:"required"`
 	ConversationID       string                  `json:"conversationId,omitempty"`
-	ProjectID            string                  `json:"projectId,omitempty"` // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
-	Role                 string                  `json:"role,omitempty"`      // 角色名称
+	ProjectID            string                  `json:"projectId,omitempty"`   // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
+	RuntimeMode          string                  `json:"runtimeMode,omitempty"` // 新对话执行位置：host | container；存量对话忽略请求值
+	Role                 string                  `json:"role,omitempty"`        // 角色名称
 	Attachments          []ChatAttachment        `json:"attachments,omitempty"`
 	WebShellConnectionID string                  `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具
 	AIChannelID          string                  `json:"aiChannelId,omitempty"`          // 会话级 AI 通道；空则使用 ai.default_channel

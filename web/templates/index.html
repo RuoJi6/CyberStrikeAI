@@ -1189,6 +1189,46 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div id="runtime-mode-wrapper" class="agent-mode-wrapper runtime-mode-wrapper">
+                                    <div class="agent-mode-inner">
+                                        <button type="button" id="runtime-mode-btn" class="role-selector-btn runtime-mode-btn" onclick="toggleRuntimeModePanel()" data-i18n="chat.runtimeModeSelectAria" data-i18n-attr="aria-label,title" data-i18n-skip-text="true" aria-label="选择新对话执行位置" aria-haspopup="listbox" aria-expanded="false" title="选择新对话执行位置">
+                                            <span id="runtime-mode-icon" class="role-selector-icon" aria-hidden="true">🖥️</span>
+                                            <span id="runtime-mode-text" class="role-selector-text" data-i18n="chat.runtimeModeHost">Host</span>
+                                            <svg class="role-selector-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+                                                <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                            </svg>
+                                        </button>
+                                        <div id="runtime-mode-panel" class="agent-mode-panel runtime-mode-panel" style="display: none;" role="listbox" aria-labelledby="runtime-mode-panel-title">
+                                            <div class="role-selection-panel-header agent-mode-panel-header">
+                                                <h3 id="runtime-mode-panel-title" class="role-selection-panel-title" data-i18n="chat.runtimeModePanelTitle">执行位置</h3>
+                                                <button type="button" class="role-selection-panel-close" onclick="closeRuntimeModePanel()" data-i18n="common.close" data-i18n-attr="title" title="关闭">
+                                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                                        <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                                    </svg>
+                                                </button>
+                                            </div>
+                                            <div class="agent-mode-options runtime-mode-options">
+                                                <button type="button" class="role-selection-item-main runtime-mode-option selected" data-value="host" role="option" aria-selected="true" onclick="selectRuntimeMode('host')">
+                                                    <div class="role-selection-item-icon-main" aria-hidden="true">🖥️</div>
+                                                    <div class="role-selection-item-content-main">
+                                                        <div class="role-selection-item-name-main" data-i18n="chat.runtimeModeHost">本机执行</div>
+                                                        <div class="role-selection-item-description-main" data-i18n="chat.runtimeModeHostHint">使用 CyberStrikeAI 当前宿主执行路径</div>
+                                                    </div>
+                                                    <div class="role-selection-checkmark-main runtime-mode-check">✓</div>
+                                                </button>
+                                                <button type="button" class="role-selection-item-main runtime-mode-option" data-value="container" role="option" aria-selected="false" onclick="selectRuntimeMode('container')">
+                                                    <div class="role-selection-item-icon-main" aria-hidden="true">📦</div>
+                                                    <div class="role-selection-item-content-main">
+                                                        <div class="role-selection-item-name-main" data-i18n="chat.runtimeModeContainer">容器模式（待接入）</div>
+                                                        <div class="role-selection-item-description-main" data-i18n="chat.runtimeModeContainerHint">为对话保存容器模式；本实施项尚未将 Agent 命令路由到容器</div>
+                                                    </div>
+                                                    <div class="role-selection-checkmark-main runtime-mode-check">✓</div>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">
+                                </div>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
                                     <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="选择角色">
                                         <span id="role-selector-icon" class="role-selector-icon">🔵</span>

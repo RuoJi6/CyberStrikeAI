@@ -101,6 +101,27 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 			t.Fatalf("ContainerInitialization schema is missing %s", field)
 		}
 	}
+	conversationSchema := schemas["Conversation"].(map[string]interface{})
+	conversationProperties := conversationSchema["properties"].(map[string]interface{})
+	if _, ok := conversationProperties["runtimeMode"]; !ok {
+		t.Fatal("Conversation schema is missing runtimeMode")
+	}
+	createSchema := schemas["CreateConversationRequest"].(map[string]interface{})
+	createProperties := createSchema["properties"].(map[string]interface{})
+	if _, ok := createProperties["runtimeMode"]; !ok {
+		t.Fatal("CreateConversationRequest schema is missing runtimeMode")
+	}
+	for _, route := range []string{"/api/eino-agent", "/api/eino-agent/stream", "/api/multi-agent", "/api/multi-agent/stream"} {
+		post := paths[route].(map[string]interface{})["post"].(map[string]interface{})
+		requestBody := post["requestBody"].(map[string]interface{})
+		content := requestBody["content"].(map[string]interface{})
+		applicationJSON := content["application/json"].(map[string]interface{})
+		requestSchema := applicationJSON["schema"].(map[string]interface{})
+		requestProperties := requestSchema["properties"].(map[string]interface{})
+		if _, ok := requestProperties["runtimeMode"]; !ok {
+			t.Fatalf("%s request schema is missing runtimeMode", route)
+		}
+	}
 	for path, method := range map[string]string{
 		"/api/conversations/{id}/container/start":     "post",
 		"/api/conversations/{id}/container/stop":      "post",

@@ -138,6 +138,8 @@ const REASONING_EFFORT_LS = 'cyberstrike-chat-reasoning-effort';
 const CHAT_AI_CHANNEL_SUMMARY_NAME_MAX = 10;
 const CHAT_AGENT_MODE_EINO_SINGLE = 'eino_single';
 const CHAT_AGENT_EINO_MODES = ['deep', 'plan_execute', 'supervisor'];
+const CHAT_RUNTIME_MODE_HOST = 'host';
+const CHAT_RUNTIME_MODE_CONTAINER = 'container';
 let multiAgentAPIEnabled = false;
 let chatAIChannels = {};
 let chatDefaultAIChannel = '';
@@ -911,6 +913,56 @@ function applyConversationAgentMode(conversationId, conversation) {
     syncAgentModeFromValue(mode);
 }
 
+function normalizeConversationRuntimeModeForUI(mode) {
+    const value = String(mode || '').trim().toLowerCase();
+    return value === CHAT_RUNTIME_MODE_CONTAINER ? CHAT_RUNTIME_MODE_CONTAINER : CHAT_RUNTIME_MODE_HOST;
+}
+
+function getRuntimeModeLabelForValue(mode) {
+    const normalized = normalizeConversationRuntimeModeForUI(mode);
+    if (typeof window.t === 'function') {
+        return window.t(normalized === CHAT_RUNTIME_MODE_CONTAINER
+            ? 'chat.runtimeModeContainer'
+            : 'chat.runtimeModeHost');
+    }
+    return normalized === CHAT_RUNTIME_MODE_CONTAINER ? '容器模式（待接入）' : '本机执行';
+}
+
+function setChatRuntimeModeLocked(locked) {
+    const button = document.getElementById('runtime-mode-btn');
+    const panel = document.getElementById('runtime-mode-panel');
+    if (!button) return;
+    button.disabled = !!locked;
+    button.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    const titleKey = locked ? 'chat.runtimeModeLockedHint' : 'chat.runtimeModeSelectAria';
+    const fallback = locked ? '执行位置在对话创建后锁定' : '选择新对话执行位置';
+    const title = typeof window.t === 'function' ? window.t(titleKey) : fallback;
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    if (locked && panel) closeRuntimeModePanel();
+}
+
+function syncRuntimeModeFromValue(mode) {
+    const normalized = normalizeConversationRuntimeModeForUI(mode);
+    const input = document.getElementById('runtime-mode-select');
+    const label = document.getElementById('runtime-mode-text');
+    const icon = document.getElementById('runtime-mode-icon');
+    if (input) input.value = normalized;
+    if (label) label.textContent = getRuntimeModeLabelForValue(normalized);
+    if (icon) icon.textContent = normalized === CHAT_RUNTIME_MODE_CONTAINER ? '📦' : '🖥️';
+    document.querySelectorAll('.runtime-mode-option').forEach(function (option) {
+        const selected = option.getAttribute('data-value') === normalized;
+        option.classList.toggle('selected', selected);
+        option.setAttribute('aria-selected', selected ? 'true' : 'false');
+    });
+}
+
+function applyConversationRuntimeMode(conversationId, conversation) {
+    const fromServer = conversation && (conversation.runtimeMode || conversation.runtime_mode);
+    syncRuntimeModeFromValue(fromServer || CHAT_RUNTIME_MODE_HOST);
+    setChatRuntimeModeLocked(!!conversationId);
+}
+
 if (typeof window !== 'undefined') {
     window.csaiHitlGlobalToolWhitelist = window.csaiHitlGlobalToolWhitelist || [];
     window.csaiHitlDefaultReviewer = window.csaiHitlDefaultReviewer || 'human';
@@ -921,6 +973,12 @@ if (typeof window !== 'undefined') {
         isEinoSingle: chatAgentModeIsEinoSingle,
         normalizeStored: chatAgentModeNormalizeStored,
         normalizeOrchestration: normalizeOrchestrationClient
+    };
+    window.csaiChatRuntimeMode = {
+        HOST: CHAT_RUNTIME_MODE_HOST,
+        CONTAINER: CHAT_RUNTIME_MODE_CONTAINER,
+        normalize: normalizeConversationRuntimeModeForUI,
+        sync: syncRuntimeModeFromValue
     };
     window.applyHitlSidebarConfig = applyHitlSidebarConfig;
     window.readHitlConfigFromForm = readHitlConfigFromForm;
@@ -2044,6 +2102,40 @@ function closeAgentModePanel() {
     }
 }
 
+function closeRuntimeModePanel() {
+    const panel = document.getElementById('runtime-mode-panel');
+    const button = document.getElementById('runtime-mode-btn');
+    if (panel) panel.style.display = 'none';
+    if (button) {
+        button.classList.remove('active');
+        button.setAttribute('aria-expanded', 'false');
+    }
+}
+
+function toggleRuntimeModePanel() {
+    const panel = document.getElementById('runtime-mode-panel');
+    const button = document.getElementById('runtime-mode-btn');
+    if (!panel || !button || button.disabled) return;
+    if (panel.style.display === 'flex') {
+        closeRuntimeModePanel();
+        return;
+    }
+    closeAgentModePanel();
+    if (typeof closeRoleSelectionPanel === 'function') closeRoleSelectionPanel();
+    if (typeof closeChatProjectPanel === 'function') closeChatProjectPanel();
+    if (typeof closeChatReasoningPanel === 'function') closeChatReasoningPanel();
+    panel.style.display = 'flex';
+    button.classList.add('active');
+    button.setAttribute('aria-expanded', 'true');
+}
+
+function selectRuntimeMode(mode) {
+    if (currentConversationId) return;
+    const normalized = normalizeConversationRuntimeModeForUI(mode);
+    syncRuntimeModeFromValue(normalized);
+    closeRuntimeModePanel();
+}
+
 function toggleAgentModePanel() {
     const panel = document.getElementById('agent-mode-panel');
     const btn = document.getElementById('agent-mode-btn');
@@ -2062,6 +2154,7 @@ function toggleAgentModePanel() {
     if (typeof closeChatProjectPanel === 'function') {
         closeChatProjectPanel();
     }
+    closeRuntimeModePanel();
     panel.style.display = 'flex';
     btn.classList.add('active');
     btn.setAttribute('aria-expanded', 'true');
@@ -2153,6 +2246,11 @@ document.addEventListener('languagechange', function () {
     }
     if (typeof updateChatReasoningSummary === 'function') {
         updateChatReasoningSummary();
+    }
+    const runtimeMode = document.getElementById('runtime-mode-select');
+    if (runtimeMode) {
+        syncRuntimeModeFromValue(runtimeMode.value);
+        setChatRuntimeModeLocked(!!currentConversationId);
     }
 });
 
@@ -2352,11 +2450,17 @@ async function sendMessage() {
     input.style.height = '40px';
 
     // 构建请求体（含附件）
+    const creatingNewConversation = !requestConversationId;
     const body = {
         message: message,
         conversationId: requestConversationId,
         role: typeof getCurrentRole === 'function' ? getCurrentRole() : ''
     };
+    if (creatingNewConversation) {
+        const runtimeModeSelect = document.getElementById('runtime-mode-select');
+        body.runtimeMode = normalizeConversationRuntimeModeForUI(runtimeModeSelect && runtimeModeSelect.value);
+        setChatRuntimeModeLocked(true);
+    }
     if (window.__csNextChatFinalizationPolicy && typeof window.__csNextChatFinalizationPolicy === 'object') {
         body.finalization = window.__csNextChatFinalizationPolicy;
         window.__csNextChatFinalizationPolicy = null;
@@ -2559,6 +2663,9 @@ async function sendMessage() {
         
     } catch (error) {
         clearLiveChatStreamIfOwned(liveStreamState);
+        if (creatingNewConversation && !streamConversationId && !currentConversationId) {
+            setChatRuntimeModeLocked(false);
+        }
         if (liveStreamState.detached || !isStreamStillVisibleForRequest()) {
             if (typeof loadActiveTasks === 'function') {
                 loadActiveTasks();
@@ -5736,6 +5843,8 @@ async function startNewConversation(options = {}) {
     }
     
     currentConversationId = null;
+    syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    setChatRuntimeModeLocked(false);
     window._loadedConversationProjectId = '';
     try {
         window.currentConversationId = '';
@@ -6272,6 +6381,7 @@ async function loadConversation(conversationId) {
             window.setCurrentRole(conversationRoleName || '默认');
         }
         applyConversationAgentMode(conversationId, conversation);
+        applyConversationRuntimeMode(conversationId, conversation);
         try {
             window.currentConversationId = conversationId;
         } catch (e) { /* ignore */ }
@@ -12143,6 +12253,8 @@ document.addEventListener('DOMContentLoaded', function() {
     initSessionSettingsSelects();
     initChatReasoningBarHeightSync();
     initChatPrimaryActionButton();
+    syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    setChatRuntimeModeLocked(!!currentConversationId);
     const customInput = document.getElementById('custom-icon-input');
     if (customInput) {
         customInput.addEventListener('keydown', function(e) {
@@ -12166,6 +12278,16 @@ document.addEventListener('languagechange', function () {
     updateChatPrimaryActionState();
 });
 
+document.addEventListener('conversation-changed', function (event) {
+    const conversationId = String(event && event.detail && event.detail.conversationId || '').trim();
+    if (conversationId) {
+        setChatRuntimeModeLocked(true);
+        return;
+    }
+    syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+    setChatRuntimeModeLocked(false);
+});
+
 document.addEventListener('keydown', function (event) {
     if (event.key === 'Escape') closeChatSystemModelPicker();
 });
@@ -12186,6 +12308,14 @@ document.addEventListener('click', function(event) {
     if (agentWrap && agentPanel && agentPanel.style.display === 'flex') {
         if (!agentWrap.contains(event.target)) {
             closeAgentModePanel();
+        }
+    }
+
+    const runtimeWrap = document.getElementById('runtime-mode-wrapper');
+    const runtimePanel = document.getElementById('runtime-mode-panel');
+    if (runtimeWrap && runtimePanel && runtimePanel.style.display === 'flex') {
+        if (!runtimeWrap.contains(event.target)) {
+            closeRuntimeModePanel();
         }
     }
 

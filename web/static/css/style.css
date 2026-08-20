@@ -28773,6 +28773,37 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
     flex-shrink: 0;
 }
 
+.runtime-mode-btn:disabled {
+    cursor: default;
+    opacity: 0.78;
+    background: #f8fafc;
+    box-shadow: none;
+    transform: none;
+}
+
+.runtime-mode-panel {
+    width: 340px;
+}
+
+.runtime-mode-option.role-selection-item-main {
+    text-align: left;
+    justify-content: flex-start;
+}
+
+.runtime-mode-option .role-selection-item-content-main,
+.runtime-mode-option .role-selection-item-name-main,
+.runtime-mode-option .role-selection-item-description-main {
+    text-align: left;
+}
+
+.runtime-mode-option .runtime-mode-check {
+    display: none;
+}
+
+.runtime-mode-option.selected .runtime-mode-check {
+    display: flex;
+}
+
 /* 与角色选择器共用 .role-selector-btn；此处仅包一层用于定位浮层 */
 .agent-mode-inner {
     position: relative;
@@ -46112,6 +46143,12 @@ html[data-theme="dark"] .chat-system-model-retry:hover {
         overflow: hidden;
         text-overflow: ellipsis;
     }
+
+    .chat-composer-context #runtime-mode-text {
+        max-width: 150px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
 }
 
 @media (max-width: 620px) {
@@ -46173,6 +46210,10 @@ html[data-theme="dark"] .chat-system-model-retry:hover {
     }
 
     .chat-composer-context #agent-mode-text {
+        display: none;
+    }
+
+    .chat-composer-context #runtime-mode-text {
         display: none;
     }
 

@@ -84,7 +84,7 @@ func (db *DB) ListConversationsByProjectID(projectID string, limit, offset int) 
 		limit = 100
 	}
 	rows, err := db.Query(
-		`SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name
+		`SELECT id, title, COALESCE(pinned, 0), created_at, updated_at, project_id, role_name, agent_mode, runtime_mode
 		 FROM conversations WHERE project_id = ? ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
 		projectID, limit, offset,
 	)
@@ -100,7 +100,9 @@ func (db *DB) ListConversationsByProjectID(projectID string, limit, offset int) 
 		var pinned int
 		var pid sql.NullString
 		var roleName sql.NullString
-		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &pid, &roleName); err != nil {
+		var agentMode sql.NullString
+		var runtimeMode sql.NullString
+		if err := rows.Scan(&conv.ID, &conv.Title, &pinned, &createdAt, &updatedAt, &pid, &roleName, &agentMode, &runtimeMode); err != nil {
 			return nil, err
 		}
 		if pid.Valid {
@@ -109,6 +111,10 @@ func (db *DB) ListConversationsByProjectID(projectID string, limit, offset int) 
 		if roleName.Valid {
 			conv.RoleName = normalizeConversationRoleName(roleName.String)
 		}
+		if agentMode.Valid {
+			conv.AgentMode = normalizeConversationAgentMode(agentMode.String)
+		}
+		conv.RuntimeMode, _ = NormalizeConversationRuntimeMode(runtimeMode.String)
 		conv.CreatedAt = parseDBTime(createdAt)
 		conv.UpdatedAt = parseDBTime(updatedAt)
 		conv.Pinned = pinned != 0

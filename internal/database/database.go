@@ -185,6 +185,7 @@ func (db *DB) initTables() error {
 		updated_at DATETIME NOT NULL,
 		role_name TEXT NOT NULL DEFAULT '默认',
 		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
+		runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container')),
 		last_react_input TEXT,
 		last_react_output TEXT
 	);`
@@ -1197,6 +1198,24 @@ func (db *DB) migrateConversationsTable() error {
 		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'eino_single'"); err != nil {
 			db.logger.Warn("添加agent_mode字段失败", zap.Error(err))
 		}
+	}
+
+	// 存量对话显式迁移为 host；新对话只能使用 host/container 之一。
+	err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name='runtime_mode'").Scan(&count)
+	if err != nil {
+		if _, addErr := db.Exec("ALTER TABLE conversations ADD COLUMN runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container'))"); addErr != nil {
+			errMsg := strings.ToLower(addErr.Error())
+			if !strings.Contains(errMsg, "duplicate column") && !strings.Contains(errMsg, "already exists") {
+				return fmt.Errorf("添加 conversations.runtime_mode 字段失败: %w", addErr)
+			}
+		}
+	} else if count == 0 {
+		if _, err := db.Exec("ALTER TABLE conversations ADD COLUMN runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container'))"); err != nil {
+			return fmt.Errorf("添加 conversations.runtime_mode 字段失败: %w", err)
+		}
+	}
+	if _, err := db.Exec("UPDATE conversations SET runtime_mode = 'host' WHERE runtime_mode IS NULL OR TRIM(runtime_mode) = ''"); err != nil {
+		return fmt.Errorf("迁移存量对话 runtime_mode 失败: %w", err)
 	}
 
 	return nil

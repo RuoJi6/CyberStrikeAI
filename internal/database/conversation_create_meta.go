@@ -7,6 +7,7 @@ type ConversationCreateMeta struct {
 	ProjectID            string
 	RoleName             string
 	AgentMode            string
+	RuntimeMode          string
 	ClientIP             string
 	SessionHint          string
 }
