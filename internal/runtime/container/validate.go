@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/distribution/reference"
 )
 
 var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
@@ -22,17 +24,8 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if strings.TrimSpace(spec.ConversationID) == "" {
 		return invalidSpec("conversation id is required")
 	}
-	if strings.TrimSpace(spec.Image.Repository) == "" {
-		return invalidSpec("image repository is required")
-	}
-	if !sha256DigestPattern.MatchString(spec.Image.Digest) {
-		return invalidSpec("image digest must be a lowercase sha256 digest")
-	}
-	if strings.TrimSpace(spec.Image.ResolvedDigest) != "" {
-		return invalidSpec("resolved image digest is engine output and cannot be requested")
-	}
-	if strings.TrimSpace(spec.Image.Platform) == "" {
-		return invalidSpec("image platform is required")
+	if err := ValidateImageReference(spec.Image); err != nil {
+		return err
 	}
 	if spec.Resources.NanoCPUs <= 0 || spec.Resources.MemoryBytes <= 0 || spec.Resources.PIDs <= 0 {
 		return invalidSpec("cpu, memory and pid limits must be positive")
@@ -68,6 +61,51 @@ func ValidateSpec(spec RuntimeSpec) error {
 		return invalidSpec("ephemeral workspace cannot declare a named volume")
 	}
 	return nil
+}
+
+// ValidateImageReference requires a repository without a tag, an immutable
+// digest and an explicit linux platform. The repository parser normalizes
+// familiar Docker Hub names while rejecting tag/digest smuggling.
+func ValidateImageReference(image ImageReference) error {
+	repository := strings.TrimSpace(image.Repository)
+	if repository == "" {
+		return invalidSpec("image repository is required")
+	}
+	named, err := reference.ParseNormalizedNamed(repository)
+	if err != nil {
+		return invalidSpec("image repository is invalid")
+	}
+	if _, tagged := named.(reference.Tagged); tagged {
+		return invalidSpec("image repository must not include a tag")
+	}
+	if _, digested := named.(reference.Digested); digested {
+		return invalidSpec("image repository must not include a digest")
+	}
+	if !sha256DigestPattern.MatchString(image.Digest) {
+		return invalidSpec("image digest must be a lowercase sha256 digest")
+	}
+	if strings.TrimSpace(image.ResolvedDigest) != "" {
+		return invalidSpec("resolved image digest is engine output and cannot be requested")
+	}
+	if _, err := parsePlatform(image.Platform); err != nil {
+		return err
+	}
+	return nil
+}
+
+func parsePlatform(platform string) ([3]string, error) {
+	parts := strings.Split(strings.TrimSpace(platform), "/")
+	if len(parts) < 2 || len(parts) > 3 || parts[0] != "linux" || parts[1] == "" {
+		return [3]string{}, invalidSpec("image platform must be linux/<architecture>[/<variant>]")
+	}
+	if len(parts) == 3 && parts[2] == "" {
+		return [3]string{}, invalidSpec("image platform variant cannot be empty")
+	}
+	parsed := [3]string{parts[0], parts[1], ""}
+	if len(parts) == 3 {
+		parsed[2] = parts[2]
+	}
+	return parsed, nil
 }
 
 func invalidSpec(message string) error {

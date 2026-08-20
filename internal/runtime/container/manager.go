@@ -39,15 +39,19 @@ var (
 	ErrInvalidSpecification = errors.New("invalid container runtime specification")
 	ErrArchitectureMismatch = errors.New("container image architecture mismatch")
 	ErrImageDigestMismatch  = errors.New("container image digest mismatch")
+	ErrRegistryUnavailable  = errors.New("container image registry unavailable")
 	ErrRuntimeStateConflict = errors.New("container runtime state conflict")
 )
 
 // EngineInfo is a read-only description of the connected container engine.
 type EngineInfo struct {
-	Available    bool
-	Version      string
-	Architecture string
-	OperatingSys string
+	Available       bool
+	Version         string
+	APIVersion      string
+	Architecture    string
+	OperatingSys    string
+	CgroupVersion   string
+	SecurityOptions []string
 }
 
 // ImageReference requires an immutable digest in addition to the repository.
@@ -58,6 +62,18 @@ type ImageReference struct {
 	Digest         string
 	Platform       string
 	ResolvedDigest string
+}
+
+// ImageInspection is returned by both remote manifest inspection and local
+// image verification. ManifestDigest is the immutable distribution digest;
+// ImageID is populated only for a local engine image.
+type ImageInspection struct {
+	Reference      ImageReference
+	ManifestDigest string
+	Platforms      []string
+	ImageID        string
+	SizeBytes      int64
+	Local          bool
 }
 
 // ResourceLimits contains the limits that every runtime implementation must
@@ -127,11 +143,21 @@ type RebuildOptions struct {
 	RemoveWorkspace bool
 }
 
+// RuntimeInspector exposes read-only engine and image checks. Keeping this
+// boundary separate allows health/readiness code to be tested before lifecycle
+// mutations are enabled.
+type RuntimeInspector interface {
+	EngineInfo(ctx context.Context) (EngineInfo, error)
+	InspectManifest(ctx context.Context, image ImageReference) (ImageInspection, error)
+	InspectLocalImage(ctx context.Context, image ImageReference) (ImageInspection, error)
+	VerifyRuntimeImage(ctx context.Context, providerID string, image ImageReference) (ImageInspection, error)
+}
+
 // RuntimeManager is the only lifecycle boundary the application may use for
 // conversation containers. Handlers and Agent execution paths must depend on
 // this interface instead of invoking Docker CLI commands directly.
 type RuntimeManager interface {
-	EngineInfo(ctx context.Context) (EngineInfo, error)
+	RuntimeInspector
 	Create(ctx context.Context, spec RuntimeSpec) (Runtime, error)
 	Inspect(ctx context.Context, id RuntimeID) (Runtime, error)
 	ListOwned(ctx context.Context) ([]Runtime, error)

@@ -13,14 +13,17 @@ import (
 )
 
 const (
-	OperationEngineInfo = "engine_info"
-	OperationCreate     = "create"
-	OperationInspect    = "inspect"
-	OperationListOwned  = "list_owned"
-	OperationStart      = "start"
-	OperationStop       = "stop"
-	OperationRebuild    = "rebuild"
-	OperationDelete     = "delete"
+	OperationEngineInfo         = "engine_info"
+	OperationInspectManifest    = "inspect_manifest"
+	OperationInspectLocalImage  = "inspect_local_image"
+	OperationVerifyRuntimeImage = "verify_runtime_image"
+	OperationCreate             = "create"
+	OperationInspect            = "inspect"
+	OperationListOwned          = "list_owned"
+	OperationStart              = "start"
+	OperationStop               = "stop"
+	OperationRebuild            = "rebuild"
+	OperationDelete             = "delete"
 )
 
 type Call struct {
@@ -83,6 +86,21 @@ func (f *FakeManager) EngineInfo(ctx context.Context) (container.EngineInfo, err
 		return f.engine, container.ErrEngineUnavailable
 	}
 	return f.engine, nil
+}
+
+func (f *FakeManager) InspectManifest(ctx context.Context, image container.ImageReference) (container.ImageInspection, error) {
+	return f.inspectImage(ctx, OperationInspectManifest, "", image, false)
+}
+
+func (f *FakeManager) InspectLocalImage(ctx context.Context, image container.ImageReference) (container.ImageInspection, error) {
+	return f.inspectImage(ctx, OperationInspectLocalImage, "", image, true)
+}
+
+func (f *FakeManager) VerifyRuntimeImage(ctx context.Context, providerID string, image container.ImageReference) (container.ImageInspection, error) {
+	if providerID == "" {
+		return container.ImageInspection{}, fmt.Errorf("%w: provider id is required", container.ErrInvalidSpecification)
+	}
+	return f.inspectImage(ctx, OperationVerifyRuntimeImage, container.RuntimeID(providerID), image, true)
 }
 
 func (f *FakeManager) Create(ctx context.Context, spec container.RuntimeSpec) (container.Runtime, error) {
@@ -241,6 +259,34 @@ func (f *FakeManager) transition(ctx context.Context, operation string, id conta
 	runtime.UpdatedAt = f.now().UTC()
 	f.runtimes[id] = runtime
 	return runtime, nil
+}
+
+func (f *FakeManager) inspectImage(ctx context.Context, operation string, id container.RuntimeID, image container.ImageReference, local bool) (container.ImageInspection, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := contextError(ctx); err != nil {
+		return container.ImageInspection{}, err
+	}
+	f.record(operation, id)
+	if err := f.takeFailure(operation); err != nil {
+		return container.ImageInspection{}, err
+	}
+	if err := container.ValidateImageReference(image); err != nil {
+		return container.ImageInspection{}, err
+	}
+	resolved := image
+	resolved.ResolvedDigest = image.Digest
+	inspection := container.ImageInspection{
+		Reference:      resolved,
+		ManifestDigest: image.Digest,
+		Platforms:      []string{image.Platform},
+		Local:          local,
+	}
+	if local {
+		inspection.ImageID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+		inspection.SizeBytes = 64 << 20
+	}
+	return inspection, nil
 }
 
 func (f *FakeManager) runtime(id container.RuntimeID) (container.Runtime, error) {

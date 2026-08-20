@@ -19,6 +19,8 @@ func TestValidateSpec(t *testing.T) {
 	}{
 		{name: "missing runtime id", mutate: func(spec *container.RuntimeSpec) { spec.ID = "" }},
 		{name: "floating image", mutate: func(spec *container.RuntimeSpec) { spec.Image.Digest = "latest" }},
+		{name: "repository includes tag", mutate: func(spec *container.RuntimeSpec) { spec.Image.Repository = "ghcr.io/example/sandbox:latest" }},
+		{name: "non-linux platform", mutate: func(spec *container.RuntimeSpec) { spec.Image.Platform = "windows/amd64" }},
 		{name: "forged resolved digest", mutate: func(spec *container.RuntimeSpec) { spec.Image.ResolvedDigest = spec.Image.Digest }},
 		{name: "unlimited cpu", mutate: func(spec *container.RuntimeSpec) { spec.Resources.NanoCPUs = 0 }},
 		{name: "writable rootfs", mutate: func(spec *container.RuntimeSpec) { spec.Security.ReadOnlyRootFS = false }},

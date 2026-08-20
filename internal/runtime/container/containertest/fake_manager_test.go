@@ -121,6 +121,23 @@ func TestFakeManagerUnavailableFailsClosed(t *testing.T) {
 	}
 }
 
+func TestFakeManagerImageInspection(t *testing.T) {
+	manager := containertest.NewFakeManager(container.EngineInfo{Available: true})
+	image := validSpec().Image
+	manifest, err := manager.InspectManifest(context.Background(), image)
+	if err != nil || manifest.Local || manifest.ManifestDigest != image.Digest {
+		t.Fatalf("manifest = %#v, %v", manifest, err)
+	}
+	local, err := manager.InspectLocalImage(context.Background(), image)
+	if err != nil || !local.Local || local.ImageID == "" {
+		t.Fatalf("local image = %#v, %v", local, err)
+	}
+	verified, err := manager.VerifyRuntimeImage(context.Background(), "provider-1", image)
+	if err != nil || !verified.Local || verified.Reference.ResolvedDigest != image.Digest {
+		t.Fatalf("runtime image = %#v, %v", verified, err)
+	}
+}
+
 func validSpec() container.RuntimeSpec {
 	return container.RuntimeSpec{
 		ID:             "runtime-1",
