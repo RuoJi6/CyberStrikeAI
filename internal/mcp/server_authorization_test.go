@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -45,6 +46,34 @@ func TestToolAuthorizerIsUniversalAndExecutionKeepsOwner(t *testing.T) {
 	execution, ok := server.GetExecution(executionID)
 	if !ok || execution.OwnerUserID != "u1" {
 		t.Fatalf("execution owner = %#v, want u1", execution)
+	}
+}
+
+func TestHTTPToolCallRecordsBackendAuditIdentity(t *testing.T) {
+	server := NewServer(zap.NewNop())
+	server.RegisterTool(Tool{Name: "audit", InputSchema: map[string]interface{}{"type": "object"}}, func(ctx context.Context, _ map[string]interface{}) (*ToolResult, error) {
+		RecordToolExecutionAudit(ctx, ToolExecutionAudit{
+			ExecutionLocation: "container",
+			ContainerID:       "http-container-id",
+			ImageDigest:       "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		})
+		return &ToolResult{Content: []Content{{Type: "text", Text: "ok"}}}, nil
+	})
+	params, err := json.Marshal(CallToolRequest{Name: "audit", Arguments: map[string]interface{}{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := server.handleCallTool(context.Background(), &Message{ID: MessageID{value: 1}, Params: params})
+	if response == nil || response.Error != nil {
+		t.Fatalf("response = %#v", response)
+	}
+	executions := server.GetAllExecutions()
+	if len(executions) != 1 {
+		t.Fatalf("executions = %#v", executions)
+	}
+	exec := executions[0]
+	if exec.ExecutionLocation != "container" || exec.ContainerID != "http-container-id" || exec.ImageDigest == "" {
+		t.Fatalf("execution audit = %#v", exec)
 	}
 }
 

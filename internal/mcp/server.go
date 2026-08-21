@@ -579,6 +579,8 @@ func (s *Server) handleCallTool(requestCtx context.Context, msg *Message) *Messa
 	baseCtx, timeoutCancel := s.effectiveHTTPToolCallDeadline(requestCtx)
 	defer timeoutCancel()
 	execCtx, runCancel := context.WithCancel(baseCtx)
+	execCtx = WithMCPExecutionID(execCtx, executionID)
+	execCtx = WithToolExecutionAuditRecorder(execCtx, s.RecordLocalToolExecutionAudit)
 	s.registerRunningCancel(executionID, runCancel)
 	defer func() {
 		runCancel()
