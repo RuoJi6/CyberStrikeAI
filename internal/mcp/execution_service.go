@@ -176,6 +176,11 @@ func (s *ExecutionService) Submit(ctx context.Context, req ExecutionRequest) (*E
 func (s *ExecutionService) runWorker(ctx context.Context, entry *executionEntry, onDone ExecutionDoneFunc) {
 	id := entry.exec.ID
 	ctx = WithMCPExecutionID(ctx, id)
+	ctx = WithToolExecutionAuditRecorder(ctx, func(executionID string, observation ToolExecutionAudit) {
+		if executionID == id {
+			s.recordToolExecutionAudit(entry, observation)
+		}
+	})
 	if conv := strings.TrimSpace(entry.exec.ConversationID); conv != "" {
 		ctx = WithMCPConversationID(ctx, conv)
 	}
@@ -203,6 +208,21 @@ func (s *ExecutionService) runWorker(ctx context.Context, entry *executionEntry,
 		return nilSafeRun(ctx, entry)
 	})
 	s.finishEntry(ctx, entry, result, err, onDone)
+}
+
+func (s *ExecutionService) recordToolExecutionAudit(entry *executionEntry, observation ToolExecutionAudit) {
+	if s == nil || entry == nil || entry.exec == nil {
+		return
+	}
+	s.mu.Lock()
+	mergeToolExecutionAudit(entry.exec, observation)
+	snapshot := cloneToolExecution(entry.exec)
+	s.mu.Unlock()
+	if s.storage != nil {
+		if err := s.storage.SaveToolExecution(snapshot); err != nil {
+			s.logger.Warn("保存工具执行审计身份失败", zap.Error(err), zap.String("executionId", snapshot.ID))
+		}
+	}
 }
 
 func (s *ExecutionService) markEntryRunning(entry *executionEntry) {

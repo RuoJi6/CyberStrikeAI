@@ -61,6 +61,9 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	execRuntime := &appFakeRuntimeExecutor{}
 	resolver := newConversationExecutionBackendResolver(db, execRuntime, lifecycle)
 	ctx := mcp.WithMCPConversationID(context.Background(), conversation.ID)
+	ctx = mcp.WithMCPExecutionID(ctx, "tool-execution-1")
+	var audit mcp.ToolExecutionAudit
+	ctx = mcp.WithToolExecutionAuditRecorder(ctx, func(_ string, observation mcp.ToolExecutionAudit) { audit = observation })
 	backend, err := resolver.ResolveExecutionBackend(ctx)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -69,8 +72,11 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	if err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if result.Location != "container" || result.Output != "inside-container" || execRuntime.called != 1 {
+	if result.Location != "container" || result.Output != "inside-container" || execRuntime.called != 1 || result.ContainerID != runtime.ProviderID || result.ImageDigest != spec.Image.Digest {
 		t.Fatalf("result=%#v calls=%d", result, execRuntime.called)
+	}
+	if audit.ExecutionLocation != "container" || audit.ContainerID != runtime.ProviderID || audit.ImageDigest != spec.Image.Digest {
+		t.Fatalf("execution audit = %#v runtime = %#v", audit, runtime)
 	}
 	record, err := db.GetContainerInitialization(context.Background(), conversation.ID)
 	if err != nil || record.RuntimeStatus != containerruntime.StatusRunning {

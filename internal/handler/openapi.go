@@ -952,6 +952,19 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "执行状态",
 							"enum":        []string{"queued", "running", "completed", "failed", "cancelled", "hard_timeout", "orphaned"},
 						},
+						"executionLocation": map[string]interface{}{
+							"type":        "string",
+							"description": "由受信执行后端记录的真实执行位置",
+							"enum":        []string{"host", "container"},
+						},
+						"containerId": map[string]interface{}{
+							"type":        "string",
+							"description": "容器执行时由运行时提供方记录的容器 ID",
+						},
+						"imageDigest": map[string]interface{}{
+							"type":        "string",
+							"description": "容器执行时经验证运行规格的不可变镜像 digest",
+						},
 						"createdAt": map[string]interface{}{
 							"type":        "string",
 							"format":      "date-time",

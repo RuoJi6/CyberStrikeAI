@@ -10,6 +10,7 @@ import (
 
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/einomcp"
+	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/tooloutput"
 
@@ -174,6 +175,11 @@ func (m *einoAgenticFilesystemToolMiddleware) WrapInvokableToolCall(ctx context.
 		args := parseToolArgumentsObject(argumentsInJSON)
 		if len(args) > 0 && m.binder != nil {
 			m.binder.BindArguments(tCtx.CallID, args)
+		}
+		if m.binder != nil {
+			if executionID := m.binder.ExecutionID(tCtx.CallID); executionID != "" {
+				ctx = mcp.WithMCPExecutionID(ctx, executionID)
+			}
 		}
 		result, runErr := wrapped(ctx, argumentsInJSON, opts...)
 		if runErr != nil {

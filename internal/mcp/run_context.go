@@ -24,6 +24,20 @@ type einoExecuteRunRegistryCtxKey struct{}
 type mcpConversationIDCtxKey struct{}
 type mcpExecutionIDCtxKey struct{}
 type mcpProjectIDCtxKey struct{}
+type toolExecutionAuditRecorderCtxKey struct{}
+
+// ToolExecutionAudit is the trusted execution identity attached by host or
+// container backends. ContainerID is the provider-owned Docker container ID;
+// ImageDigest is the immutable digest from the validated runtime spec.
+type ToolExecutionAudit struct {
+	ExecutionLocation string
+	ContainerID       string
+	ImageDigest       string
+}
+
+// ToolExecutionAuditRecorder persists backend-observed execution identity for
+// the current monitor execution ID.
+type ToolExecutionAuditRecorder func(executionID string, observation ToolExecutionAudit)
 
 // WithToolRunRegistry 将登记器注入 ctx（Eino / 原生 Agent 任务 ctx）。
 func WithToolRunRegistry(ctx context.Context, reg ToolRunRegistry) context.Context {
@@ -99,6 +113,48 @@ func MCPExecutionIDFromContext(ctx context.Context) string {
 	}
 	v, _ := ctx.Value(mcpExecutionIDCtxKey{}).(string)
 	return v
+}
+
+// WithToolExecutionAuditRecorder injects the trusted audit sink used by
+// execution backends. Callers still need WithMCPExecutionID so one tool cannot
+// attribute observations to another execution.
+func WithToolExecutionAuditRecorder(ctx context.Context, recorder ToolExecutionAuditRecorder) context.Context {
+	if ctx == nil || recorder == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolExecutionAuditRecorderCtxKey{}, recorder)
+}
+
+// RecordToolExecutionAudit records a backend observation for the current
+// execution ID. Missing IDs or recorders fail closed as a no-op.
+func RecordToolExecutionAudit(ctx context.Context, observation ToolExecutionAudit) {
+	if ctx == nil {
+		return
+	}
+	executionID := MCPExecutionIDFromContext(ctx)
+	if executionID == "" {
+		return
+	}
+	recorder, _ := ctx.Value(toolExecutionAuditRecorderCtxKey{}).(ToolExecutionAuditRecorder)
+	if recorder != nil {
+		recorder(executionID, observation)
+	}
+}
+
+func mergeToolExecutionAudit(exec *ToolExecution, observation ToolExecutionAudit) {
+	if exec == nil {
+		return
+	}
+	switch location := strings.ToLower(strings.TrimSpace(observation.ExecutionLocation)); location {
+	case "host", "container":
+		exec.ExecutionLocation = location
+	}
+	if containerID := strings.TrimSpace(observation.ContainerID); containerID != "" {
+		exec.ContainerID = containerID
+	}
+	if imageDigest := strings.TrimSpace(observation.ImageDigest); imageDigest != "" {
+		exec.ImageDigest = imageDigest
+	}
 }
 
 // WithMCPProjectID 将项目 ID 注入 ctx，供 reduction/trunc 落盘路径与项目隔离对齐。

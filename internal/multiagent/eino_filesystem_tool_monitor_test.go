@@ -140,6 +140,7 @@ func TestEinoADKFilesystemToolMonitorSpillsLargeReadFileResultForProgress(t *tes
 func TestEinoAgenticFilesystemWrapperCapturesArgumentsAndSpillsResult(t *testing.T) {
 	t.Parallel()
 	binder := NewMCPExecutionBinder()
+	binder.Bind("call-read", "exec-read")
 	mw := &einoAgenticFilesystemToolMiddleware{
 		TypedChatModelAgentMiddleware: &adk.TypedBaseChatModelAgentMiddleware[*schema.AgenticMessage]{},
 		conversationID:                "conv-1",
@@ -147,7 +148,9 @@ func TestEinoAgenticFilesystemWrapperCapturesArgumentsAndSpillsResult(t *testing
 		reductionRootDir:              t.TempDir(),
 		binder:                        binder,
 	}
+	var executionIDFromContext string
 	endpoint, err := mw.WrapInvokableToolCall(context.Background(), func(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (string, error) {
+		executionIDFromContext = mcp.MCPExecutionIDFromContext(ctx)
 		return strings.Repeat("0123456789", 100), nil
 	}, &adk.ToolContext{Name: "read_file", CallID: "call-read"})
 	if err != nil {
@@ -160,6 +163,9 @@ func TestEinoAgenticFilesystemWrapperCapturesArgumentsAndSpillsResult(t *testing
 	args := binder.Arguments("call-read")
 	if args["file_path"] != "/tmp/requirements.txt" {
 		t.Fatalf("captured args = %#v", args)
+	}
+	if executionIDFromContext != "exec-read" {
+		t.Fatalf("execution id in filesystem backend context = %q", executionIDFromContext)
 	}
 	if !strings.Contains(result, "<persisted-output>") || !strings.Contains(result, "Full output saved to:") {
 		t.Fatalf("expected persisted-output summary, got %q", result)

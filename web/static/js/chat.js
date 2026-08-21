@@ -5558,6 +5558,20 @@ function renderMCPDetailModal(exec) {
     exec = exec || {};
     document.getElementById('detail-tool-name').textContent = exec.toolName || (typeof window.t === 'function' ? window.t('mcpDetailModal.unknown') : 'Unknown');
     document.getElementById('detail-execution-id').textContent = exec.id || 'N/A';
+    const executionLocation = String(exec.executionLocation || '').trim().toLowerCase();
+    const executionLocationKey = executionLocation === 'host'
+        ? 'mcpDetailModal.executionLocationHost'
+        : (executionLocation === 'container' ? 'mcpDetailModal.executionLocationContainer' : '');
+    const executionLocationEl = document.getElementById('detail-execution-location');
+    if (executionLocationEl) {
+        executionLocationEl.textContent = executionLocationKey && typeof window.t === 'function'
+            ? window.t(executionLocationKey)
+            : (executionLocation || '—');
+    }
+    const containerIdEl = document.getElementById('detail-container-id');
+    if (containerIdEl) containerIdEl.textContent = exec.containerId || '—';
+    const imageDigestEl = document.getElementById('detail-image-digest');
+    if (imageDigestEl) imageDigestEl.textContent = exec.imageDigest || '—';
     const statusEl = document.getElementById('detail-status');
     const normalizedStatus = (exec.status || 'unknown').toLowerCase();
     statusEl.textContent = getStatusText(exec.status);

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"cyberstrike-ai/internal/mcp"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -119,6 +120,7 @@ func (b *conversationFilesystemBackend) resolve(ctx context.Context) (filesystem
 	}
 	switch reporter.ExecutionLocation() {
 	case "host":
+		mcp.RecordToolExecutionAudit(ctx, mcp.ToolExecutionAudit{ExecutionLocation: "host"})
 		if b.host == nil {
 			return nil, nil, fmt.Errorf("host filesystem backend is not configured")
 		}

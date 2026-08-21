@@ -469,7 +469,7 @@ test('刷新指定对话时立即恢复且加载完成前不闪出无项目状�
     assert.match(css, /\.chat-container\.is-conversation-restoring #chat-messages/);
     assert.match(css, /\.chat-container\.is-conversation-restoring #chat-input-container/);
     assert.match(html, /router\.js\?v=20260819-3/);
-    assert.match(html, /chat\.js\?v=20260821-1/);
+    assert.match(html, /chat\.js\?v=20260821-2/);
 });
 
 test('刷新运行中回复会复用已持久化 planning 并继续追加未来增量', () => {

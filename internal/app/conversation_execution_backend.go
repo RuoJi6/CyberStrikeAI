@@ -84,7 +84,7 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	if record.RuntimeStatus != containerruntime.StatusRunning || record.LifecycleState != containerruntime.LifecycleIdle {
 		return nil, fmt.Errorf("container runtime for conversation %s is %s/%s", conversationID, record.RuntimeStatus, record.LifecycleState)
 	}
-	backend, err := security.NewContainerExecutionBackend(r.container, record.Spec)
+	backend, err := security.NewContainerExecutionBackendWithIdentity(r.container, record.Spec, record.ProviderID)
 	if err != nil {
 		return nil, fmt.Errorf("bind container execution backend for conversation %s: %w", conversationID, err)
 	}

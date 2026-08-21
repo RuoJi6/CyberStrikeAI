@@ -85,6 +85,7 @@ func RunDeepAgent(
 		return nil, fmt.Errorf("multiagent: 配置或 Agent 为空")
 	}
 	ctx = mcp.WithMCPConversationID(ctx, conversationID)
+	ctx = ag.WithLocalToolExecutionAuditRecorder(ctx)
 
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 

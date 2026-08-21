@@ -792,6 +792,15 @@ func (a *Agent) BeginLocalToolExecution(ctx context.Context, toolName string, ar
 	return a.mcpServer.BeginToolExecution(ctx, toolName, args)
 }
 
+// WithLocalToolExecutionAuditRecorder lets trusted execution backends attach
+// their observed host/container identity to Eino-local monitor records.
+func (a *Agent) WithLocalToolExecutionAuditRecorder(ctx context.Context) context.Context {
+	if a == nil || a.mcpServer == nil {
+		return ctx
+	}
+	return a.mcpServer.WithLocalToolExecutionAuditRecorder(ctx)
+}
+
 // FinishLocalToolExecution 完成 BeginLocalToolExecution 创建的记录；executionID 为空时一次性写入已完成记录。
 func (a *Agent) FinishLocalToolExecution(ctx context.Context, executionID, toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
 	if a == nil || a.mcpServer == nil {

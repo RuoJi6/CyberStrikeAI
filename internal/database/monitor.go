@@ -54,8 +54,8 @@ func (db *DB) SaveToolExecution(exec *mcp.ToolExecution) error {
 
 	query := `
 		INSERT OR REPLACE INTO tool_executions 
-		(id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms, partial_output, partial_output_bytes, partial_output_truncated, partial_output_updated_at, owner_user_id, conversation_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms, execution_location, container_id, image_digest, partial_output, partial_output_bytes, partial_output_truncated, partial_output_updated_at, owner_user_id, conversation_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err = db.Exec(query,
@@ -68,6 +68,9 @@ func (db *DB) SaveToolExecution(exec *mcp.ToolExecution) error {
 		exec.StartTime,
 		endTime,
 		durationMs,
+		sqlNullString(strings.TrimSpace(exec.ExecutionLocation)),
+		sqlNullString(strings.TrimSpace(exec.ContainerID)),
+		sqlNullString(strings.TrimSpace(exec.ImageDigest)),
 		sqlNullString(exec.PartialOutput),
 		exec.PartialOutputBytes,
 		partialTruncated,
@@ -161,7 +164,9 @@ func (db *DB) LoadToolExecutionsWithPagination(offset, limit int, status, toolNa
 	}
 
 	query := `
-		SELECT id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms, COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
+		SELECT id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms,
+		       COALESCE(execution_location, ''), COALESCE(container_id, ''), COALESCE(image_digest, ''),
+		       COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
 		FROM tool_executions
 	`
 	args := []interface{}{}
@@ -209,6 +214,9 @@ func (db *DB) LoadToolExecutionsWithPagination(offset, limit int, status, toolNa
 			&exec.StartTime,
 			&endTime,
 			&durationMs,
+			&exec.ExecutionLocation,
+			&exec.ContainerID,
+			&exec.ImageDigest,
 			&exec.OwnerUserID,
 			&exec.ConversationID,
 		)
@@ -433,7 +441,9 @@ func (db *DB) LoadToolExecutionListPageForAccess(offset, limit int, status, tool
 	}
 
 	query := `
-		SELECT id, tool_name, status, start_time, end_time, duration_ms, COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
+		SELECT id, tool_name, status, start_time, end_time, duration_ms,
+		       COALESCE(execution_location, ''), COALESCE(container_id, ''), COALESCE(image_digest, ''),
+		       COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
 		FROM tool_executions
 	`
 	whereSQL, args := toolExecutionsFilterSQL(status, toolName)
@@ -461,6 +471,9 @@ func (db *DB) LoadToolExecutionListPageForAccess(offset, limit int, status, tool
 			&exec.StartTime,
 			&endTime,
 			&durationMs,
+			&exec.ExecutionLocation,
+			&exec.ContainerID,
+			&exec.ImageDigest,
 			&exec.OwnerUserID,
 			&exec.ConversationID,
 		); err != nil {
@@ -508,6 +521,7 @@ func appendToolExecutionAccessSQL(query string, args []interface{}, access RBACL
 func (db *DB) GetToolExecution(id string) (*mcp.ToolExecution, error) {
 	query := `
 		SELECT id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms,
+		       COALESCE(execution_location, ''), COALESCE(container_id, ''), COALESCE(image_digest, ''),
 		       COALESCE(partial_output, ''), COALESCE(partial_output_bytes, 0), COALESCE(partial_output_truncated, 0), partial_output_updated_at,
 		       COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
 		FROM tool_executions
@@ -535,6 +549,9 @@ func (db *DB) GetToolExecution(id string) (*mcp.ToolExecution, error) {
 		&exec.StartTime,
 		&endTime,
 		&durationMs,
+		&exec.ExecutionLocation,
+		&exec.ContainerID,
+		&exec.ImageDigest,
 		&exec.PartialOutput,
 		&exec.PartialOutputBytes,
 		&partialTruncated,
@@ -738,7 +755,9 @@ func (db *DB) GetToolExecutionsByIds(ids []string) ([]*mcp.ToolExecution, error)
 	}
 
 	query := `
-		SELECT id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms, COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
+		SELECT id, tool_name, arguments, status, result, error, start_time, end_time, duration_ms,
+		       COALESCE(execution_location, ''), COALESCE(container_id, ''), COALESCE(image_digest, ''),
+		       COALESCE(owner_user_id, ''), COALESCE(conversation_id, '')
 		FROM tool_executions
 		WHERE id IN (` + strings.Join(placeholders, ",") + `)
 	`
@@ -768,6 +787,9 @@ func (db *DB) GetToolExecutionsByIds(ids []string) ([]*mcp.ToolExecution, error)
 			&exec.StartTime,
 			&endTime,
 			&durationMs,
+			&exec.ExecutionLocation,
+			&exec.ContainerID,
+			&exec.ImageDigest,
 			&exec.OwnerUserID,
 			&exec.ConversationID,
 		)

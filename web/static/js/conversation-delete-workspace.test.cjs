@@ -12,7 +12,8 @@ const zh = JSON.parse(fs.readFileSync(path.join(root, 'web/static/i18n/zh-CN.jso
 const en = JSON.parse(fs.readFileSync(path.join(root, 'web/static/i18n/en-US.json'), 'utf8'));
 
 test('删除对话弹窗为持久工作区提供两个明确选项', () => {
-    assert.match(template, /id="conversation-delete-workspace-modal"/);
+    assert.match(template, /id="conversation-delete-workspace-modal" class="modal-overlay projects-modal-overlay conversation-delete-workspace-modal"/);
+    assert.match(styles, /\.modal-overlay\.projects-modal-overlay\s*\{[\s\S]{0,240}position:\s*fixed;[\s\S]{0,240}align-items:\s*center;[\s\S]{0,120}justify-content:\s*center;/);
     assert.match(template, /id="conversation-delete-retain-btn"[^>]+onclick="resolveConversationDeleteWorkspaceChoice\('retain'\)"/);
     assert.match(template, /id="conversation-delete-workspace-btn"[^>]+onclick="resolveConversationDeleteWorkspaceChoice\('delete'\)"/);
     assert.match(styles, /\.conversation-delete-workspace-dialog/);

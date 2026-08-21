@@ -292,10 +292,13 @@ func slimToolExecution(exec *mcp.ToolExecution) *mcp.ToolExecution {
 		return nil
 	}
 	slim := &mcp.ToolExecution{
-		ID:        exec.ID,
-		ToolName:  exec.ToolName,
-		Status:    exec.Status,
-		StartTime: exec.StartTime,
+		ID:                exec.ID,
+		ToolName:          exec.ToolName,
+		Status:            exec.Status,
+		StartTime:         exec.StartTime,
+		ExecutionLocation: exec.ExecutionLocation,
+		ContainerID:       exec.ContainerID,
+		ImageDigest:       exec.ImageDigest,
 	}
 	if exec.EndTime != nil {
 		end := *exec.EndTime

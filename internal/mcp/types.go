@@ -199,6 +199,11 @@ type ToolExecution struct {
 	StartTime time.Time              `json:"startTime"`
 	EndTime   *time.Time             `json:"endTime,omitempty"`
 	Duration  time.Duration          `json:"duration,omitempty"`
+	// ExecutionLocation and the container identity are trusted execution-backend
+	// observations. They are never accepted from tool arguments or HTTP input.
+	ExecutionLocation string `json:"executionLocation,omitempty"`
+	ContainerID       string `json:"containerId,omitempty"`
+	ImageDigest       string `json:"imageDigest,omitempty"`
 	// PartialOutput is a bounded tail preview of output produced by a running tool.
 	// It is intentionally separate from Result, which remains the final canonical tool result.
 	PartialOutput          string     `json:"partialOutput,omitempty"`

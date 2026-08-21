@@ -10,6 +10,7 @@ import (
 	"path"
 	"strings"
 
+	"cyberstrike-ai/internal/mcp"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/tooloutput"
 )
@@ -33,6 +34,8 @@ type ExecutionResult struct {
 	ExitCode       int
 	Location       string
 	RuntimeID      string
+	ContainerID    string
+	ImageDigest    string
 	ProviderExecID string
 }
 
@@ -85,6 +88,7 @@ type hostExecutionBackend struct{}
 func (hostExecutionBackend) ExecutionLocation() string { return "host" }
 
 func (hostExecutionBackend) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
+	mcp.RecordToolExecutionAudit(ctx, mcp.ToolExecutionAudit{ExecutionLocation: "host"})
 	if len(request.Command) == 0 || strings.TrimSpace(request.Command[0]) == "" {
 		return ExecutionResult{Location: "host", ExitCode: -1}, fmt.Errorf("command is required")
 	}
@@ -144,6 +148,9 @@ func commandExitCode(err error) (int, bool) {
 type containerExecutionBackend struct {
 	executor containerruntime.RuntimeExecutor
 	spec     containerruntime.RuntimeSpec
+	// containerID is loaded from the durable runtime record and revalidated by
+	// the runtime executor before every mutation or exec.
+	containerID string
 }
 
 func (*containerExecutionBackend) ExecutionLocation() string { return "container" }
@@ -152,6 +159,7 @@ func (b *containerExecutionBackend) WriteWorkspaceFile(ctx context.Context, file
 	if b == nil || b.executor == nil {
 		return "", fmt.Errorf("container execution backend is not configured")
 	}
+	b.recordAudit(ctx)
 	writer, ok := b.executor.(containerruntime.RuntimeWorkspaceFileWriter)
 	if !ok {
 		return "", fmt.Errorf("container workspace writer is unavailable")
@@ -162,19 +170,38 @@ func (b *containerExecutionBackend) WriteWorkspaceFile(ctx context.Context, file
 }
 
 func NewContainerExecutionBackend(executor containerruntime.RuntimeExecutor, spec containerruntime.RuntimeSpec) (ExecutionBackend, error) {
+	return NewContainerExecutionBackendWithIdentity(executor, spec, "")
+}
+
+// NewContainerExecutionBackendWithIdentity binds the durable, provider-owned
+// container ID to execution audit records. The runtime executor still verifies
+// this identity against engine state before executing.
+func NewContainerExecutionBackendWithIdentity(executor containerruntime.RuntimeExecutor, spec containerruntime.RuntimeSpec, containerID string) (ExecutionBackend, error) {
 	if executor == nil {
 		return nil, fmt.Errorf("container execution backend is not configured")
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return nil, err
 	}
-	return &containerExecutionBackend{executor: executor, spec: spec}, nil
+	return &containerExecutionBackend{executor: executor, spec: spec, containerID: strings.TrimSpace(containerID)}, nil
+}
+
+func (b *containerExecutionBackend) recordAudit(ctx context.Context) {
+	if b == nil {
+		return
+	}
+	mcp.RecordToolExecutionAudit(ctx, mcp.ToolExecutionAudit{
+		ExecutionLocation: "container",
+		ContainerID:       b.containerID,
+		ImageDigest:       strings.TrimSpace(b.spec.Image.Digest),
+	})
 }
 
 func (b *containerExecutionBackend) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	if b == nil || b.executor == nil {
 		return ExecutionResult{Location: "container", ExitCode: -1}, fmt.Errorf("container execution backend is not configured")
 	}
+	b.recordAudit(ctx)
 	env := append([]string{
 		"HOME=/workspace",
 		"TMPDIR=/tmp",
@@ -269,6 +296,8 @@ func (b *containerExecutionBackend) Execute(ctx context.Context, request Executi
 			ExitCode:       result.ExitCode,
 			Location:       "container",
 			RuntimeID:      string(b.spec.ID),
+			ContainerID:    b.containerID,
+			ImageDigest:    strings.TrimSpace(b.spec.Image.Digest),
 			ProviderExecID: result.ExecID,
 		}
 		if err != nil {

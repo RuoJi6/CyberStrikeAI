@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/config"
+	"cyberstrike-ai/internal/mcp"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/tooloutput"
 
@@ -81,6 +82,48 @@ func TestContainerExecutionBackendStreamsAndPreservesExitCode(t *testing.T) {
 	if got := FormatCommandFailureFromErr(err, result.Output); !strings.Contains(got, "exit status 7") || !strings.Contains(got, "container-output") {
 		t.Fatalf("formatted failure = %q", got)
 	}
+}
+
+func TestExecutionBackendsRecordTrustedAuditIdentity(t *testing.T) {
+	t.Run("host", func(t *testing.T) {
+		var got mcp.ToolExecutionAudit
+		ctx := mcp.WithMCPExecutionID(context.Background(), "exec-host")
+		ctx = mcp.WithToolExecutionAuditRecorder(ctx, func(executionID string, observation mcp.ToolExecutionAudit) {
+			if executionID != "exec-host" {
+				t.Fatalf("execution id = %q", executionID)
+			}
+			got = observation
+		})
+		result, err := NewHostExecutionBackend().Execute(ctx, ExecutionRequest{Command: []string{"/bin/sh", "-c", "printf host"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Location != "host" || got.ExecutionLocation != "host" || got.ContainerID != "" || got.ImageDigest != "" {
+			t.Fatalf("result=%#v audit=%#v", result, got)
+		}
+	})
+
+	t.Run("container", func(t *testing.T) {
+		var got mcp.ToolExecutionAudit
+		ctx := mcp.WithMCPExecutionID(context.Background(), "exec-container")
+		ctx = mcp.WithToolExecutionAuditRecorder(ctx, func(_ string, observation mcp.ToolExecutionAudit) { got = observation })
+		executor := &fakeContainerRuntimeExecutor{result: containerruntime.ExecResult{ExecID: "provider-exec", ExitCode: 0}}
+		backend, err := NewContainerExecutionBackendWithIdentity(executor, executionBackendSpec(), "docker-container-123")
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := backend.Execute(ctx, ExecutionRequest{Command: []string{"true"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantDigest := executionBackendSpec().Image.Digest
+		if result.Location != "container" || result.ContainerID != "docker-container-123" || result.ImageDigest != wantDigest {
+			t.Fatalf("result = %#v", result)
+		}
+		if got.ExecutionLocation != "container" || got.ContainerID != "docker-container-123" || got.ImageDigest != wantDigest {
+			t.Fatalf("audit = %#v", got)
+		}
+	})
 }
 
 func TestContainerExecutionBackendNormalizesRelativeWorkingDirectory(t *testing.T) {

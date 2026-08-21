@@ -1031,6 +1031,38 @@ func (s *Server) BeginToolExecution(ctx context.Context, toolName string, args m
 	return executionID
 }
 
+// WithLocalToolExecutionAuditRecorder binds backend observations to local
+// Eino filesystem/execute monitor records created by BeginToolExecution.
+func (s *Server) WithLocalToolExecutionAuditRecorder(ctx context.Context) context.Context {
+	if s == nil {
+		return ctx
+	}
+	return WithToolExecutionAuditRecorder(ctx, s.RecordLocalToolExecutionAudit)
+}
+
+// RecordLocalToolExecutionAudit updates a running local monitor record. The
+// execution ID comes from trusted context, never from tool arguments.
+func (s *Server) RecordLocalToolExecutionAudit(executionID string, observation ToolExecutionAudit) {
+	if s == nil || strings.TrimSpace(executionID) == "" {
+		return
+	}
+	id := strings.TrimSpace(executionID)
+	s.mu.Lock()
+	exec := s.executions[id]
+	if exec == nil {
+		s.mu.Unlock()
+		return
+	}
+	mergeToolExecutionAudit(exec, observation)
+	snapshot := cloneToolExecution(exec)
+	s.mu.Unlock()
+	if s.storage != nil {
+		if err := s.storage.SaveToolExecution(snapshot); err != nil {
+			s.logger.Warn("保存本地工具执行审计身份失败", zap.Error(err), zap.String("executionId", id))
+		}
+	}
+}
+
 // FinishToolExecution 完成先前 BeginToolExecution 创建的记录；executionID 为空时等同 RecordCompletedToolInvocation。
 func (s *Server) FinishToolExecution(ctx context.Context, executionID, toolName string, args map[string]interface{}, resultText string, invokeErr error) string {
 	if s == nil {

@@ -230,6 +230,9 @@ func (db *DB) initTables() error {
 		start_time DATETIME NOT NULL,
 		end_time DATETIME,
 		duration_ms INTEGER,
+		execution_location TEXT,
+		container_id TEXT,
+		image_digest TEXT,
 		partial_output TEXT,
 		partial_output_bytes INTEGER NOT NULL DEFAULT 0,
 		partial_output_truncated INTEGER NOT NULL DEFAULT 0,
@@ -979,6 +982,9 @@ func (db *DB) initTables() error {
 	if err := db.migrateToolExecutionsPartialOutputColumns(); err != nil {
 		db.logger.Warn("迁移tool_executions partial output字段失败", zap.Error(err))
 	}
+	if err := db.migrateToolExecutionsExecutionAuditColumns(); err != nil {
+		db.logger.Warn("迁移tool_executions execution audit字段失败", zap.Error(err))
+	}
 	if err := db.migrateRBACOwnershipColumns(); err != nil {
 		db.logger.Warn("迁移RBAC资源归属字段失败", zap.Error(err))
 	}
@@ -1011,6 +1017,22 @@ func (db *DB) migrateToolExecutionsPartialOutputColumns() error {
 		{"partial_output_bytes", "ALTER TABLE tool_executions ADD COLUMN partial_output_bytes INTEGER NOT NULL DEFAULT 0"},
 		{"partial_output_truncated", "ALTER TABLE tool_executions ADD COLUMN partial_output_truncated INTEGER NOT NULL DEFAULT 0"},
 		{"partial_output_updated_at", "ALTER TABLE tool_executions ADD COLUMN partial_output_updated_at DATETIME"},
+	} {
+		if err := db.addColumnIfMissing("tool_executions", col.name, col.stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) migrateToolExecutionsExecutionAuditColumns() error {
+	for _, col := range []struct {
+		name string
+		stmt string
+	}{
+		{"execution_location", "ALTER TABLE tool_executions ADD COLUMN execution_location TEXT"},
+		{"container_id", "ALTER TABLE tool_executions ADD COLUMN container_id TEXT"},
+		{"image_digest", "ALTER TABLE tool_executions ADD COLUMN image_digest TEXT"},
 	} {
 		if err := db.addColumnIfMissing("tool_executions", col.name, col.stmt); err != nil {
 			return err

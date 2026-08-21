@@ -48,6 +48,7 @@ func RunEinoSingleChatModelAgent(
 		return nil, fmt.Errorf("eino single: multi_agent 配置为空")
 	}
 	ctx = mcp.WithMCPConversationID(ctx, conversationID)
+	ctx = ag.WithLocalToolExecutionAuditRecorder(ctx)
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
 	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger)
