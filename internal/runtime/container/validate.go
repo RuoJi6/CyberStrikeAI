@@ -49,14 +49,14 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if !spec.Security.ReadOnlyRootFS || !spec.Security.NoNewPrivileges || !spec.Security.DropAllCapabilities {
 		return invalidSpec("read-only rootfs, no-new-privileges and capability drop are required")
 	}
-	if spec.Security.NetworkMode != NetworkNone {
-		return invalidSpec("phase 1 runtimes require network mode none")
+	if spec.Security.NetworkMode != NetworkNone && spec.Security.NetworkMode != NetworkInternal {
+		return invalidSpec("runtime network mode must be none or internal")
 	}
 	if spec.Security.TmpfsBytes <= 0 {
 		return invalidSpec("tmpfs limit must be positive")
 	}
 	if strings.TrimSpace(spec.Security.SeccompProfile) != "default" {
-		return invalidSpec("phase 1 runtimes require the Docker default seccomp profile")
+		return invalidSpec("runtimes require the Docker default seccomp profile")
 	}
 	if spec.Workspace.MountPath != "/workspace" {
 		return invalidSpec("workspace mount path must be /workspace")

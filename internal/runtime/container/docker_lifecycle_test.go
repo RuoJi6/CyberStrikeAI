@@ -51,6 +51,83 @@ func TestDockerManagerLifecycleStartStopAndDelete(t *testing.T) {
 	}
 }
 
+func TestDockerManagerDeleteRemovesOwnedConversationNetwork(t *testing.T) {
+	for _, missingContainer := range []bool{false, true} {
+		name := "normal"
+		if missingContainer {
+			name = "recover partial delete"
+		}
+		t.Run(name, func(t *testing.T) {
+			spec := creationSpec()
+			spec.Security.NetworkMode = NetworkInternal
+			api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+			manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Create(context.Background(), spec); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			if missingContainer {
+				api.containerErr = containerderrdefs.ErrNotFound.WithMessage("container missing")
+				network := api.networks[ConversationNetworkName(spec.ID)]
+				network.Containers = nil
+				api.networks[ConversationNetworkName(spec.ID)] = network
+			}
+			if err := manager.Delete(context.Background(), spec.ID, DeleteOptions{}); err != nil {
+				t.Fatalf("delete: %v", err)
+			}
+			if api.networkRemoved != "provider-network-1" || len(api.networks) != 0 {
+				t.Fatalf("network removal = %q / %#v", api.networkRemoved, api.networks)
+			}
+		})
+	}
+}
+
+func TestDockerManagerInternalNetworkAttachmentFollowsLifecycle(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	name := ConversationNetworkName(spec.ID)
+	if len(api.networks[name].Containers) != 0 {
+		t.Fatal("created runtime unexpectedly appeared as an active network attachment")
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if len(api.networks[name].Containers) != 1 {
+		t.Fatalf("running network attachments = %#v", api.networks[name].Containers)
+	}
+	network := api.networks[name]
+	attachments := network.Containers
+	network.Containers = nil
+	api.networks[name] = network
+	if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("running runtime without network attachment error = %v", err)
+	}
+	network.Containers = attachments
+	api.networks[name] = network
+	if _, err := manager.Stop(context.Background(), spec.ID, StopOptions{}); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+	if len(api.networks[name].Containers) != 0 {
+		t.Fatalf("stopped network attachments = %#v", api.networks[name].Containers)
+	}
+	if err := manager.Delete(context.Background(), spec.ID, DeleteOptions{}); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if len(api.networks) != 0 {
+		t.Fatalf("deleted runtime network survived = %#v", api.networks)
+	}
+}
+
 func TestDockerManagerDeletePersistentWorkspacePolicy(t *testing.T) {
 	for _, test := range []struct {
 		name            string

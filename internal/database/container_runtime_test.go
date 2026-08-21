@@ -181,6 +181,99 @@ func TestContainerInitializationStoreLifecycleAndCascade(t *testing.T) {
 	}
 }
 
+func TestContainerLifecycleSpecReplacementIsRestrictedAndAtomic(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("legacy network migration", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-none", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := spec
+	replacement.Security.NetworkMode = containerruntime.NetworkInternal
+	observed := containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-internal", Status: containerruntime.StatusStopped,
+		Image: replacement.Image, SpecDigest: containerruntime.RuntimeSpecDigest(replacement),
+	}
+	invalid := replacement
+	invalid.Resources.MemoryBytes++
+	invalidObserved := observed
+	invalidObserved.SpecDigest = containerruntime.RuntimeSpecDigest(invalid)
+	if _, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: invalidObserved, ReplacementSpec: &invalid,
+	}); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		t.Fatalf("unrestricted replacement error = %v", err)
+	}
+	unchanged, err := db.GetContainerInitialization(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Spec.Security.NetworkMode != containerruntime.NetworkNone || unchanged.LifecycleState != containerruntime.LifecycleInProgress || unchanged.ProviderID != "provider-none" {
+		t.Fatalf("failed replacement was not atomic: %#v", unchanged)
+	}
+
+	migrated, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: observed, IncrementGeneration: true, ReplacementSpec: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Spec.Security.NetworkMode != containerruntime.NetworkInternal || migrated.ProviderID != observed.ProviderID || migrated.RuntimeGeneration != 2 || migrated.LifecycleState != containerruntime.LifecycleIdle {
+		t.Fatalf("migrated record = %#v", migrated)
+	}
+}
+
+func TestContainerLifecycleFailurePersistsAppliedNetworkMigration(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("failed migrated readiness", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-none", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	replacement := spec
+	replacement.Security.NetworkMode = containerruntime.NetworkInternal
+	applied := containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-internal", Status: containerruntime.StatusStopped,
+		Image: replacement.Image, SpecDigest: containerruntime.RuntimeSpecDigest(replacement),
+	}
+	failed, err := db.FailLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleFailure{
+		Message: "readiness failed", RuntimeStatus: containerruntime.StatusStopped,
+		Drift: "readiness_failed", AppliedRuntime: &applied, ReplacementSpec: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Spec.Security.NetworkMode != containerruntime.NetworkInternal || failed.ProviderID != applied.ProviderID || failed.RuntimeGeneration != 1 || failed.LifecycleState != containerruntime.LifecycleFailed || failed.LifecycleError != "readiness failed" {
+		t.Fatalf("failed migrated record = %#v", failed)
+	}
+}
+
 func TestIdleContainerCandidatesAndAtomicStopClaim(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()

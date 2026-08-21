@@ -453,9 +453,16 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 		return containerruntime.InitializationRecord{}, fmt.Errorf("begin container lifecycle completion: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	replaceSpec, replacementJSON, err := validateLifecycleSpecReplacement(ctx, tx, conversationID, operation, completion.Runtime, completion.ReplacementSpec)
+	if err != nil {
+		return containerruntime.InitializationRecord{}, err
+	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE conversation_container_runtimes
 		SET provider_id = ?, runtime_status = ?, last_error = ?,
+			image_digest = CASE WHEN ? = 1 THEN ? ELSE image_digest END,
+			image_platform = CASE WHEN ? = 1 THEN ? ELSE image_platform END,
+			spec_json = CASE WHEN ? = 1 THEN ? ELSE spec_json END,
 			lifecycle_state = ?, lifecycle_error = '', lifecycle_completed_at = ?,
 			runtime_generation = runtime_generation + ?, runtime_observed_at = ?, runtime_drift = ?,
 			readiness_status = CASE WHEN ? = 1 THEN ? ELSE readiness_status END,
@@ -467,6 +474,9 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 		WHERE conversation_id = ? AND runtime_id = ? AND initialization_status = ?
 			AND lifecycle_operation = ? AND lifecycle_state = ?
 	`, completion.Runtime.ProviderID, completion.Runtime.Status, strings.TrimSpace(completion.Runtime.LastError),
+		replaceSpec, completion.Runtime.Image.Digest,
+		replaceSpec, completion.Runtime.Image.Platform,
+		replaceSpec, replacementJSON,
 		containerruntime.LifecycleIdle, now, increment, now, strings.TrimSpace(completion.Drift),
 		updateReadiness, containerruntime.ReadinessReady,
 		updateReadiness,
@@ -575,13 +585,42 @@ func (db *DB) FailLifecycle(ctx context.Context, conversationID string, operatio
 	if failure.RuntimeStatus != "" {
 		statusPresent = 1
 	}
+	if (failure.AppliedRuntime == nil) != (failure.ReplacementSpec == nil) {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("%w: applied runtime and replacement specification must be provided together", containerruntime.ErrInvalidSpecification)
+	}
 	message := strings.TrimSpace(failure.Message)
 	if len(message) > 1024 {
 		message = message[:1024]
 	}
-	result, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("begin failed container lifecycle completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	appliedRuntime := 0
+	providerID := ""
+	imageDigest := ""
+	imagePlatform := ""
+	replacementJSON := ""
+	if failure.AppliedRuntime != nil {
+		appliedRuntime = 1
+		providerID = strings.TrimSpace(failure.AppliedRuntime.ProviderID)
+		imageDigest = failure.AppliedRuntime.Image.Digest
+		imagePlatform = failure.AppliedRuntime.Image.Platform
+		failure.RuntimeStatus = failure.AppliedRuntime.Status
+		statusPresent = 1
+		_, replacementJSON, err = validateLifecycleSpecReplacement(ctx, tx, conversationID, operation, *failure.AppliedRuntime, failure.ReplacementSpec)
+		if err != nil {
+			return containerruntime.InitializationRecord{}, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `
 		UPDATE conversation_container_runtimes
 		SET lifecycle_state = ?, lifecycle_error = ?, lifecycle_completed_at = ?,
+			provider_id = CASE WHEN ? = 1 THEN ? ELSE provider_id END,
+			image_digest = CASE WHEN ? = 1 THEN ? ELSE image_digest END,
+			image_platform = CASE WHEN ? = 1 THEN ? ELSE image_platform END,
+			spec_json = CASE WHEN ? = 1 THEN ? ELSE spec_json END,
 			runtime_status = CASE WHEN ? = 1 THEN ? ELSE runtime_status END,
 			runtime_observed_at = ?, runtime_drift = ?,
 			readiness_status = CASE WHEN ? = 1 THEN ? ELSE readiness_status END,
@@ -591,6 +630,10 @@ func (db *DB) FailLifecycle(ctx context.Context, conversationID string, operatio
 		WHERE conversation_id = ? AND initialization_status = ?
 			AND lifecycle_operation = ? AND lifecycle_state = ?
 	`, containerruntime.LifecycleFailed, message, now,
+		appliedRuntime, providerID,
+		appliedRuntime, imageDigest,
+		appliedRuntime, imagePlatform,
+		appliedRuntime, replacementJSON,
 		statusPresent, failure.RuntimeStatus, now, strings.TrimSpace(failure.Drift),
 		readinessFailed, containerruntime.ReadinessFailed,
 		readinessFailed, message,
@@ -603,7 +646,66 @@ func (db *DB) FailLifecycle(ctx context.Context, conversationID string, operatio
 	if err := requireContainerRuntimeUpdate(result, "fail "+string(operation)); err != nil {
 		return containerruntime.InitializationRecord{}, err
 	}
+	if err := tx.Commit(); err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("commit failed container lifecycle %s: %w", operation, err)
+	}
 	return db.GetContainerInitialization(ctx, conversationID)
+}
+
+func validateLifecycleSpecReplacement(
+	ctx context.Context,
+	tx *sql.Tx,
+	conversationID string,
+	operation containerruntime.LifecycleOperation,
+	runtime containerruntime.Runtime,
+	replacement *containerruntime.RuntimeSpec,
+) (int, string, error) {
+	if replacement == nil {
+		return 0, "", nil
+	}
+	if operation != containerruntime.LifecycleOperationRebuild && operation != containerruntime.LifecycleOperationReconcile {
+		return 0, "", fmt.Errorf("%w: runtime specification replacement requires rebuild or reconciliation", containerruntime.ErrInvalidSpecification)
+	}
+	if err := containerruntime.ValidateSpec(*replacement); err != nil {
+		return 0, "", err
+	}
+	if strings.TrimSpace(runtime.ProviderID) == "" || runtime.ID == "" || runtime.Status == "" {
+		return 0, "", fmt.Errorf("%w: observed replacement runtime identity and status are required", containerruntime.ErrInvalidSpecification)
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	if replacement.ConversationID != conversationID || replacement.ID != runtime.ID ||
+		replacement.Image.Digest != runtime.Image.Digest || replacement.Image.Platform != runtime.Image.Platform ||
+		containerruntime.RuntimeSpecDigest(*replacement) != runtime.SpecDigest {
+		return 0, "", fmt.Errorf("%w: replacement specification does not match the observed runtime", containerruntime.ErrRuntimeStateConflict)
+	}
+	var currentJSON string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT spec_json FROM conversation_container_runtimes
+		WHERE conversation_id = ? AND runtime_id = ? AND initialization_status = ?
+			AND lifecycle_operation = ? AND lifecycle_state = ?
+	`, conversationID, runtime.ID, containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress).Scan(&currentJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", containerruntime.ErrRuntimeStateConflict
+		}
+		return 0, "", fmt.Errorf("load runtime specification for lifecycle replacement: %w", err)
+	}
+	var current containerruntime.RuntimeSpec
+	if err := json.Unmarshal([]byte(currentJSON), &current); err != nil {
+		return 0, "", fmt.Errorf("decode current runtime specification for lifecycle replacement: %w", err)
+	}
+	expected := current
+	if current.Security.NetworkMode != containerruntime.NetworkNone {
+		return 0, "", fmt.Errorf("%w: only a legacy none-network runtime can be migrated", containerruntime.ErrRuntimeStateConflict)
+	}
+	expected.Security.NetworkMode = containerruntime.NetworkInternal
+	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only change network mode from none to internal", containerruntime.ErrRuntimeStateConflict)
+	}
+	encoded, err := json.Marshal(replacement)
+	if err != nil {
+		return 0, "", fmt.Errorf("encode replacement runtime specification: %w", err)
+	}
+	return 1, string(encoded), nil
 }
 
 func (db *DB) DeleteLifecycle(ctx context.Context, conversationID string, operation containerruntime.LifecycleOperation) error {

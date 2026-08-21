@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	mobystdcopy "github.com/moby/moby/api/pkg/stdcopy"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
+	mobynetwork "github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/system"
 	mobyvolume "github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
@@ -20,38 +22,45 @@ import (
 
 type fakeDockerCreationAPI struct {
 	*fakeDockerInspectionAPI
-	createResult      mobyclient.ContainerCreateResult
-	createErr         error
-	createOpts        mobyclient.ContainerCreateOptions
-	removeErr         error
-	removedID         string
-	removeOpts        mobyclient.ContainerRemoveOptions
-	pathStats         map[string]mobycontainer.PathStat
-	pathStatErrs      map[string]error
-	listResult        mobyclient.ContainerListResult
-	listErr           error
-	startErr          error
-	stopErr           error
-	startedID         string
-	stoppedID         string
-	stopOpts          mobyclient.ContainerStopOptions
-	execCreateOpts    mobyclient.ExecCreateOptions
-	execContainerID   string
-	execID            string
-	execStdout        string
-	execStderr        string
-	execStdin         []byte
-	execStdinBytes    int
-	execAttachOpts    mobyclient.ExecAttachOptions
-	execExitCode      int
-	execRunning       bool
-	volumes           map[string]mobyvolume.Volume
-	volumeCreateOpts  mobyclient.VolumeCreateOptions
-	volumeCreateErr   error
-	volumeCreateCalls int
-	volumeInspectErr  error
-	volumeRemoved     string
-	volumeRemoveErr   error
+	createResult       mobyclient.ContainerCreateResult
+	createErr          error
+	createOpts         mobyclient.ContainerCreateOptions
+	removeErr          error
+	removedID          string
+	removeOpts         mobyclient.ContainerRemoveOptions
+	pathStats          map[string]mobycontainer.PathStat
+	pathStatErrs       map[string]error
+	listResult         mobyclient.ContainerListResult
+	listErr            error
+	startErr           error
+	stopErr            error
+	startedID          string
+	stoppedID          string
+	stopOpts           mobyclient.ContainerStopOptions
+	execCreateOpts     mobyclient.ExecCreateOptions
+	execContainerID    string
+	execID             string
+	execStdout         string
+	execStderr         string
+	execStdin          []byte
+	execStdinBytes     int
+	execAttachOpts     mobyclient.ExecAttachOptions
+	execExitCode       int
+	execRunning        bool
+	volumes            map[string]mobyvolume.Volume
+	volumeCreateOpts   mobyclient.VolumeCreateOptions
+	volumeCreateErr    error
+	volumeCreateCalls  int
+	volumeInspectErr   error
+	volumeRemoved      string
+	volumeRemoveErr    error
+	networks           map[string]mobynetwork.Inspect
+	networkCreateOpts  mobyclient.NetworkCreateOptions
+	networkCreateName  string
+	networkCreateErr   error
+	networkCreateCalls int
+	networkRemoved     string
+	networkRemoveErr   error
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
@@ -62,7 +71,64 @@ func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyc
 func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, options mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
 	f.removedID = id
 	f.removeOpts = options
+	if f.removeErr == nil {
+		for name, network := range f.networks {
+			delete(network.Containers, id)
+			f.networks[name] = network
+		}
+	}
 	return mobyclient.ContainerRemoveResult{}, f.removeErr
+}
+
+func (f *fakeDockerCreationAPI) NetworkCreate(_ context.Context, name string, options mobyclient.NetworkCreateOptions) (mobyclient.NetworkCreateResult, error) {
+	f.networkCreateName = name
+	f.networkCreateOpts = options
+	f.networkCreateCalls++
+	if f.networkCreateErr != nil {
+		return mobyclient.NetworkCreateResult{}, f.networkCreateErr
+	}
+	if f.networks == nil {
+		f.networks = make(map[string]mobynetwork.Inspect)
+	}
+	if _, exists := f.networks[name]; exists {
+		return mobyclient.NetworkCreateResult{}, containerderrdefs.ErrConflict.WithMessage("network exists")
+	}
+	id := "provider-network-1"
+	enableIPv4 := options.EnableIPv4 == nil || *options.EnableIPv4
+	enableIPv6 := options.EnableIPv6 != nil && *options.EnableIPv6
+	f.networks[name] = mobynetwork.Inspect{Network: mobynetwork.Network{
+		ID: id, Name: name, Created: time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC),
+		Scope: options.Scope, Driver: options.Driver, EnableIPv4: enableIPv4, EnableIPv6: enableIPv6,
+		Internal: options.Internal, Attachable: options.Attachable, Ingress: options.Ingress,
+		ConfigOnly: options.ConfigOnly, Labels: cloneLabels(options.Labels),
+	}}
+	return mobyclient.NetworkCreateResult{ID: id}, nil
+}
+
+func (f *fakeDockerCreationAPI) NetworkInspect(_ context.Context, idOrName string, _ mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error) {
+	for name, network := range f.networks {
+		if name == idOrName || network.ID == idOrName {
+			return mobyclient.NetworkInspectResult{Network: network}, nil
+		}
+	}
+	return mobyclient.NetworkInspectResult{}, containerderrdefs.ErrNotFound.WithMessage("network not found")
+}
+
+func (f *fakeDockerCreationAPI) NetworkRemove(_ context.Context, id string, _ mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error) {
+	f.networkRemoved = id
+	if f.networkRemoveErr != nil {
+		return mobyclient.NetworkRemoveResult{}, f.networkRemoveErr
+	}
+	for name, network := range f.networks {
+		if network.ID == id || name == id {
+			if len(network.Containers) != 0 {
+				return mobyclient.NetworkRemoveResult{}, containerderrdefs.ErrConflict.WithMessage("network attached")
+			}
+			delete(f.networks, name)
+			return mobyclient.NetworkRemoveResult{}, nil
+		}
+	}
+	return mobyclient.NetworkRemoveResult{}, containerderrdefs.ErrNotFound.WithMessage("network not found")
 }
 
 func (f *fakeDockerCreationAPI) VolumeCreate(_ context.Context, options mobyclient.VolumeCreateOptions) (mobyclient.VolumeCreateResult, error) {
@@ -116,6 +182,17 @@ func (f *fakeDockerCreationAPI) ContainerStart(_ context.Context, id string, _ m
 	if f.startErr == nil && f.containerResult.Container.State != nil {
 		f.containerResult.Container.State.Status = mobycontainer.StateRunning
 		f.containerResult.Container.State.Running = true
+		if f.containerResult.Container.NetworkSettings != nil {
+			for name := range f.containerResult.Container.NetworkSettings.Networks {
+				if network, ok := f.networks[name]; ok {
+					if network.Containers == nil {
+						network.Containers = make(map[string]mobynetwork.EndpointResource)
+					}
+					network.Containers[id] = mobynetwork.EndpointResource{Name: strings.TrimPrefix(f.containerResult.Container.Name, "/")}
+					f.networks[name] = network
+				}
+			}
+		}
 	}
 	return mobyclient.ContainerStartResult{}, f.startErr
 }
@@ -126,6 +203,10 @@ func (f *fakeDockerCreationAPI) ContainerStop(_ context.Context, id string, opti
 	if f.stopErr == nil && f.containerResult.Container.State != nil {
 		f.containerResult.Container.State.Status = mobycontainer.StateExited
 		f.containerResult.Container.State.Running = false
+		for name, network := range f.networks {
+			delete(network.Containers, id)
+			f.networks[name] = network
+		}
 	}
 	return mobyclient.ContainerStopResult{}, f.stopErr
 }
@@ -243,6 +324,104 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	}
 }
 
+func TestDockerManagerCreateUsesOwnedInternalConversationNetwork(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	ownerID := "instance-01"
+	api := newSuccessfulCreationAPI(spec, ownerID, "provider-container-1", "")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := manager.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("create internal runtime: %v", err)
+	}
+	if runtime.Status != StatusStopped || api.networkCreateCalls != 1 || api.networkCreateName != ConversationNetworkName(spec.ID) {
+		t.Fatalf("runtime/network create = %#v / %d / %q", runtime, api.networkCreateCalls, api.networkCreateName)
+	}
+	options := api.networkCreateOpts
+	if options.Driver != "bridge" || options.Scope != "local" || !options.Internal || options.Attachable || options.Ingress || options.EnableIPv4 == nil || !*options.EnableIPv4 || options.EnableIPv6 == nil || *options.EnableIPv6 {
+		t.Fatalf("network isolation options = %#v", options)
+	}
+	if options.Labels[LabelOwner] != ownerID || options.Labels[LabelResourceKind] != ResourceKindConversationNetwork || options.Labels[LabelRuntimeID] != string(spec.ID) || options.Labels[LabelConversationID] != spec.ConversationID || options.Labels[LabelNetworkMode] != string(NetworkInternal) || options.Labels[LabelSpecDigest] != RuntimeSpecDigest(spec) {
+		t.Fatalf("network labels = %#v", options.Labels)
+	}
+	name := ConversationNetworkName(spec.ID)
+	if api.createOpts.Config.NetworkDisabled || api.createOpts.HostConfig.NetworkMode != mobycontainer.NetworkMode(name) {
+		t.Fatalf("container network mode = %#v / %q", api.createOpts.Config, api.createOpts.HostConfig.NetworkMode)
+	}
+	endpoint := api.createOpts.NetworkingConfig.EndpointsConfig[name]
+	if endpoint == nil || endpoint.NetworkID != "provider-network-1" || len(api.createOpts.NetworkingConfig.EndpointsConfig) != 1 {
+		t.Fatalf("container network endpoint = %#v", api.createOpts.NetworkingConfig)
+	}
+	network := api.networks[name]
+	if len(network.Containers) != 0 {
+		t.Fatalf("created-but-not-started network attachments = %#v", network.Containers)
+	}
+}
+
+func TestDockerManagerCreateRejectsUnsafeExistingConversationNetwork(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	ownerID := "instance-01"
+	api := newSuccessfulCreationAPI(spec, ownerID, "provider-container-1", "")
+	name := ConversationNetworkName(spec.ID)
+	api.networks = map[string]mobynetwork.Inspect{name: {Network: mobynetwork.Network{
+		ID: "provider-network-1", Name: name, Created: time.Now().UTC(), Scope: "local", Driver: "bridge",
+		EnableIPv4: true, Internal: false, Labels: conversationNetworkLabels(ownerID, spec),
+	}}}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("unsafe existing network error = %v", err)
+	}
+	if api.createOpts.Name != "" || api.networkCreateCalls != 0 {
+		t.Fatal("container or replacement network was created after unsafe network inspection")
+	}
+}
+
+func TestDockerManagerCreateReusesEmptyOwnedConversationNetwork(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	ownerID := "instance-01"
+	api := newSuccessfulCreationAPI(spec, ownerID, "provider-container-1", "")
+	name := ConversationNetworkName(spec.ID)
+	api.networks = map[string]mobynetwork.Inspect{name: {Network: mobynetwork.Network{
+		ID: "provider-network-1", Name: name, Created: time.Now().UTC(), Scope: "local", Driver: "bridge",
+		EnableIPv4: true, Internal: true, Labels: conversationNetworkLabels(ownerID, spec),
+	}}}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("reuse owned network: %v", err)
+	}
+	if api.networkCreateCalls != 0 || len(api.networks[name].Containers) != 0 {
+		t.Fatalf("network reuse = create calls %d, attachments %#v", api.networkCreateCalls, api.networks[name].Containers)
+	}
+}
+
+func TestDockerManagerCreateRollsBackNewConversationNetwork(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.createErr = errors.New("engine create failed")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err == nil {
+		t.Fatal("create unexpectedly succeeded")
+	}
+	if api.networkRemoved != "provider-network-1" || len(api.networks) != 0 {
+		t.Fatalf("rolled back network = %q / %#v", api.networkRemoved, api.networks)
+	}
+}
+
 func TestDockerManagerCreateUsesOwnedConversationVolume(t *testing.T) {
 	spec := creationSpec()
 	spec.Workspace.Persistent = true
@@ -287,6 +466,57 @@ func TestDockerManagerCreateRejectsForeignWorkspaceVolume(t *testing.T) {
 	}
 	if api.createOpts.Name != "" || api.volumeCreateCalls != 0 {
 		t.Fatal("container or volume mutation reached foreign workspace volume")
+	}
+}
+
+func TestDockerManagerCreateReusesLegacyPersistentWorkspaceDuringNetworkMigration(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	legacy := spec
+	legacy.Security.NetworkMode = NetworkNone
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.volumes = map[string]mobyvolume.Volume{
+		spec.Workspace.VolumeName: {
+			Name: spec.Workspace.VolumeName, Driver: "local",
+			Labels: workspaceVolumeLabels("instance-01", legacy),
+		},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("reuse legacy workspace: %v", err)
+	}
+	if api.volumeCreateCalls != 0 {
+		t.Fatalf("legacy workspace was recreated: %d", api.volumeCreateCalls)
+	}
+}
+
+func TestDockerManagerCreateRejectsLegacyWorkspaceWithOtherSpecDrift(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	drifted := spec
+	drifted.Security.NetworkMode = NetworkNone
+	drifted.Resources.MemoryBytes++
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.volumes = map[string]mobyvolume.Volume{
+		spec.Workspace.VolumeName: {
+			Name: spec.Workspace.VolumeName, Driver: "local",
+			Labels: workspaceVolumeLabels("instance-01", drifted),
+		},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("drifted legacy workspace error = %v", err)
+	}
+	if api.createOpts.Name != "" {
+		t.Fatal("container creation reached drifted legacy workspace")
 	}
 }
 
@@ -432,6 +662,12 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 	}
 	imageID := "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 	created := time.Date(2026, 8, 20, 12, 45, 0, 0, time.UTC)
+	networkSettings := (*mobycontainer.NetworkSettings)(nil)
+	if spec.Security.NetworkMode == NetworkInternal {
+		networkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
+			ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1"},
+		}}
+	}
 	inspection := &fakeDockerInspectionAPI{
 		pingResult: mobyclient.PingResult{APIVersion: "1.52", OSType: "linux"},
 		infoResult: mobyclient.SystemInfoResult{Info: system.Info{
@@ -458,13 +694,14 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 			State:   &mobycontainer.State{Status: mobycontainer.StateCreated},
 			Config: &mobycontainer.Config{
 				Image:           pinned,
-				NetworkDisabled: true,
+				NetworkDisabled: spec.Security.NetworkMode == NetworkNone,
 				WorkingDir:      spec.Workspace.MountPath,
 				Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 				Cmd:             []string{runtimeKeepaliveScript},
 				Labels:          runtimeLabels(ownerID, spec),
 			},
-			HostConfig: runtimeHostConfig(spec),
+			HostConfig:      runtimeHostConfig(spec),
+			NetworkSettings: networkSettings,
 		}},
 	}
 	return &fakeDockerCreationAPI{

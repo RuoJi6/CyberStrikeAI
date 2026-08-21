@@ -27,8 +27,9 @@ const (
 	StatusFailed   Status = "failed"
 )
 
-// NetworkMode is deliberately closed. Phase 1 only permits NetworkNone; the
-// internal egress-gateway mode is reserved for the later boundary phase.
+// NetworkMode is deliberately closed. NetworkNone remains valid for durable
+// runtimes created before stage 4; all newly generated conversation runtimes
+// use an isolated per-conversation internal network.
 type NetworkMode string
 
 const (

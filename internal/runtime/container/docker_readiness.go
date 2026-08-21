@@ -57,7 +57,7 @@ func (m *DockerManager) ValidateReadiness(ctx context.Context, runtime Runtime, 
 			return ReadinessReport{}, fmt.Errorf("%w: runtime label %s mismatch", ErrRuntimeNotReady, key)
 		}
 	}
-	if err := verifyRuntimeSecurityBaseline(actual.HostConfig, spec); err != nil {
+	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return ReadinessReport{}, fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 	}
 	if err := verifyReadinessIsolation(actual, spec); err != nil {
@@ -92,8 +92,17 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 	if actual.Config == nil || actual.HostConfig == nil {
 		return fmt.Errorf("%w: runtime configuration is incomplete", ErrRuntimeNotReady)
 	}
-	if !actual.Config.NetworkDisabled || actual.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) {
-		return fmt.Errorf("%w: runtime network is not disabled", ErrRuntimeNotReady)
+	switch spec.Security.NetworkMode {
+	case NetworkNone:
+		if !actual.Config.NetworkDisabled || actual.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) {
+			return fmt.Errorf("%w: runtime none network is not disabled", ErrRuntimeNotReady)
+		}
+	case NetworkInternal:
+		if actual.Config.NetworkDisabled || actual.HostConfig.NetworkMode != mobycontainer.NetworkMode(ConversationNetworkName(spec.ID)) {
+			return fmt.Errorf("%w: runtime internal network mode mismatch", ErrRuntimeNotReady)
+		}
+	default:
+		return fmt.Errorf("%w: runtime network mode is invalid", ErrRuntimeNotReady)
 	}
 	if len(actual.HostConfig.DNS) != 0 || len(actual.HostConfig.DNSOptions) != 0 || len(actual.HostConfig.DNSSearch) != 0 || len(actual.HostConfig.ExtraHosts) != 0 || len(actual.HostConfig.Links) != 0 || len(actual.HostConfig.PortBindings) != 0 {
 		return fmt.Errorf("%w: runtime declares DNS, host, link, or port egress settings", ErrRuntimeNotReady)
@@ -103,11 +112,17 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 			return fmt.Errorf("%w: runtime has an assigned network address or port", ErrRuntimeNotReady)
 		}
 		for networkName, endpoint := range actual.NetworkSettings.Networks {
-			if networkName != string(NetworkNone) {
-				return fmt.Errorf("%w: runtime is attached to network %s", ErrRuntimeNotReady, networkName)
+			if spec.Security.NetworkMode == NetworkNone {
+				if networkName != string(NetworkNone) {
+					return fmt.Errorf("%w: runtime is attached to network %s", ErrRuntimeNotReady, networkName)
+				}
+				if endpoint != nil && (endpoint.Gateway.IsValid() || endpoint.IPAddress.IsValid() || endpoint.IPv6Gateway.IsValid() || endpoint.GlobalIPv6Address.IsValid()) {
+					return fmt.Errorf("%w: runtime none network has an assigned address", ErrRuntimeNotReady)
+				}
+				continue
 			}
-			if endpoint != nil && (endpoint.Gateway.IsValid() || endpoint.IPAddress.IsValid() || endpoint.IPv6Gateway.IsValid() || endpoint.GlobalIPv6Address.IsValid()) {
-				return fmt.Errorf("%w: runtime none network has an assigned address", ErrRuntimeNotReady)
+			if networkName != ConversationNetworkName(spec.ID) || endpoint == nil || strings.TrimSpace(endpoint.NetworkID) == "" {
+				return fmt.Errorf("%w: runtime internal network endpoint mismatch", ErrRuntimeNotReady)
 			}
 		}
 	}

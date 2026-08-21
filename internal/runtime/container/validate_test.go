@@ -12,6 +12,11 @@ func TestValidateSpec(t *testing.T) {
 	if err := container.ValidateSpec(valid); err != nil {
 		t.Fatalf("valid spec rejected: %v", err)
 	}
+	internal := valid
+	internal.Security.NetworkMode = container.NetworkInternal
+	if err := container.ValidateSpec(internal); err != nil {
+		t.Fatalf("valid internal-network spec rejected: %v", err)
+	}
 
 	tests := []struct {
 		name   string
@@ -26,7 +31,6 @@ func TestValidateSpec(t *testing.T) {
 		{name: "unlimited cpu", mutate: func(spec *container.RuntimeSpec) { spec.Resources.NanoCPUs = 0 }},
 		{name: "writable rootfs", mutate: func(spec *container.RuntimeSpec) { spec.Security.ReadOnlyRootFS = false }},
 		{name: "host network", mutate: func(spec *container.RuntimeSpec) { spec.Security.NetworkMode = "host" }},
-		{name: "internal network before gateway phase", mutate: func(spec *container.RuntimeSpec) { spec.Security.NetworkMode = container.NetworkInternal }},
 		{name: "host bind path", mutate: func(spec *container.RuntimeSpec) { spec.Workspace.MountPath = "/host" }},
 		{name: "unnamed persistent volume", mutate: func(spec *container.RuntimeSpec) { spec.Workspace.VolumeName = "" }},
 		{name: "arbitrary persistent volume", mutate: func(spec *container.RuntimeSpec) { spec.Workspace.VolumeName = "user-volume" }},

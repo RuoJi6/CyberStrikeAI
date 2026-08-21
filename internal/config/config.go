@@ -1165,7 +1165,7 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 		},
 		Security: containerruntime.SecurityProfile{
 			ReadOnlyRootFS: true, NoNewPrivileges: true, DropAllCapabilities: true,
-			NetworkMode: containerruntime.NetworkNone, SeccompProfile: "default", TmpfsBytes: c.TmpfsBytes,
+			NetworkMode: containerruntime.NetworkInternal, SeccompProfile: "default", TmpfsBytes: c.TmpfsBytes,
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
 		Readiness: containerruntime.ReadinessPolicy{

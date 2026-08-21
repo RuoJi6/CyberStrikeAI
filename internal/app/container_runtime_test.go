@@ -35,7 +35,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	if spec.ID != "conversation-conversation-01" || spec.ConversationID != "conversation-01" || spec.Image.Repository != cfg.Container.ImageRepository || spec.Image.Digest != cfg.Container.ImageDigest {
 		t.Fatalf("spec identity = %#v", spec)
 	}
-	if spec.Security.NetworkMode != containerruntime.NetworkNone || !spec.Security.ReadOnlyRootFS || !spec.Security.NoNewPrivileges || !spec.Security.DropAllCapabilities || spec.Security.SeccompProfile != "default" {
+	if spec.Security.NetworkMode != containerruntime.NetworkInternal || !spec.Security.ReadOnlyRootFS || !spec.Security.NoNewPrivileges || !spec.Security.DropAllCapabilities || spec.Security.SeccompProfile != "default" {
 		t.Fatalf("spec security = %#v", spec.Security)
 	}
 	if spec.Resources.MemoryBytes != 512<<20 || spec.Resources.MaxConcurrentExec != 2 || spec.Resources.MaxQueuedExec != 8 || spec.Resources.LogMaxFiles != 3 {

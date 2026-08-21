@@ -11,6 +11,7 @@ import (
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
+	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyvolume "github.com/moby/moby/api/types/volume"
 	mobyclient "github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -38,6 +39,7 @@ const (
 	LabelWorkspacePath       = "com.cyberstrike.workspace-path"
 	LabelWorkspacePersistent = "com.cyberstrike.workspace-persistent"
 	LabelWorkspaceVolume     = "com.cyberstrike.workspace-volume"
+	LabelNetworkMode         = "com.cyberstrike.network-mode"
 	ResourceKindAgent        = "agent-runtime"
 
 	defaultDockerOperationTimeout = 30 * time.Second
@@ -68,6 +70,12 @@ type dockerManagedResourceAPI interface {
 	VolumeRemove(context.Context, string, mobyclient.VolumeRemoveOptions) (mobyclient.VolumeRemoveResult, error)
 }
 
+type dockerNetworkAPI interface {
+	NetworkCreate(context.Context, string, mobyclient.NetworkCreateOptions) (mobyclient.NetworkCreateResult, error)
+	NetworkInspect(context.Context, string, mobyclient.NetworkInspectOptions) (mobyclient.NetworkInspectResult, error)
+	NetworkRemove(context.Context, string, mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error)
+}
+
 type dockerVolumeAPI interface {
 	VolumeCreate(context.Context, mobyclient.VolumeCreateOptions) (mobyclient.VolumeCreateResult, error)
 	VolumeInspect(context.Context, string, mobyclient.VolumeInspectOptions) (mobyclient.VolumeInspectResult, error)
@@ -91,6 +99,7 @@ type DockerManager struct {
 	execAPI          dockerExecAPI
 	execLimiter      *ExecLimiter
 	resourceAPI      dockerManagedResourceAPI
+	networkAPI       dockerNetworkAPI
 	volumeAPI        dockerVolumeAPI
 	ownerID          string
 	operationTimeout time.Duration
@@ -142,8 +151,9 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	inspector := newDockerInspector(api)
 	execAPI, _ := api.(dockerExecAPI)
 	resourceAPI, _ := api.(dockerManagedResourceAPI)
+	networkAPI, _ := api.(dockerNetworkAPI)
 	volumeAPI, _ := api.(dockerVolumeAPI)
-	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, volumeAPI: volumeAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {
@@ -172,11 +182,19 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if _, err := m.InspectLocalImage(ctx, spec.Image); err != nil {
 		return Runtime{}, err
 	}
+	networkCreated := false
+	var conversationNetwork ManagedResource
+	if spec.Security.NetworkMode == NetworkInternal {
+		conversationNetwork, networkCreated, err = m.ensureOwnedConversationNetwork(ctx, spec)
+		if err != nil {
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, false, spec, err)
+		}
+	}
 	workspaceCreated := false
 	if spec.Workspace.Persistent {
 		workspaceCreated, err = m.ensureOwnedWorkspaceVolume(ctx, spec)
 		if err != nil {
-			return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, err)
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, err)
 		}
 	}
 
@@ -192,20 +210,22 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 			Variant:      platform[2],
 		},
 		Config: &mobycontainer.Config{
-			NetworkDisabled: true,
+			NetworkDisabled: spec.Security.NetworkMode == NetworkNone,
 			WorkingDir:      "/workspace",
 			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 			Cmd:             []string{runtimeKeepaliveScript},
 			Labels:          labels,
 		},
-		HostConfig: runtimeHostConfig(spec),
+		HostConfig:       runtimeHostConfig(spec),
+		NetworkingConfig: runtimeNetworkingConfig(spec, conversationNetwork),
 	})
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
-			return Runtime{}, fmt.Errorf("%w: %s", ErrAlreadyExists, name)
+			conflictErr := fmt.Errorf("%w: %s", ErrAlreadyExists, name)
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, conflictErr)
 		}
 		createErr := fmt.Errorf("create runtime %s: %w", spec.ID, err)
-		return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, createErr)
+		return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, createErr)
 	}
 
 	runtime, verifyErr := m.verifyCreatedRuntime(ctx, spec, name, labels, createResult)
@@ -218,7 +238,89 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if cleanupErr != nil {
 		return Runtime{}, errors.Join(verifyErr, fmt.Errorf("rollback created runtime %s: %w", createResult.ID, cleanupErr))
 	}
-	return Runtime{}, m.rollbackNewWorkspaceVolume(workspaceCreated, spec, verifyErr)
+	return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, verifyErr)
+}
+
+func (m *DockerManager) ensureOwnedConversationNetwork(ctx context.Context, spec RuntimeSpec) (ManagedResource, bool, error) {
+	if m.networkAPI == nil {
+		return ManagedResource{}, false, fmt.Errorf("%w: engine client does not support conversation networks", ErrEngineUnavailable)
+	}
+	name := ConversationNetworkName(spec.ID)
+	result, err := m.networkAPI.NetworkInspect(ctx, name, mobyclient.NetworkInspectOptions{})
+	if err == nil {
+		resource, verifyErr := m.verifyConversationNetwork(spec, RuntimeSpecDigest(spec), result.Network, "", true)
+		return resource, false, verifyErr
+	}
+	if !containerderrdefs.IsNotFound(err) {
+		return ManagedResource{}, false, fmt.Errorf("inspect conversation network %s: %w", name, err)
+	}
+	enableIPv4, enableIPv6 := true, false
+	created, err := m.networkAPI.NetworkCreate(ctx, name, mobyclient.NetworkCreateOptions{
+		Driver: "bridge", Scope: "local", EnableIPv4: &enableIPv4, EnableIPv6: &enableIPv6,
+		Internal: true, Attachable: false, Ingress: false, Labels: conversationNetworkLabels(m.ownerID, spec),
+	})
+	if err != nil {
+		if containerderrdefs.IsConflict(err) {
+			return ManagedResource{}, false, fmt.Errorf("%w: conversation network %s already exists", ErrAlreadyExists, name)
+		}
+		return ManagedResource{}, false, fmt.Errorf("create conversation network %s: %w", name, err)
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		return ManagedResource{}, true, fmt.Errorf("%w: engine returned an empty conversation network id", ErrRuntimeStateConflict)
+	}
+	inspected, err := m.networkAPI.NetworkInspect(ctx, created.ID, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		return ManagedResource{}, true, fmt.Errorf("inspect created conversation network %s: %w", name, err)
+	}
+	resource, err := m.verifyConversationNetwork(spec, RuntimeSpecDigest(spec), inspected.Network, created.ID, true)
+	return resource, true, err
+}
+
+func (m *DockerManager) verifyConversationNetwork(spec RuntimeSpec, expectedSpecDigest string, actual mobynetwork.Inspect, providerID string, requireEmpty bool) (ManagedResource, error) {
+	if strings.TrimSpace(providerID) != "" && actual.ID != providerID {
+		return ManagedResource{}, fmt.Errorf("%w: conversation network provider identity mismatch", ErrRuntimeStateConflict)
+	}
+	expected := conversationNetworkManagedResource(spec, actual.ID)
+	observed, err := m.resourceFromLabels(ResourceKindConversationNetwork, actual.ID, actual.Name, actual.Labels, actual.Created.UTC())
+	if err != nil || !sameManagedResource(expected, observed) {
+		return ManagedResource{}, fmt.Errorf("%w: conversation network ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if !sha256DigestPattern.MatchString(expectedSpecDigest) {
+		return ManagedResource{}, fmt.Errorf("%w: conversation network expected specification digest is invalid", ErrRuntimeStateConflict)
+	}
+	for key, value := range expectedConversationNetworkLabels(m.ownerID, spec, expectedSpecDigest) {
+		if actual.Labels[key] != value {
+			return ManagedResource{}, fmt.Errorf("%w: conversation network label %s mismatch", ErrRuntimeStateConflict, key)
+		}
+	}
+	if actual.Driver != "bridge" || actual.Scope != "local" || !actual.Internal || !actual.EnableIPv4 || actual.EnableIPv6 || actual.Attachable || actual.Ingress || actual.ConfigOnly {
+		return ManagedResource{}, fmt.Errorf("%w: conversation network isolation settings mismatch", ErrRuntimeStateConflict)
+	}
+	if requireEmpty && (len(actual.Containers) != 0 || len(actual.Services) != 0) {
+		return ManagedResource{}, fmt.Errorf("%w: conversation network already has attached workloads", ErrRuntimeStateConflict)
+	}
+	return observed, nil
+}
+
+func conversationNetworkLabels(ownerID string, spec RuntimeSpec) map[string]string {
+	return expectedConversationNetworkLabels(ownerID, spec, RuntimeSpecDigest(spec))
+}
+
+func expectedConversationNetworkLabels(ownerID string, spec RuntimeSpec, specDigest string) map[string]string {
+	return map[string]string{
+		LabelManaged: "true", LabelOwner: ownerID,
+		LabelResourceKind: ResourceKindConversationNetwork,
+		LabelResourceID:   string(spec.ID), LabelRuntimeID: string(spec.ID),
+		LabelConversationID: spec.ConversationID,
+		LabelSpecDigest:     specDigest, LabelNetworkMode: string(NetworkInternal),
+	}
+}
+
+func conversationNetworkManagedResource(spec RuntimeSpec, providerID string) ManagedResource {
+	return ManagedResource{
+		Kind: ResourceKindConversationNetwork, LogicalID: string(spec.ID), ProviderID: providerID,
+		Name: ConversationNetworkName(spec.ID), ConversationID: spec.ConversationID,
+	}
 }
 
 func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec RuntimeSpec) (bool, error) {
@@ -255,11 +357,29 @@ func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolum
 		return fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
 	}
 	for key, value := range workspaceVolumeLabels(m.ownerID, spec) {
+		if key == LabelSpecDigest && workspaceVolumeSpecDigestMatches(spec, actual.Labels[key]) {
+			continue
+		}
 		if actual.Labels[key] != value {
 			return fmt.Errorf("%w: workspace volume label %s mismatch", ErrRuntimeStateConflict, key)
 		}
 	}
 	return nil
+}
+
+func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual string) bool {
+	if actual == RuntimeSpecDigest(spec) {
+		return true
+	}
+	if spec.Security.NetworkMode != NetworkInternal {
+		return false
+	}
+	// Docker volume labels are immutable. A persistent workspace created before
+	// stage 4 retains the digest of the otherwise-identical none-network spec
+	// after its container is explicitly migrated to an internal network.
+	legacy := spec
+	legacy.Security.NetworkMode = NetworkNone
+	return actual == RuntimeSpecDigest(legacy)
 }
 
 func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpec, cause error) error {
@@ -270,6 +390,19 @@ func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpe
 	defer cancel()
 	if err := m.deleteOwnedVolumeResource(cleanupCtx, workspaceManagedResource(spec)); err != nil && !errors.Is(err, ErrNotFound) {
 		return errors.Join(cause, fmt.Errorf("rollback workspace volume %s: %w", spec.Workspace.VolumeName, err))
+	}
+	return cause
+}
+
+func (m *DockerManager) rollbackCreatedResources(networkCreated, workspaceCreated bool, spec RuntimeSpec, cause error) error {
+	cause = m.rollbackNewWorkspaceVolume(workspaceCreated, spec, cause)
+	if !networkCreated || spec.Security.NetworkMode != NetworkInternal || m.networkAPI == nil {
+		return cause
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+	defer cancel()
+	if err := m.deleteOwnedConversationNetwork(cleanupCtx, spec, RuntimeSpecDigest(spec)); err != nil && !errors.Is(err, ErrNotFound) {
+		return errors.Join(cause, fmt.Errorf("rollback conversation network %s: %w", ConversationNetworkName(spec.ID), err))
 	}
 	return cause
 }
@@ -321,10 +454,7 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 			return Runtime{}, fmt.Errorf("%w: created runtime label %s mismatch", ErrRuntimeStateConflict, key)
 		}
 	}
-	if actual.HostConfig == nil || actual.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) || !actual.Config.NetworkDisabled {
-		return Runtime{}, fmt.Errorf("%w: created runtime network is not disabled", ErrRuntimeStateConflict)
-	}
-	if err := verifyRuntimeSecurityBaseline(actual.HostConfig, spec); err != nil {
+	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return Runtime{}, err
 	}
 	image, err := m.VerifyRuntimeImage(ctx, createResult.ID, spec.Image)
@@ -386,8 +516,12 @@ func hasSecurityOption(options []string, expected string) bool {
 
 func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	pidsLimit := spec.Resources.PIDs
+	networkMode := mobycontainer.NetworkMode(NetworkNone)
+	if spec.Security.NetworkMode == NetworkInternal {
+		networkMode = mobycontainer.NetworkMode(ConversationNetworkName(spec.ID))
+	}
 	host := &mobycontainer.HostConfig{
-		NetworkMode: mobycontainer.NetworkMode(NetworkNone),
+		NetworkMode: networkMode,
 		LogConfig: mobycontainer.LogConfig{
 			Type: "local",
 			Config: map[string]string{
@@ -427,6 +561,15 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	return host
 }
 
+func runtimeNetworkingConfig(spec RuntimeSpec, network ManagedResource) *mobynetwork.NetworkingConfig {
+	if spec.Security.NetworkMode != NetworkInternal {
+		return nil
+	}
+	return &mobynetwork.NetworkingConfig{EndpointsConfig: map[string]*mobynetwork.EndpointSettings{
+		ConversationNetworkName(spec.ID): {NetworkID: network.ProviderID},
+	}}
+}
+
 func tmpfsOptions(sizeBytes int64, noexec bool) string {
 	// Images may declare a non-root USER. tmpfs defaults are owned by root, so
 	// both scratch locations need an explicit sticky, world-writable mode while
@@ -440,6 +583,9 @@ func tmpfsOptions(sizeBytes int64, noexec bool) string {
 
 func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
 	expected := runtimeHostConfig(spec)
+	if actual.NetworkMode != expected.NetworkMode {
+		return fmt.Errorf("%w: created runtime network mode mismatch", ErrRuntimeStateConflict)
+	}
 	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: created runtime has privileged access, host mounts, devices, or published ports", ErrRuntimeStateConflict)
 	}
@@ -529,5 +675,6 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		LabelWorkspacePath:       spec.Workspace.MountPath,
 		LabelWorkspacePersistent: strconv.FormatBool(spec.Workspace.Persistent),
 		LabelWorkspaceVolume:     spec.Workspace.VolumeName,
+		LabelNetworkMode:         string(spec.Security.NetworkMode),
 	}
 }

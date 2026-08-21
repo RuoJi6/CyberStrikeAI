@@ -29,6 +29,10 @@ type LifecycleCompletion struct {
 	Readiness           *ReadinessReport
 	IncrementGeneration bool
 	Drift               string
+	// ReplacementSpec is set only for the controlled legacy none-network to
+	// per-conversation internal-network migration performed by Rebuild or
+	// recovered by Reconcile.
+	ReplacementSpec *RuntimeSpec
 }
 
 type LifecycleFailure struct {
@@ -36,6 +40,11 @@ type LifecycleFailure struct {
 	RuntimeStatus   Status
 	Drift           string
 	ReadinessFailed bool
+	// AppliedRuntime and ReplacementSpec keep the durable specification aligned
+	// when Docker completed the controlled network migration but readiness did
+	// not. They must either both be nil or both describe the same runtime.
+	AppliedRuntime  *Runtime
+	ReplacementSpec *RuntimeSpec
 }
 
 type boundaryRebuildSnapshotContextKey struct{}
@@ -152,7 +161,11 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 			RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err), ReadinessFailed: record.Spec.Readiness.Enabled,
 		})
 	}
-	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{Spec: record.Spec})
+	target := record
+	if target.Spec.Security.NetworkMode == NetworkNone {
+		target.Spec.Security.NetworkMode = NetworkInternal
+	}
+	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{Spec: target.Spec})
 	if err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus:   StatusFailed,
@@ -160,34 +173,34 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 			ReadinessFailed: record.Spec.Readiness.Enabled,
 		})
 	}
-	if err := validateObservedRuntime(record, runtime); err != nil {
+	if err := validateObservedRuntime(target, runtime); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus: StatusFailed, Drift: "specification_drift", ReadinessFailed: record.Spec.Readiness.Enabled,
 		})
 	}
 	completion := LifecycleCompletion{Runtime: runtime, IncrementGeneration: true}
-	if record.Spec.Readiness.Enabled {
+	if target.Spec.Security.NetworkMode != record.Spec.Security.NetworkMode {
+		replacement := target.Spec
+		completion.ReplacementSpec = &replacement
+	}
+	if target.Spec.Readiness.Enabled {
 		if c.checker == nil {
 			err = fmt.Errorf("%w: runtime manager does not implement readiness validation", ErrRuntimeNotReady)
 		} else {
 			var report ReadinessReport
-			report, err = c.checker.ValidateReadiness(ctx, runtime, record.Spec)
+			report, err = c.checker.ValidateReadiness(ctx, runtime, target.Spec)
 			if err == nil {
 				completion.Readiness = &report
 			}
 		}
 		if err != nil {
-			return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
-				RuntimeStatus:   runtime.Status,
-				Drift:           "readiness_failed",
-				ReadinessFailed: true,
-			})
+			failure := lifecycleFailureAfterRebuild(record, target, runtime, "readiness_failed")
+			return c.failAfterMutation(record, LifecycleOperationRebuild, err, failure)
 		}
-		if completion.Readiness != nil && (completion.Readiness.InventoryDigest != record.Spec.Readiness.InventoryDigest || completion.Readiness.ToolCount != len(record.Spec.Readiness.Inventory.Tools)) {
+		if completion.Readiness != nil && (completion.Readiness.InventoryDigest != target.Spec.Readiness.InventoryDigest || completion.Readiness.ToolCount != len(target.Spec.Readiness.Inventory.Tools)) {
 			err = fmt.Errorf("%w: readiness report does not match immutable inventory", ErrRuntimeNotReady)
-			return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
-				RuntimeStatus: runtime.Status, Drift: "readiness_failed", ReadinessFailed: true,
-			})
+			failure := lifecycleFailureAfterRebuild(record, target, runtime, "readiness_failed")
+			return c.failAfterMutation(record, LifecycleOperationRebuild, err, failure)
 		}
 	}
 	return c.complete(record, LifecycleOperationRebuild, completion)
@@ -204,14 +217,12 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 		return errors.Join(err, failErr)
 	}
 	if missing {
-		// The provider may have disappeared after a previous container removal
-		// while its explicitly requested named-volume deletion failed. Give the
-		// manager one final ownership-checked chance to remove that volume.
-		if removeWorkspace {
-			if deleteErr := c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: true}); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
-				_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, deleteErr, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(deleteErr)})
-				return errors.Join(deleteErr, failErr)
-			}
+		// The provider may have disappeared after a partial delete. Give the
+		// manager one final ownership-checked chance to remove its conversation
+		// network and, when requested, its named workspace volume.
+		if deleteErr := c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace}); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+			_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, deleteErr, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(deleteErr)})
+			return errors.Join(deleteErr, failErr)
 		}
 		writeCtx, cancel := lifecycleWriteContext()
 		defer cancel()
@@ -278,6 +289,20 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		}
 	}
 	if err := validateObservedRuntime(record, runtime); err != nil {
+		// A process can stop after Docker created the upgraded provider but before
+		// the lifecycle completion transaction committed. Adopt only the exact
+		// deterministic none -> internal transition; every other mismatch remains
+		// a fail-closed specification drift.
+		if record.Spec.Security.NetworkMode == NetworkNone {
+			target := record
+			target.Spec.Security.NetworkMode = NetworkInternal
+			if validateObservedRuntime(target, runtime) == nil {
+				replacement := target.Spec
+				return c.complete(record, LifecycleOperationReconcile, LifecycleCompletion{
+					Runtime: runtime, Drift: "network_migration_recovered", ReplacementSpec: &replacement,
+				})
+			}
+		}
 		return c.failObserved(record, "specification_drift", "容器身份或镜像与不可变运行时规格不一致")
 	}
 	drifts := make([]string, 0, 2)
@@ -359,6 +384,17 @@ func validateObservedRuntime(record InitializationRecord, runtime Runtime) error
 		return fmt.Errorf("%w: engine runtime does not match the durable immutable specification", ErrRuntimeStateConflict)
 	}
 	return nil
+}
+
+func lifecycleFailureAfterRebuild(original, target InitializationRecord, runtime Runtime, drift string) LifecycleFailure {
+	failure := LifecycleFailure{RuntimeStatus: runtime.Status, Drift: drift, ReadinessFailed: true}
+	if original.Spec.Security.NetworkMode != target.Spec.Security.NetworkMode {
+		applied := runtime
+		replacement := target.Spec
+		failure.AppliedRuntime = &applied
+		failure.ReplacementSpec = &replacement
+	}
+	return failure
 }
 
 func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record InitializationRecord, allowMissing bool) (bool, error) {

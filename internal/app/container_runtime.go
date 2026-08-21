@@ -170,7 +170,7 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			ReadOnlyRootFS:      true,
 			NoNewPrivileges:     true,
 			DropAllCapabilities: true,
-			NetworkMode:         containerruntime.NetworkNone,
+			NetworkMode:         containerruntime.NetworkInternal,
 			SeccompProfile:      "default",
 			TmpfsBytes:          cfg.Container.TmpfsBytes,
 		},

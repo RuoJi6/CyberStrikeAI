@@ -39,6 +39,16 @@ func TestLifecycleControllerPersistsStartStopRebuildAndDelete(t *testing.T) {
 	if rebuilt.RuntimeStatus != container.StatusStopped || rebuilt.RuntimeGeneration != 2 || rebuilt.ProviderID == stopped.ProviderID {
 		t.Fatalf("rebuilt record = %#v", rebuilt)
 	}
+	if rebuilt.Spec.Security.NetworkMode != container.NetworkInternal {
+		t.Fatalf("legacy runtime was not migrated to an internal network: %#v", rebuilt.Spec.Security)
+	}
+	observed, err := manager.Inspect(context.Background(), rebuilt.RuntimeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.SpecDigest != container.RuntimeSpecDigest(rebuilt.Spec) {
+		t.Fatalf("rebuilt runtime digest = %q, want %q", observed.SpecDigest, container.RuntimeSpecDigest(rebuilt.Spec))
+	}
 
 	if err := controller.Delete(context.Background(), conversationID, false); err != nil {
 		t.Fatalf("delete: %v", err)
@@ -48,6 +58,34 @@ func TestLifecycleControllerPersistsStartStopRebuildAndDelete(t *testing.T) {
 	}
 	if _, err := manager.Inspect(context.Background(), rebuilt.RuntimeID); !errors.Is(err, container.ErrNotFound) {
 		t.Fatalf("deleted provider lookup = %v", err)
+	}
+}
+
+func TestLifecycleControllerReconcileRecoversCommittedDockerNetworkMigration(t *testing.T) {
+	db, manager, controller, conversationID := lifecycleFixture(t)
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := record.Spec
+	replacement.Security.NetworkMode = container.NetworkInternal
+	runtime, err := manager.Rebuild(context.Background(), record.RuntimeID, container.RebuildOptions{Spec: replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.SpecDigest != container.RuntimeSpecDigest(replacement) {
+		t.Fatalf("simulated migrated runtime = %#v", runtime)
+	}
+
+	reconciled, err := controller.Reconcile(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("reconcile interrupted network migration: %v", err)
+	}
+	if reconciled.Spec.Security.NetworkMode != container.NetworkInternal || reconciled.ProviderID != runtime.ProviderID || reconciled.RuntimeDrift != "network_migration_recovered" {
+		t.Fatalf("reconciled migration = %#v", reconciled)
+	}
+	if reconciled.RuntimeGeneration != record.RuntimeGeneration {
+		t.Fatalf("reconciliation changed active generation: got %d, want %d", reconciled.RuntimeGeneration, record.RuntimeGeneration)
 	}
 }
 

@@ -207,6 +207,12 @@ func WorkspaceVolumeName(id RuntimeID) string {
 	return managedResourceName(ResourceKindWorkspaceVolume, string(id))
 }
 
+// ConversationNetworkName returns the only accepted per-conversation network
+// name for a runtime. It is system-derived and never accepted from a request.
+func ConversationNetworkName(id RuntimeID) string {
+	return managedResourceName(ResourceKindConversationNetwork, string(id))
+}
+
 func sameManagedResource(expected, observed ManagedResource) bool {
 	return expected.Kind == observed.Kind && expected.LogicalID == observed.LogicalID &&
 		expected.ProviderID == observed.ProviderID && expected.Name == observed.Name &&

@@ -64,7 +64,7 @@ func (m *DockerManager) ListOwned(ctx context.Context) ([]Runtime, error) {
 			}
 			return nil, fmt.Errorf("inspect owned runtime %s: %w", id, inspectErr)
 		}
-		runtime, convertErr := m.runtimeFromInspection(id, inspection.Container)
+		runtime, convertErr := m.runtimeFromInspection(operationCtx, id, inspection.Container)
 		if convertErr != nil {
 			return nil, convertErr
 		}
@@ -212,12 +212,19 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 	defer cancel()
 	runtime, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) && options.RemoveWorkspace {
-			removed, volumeErr := m.deleteOwnedWorkspaceVolumeByRuntimeID(operationCtx, id)
-			if volumeErr != nil {
-				return volumeErr
+		if errors.Is(err, ErrNotFound) {
+			removedNetwork, networkErr := m.deleteOwnedConversationNetworkByRuntimeID(operationCtx, id)
+			if networkErr != nil {
+				return networkErr
 			}
-			if removed {
+			removedWorkspace := false
+			if options.RemoveWorkspace {
+				removedWorkspace, err = m.deleteOwnedWorkspaceVolumeByRuntimeID(operationCtx, id)
+				if err != nil {
+					return err
+				}
+			}
+			if removedNetwork || removedWorkspace {
 				return nil
 			}
 		}
@@ -244,12 +251,79 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 		}
 		return fmt.Errorf("delete runtime %s: %w", id, err)
 	}
+	if securitySpec.Security.NetworkMode == NetworkInternal {
+		if err := m.deleteOwnedConversationNetwork(operationCtx, securitySpec, inspection.Container.Config.Labels[LabelSpecDigest]); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("delete runtime %s conversation network: %w", id, err)
+		}
+	}
 	if options.RemoveWorkspace && securitySpec.Workspace.Persistent {
 		if err := m.deleteOwnedVolumeResource(operationCtx, workspaceManagedResource(securitySpec)); err != nil && !errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("delete runtime %s workspace: %w", id, err)
 		}
 	}
 	return nil
+}
+
+func (m *DockerManager) deleteOwnedConversationNetwork(ctx context.Context, spec RuntimeSpec, expectedSpecDigest string) error {
+	if m.networkAPI == nil {
+		return fmt.Errorf("%w: engine client does not support conversation networks", ErrEngineUnavailable)
+	}
+	name := ConversationNetworkName(spec.ID)
+	result, err := m.networkAPI.NetworkInspect(ctx, name, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: conversation network %s", ErrNotFound, name)
+		}
+		return fmt.Errorf("inspect conversation network %s: %w", name, err)
+	}
+	resource, err := m.verifyConversationNetwork(spec, expectedSpecDigest, result.Network, result.Network.ID, true)
+	if err != nil {
+		return err
+	}
+	if _, err := m.networkAPI.NetworkRemove(ctx, resource.ProviderID, mobyclient.NetworkRemoveOptions{}); err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: conversation network %s", ErrNotFound, name)
+		}
+		return err
+	}
+	return nil
+}
+
+func (m *DockerManager) deleteOwnedConversationNetworkByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
+	if m.networkAPI == nil {
+		return false, nil
+	}
+	name := ConversationNetworkName(id)
+	result, err := m.networkAPI.NetworkInspect(ctx, name, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect conversation network %s: %w", name, err)
+	}
+	labels := result.Network.Labels
+	if labels[LabelRuntimeID] != string(id) || labels[LabelNetworkMode] != string(NetworkInternal) || !sha256DigestPattern.MatchString(labels[LabelSpecDigest]) {
+		return false, fmt.Errorf("%w: conversation network runtime labels mismatch", ErrRuntimeStateConflict)
+	}
+	spec := RuntimeSpec{
+		ID: id, ConversationID: strings.TrimSpace(labels[LabelConversationID]),
+		Security: SecurityProfile{NetworkMode: NetworkInternal},
+	}
+	expected := conversationNetworkManagedResource(spec, result.Network.ID)
+	observed, observeErr := m.resourceFromLabels(ResourceKindConversationNetwork, result.Network.ID, result.Network.Name, labels, result.Network.Created.UTC())
+	if observeErr != nil || !sameManagedResource(expected, observed) {
+		return false, fmt.Errorf("%w: conversation network ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if result.Network.Driver != "bridge" || result.Network.Scope != "local" || !result.Network.Internal || !result.Network.EnableIPv4 || result.Network.EnableIPv6 || result.Network.Attachable || result.Network.Ingress || result.Network.ConfigOnly || len(result.Network.Containers) != 0 || len(result.Network.Services) != 0 {
+		return false, fmt.Errorf("%w: conversation network is unsafe to delete", ErrRuntimeStateConflict)
+	}
+	if _, err := m.networkAPI.NetworkRemove(ctx, result.Network.ID, mobyclient.NetworkRemoveOptions{}); err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *DockerManager) deleteOwnedWorkspaceVolumeByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
@@ -307,10 +381,10 @@ func (m *DockerManager) inspectOwned(ctx context.Context, id RuntimeID) (Runtime
 		}
 		return Runtime{}, fmt.Errorf("inspect runtime %s: %w", id, err)
 	}
-	return m.runtimeFromInspection(id, result.Container)
+	return m.runtimeFromInspection(ctx, id, result.Container)
 }
 
-func (m *DockerManager) runtimeFromInspection(expectedID RuntimeID, actual mobycontainer.InspectResponse) (Runtime, error) {
+func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID RuntimeID, actual mobycontainer.InspectResponse) (Runtime, error) {
 	if strings.TrimSpace(actual.ID) == "" || actual.Config == nil || actual.State == nil || actual.HostConfig == nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s has an incomplete engine inspection", ErrRuntimeStateConflict, expectedID)
 	}
@@ -333,7 +407,7 @@ func (m *DockerManager) runtimeFromInspection(expectedID RuntimeID, actual mobyc
 	if err != nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s image labels mismatch", ErrRuntimeStateConflict, expectedID)
 	}
-	if err := verifyObservedSecurityBaseline(actual); err != nil {
+	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return Runtime{}, err
 	}
 	if !matchesRuntimeKeepalive(actual.Config) {
@@ -391,21 +465,71 @@ func imageReferenceFromRuntime(configured string, labels map[string]string) (Ima
 	}, nil
 }
 
-func verifyObservedSecurityBaseline(actual mobycontainer.InspectResponse) error {
+func (m *DockerManager) verifyObservedSecurityBaseline(ctx context.Context, actual mobycontainer.InspectResponse) error {
 	host := actual.HostConfig
 	config := actual.Config
 	if config == nil || host == nil || actual.State == nil {
 		return fmt.Errorf("%w: runtime inspection is incomplete", ErrRuntimeStateConflict)
 	}
-	if !config.NetworkDisabled || host.NetworkMode != mobycontainer.NetworkMode(NetworkNone) || !isolatedNetworkSettings(actual.NetworkSettings) {
-		return fmt.Errorf("%w: owned runtime network isolation drifted", ErrRuntimeStateConflict)
-	}
 	expected, err := runtimeSecuritySpecFromLabels(config.Labels)
 	if err != nil {
 		return fmt.Errorf("%w: owned runtime resource labels are invalid", ErrRuntimeStateConflict)
 	}
+	switch expected.Security.NetworkMode {
+	case NetworkNone:
+		if !config.NetworkDisabled || host.NetworkMode != mobycontainer.NetworkMode(NetworkNone) || !isolatedNetworkSettings(actual.NetworkSettings) {
+			return fmt.Errorf("%w: owned runtime none-network isolation drifted", ErrRuntimeStateConflict)
+		}
+	case NetworkInternal:
+		if config.NetworkDisabled || host.NetworkMode != mobycontainer.NetworkMode(ConversationNetworkName(expected.ID)) {
+			return fmt.Errorf("%w: owned runtime internal network mode drifted", ErrRuntimeStateConflict)
+		}
+		if err := m.verifyAttachedConversationNetwork(ctx, actual, expected); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("%w: owned runtime network mode is invalid", ErrRuntimeStateConflict)
+	}
 	if err := verifyRuntimeSecurityBaseline(host, expected); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, actual mobycontainer.InspectResponse, spec RuntimeSpec) error {
+	if m.networkAPI == nil {
+		return fmt.Errorf("%w: engine client does not support conversation network inspection", ErrEngineUnavailable)
+	}
+	name := ConversationNetworkName(spec.ID)
+	if actual.NetworkSettings == nil || len(actual.NetworkSettings.Networks) != 1 {
+		return fmt.Errorf("%w: runtime is not attached to exactly one conversation network", ErrRuntimeStateConflict)
+	}
+	endpoint := actual.NetworkSettings.Networks[name]
+	if endpoint == nil || strings.TrimSpace(endpoint.NetworkID) == "" {
+		return fmt.Errorf("%w: runtime conversation network endpoint is incomplete", ErrRuntimeStateConflict)
+	}
+	result, err := m.networkAPI.NetworkInspect(ctx, endpoint.NetworkID, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: conversation network is missing", ErrRuntimeStateConflict)
+		}
+		return fmt.Errorf("inspect attached conversation network: %w", err)
+	}
+	if _, err := m.verifyConversationNetwork(spec, actual.Config.Labels[LabelSpecDigest], result.Network, endpoint.NetworkID, false); err != nil {
+		return err
+	}
+	if len(result.Network.Services) != 0 || len(result.Network.Containers) > 1 {
+		return fmt.Errorf("%w: conversation network has unexpected attached workloads", ErrRuntimeStateConflict)
+	}
+	if len(result.Network.Containers) == 0 {
+		if actual.State == nil || actual.State.Running {
+			return fmt.Errorf("%w: conversation network attachment is missing", ErrRuntimeStateConflict)
+		}
+		return nil
+	}
+	attached, ok := result.Network.Containers[actual.ID]
+	if !ok || (strings.TrimSpace(attached.Name) != "" && strings.TrimSpace(attached.Name) != strings.TrimPrefix(actual.Name, "/")) {
+		return fmt.Errorf("%w: conversation network attachment identity mismatch", ErrRuntimeStateConflict)
 	}
 	return nil
 }
@@ -477,6 +601,15 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 	if !persistent && volumeName != "" {
 		return RuntimeSpec{}, errors.New("ephemeral workspace declares a volume label")
 	}
+	networkMode := NetworkMode(strings.TrimSpace(labels[LabelNetworkMode]))
+	if networkMode == "" {
+		// Runtimes created before stage 4 did not carry a network mode label and
+		// were unconditionally created with Docker's none network.
+		networkMode = NetworkNone
+	}
+	if networkMode != NetworkNone && networkMode != NetworkInternal {
+		return RuntimeSpec{}, errors.New("invalid network mode label")
+	}
 	return RuntimeSpec{
 		ID: runtimeID, ConversationID: conversationID,
 		Resources: ResourceLimits{
@@ -484,7 +617,7 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard,
 			WorkspaceBytes: workspaceBytes, LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles64),
 		},
-		Security:  SecurityProfile{TmpfsBytes: tmpfsBytes},
+		Security:  SecurityProfile{NetworkMode: networkMode, TmpfsBytes: tmpfsBytes},
 		Workspace: WorkspaceSpec{Persistent: persistent, VolumeName: volumeName, MountPath: workspacePath},
 	}, nil
 }

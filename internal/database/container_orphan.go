@@ -16,7 +16,9 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 		SELECT runtime_id,
 			CASE WHEN initialization_status IN (?, ?) OR lifecycle_state = ? THEN '' ELSE provider_id END,
 			conversation_id,
-			spec_json
+			spec_json,
+			lifecycle_operation,
+			lifecycle_state
 		FROM conversation_container_runtimes
 		WHERE initialization_status IN (?, ?, ?)
 		ORDER BY runtime_id
@@ -31,7 +33,9 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 		var claim containerruntime.ManagedResourceClaim
 		claim.Kind = containerruntime.ResourceKindAgent
 		var specJSON string
-		if err := rows.Scan(&claim.LogicalID, &claim.ProviderID, &claim.ConversationID, &specJSON); err != nil {
+		var lifecycleOperation containerruntime.LifecycleOperation
+		var lifecycleState containerruntime.LifecycleState
+		if err := rows.Scan(&claim.LogicalID, &claim.ProviderID, &claim.ConversationID, &specJSON, &lifecycleOperation, &lifecycleState); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -39,11 +43,24 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 		var spec containerruntime.RuntimeSpec
 		if err := json.Unmarshal([]byte(specJSON), &spec); err != nil {
 			_ = rows.Close()
-			return nil, fmt.Errorf("decode container workspace claim %s: %w", claim.LogicalID, err)
+			return nil, fmt.Errorf("decode container resource claim %s: %w", claim.LogicalID, err)
+		}
+		if string(spec.ID) != claim.LogicalID || spec.ConversationID != claim.ConversationID {
+			_ = rows.Close()
+			return nil, fmt.Errorf("%w: container resource claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
+		}
+		migrationMayOwnNetwork := spec.Security.NetworkMode == containerruntime.NetworkNone &&
+			lifecycleOperation == containerruntime.LifecycleOperationRebuild &&
+			(lifecycleState == containerruntime.LifecycleInProgress || lifecycleState == containerruntime.LifecycleFailed)
+		if spec.Security.NetworkMode == containerruntime.NetworkInternal || migrationMayOwnNetwork {
+			claims = append(claims, containerruntime.ManagedResourceClaim{
+				Kind: containerruntime.ResourceKindConversationNetwork, LogicalID: claim.LogicalID,
+				ConversationID: claim.ConversationID,
+			})
 		}
 		if spec.Workspace.Persistent {
 			expectedName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(claim.LogicalID))
-			if spec.Workspace.VolumeName != expectedName || string(spec.ID) != claim.LogicalID || spec.ConversationID != claim.ConversationID {
+			if spec.Workspace.VolumeName != expectedName {
 				_ = rows.Close()
 				return nil, fmt.Errorf("%w: persistent workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
 			}

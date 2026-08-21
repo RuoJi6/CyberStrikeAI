@@ -92,6 +92,34 @@ func TestDockerManagerValidateReadinessChecksInventoryAndIsolation(t *testing.T)
 	}
 }
 
+func TestDockerManagerValidateReadinessRequiresOwnedInternalNetwork(t *testing.T) {
+	spec := creationSpec()
+	spec.Security.NetworkMode = NetworkInternal
+	spec.Readiness = ReadinessPolicy{
+		Enabled: true, InventoryDigest: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Inventory: readinessInventory(),
+	}
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := manager.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); err != nil {
+		t.Fatalf("internal readiness: %v", err)
+	}
+	name := ConversationNetworkName(spec.ID)
+	network := api.networks[name]
+	network.Internal = false
+	api.networks[name] = network
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); !errors.Is(err, ErrRuntimeNotReady) || !strings.Contains(err.Error(), "conversation network isolation") {
+		t.Fatalf("drifted internal network readiness error = %v", err)
+	}
+}
+
 func TestDockerManagerValidateReadinessAllowsOnlyOwnedWorkspaceVolume(t *testing.T) {
 	spec := creationSpec()
 	spec.Workspace.Persistent = true

@@ -153,6 +153,76 @@ func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
 	}
 }
 
+func TestContainerResourceClaimsIncludeConversationNetwork(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, err := db.CreateConversation("internal network claims", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.ID = containerruntime.RuntimeID("conversation-" + conversation.ID)
+	spec.Security.NetworkMode = containerruntime.NetworkInternal
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := db.ListManagedResourceClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 2 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindConversationNetwork {
+		t.Fatalf("claims = %#v", claims)
+	}
+	if claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != "" || claims[1].ConversationID != conversation.ID {
+		t.Fatalf("network claim = %#v", claims[1])
+	}
+}
+
+func TestContainerResourceClaimsProtectLegacyNetworkDuringRebuildMigration(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("legacy migration claims", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.ID = containerruntime.RuntimeID("conversation-" + conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-legacy", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationNetworkClaim := func(stage string) {
+		t.Helper()
+		claims, err := db.ListManagedResourceClaims(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claims) != 2 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindConversationNetwork || claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != "" {
+			t.Fatalf("%s claims = %#v", stage, claims)
+		}
+	}
+	assertMigrationNetworkClaim("in-progress")
+	if _, err := db.FailLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleFailure{
+		Message: "interrupted", RuntimeStatus: containerruntime.StatusFailed, Drift: "rebuild_incomplete",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertMigrationNetworkClaim("failed")
+}
+
 func TestDeleteConversationCanRetainPersistentWorkspaceClaim(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	conversation, err := db.CreateConversation("retain workspace after chat deletion", ConversationCreateMeta{
