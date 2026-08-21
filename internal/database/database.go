@@ -805,6 +805,9 @@ func (db *DB) initTables() error {
 	if err := db.initContainerRuntimeTables(); err != nil {
 		return fmt.Errorf("创建对话容器运行时表失败: %w", err)
 	}
+	if err := db.initBoundaryPolicyTables(); err != nil {
+		return fmt.Errorf("创建边界策略表失败: %w", err)
+	}
 
 	if _, err := db.Exec(createMessagesTable); err != nil {
 		return fmt.Errorf("创建messages表失败: %w", err)
