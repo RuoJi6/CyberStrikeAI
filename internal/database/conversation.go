@@ -86,6 +86,20 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 			return nil, fmt.Errorf("边界策略不存在: %w", err)
 		}
 	}
+	egressMode, egressProxyID, egressProxyGroupID, egressConfigured, err := NormalizeConversationEgressSelection(
+		meta.EgressMode, meta.EgressProxyID, meta.EgressProxyGroupID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if egressConfigured {
+		if runtimeMode != ConversationRuntimeModeContainer {
+			return nil, fmt.Errorf("upstream egress can only be selected for container conversations")
+		}
+		if err := validateConversationEgressTarget(context.Background(), db, egressMode, egressProxyID, egressProxyGroupID); err != nil {
+			return nil, fmt.Errorf("selected upstream egress does not exist: %w", err)
+		}
+	}
 
 	wsID := strings.TrimSpace(webshellConnectionID)
 	tx, err := db.Begin()
@@ -126,6 +140,15 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 			return nil, fmt.Errorf("选择对话边界策略失败: %w", err)
 		}
 	}
+	if egressConfigured {
+		if _, err = tx.Exec(`
+			INSERT INTO conversation_egress_selections (
+				conversation_id, mode, proxy_id, proxy_group_id, selected_at
+			) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)
+		`, id, egressMode, egressProxyID, egressProxyGroupID, formatSQLiteUTC(now)); err != nil {
+			return nil, fmt.Errorf("select conversation upstream egress: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("提交创建对话事务失败: %w", err)
 	}
@@ -145,6 +168,9 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 		meta.WebShellConnectionID = wsID
 	}
 	meta.BoundaryPolicyID = boundaryPolicyID
+	meta.EgressMode = egressMode
+	meta.EgressProxyID = egressProxyID
+	meta.EgressProxyGroupID = egressProxyGroupID
 	notifyConversationCreated(conv, meta)
 	return conv, nil
 }

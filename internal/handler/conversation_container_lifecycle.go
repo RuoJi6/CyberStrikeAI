@@ -224,6 +224,9 @@ func (h *ConversationHandler) authorizeConversationContainer(c *gin.Context) (st
 }
 
 func (h *ConversationHandler) containerLifecycleStart(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
+	if _, err := h.db.EnsureConversationEgressBinding(ctx, id); err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation upstream egress: %w", err)
+	}
 	if _, err := h.db.EnsureConversationBoundarySnapshot(ctx, id); err != nil {
 		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
 	}

@@ -388,6 +388,9 @@ type ChatRequest struct {
 	RuntimeMode          string                  `json:"runtimeMode,omitempty"`         // 新对话执行位置：host | container；存量对话忽略请求值
 	WorkspacePersistent  bool                    `json:"workspacePersistent,omitempty"` // 新容器对话是否使用专属 named volume；存量对话忽略请求值
 	BoundaryPolicyID     string                  `json:"boundaryPolicyId,omitempty"`    // 新容器对话首次启动时锁定的边界策略草案；存量对话忽略
+	EgressMode           string                  `json:"egressMode,omitempty"`          // 新容器对话上游出口：none | proxy | group；存量对话忽略
+	EgressProxyID        string                  `json:"egressProxyId,omitempty"`       // mode=proxy 时必填
+	EgressProxyGroupID   string                  `json:"egressProxyGroupId,omitempty"`  // mode=group 时必填
 	Role                 string                  `json:"role,omitempty"`                // 角色名称
 	Attachments          []ChatAttachment        `json:"attachments,omitempty"`
 	WebShellConnectionID string                  `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具

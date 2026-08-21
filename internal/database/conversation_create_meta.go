@@ -10,6 +10,9 @@ type ConversationCreateMeta struct {
 	RuntimeMode          string
 	WorkspacePersistent  bool
 	BoundaryPolicyID     string
+	EgressMode           string
+	EgressProxyID        string
+	EgressProxyGroupID   string
 	ClientIP             string
 	SessionHint          string
 }

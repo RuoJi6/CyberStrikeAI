@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -94,6 +95,10 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
 		t.Fatalf("worker claim did not bind snapshot first: %v", err)
 	}
+	conversationEgress, err := db.GetConversationEgressBinding(context.Background(), conversation.ID)
+	if err != nil || conversationEgress.State != database.ConversationEgressStateActive || conversationEgress.Mode != database.ConversationEgressModeNone || conversationEgress.Source != database.ConversationEgressSourceNone {
+		t.Fatalf("worker claim did not bind upstream egress first: %#v / %v", conversationEgress, err)
+	}
 	bound, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -103,6 +108,39 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 	}
 	if claimedRecord.Spec.Security.NetworkMode != containerruntime.NetworkInternal || claimedRecord.Spec.EgressGateway == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot.ID != bound.SnapshotID || claimedRecord.Spec.EgressGateway.BoundarySnapshot.SHA256 != bound.SHA256 {
 		t.Fatalf("worker claim did not upgrade queued topology: %#v", claimedRecord.Spec)
+	}
+}
+
+func TestBoundarySnapshotInitializationStoreFailsClosedWhenEgressBindingCannotPersist(t *testing.T) {
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "initializer-egress-failure.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conversation, err := db.CreateConversation("queued", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.Queue(context.Background(), appExecutionSpec(conversation.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE conversation_egress_bindings`); err != nil {
+		t.Fatal(err)
+	}
+	snapshotStore, err := egress.NewSnapshotStore(filepath.Join(t.TempDir(), "snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &boundarySnapshotInitializationStore{DB: db, SnapshotStore: snapshotStore}
+	if _, claimed, err := store.Claim(context.Background(), conversation.ID); err == nil || claimed {
+		t.Fatalf("claim = %v / %v, want fail closed", claimed, err)
+	}
+	record, err := db.GetContainerInitialization(context.Background(), conversation.ID)
+	if err != nil || record.Status != containerruntime.InitializationQueued {
+		t.Fatalf("record after rejected claim = %#v / %v", record, err)
+	}
+	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); !errors.Is(err, database.ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("boundary froze after egress failure: %v", err)
 	}
 }
 

@@ -61,6 +61,17 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type":        "string",
 		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示默认拒绝空策略。",
 	}
+	conversationEgressModeRequestSchema := map[string]interface{}{
+		"type":        "string",
+		"enum":        []string{"none", "proxy", "group"},
+		"description": "仅在新建 container 对话时生效。none 显式关闭上游；proxy 需要 egressProxyId；group 需要 egressProxyGroupId。首次容器启动前可修改，之后不可变。",
+	}
+	conversationEgressProxyIDRequestSchema := map[string]interface{}{
+		"type": "string", "format": "uuid", "description": "egressMode=proxy 时必填，且调用者必须拥有 egress:read 资源权限。",
+	}
+	conversationEgressProxyGroupIDRequestSchema := map[string]interface{}{
+		"type": "string", "format": "uuid", "description": "egressMode=group 时必填，且调用者必须拥有 egress:read 资源权限。",
+	}
 	egressProxySchema := map[string]interface{}{
 		"type":        "object",
 		"description": "安全的上游出站代理投影。响应永不包含用户名、密码、认证头或加密信封。",
@@ -165,6 +176,39 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 		},
 	}
+	conversationEgressGroupSummarySchema := map[string]interface{}{
+		"type":        "object",
+		"description": "对话出口绑定中的安全代理组摘要；不包含成员调度权重或凭据。",
+		"required":    []string{"id", "name", "enabled", "failureThreshold", "cooldownSeconds", "failClosed"},
+		"properties": map[string]interface{}{
+			"id": map[string]interface{}{"type": "string", "format": "uuid"}, "name": map[string]interface{}{"type": "string"},
+			"enabled": map[string]interface{}{"type": "boolean"}, "failureThreshold": map[string]interface{}{"type": "integer"},
+			"cooldownSeconds": map[string]interface{}{"type": "integer"}, "failClosed": map[string]interface{}{"type": "boolean", "enum": []bool{true}},
+		},
+	}
+	conversationEgressBindingSchema := map[string]interface{}{
+		"type":        "object",
+		"description": "pending 表示首次启动前的可编辑选择；active 表示已冻结绑定。source=none 是未显式选择的缺省 none，source=conversation 是对话显式选择。",
+		"required":    []string{"conversationId", "state", "mode", "source"},
+		"properties": map[string]interface{}{
+			"conversationId": map[string]interface{}{"type": "string"},
+			"state":          map[string]interface{}{"type": "string", "enum": []string{"pending", "active"}},
+			"mode":           map[string]interface{}{"type": "string", "enum": []string{"none", "proxy", "group"}},
+			"source":         map[string]interface{}{"type": "string", "enum": []string{"none", "conversation", "project", "user"}},
+			"proxy":          map[string]interface{}{"$ref": "#/components/schemas/EgressProxySummary"},
+			"proxyGroup":     map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressProxyGroupSummary"},
+			"selectedAt":     map[string]interface{}{"type": "string", "format": "date-time"},
+			"boundAt":        map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	conversationEgressWriteSchema := map[string]interface{}{
+		"type": "object", "required": []string{"mode"},
+		"properties": map[string]interface{}{
+			"mode":               conversationEgressModeRequestSchema,
+			"egressProxyId":      conversationEgressProxyIDRequestSchema,
+			"egressProxyGroupId": conversationEgressProxyGroupIDRequestSchema,
+		},
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -192,12 +236,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 			},
 			"schemas": map[string]interface{}{
-				"EgressProxy":            egressProxySchema,
-				"EgressProxyWrite":       egressProxyWriteSchema,
-				"EgressProxySummary":     egressProxySummarySchema,
-				"EgressProxyGroupMember": egressProxyGroupMemberSchema,
-				"EgressProxyGroup":       egressProxyGroupSchema,
-				"EgressProxyGroupWrite":  egressProxyGroupWriteSchema,
+				"EgressProxy":                         egressProxySchema,
+				"EgressProxyWrite":                    egressProxyWriteSchema,
+				"EgressProxySummary":                  egressProxySummarySchema,
+				"EgressProxyGroupMember":              egressProxyGroupMemberSchema,
+				"EgressProxyGroup":                    egressProxyGroupSchema,
+				"EgressProxyGroupWrite":               egressProxyGroupWriteSchema,
+				"ConversationEgressProxyGroupSummary": conversationEgressGroupSummarySchema,
+				"ConversationEgressBinding":           conversationEgressBindingSchema,
+				"ConversationEgressWrite":             conversationEgressWriteSchema,
 				"CreateConversationRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -218,6 +265,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"workspacePersistent": workspacePersistenceRequestSchema,
 						"boundaryPolicyId":    boundaryPolicyRequestSchema,
+						"egressMode":          conversationEgressModeRequestSchema,
+						"egressProxyId":       conversationEgressProxyIDRequestSchema,
+						"egressProxyGroupId":  conversationEgressProxyGroupIDRequestSchema,
 					},
 				},
 				"SetConversationProjectRequest": map[string]interface{}{
@@ -2021,6 +2071,38 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/conversations/{id}/egress": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"出站代理", "对话管理"},
+					"summary":     "查看对话上游出口选择或冻结绑定",
+					"description": "仅适用于 container 对话。响应仅包含无凭据安全投影；需要 chat:read、egress:read 及对话资源权限。",
+					"operationId": "getConversationEgress",
+					"parameters": []map[string]interface{}{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "当前选择或绑定", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressBinding"}}}},
+						"400": map[string]interface{}{"description": "非 container 对话"}, "401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "缺少对话或 egress:read 权限"}, "404": map[string]interface{}{"description": "对话不存在"},
+					},
+				},
+				"put": map[string]interface{}{
+					"tags":        []string{"出站代理", "对话管理"},
+					"summary":     "更新对话首次启动前的上游出口选择",
+					"description": "需要 chat:write、egress:read 及对话/出口资源权限。首次容器启动已冻结绑定时返回 409，不会修改活动绑定。",
+					"operationId": "updateConversationEgress",
+					"parameters": []map[string]interface{}{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}},
+					},
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressWrite"}}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "已更新 pending 选择", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressBinding"}}}},
+						"400": map[string]interface{}{"description": "模式/资源 ID 组合无效或非 container 对话"}, "401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "缺少对话或出口资源权限"}, "404": map[string]interface{}{"description": "对话或出口资源不存在"},
+						"409": map[string]interface{}{"description": "首次启动已冻结绑定"},
+					},
+				},
+			},
 			"/api/conversations/{id}/container-initialization": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},
@@ -2151,6 +2233,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressMode":           conversationEgressModeRequestSchema,
+										"egressProxyId":        conversationEgressProxyIDRequestSchema,
+										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -2205,6 +2290,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressMode":           conversationEgressModeRequestSchema,
+										"egressProxyId":        conversationEgressProxyIDRequestSchema,
+										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -2254,6 +2342,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":         runtimeModeRequestSchema,
 										"workspacePersistent": workspacePersistenceRequestSchema,
 										"boundaryPolicyId":    boundaryPolicyRequestSchema,
+										"egressMode":          conversationEgressModeRequestSchema,
+										"egressProxyId":       conversationEgressProxyIDRequestSchema,
+										"egressProxyGroupId":  conversationEgressProxyGroupIDRequestSchema,
 										"role": map[string]interface{}{
 											"type":        "string",
 											"description": "角色名称（可选）",
@@ -2320,6 +2411,9 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressMode":           conversationEgressModeRequestSchema,
+										"egressProxyId":        conversationEgressProxyIDRequestSchema,
+										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,

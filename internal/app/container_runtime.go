@@ -65,6 +65,14 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		_ = manager.Close()
 		return nil, nil, nil, nil, nil, fmt.Errorf("bind boundary snapshots for durable container runtimes: %w", err)
 	}
+	egressMigrationCtx, egressMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = db.EnsureContainerRuntimeEgressBindings(egressMigrationCtx)
+	egressMigrationCancel()
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, nil, nil, fmt.Errorf("bind upstream egress for durable container runtimes: %w", err)
+	}
 	rebuildRecoveryCtx, rebuildRecoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	interruptedBoundaryRebuilds, err := db.MarkPendingConversationBoundaryRebuildsInterrupted(rebuildRecoveryCtx)
 	rebuildRecoveryCancel()
@@ -120,6 +128,9 @@ type boundarySnapshotInitializationStore struct {
 func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, bool, error) {
 	if s == nil || s.DB == nil {
 		return containerruntime.InitializationRecord{}, false, fmt.Errorf("boundary snapshot initialization store is not configured")
+	}
+	if _, err := s.DB.EnsureConversationEgressBinding(ctx, conversationID); err != nil {
+		return containerruntime.InitializationRecord{}, false, fmt.Errorf("bind conversation upstream egress before runtime claim: %w", err)
 	}
 	snapshot, err := s.DB.EnsureConversationBoundarySnapshot(ctx, conversationID)
 	if err != nil {

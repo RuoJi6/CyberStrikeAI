@@ -62,7 +62,10 @@ func (db *DB) initEgressProxyTables() error {
 			return err
 		}
 	}
-	return db.initEgressProxyGroupTables()
+	if err := db.initEgressProxyGroupTables(); err != nil {
+		return err
+	}
+	return db.initConversationEgressTables()
 }
 
 func normalizeEgressProxy(proxy EgressProxy) (EgressProxy, error) {

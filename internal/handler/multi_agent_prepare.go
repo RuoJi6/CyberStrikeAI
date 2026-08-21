@@ -83,6 +83,13 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 				return nil, fmt.Errorf("无权访问该边界策略")
 			}
 		}
+		egressMode, egressProxyID, egressProxyGroupID, _, egressRequestErr := normalizeConversationEgressForSession(
+			c.Request.Context(), h.db, session, runtimeMode,
+			req.EgressMode, req.EgressProxyID, req.EgressProxyGroupID,
+		)
+		if egressRequestErr != nil {
+			return nil, fmt.Errorf("%s", egressRequestErr.Message)
+		}
 		title := safeTruncateString(req.Message, 50)
 		var err error
 		meta := audit.ConversationCreateMetaFromGin(c, source)
@@ -92,6 +99,9 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.RuntimeMode = runtimeMode
 		meta.WorkspacePersistent = req.WorkspacePersistent
 		meta.BoundaryPolicyID = boundaryPolicyID
+		meta.EgressMode = egressMode
+		meta.EgressProxyID = egressProxyID
+		meta.EgressProxyGroupID = egressProxyGroupID
 		if webshellID != "" {
 			meta.Source = source + "_webshell"
 			meta.WebShellConnectionID = webshellID

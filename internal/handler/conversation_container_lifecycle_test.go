@@ -89,6 +89,10 @@ func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
 		t.Fatalf("start did not bind boundary snapshot first: %v", err)
 	}
+	conversationEgress, err := db.GetConversationEgressBinding(context.Background(), conversation.ID)
+	if err != nil || conversationEgress.State != database.ConversationEgressStateActive || conversationEgress.Mode != database.ConversationEgressModeNone {
+		t.Fatalf("start did not bind upstream egress first: %#v / %v", conversationEgress, err)
+	}
 
 	other, err := db.CreateRBACUser("container-lifecycle-other", "Other", "hash", true, nil)
 	if err != nil {
@@ -110,6 +114,36 @@ func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	})
 	if response.Code != http.StatusInternalServerError || strings.Contains(response.Body.String(), "/var/run/docker.sock") {
 		t.Fatalf("unsanitized failure=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationContainerStartFailsClosedBeforeControllerWhenEgressBindingFails(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("egress binding failure", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetResourceOwner("conversation", conversation.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TABLE conversation_egress_bindings`); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeConversationContainerLifecycle{}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerLifecycleController(controller)
+	response := performConversationRequest(owner, http.MethodPost, "/api/conversations/"+conversation.ID+"/container/start", nil, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+		handler.StartConversationContainer(c)
+	})
+	if response.Code != http.StatusInternalServerError || controller.action != "" {
+		t.Fatalf("response=%d %s controller=%s", response.Code, response.Body.String(), controller.action)
+	}
+	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); !errors.Is(err, database.ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("boundary froze after egress failure: %v", err)
 	}
 }
 

@@ -24,6 +24,15 @@ func RegisterConversationCreateHook(s *Service) {
 		if meta.WebShellConnectionID != "" {
 			detail["webshell_connection_id"] = meta.WebShellConnectionID
 		}
+		if meta.EgressMode != "" {
+			detail["egress_mode"] = meta.EgressMode
+		}
+		if meta.EgressProxyID != "" {
+			detail["egress_proxy_id"] = meta.EgressProxyID
+		}
+		if meta.EgressProxyGroupID != "" {
+			detail["egress_proxy_group_id"] = meta.EgressProxyGroupID
+		}
 		s.Record(nil, Entry{
 			Category:     "conversation",
 			Action:       "create",

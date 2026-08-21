@@ -518,6 +518,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+			if _, egressErr := db.EnsureConversationEgressBinding(ctx, conversationID); egressErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation upstream egress: %w", egressErr)
+			}
 			snapshot, snapshotErr := db.EnsureConversationBoundarySnapshot(ctx, conversationID)
 			if snapshotErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", snapshotErr)
@@ -1195,6 +1198,8 @@ func setupRoutes(
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
 		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
+		protected.GET("/conversations/:id/egress", conversationHandler.GetConversationEgress)
+		protected.PUT("/conversations/:id/egress", conversationHandler.UpdateConversationEgress)
 		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)

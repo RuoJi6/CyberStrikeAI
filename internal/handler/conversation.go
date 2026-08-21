@@ -102,6 +102,9 @@ type CreateConversationRequest struct {
 	RuntimeMode         string `json:"runtimeMode,omitempty"`
 	WorkspacePersistent bool   `json:"workspacePersistent,omitempty"`
 	BoundaryPolicyID    string `json:"boundaryPolicyId,omitempty"`
+	EgressMode          string `json:"egressMode,omitempty"`
+	EgressProxyID       string `json:"egressProxyId,omitempty"`
+	EgressProxyGroupID  string `json:"egressProxyGroupId,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -145,6 +148,18 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 			return
 		}
 	}
+	session, _ := security.CurrentSession(c)
+	egressMode, egressProxyID, egressProxyGroupID, _, requestErr := normalizeConversationEgressForSession(
+		c.Request.Context(), h.db, session, runtimeMode,
+		req.EgressMode, req.EgressProxyID, req.EgressProxyGroupID,
+	)
+	if requestErr != nil {
+		c.JSON(requestErr.Status, gin.H{"error": requestErr.Message})
+		return
+	}
+	meta.EgressMode = egressMode
+	meta.EgressProxyID = egressProxyID
+	meta.EgressProxyGroupID = egressProxyGroupID
 	if !h.conversationProjectAllowed(c, meta.ProjectID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
 		return
