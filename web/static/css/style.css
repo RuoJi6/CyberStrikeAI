@@ -35903,7 +35903,31 @@ html[data-theme="dark"] .projects-panel-count { color: var(--accent-color); back
     min-width: 100px;
 }
 .conversation-delete-workspace-dialog {
+    width: min(560px, calc(100vw - 32px));
     max-width: 560px;
+    margin: auto;
+}
+/* This modal lives directly under body. Give it an explicit viewport-sized
+   layer so chat/sidebar layout widths can never constrain its centering. */
+.modal-overlay.projects-modal-overlay.conversation-delete-workspace-modal {
+    position: fixed !important;
+    inset: 0 !important;
+    width: 100vw !important;
+    min-width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    margin: 0 !important;
+    align-items: center;
+    justify-content: center;
+}
+@media (max-width: 640px) {
+    .modal-overlay.projects-modal-overlay.conversation-delete-workspace-modal {
+        padding: 12px;
+    }
+    .conversation-delete-workspace-dialog {
+        width: min(560px, calc(100vw - 24px));
+        max-height: calc(100dvh - 24px);
+    }
 }
 .conversation-delete-workspace-name {
     margin: 0 0 14px;
