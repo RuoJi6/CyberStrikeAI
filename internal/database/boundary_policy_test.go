@@ -132,6 +132,13 @@ func TestBoundaryPolicyRuleEffectsFailClosedInAPIAndSQLite(t *testing.T) {
 	}); err == nil {
 		t.Fatal("credential profile on non-auth-only rule was accepted")
 	}
+	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID,
+		Effect:   boundary.EffectAllowVisit,
+		Host:     "8.8.8.0/24",
+	}); err == nil {
+		t.Fatal("CIDR allow rule was accepted")
+	}
 
 	now := formatSQLiteUTC(time.Now())
 	insert := `

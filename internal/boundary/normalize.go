@@ -86,7 +86,7 @@ func NormalizeRequestTarget(rawURL, rawMethod string) (RequestTarget, error) {
 // NormalizeRuleTarget canonicalizes every target dimension independently. It
 // deliberately does not add policy defaults or make an allow/deny decision.
 func NormalizeRuleTarget(input RuleTarget) (RuleTarget, error) {
-	host, err := NormalizeHost(input.Host)
+	host, err := NormalizeRuleHost(input.Host)
 	if err != nil {
 		return RuleTarget{}, err
 	}
@@ -134,6 +134,20 @@ func NormalizeRuleTarget(input RuleTarget) (RuleTarget, error) {
 		PathPrefixes: sortedUniqueStrings(paths),
 		Methods:      sortedUniqueStrings(methods),
 	}, nil
+}
+
+// NormalizeRuleHost accepts an exact host or a canonical IP prefix. Prefixes
+// are used only by blocked rules; the policy compiler enforces that semantic.
+func NormalizeRuleHost(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !strings.Contains(raw, "/") {
+		return NormalizeHost(raw)
+	}
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil || prefix.Addr().Zone() != "" || prefix.Addr().Is4In6() {
+		return "", fmt.Errorf("%w: invalid IP prefix %q", ErrInvalidTarget, raw)
+	}
+	return prefix.Masked().String(), nil
 }
 
 func NormalizeHost(raw string) (string, error) {

@@ -150,6 +150,9 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	rule.Ports = normalizedTarget.Ports
 	rule.PathPrefixes = normalizedTarget.PathPrefixes
 	rule.Methods = normalizedTarget.Methods
+	if strings.Contains(rule.Host, "/") && rule.Effect != boundary.EffectBlocked {
+		return BoundaryPolicyRule{}, fmt.Errorf("only blocked boundary rules may use IP prefixes")
+	}
 	if rule.ID = strings.TrimSpace(rule.ID); rule.ID == "" {
 		rule.ID = uuid.New().String()
 	}
