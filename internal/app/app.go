@@ -487,7 +487,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
@@ -496,14 +496,19 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
-			if _, snapshotErr := db.EnsureConversationBoundarySnapshot(ctx, conversationID); snapshotErr != nil {
+			snapshot, snapshotErr := db.EnsureConversationBoundarySnapshot(ctx, conversationID)
+			if snapshotErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", snapshotErr)
+			}
+			snapshotSpec, snapshotErr := materializeBoundarySnapshot(containerSnapshotStore, snapshot)
+			if snapshotErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation boundary snapshot: %w", snapshotErr)
 			}
 			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent)
+			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}

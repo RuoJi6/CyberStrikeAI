@@ -2,14 +2,17 @@ package container
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/egress"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -134,14 +137,15 @@ func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpe
 	pinned, _ := pinnedImageReference(gateway.Image)
 	name := EgressGatewayContainerName(spec.ID)
 	labels := egressGatewayLabels(m.ownerID, spec)
+	config, hostConfig, err := m.egressGatewayContainerConfig(spec, labels)
+	if err != nil {
+		return "", err
+	}
 	result, err := m.api.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 		Name: name, Image: pinned,
-		Platform: &ocispec.Platform{OS: platform[0], Architecture: platform[1], Variant: platform[2]},
-		Config: &mobycontainer.Config{
-			NetworkDisabled: false, User: gatewayUser, WorkingDir: "/",
-			Entrypoint: []string{gatewayBinaryPath}, Labels: labels,
-		},
-		HostConfig:       egressGatewayHostConfig(spec),
+		Platform:         &ocispec.Platform{OS: platform[0], Architecture: platform[1], Variant: platform[2]},
+		Config:           config,
+		HostConfig:       hostConfig,
 		NetworkingConfig: egressGatewayNetworkingConfig(spec, conversationNetwork, egressNetwork),
 	})
 	if err != nil {
@@ -200,13 +204,17 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if status != expectedStatus {
 		return fmt.Errorf("%w: egress gateway state %s does not match agent state %s", ErrRuntimeStateConflict, status, expectedStatus)
 	}
-	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath || len(actual.Config.Cmd) != 0 {
+	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
 		return fmt.Errorf("%w: egress gateway process configuration mismatch", ErrRuntimeStateConflict)
+	}
+	expectedCommand := egressGatewayCommand(spec, "run")
+	if !equalStrings(actual.Config.Cmd, expectedCommand) || !equalHealthcheck(actual.Config.Healthcheck, egressGatewayHealthcheck(spec)) {
+		return fmt.Errorf("%w: egress gateway snapshot command or healthcheck mismatch", ErrRuntimeStateConflict)
 	}
 	if len(actual.Config.ExposedPorts) != 0 || len(actual.Config.Volumes) != 0 {
 		return fmt.Errorf("%w: egress gateway image exposes ports or volumes", ErrRuntimeStateConflict)
 	}
-	if err := verifyEgressGatewayHostConfig(actual.HostConfig, spec); err != nil {
+	if err := m.verifyEgressGatewayHostConfig(actual.HostConfig, spec); err != nil {
 		return err
 	}
 	if _, err := m.VerifyRuntimeImage(ctx, actual.ID, spec.EgressGateway.Image); err != nil {
@@ -239,10 +247,98 @@ func egressGatewayHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	}
 }
 
-func verifyEgressGatewayHostConfig(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
+func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels map[string]string) (*mobycontainer.Config, *mobycontainer.HostConfig, error) {
+	config := &mobycontainer.Config{
+		NetworkDisabled: false, User: gatewayUser, WorkingDir: "/",
+		Entrypoint: []string{gatewayBinaryPath}, Cmd: egressGatewayCommand(spec, "run"),
+		Healthcheck: egressGatewayHealthcheck(spec), Labels: labels,
+	}
+	hostConfig := egressGatewayHostConfig(spec)
+	if spec.EgressGateway.BoundarySnapshot == nil {
+		return config, hostConfig, nil
+	}
+	path, _, err := m.loadBoundarySnapshot(spec)
+	if err != nil {
+		return nil, nil, err
+	}
+	hostConfig.Mounts = []mobymount.Mount{{
+		Type: mobymount.TypeBind, Source: path,
+		Target: egress.SnapshotContainerPath, ReadOnly: true,
+		BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+	}}
+	return config, hostConfig, nil
+}
+
+func egressGatewayCommand(spec RuntimeSpec, action string) []string {
+	if spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil {
+		return nil
+	}
+	snapshot := spec.EgressGateway.BoundarySnapshot
+	return []string{
+		action,
+		"--snapshot-path", egress.SnapshotContainerPath,
+		"--snapshot-id", snapshot.ID,
+		"--snapshot-sha256", snapshot.SHA256,
+	}
+}
+
+func egressGatewayHealthcheck(spec RuntimeSpec) *mobycontainer.HealthConfig {
+	command := egressGatewayCommand(spec, "check")
+	if command == nil {
+		return nil
+	}
+	return &mobycontainer.HealthConfig{
+		Test:     append([]string{"CMD", gatewayBinaryPath}, command...),
+		Interval: time.Second, Timeout: 2 * time.Second,
+		StartPeriod: 3 * time.Second, StartInterval: 250 * time.Millisecond, Retries: 3,
+	}
+}
+
+func (m *DockerManager) loadBoundarySnapshot(spec RuntimeSpec) (string, egress.SnapshotReport, error) {
+	if spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil {
+		return "", egress.SnapshotReport{}, nil
+	}
+	if m.snapshotStore == nil {
+		return "", egress.SnapshotReport{}, fmt.Errorf("%w: egress snapshot store is not configured", ErrRuntimeStateConflict)
+	}
+	reference := boundarySnapshotReference(spec)
+	path, err := m.snapshotStore.Path(reference)
+	if err != nil {
+		return "", egress.SnapshotReport{}, fmt.Errorf("%w: resolve egress boundary snapshot: %v", ErrRuntimeStateConflict, err)
+	}
+	report, err := egress.LoadSnapshot(path, reference)
+	if err != nil {
+		return "", egress.SnapshotReport{}, fmt.Errorf("%w: verify egress boundary snapshot: %v", ErrRuntimeStateConflict, err)
+	}
+	return path, report, nil
+}
+
+func boundarySnapshotReference(spec RuntimeSpec) egress.SnapshotReference {
+	snapshot := spec.EgressGateway.BoundarySnapshot
+	return egress.SnapshotReference{ID: snapshot.ID, SHA256: snapshot.SHA256}
+}
+
+func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
 	expected := egressGatewayHostConfig(spec)
-	if actual.NetworkMode != expected.NetworkMode || actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Mounts) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
+	if actual.NetworkMode != expected.NetworkMode || actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: egress gateway has host, device, privileged, or published-port access", ErrRuntimeStateConflict)
+	}
+	if spec.EgressGateway.BoundarySnapshot == nil {
+		if len(actual.Mounts) != 0 {
+			return fmt.Errorf("%w: legacy egress gateway has an unexpected mount", ErrRuntimeStateConflict)
+		}
+	} else {
+		expectedPath, _, err := m.loadBoundarySnapshot(spec)
+		if err != nil {
+			return err
+		}
+		if len(actual.Mounts) != 1 {
+			return fmt.Errorf("%w: egress gateway must have exactly one snapshot mount", ErrRuntimeStateConflict)
+		}
+		mount := actual.Mounts[0]
+		if mount.Type != mobymount.TypeBind || mount.Source != expectedPath || mount.Target != egress.SnapshotContainerPath || !mount.ReadOnly || mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate || mount.BindOptions.NonRecursive || mount.BindOptions.CreateMountpoint || mount.BindOptions.ReadOnlyNonRecursive || mount.BindOptions.ReadOnlyForceRecursive || mount.VolumeOptions != nil || mount.ImageOptions != nil || mount.TmpfsOptions != nil || mount.ClusterOptions != nil {
+			return fmt.Errorf("%w: egress gateway snapshot mount mismatch", ErrRuntimeStateConflict)
+		}
 	}
 	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
 		return fmt.Errorf("%w: egress gateway privilege restrictions mismatch", ErrRuntimeStateConflict)
@@ -269,6 +365,40 @@ func verifyEgressGatewayHostConfig(actual *mobycontainer.HostConfig, spec Runtim
 		return fmt.Errorf("%w: egress gateway tmpfs mismatch", ErrRuntimeStateConflict)
 	}
 	return nil
+}
+
+func equalStrings(actual, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for index := range expected {
+		if actual[index] != expected[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func equalHealthcheck(actual, expected *mobycontainer.HealthConfig) bool {
+	if actual == nil || expected == nil {
+		return actual == nil && expected == nil
+	}
+	return equalStrings(actual.Test, expected.Test) && actual.Interval == expected.Interval && actual.Timeout == expected.Timeout && actual.StartPeriod == expected.StartPeriod && actual.StartInterval == expected.StartInterval && actual.Retries == expected.Retries
+}
+
+func healthySnapshotReport(health *mobycontainer.Health, reference egress.SnapshotReference) bool {
+	if health == nil || health.Status != mobycontainer.Healthy || len(health.Log) == 0 {
+		return false
+	}
+	entry := health.Log[len(health.Log)-1]
+	if entry == nil || entry.ExitCode != 0 {
+		return false
+	}
+	var report egress.SnapshotReport
+	if err := json.Unmarshal([]byte(strings.TrimSpace(entry.Output)), &report); err != nil {
+		return false
+	}
+	return report.Event == "boundary_snapshot_healthy" && report.SnapshotID == reference.ID && report.SHA256 == reference.SHA256
 }
 
 func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource) *mobynetwork.NetworkingConfig {
@@ -332,7 +462,7 @@ func egressGatewayLabels(ownerID string, spec RuntimeSpec) map[string]string {
 func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest string) map[string]string {
 	gateway := spec.EgressGateway
 	resources := gateway.Resources
-	return map[string]string{
+	labels := map[string]string{
 		LabelManaged: "true", LabelOwner: ownerID,
 		LabelRuntimeID: string(spec.ID), LabelResourceID: string(spec.ID),
 		LabelConversationID: spec.ConversationID, LabelResourceKind: ResourceKindEgressGateway,
@@ -343,6 +473,11 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 		LabelNoFileHard: strconv.FormatUint(resources.NoFileHard, 10), LabelTmpfsBytes: strconv.FormatInt(resources.TmpfsBytes, 10),
 		LabelLogMaxBytes: strconv.FormatInt(resources.LogMaxBytes, 10), LabelLogMaxFiles: strconv.Itoa(resources.LogMaxFiles),
 	}
+	if gateway.BoundarySnapshot != nil {
+		labels[LabelEgressSnapshotID] = gateway.BoundarySnapshot.ID
+		labels[LabelEgressSnapshotSHA256] = gateway.BoundarySnapshot.SHA256
+	}
+	return labels
 }
 
 func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewaySpec, error) {
@@ -352,6 +487,7 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressNanoCPUs, LabelEgressMemoryBytes, LabelEgressPIDs,
 		LabelEgressNoFileSoft, LabelEgressNoFileHard, LabelEgressTmpfsBytes,
 		LabelEgressLogMaxBytes, LabelEgressLogMaxFiles,
+		LabelEgressSnapshotID, LabelEgressSnapshotSHA256,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -407,6 +543,11 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard, TmpfsBytes: tmpfsBytes,
 			LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles),
 		},
+	}
+	snapshotID := strings.TrimSpace(labels[LabelEgressSnapshotID])
+	snapshotSHA256 := strings.TrimSpace(labels[LabelEgressSnapshotSHA256])
+	if snapshotID != "" || snapshotSHA256 != "" {
+		gateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{ID: snapshotID, SHA256: snapshotSHA256}
 	}
 	if err := ValidateEgressGatewaySpec(*gateway); err != nil {
 		return nil, err

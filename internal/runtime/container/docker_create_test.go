@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -41,6 +42,7 @@ type fakeDockerCreationAPI struct {
 	listErr                 error
 	startErr                error
 	startErrs               map[string]error
+	healthOutputs           map[string]string
 	stopErr                 error
 	stopErrs                map[string]error
 	startedID               string
@@ -254,6 +256,25 @@ func (f *fakeDockerCreationAPI) ContainerStart(_ context.Context, id string, _ m
 		if result != nil && result.Container.State != nil {
 			result.Container.State.Status = mobycontainer.StateRunning
 			result.Container.State.Running = true
+			if result.Container.Config != nil && result.Container.Config.Healthcheck != nil {
+				output := ""
+				if f.healthOutputs != nil {
+					output = f.healthOutputs[id]
+				}
+				if output == "" {
+					report := map[string]string{
+						"event":      "boundary_snapshot_healthy",
+						"snapshotId": result.Container.Config.Labels[LabelEgressSnapshotID],
+						"sha256":     result.Container.Config.Labels[LabelEgressSnapshotSHA256],
+					}
+					encoded, _ := json.Marshal(report)
+					output = string(encoded) + "\n"
+				}
+				result.Container.State.Health = &mobycontainer.Health{
+					Status: mobycontainer.Healthy,
+					Log:    []*mobycontainer.HealthcheckResult{{ExitCode: 0, Output: output}},
+				}
+			}
 			if result.Container.NetworkSettings != nil {
 				for name := range result.Container.NetworkSettings.Networks {
 					if network, ok := f.networks[name]; ok {
@@ -581,6 +602,83 @@ func TestDockerManagerCreateReusesLegacyPersistentWorkspaceDuringNetworkMigratio
 	}
 	if api.volumeCreateCalls != 0 {
 		t.Fatalf("legacy workspace was recreated: %d", api.volumeCreateCalls)
+	}
+}
+
+func TestWorkspaceVolumeDigestAcceptsOnlyOtherwiseIdenticalPreSnapshotGatewaySpec(t *testing.T) {
+	spec := gatewayCreationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	spec.EgressGateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{
+		ID:     "12345678-1234-1234-1234-123456789abc",
+		SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
+	legacy := spec
+	gateway := *legacy.EgressGateway
+	gateway.BoundarySnapshot = nil
+	legacy.EgressGateway = &gateway
+	if !workspaceVolumeSpecDigestMatches(spec, RuntimeSpecDigest(legacy), "") {
+		t.Fatal("item-2 workspace digest was rejected during snapshot-only upgrade")
+	}
+	drifted := legacy
+	drifted.Resources.MemoryBytes++
+	if workspaceVolumeSpecDigestMatches(spec, RuntimeSpecDigest(drifted), "") {
+		t.Fatal("workspace digest accepted non-snapshot specification drift")
+	}
+	item2 := legacy
+	item2Gateway := *item2.EgressGateway
+	item2.EgressGateway = &item2Gateway
+	item2.EgressGateway.Image.Digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	item2Digest := RuntimeSpecDigest(item2)
+	if !workspaceVolumeSpecDigestMatches(spec, item2Digest, item2Digest) {
+		t.Fatal("authorized item-2 workspace digest was rejected during gateway and snapshot upgrade")
+	}
+	if workspaceVolumeSpecDigestMatches(spec, RuntimeSpecDigest(drifted), item2Digest) {
+		t.Fatal("workspace digest authorization accepted a different prior specification")
+	}
+}
+
+func TestDockerManagerCreateReusesOnlyExplicitlyAuthorizedPreviousWorkspaceDigest(t *testing.T) {
+	spec := creationSpec()
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = WorkspaceVolumeName(spec.ID)
+	previous := spec
+	previous.Resources.MemoryBytes++
+	previousDigest := RuntimeSpecDigest(previous)
+
+	newAPI := func() *fakeDockerCreationAPI {
+		api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+		api.volumes = map[string]mobyvolume.Volume{
+			spec.Workspace.VolumeName: {
+				Name: spec.Workspace.VolumeName, Driver: "local",
+				Labels: workspaceVolumeLabels("instance-01", previous),
+			},
+		}
+		return api
+	}
+
+	api := newAPI()
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("ordinary create with previous digest error = %v", err)
+	}
+	if api.createOpts.Name != "" {
+		t.Fatal("ordinary create mutated runtime after workspace digest mismatch")
+	}
+
+	api = newAPI()
+	manager, err = newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.create(context.Background(), spec, previousDigest); err != nil {
+		t.Fatalf("create with exact previous digest authorization: %v", err)
+	}
+	if api.createOpts.Name != runtimeContainerName(spec.ID) {
+		t.Fatalf("authorized create target = %q", api.createOpts.Name)
 	}
 }
 

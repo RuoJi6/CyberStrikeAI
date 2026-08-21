@@ -11,6 +11,7 @@ import (
 )
 
 var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+var snapshotIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var generatedNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 // ValidateSpec rejects ambiguous or unsafe runtime requests before an engine
@@ -99,6 +100,16 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 	}
 	if resources.TmpfsBytes <= 0 || resources.LogMaxBytes <= 0 || resources.LogMaxFiles <= 0 {
 		return invalidSpec("egress gateway tmpfs and log rotation limits must be positive")
+	}
+	if spec.BoundarySnapshot != nil {
+		id := strings.TrimSpace(spec.BoundarySnapshot.ID)
+		if id != spec.BoundarySnapshot.ID || !snapshotIDPattern.MatchString(id) {
+			return invalidSpec("egress gateway boundary snapshot id must be a canonical UUID")
+		}
+		digest := strings.TrimSpace(spec.BoundarySnapshot.SHA256)
+		if digest != spec.BoundarySnapshot.SHA256 || !sha256DigestPattern.MatchString(digest) {
+			return invalidSpec("egress gateway boundary snapshot digest must be a lowercase sha256 digest")
+		}
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/egress"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
 )
@@ -31,7 +32,10 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 			{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"},
 		},
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01", false)
+	snapshot := containerruntime.EgressBoundarySnapshotSpec{
+		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +48,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	if spec.Resources.MemoryBytes != 512<<20 || spec.Resources.MaxConcurrentExec != 2 || spec.Resources.MaxQueuedExec != 8 || spec.Resources.LogMaxFiles != 3 {
 		t.Fatalf("spec resources = %#v", spec.Resources)
 	}
-	if spec.EgressGateway == nil || spec.EgressGateway.Image.Digest != cfg.Container.EgressImageDigest || spec.EgressGateway.Resources.MemoryBytes != 128<<20 {
+	if spec.EgressGateway == nil || spec.EgressGateway.Image.Digest != cfg.Container.EgressImageDigest || spec.EgressGateway.Resources.MemoryBytes != 128<<20 || spec.EgressGateway.BoundarySnapshot == nil || *spec.EgressGateway.BoundarySnapshot != snapshot {
 		t.Fatalf("egress gateway = %#v", spec.EgressGateway)
 	}
 	if !spec.Readiness.Enabled || spec.Readiness.InventoryDigest != cfg.Container.ToolInventoryDigest || len(spec.Readiness.Inventory.Tools) != 1 {
@@ -66,12 +70,39 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
 		t.Fatal(err)
 	}
-	store := &boundarySnapshotInitializationStore{DB: db}
-	if _, claimed, err := store.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+	snapshotStore, err := egress.NewSnapshotStore(filepath.Join(t.TempDir(), "snapshots"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := containerruntime.EgressGatewaySpec{
+		Image: containerruntime.ImageReference{
+			Repository: "ghcr.io/example/cyberstrike-egress",
+			Digest:     "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			Platform:   "linux/arm64",
+		},
+		Resources: containerruntime.EgressGatewayResources{
+			NanoCPUs: 250_000_000, MemoryBytes: 128 << 20, PIDs: 64,
+			NoFileSoft: 512, NoFileHard: 1024, TmpfsBytes: 16 << 20,
+			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
+		},
+	}
+	store := &boundarySnapshotInitializationStore{DB: db, SnapshotStore: snapshotStore, EgressGateway: &gateway}
+	claimedRecord, claimed, err := store.Claim(context.Background(), conversation.ID)
+	if err != nil || !claimed {
 		t.Fatalf("claim = %v, %v", claimed, err)
 	}
 	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
 		t.Fatalf("worker claim did not bind snapshot first: %v", err)
+	}
+	bound, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := egress.LoadSnapshot(filepath.Join(snapshotStore.Root(), bound.SnapshotID+".json"), egress.SnapshotReference{ID: bound.SnapshotID, SHA256: bound.SHA256}); err != nil {
+		t.Fatalf("worker claim did not materialize snapshot first: %v", err)
+	}
+	if claimedRecord.Spec.Security.NetworkMode != containerruntime.NetworkInternal || claimedRecord.Spec.EgressGateway == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot.ID != bound.SnapshotID || claimedRecord.Spec.EgressGateway.BoundarySnapshot.SHA256 != bound.SHA256 {
+		t.Fatalf("worker claim did not upgrade queued topology: %#v", claimedRecord.Spec)
 	}
 }
 
@@ -90,7 +121,9 @@ func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
 		ImageDigest:   cfg.Container.ImageDigest, ImagePlatform: cfg.Container.ImagePlatform,
 		Tools: []containerruntime.ToolInventoryEntry{{Name: "sh", Path: "/bin/sh", Version: "busybox-1", Category: "runtime"}},
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01", true)
+	spec, err := conversationContainerSpec(cfg, "conversation-01", true, containerruntime.EgressBoundarySnapshotSpec{
+		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

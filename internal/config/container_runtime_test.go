@@ -101,6 +101,18 @@ func TestContainerRuntimeConfigLoadsPinnedInventoryRelativeToConfig(t *testing.T
 	}
 }
 
+func TestContainerRuntimeConfigResolvesEgressSnapshotDirectoryRelativeToConfig(t *testing.T) {
+	directory := t.TempDir()
+	config := ContainerRuntimeConfig{EgressSnapshotDir: "data/egress-snapshots"}
+	if err := config.resolveEgressSnapshotDirectory(filepath.Join(directory, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(directory, "data", "egress-snapshots")
+	if config.EgressSnapshotDir != expected || !filepath.IsAbs(config.EgressSnapshotDir) {
+		t.Fatalf("resolved snapshot directory = %q, want %q", config.EgressSnapshotDir, expected)
+	}
+}
+
 func testContainerToolInventory() containerruntime.ToolInventory {
 	return containerruntime.ToolInventory{
 		SchemaVersion: containerruntime.ToolInventorySchemaVersion,

@@ -355,6 +355,24 @@ func (db *DB) GetConversationBoundarySnapshot(ctx context.Context, conversationI
 	return getConversationBoundarySnapshot(ctx, db, strings.TrimSpace(conversationID))
 }
 
+// GetPendingConversationBoundarySnapshot returns only the exact immutable
+// snapshot staged for the caller's explicit rebuild. It cannot resolve an
+// arbitrary snapshot from another conversation.
+func (db *DB) GetPendingConversationBoundarySnapshot(ctx context.Context, conversationID, snapshotID string) (ConversationBoundarySnapshot, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	snapshotID = strings.TrimSpace(snapshotID)
+	if conversationID == "" || snapshotID == "" {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("conversation id and pending snapshot id are required")
+	}
+	return scanConversationBoundarySnapshot(db.QueryRowContext(ctx, `
+		SELECT s.id, br.conversation_id, s.source_policy_id, s.sha256, s.canonical_json,
+			s.created_at, br.requested_at, br.expected_runtime_generation
+		FROM conversation_boundary_rebuilds br
+		JOIN boundary_policy_snapshots s ON s.id = br.pending_snapshot_id
+		WHERE br.conversation_id = ? AND br.pending_snapshot_id = ?
+	`, conversationID, snapshotID))
+}
+
 // EnsureContainerRuntimeBoundarySnapshots upgrades durable runtime records from
 // deployments predating boundary snapshots. It intentionally touches only
 // conversations that already have a runtime record; unused container-mode
@@ -395,9 +413,7 @@ type boundarySnapshotQuerier interface {
 }
 
 func getConversationBoundarySnapshot(ctx context.Context, query boundarySnapshotQuerier, conversationID string) (ConversationBoundarySnapshot, error) {
-	var snapshot ConversationBoundarySnapshot
-	var createdAt, boundAt string
-	err := query.QueryRowContext(ctx, `
+	return scanConversationBoundarySnapshot(query.QueryRowContext(ctx, `
 		SELECT s.id, a.conversation_id, s.source_policy_id, s.sha256, s.canonical_json,
 			s.created_at, a.activated_at, a.runtime_generation
 		FROM conversation_boundary_activations a
@@ -405,7 +421,17 @@ func getConversationBoundarySnapshot(ctx context.Context, query boundarySnapshot
 		WHERE a.conversation_id = ?
 		ORDER BY a.runtime_generation DESC
 		LIMIT 1
-	`, conversationID).Scan(
+	`, conversationID))
+}
+
+type boundarySnapshotScanner interface {
+	Scan(...interface{}) error
+}
+
+func scanConversationBoundarySnapshot(scanner boundarySnapshotScanner) (ConversationBoundarySnapshot, error) {
+	var snapshot ConversationBoundarySnapshot
+	var createdAt, boundAt string
+	err := scanner.Scan(
 		&snapshot.SnapshotID, &snapshot.ConversationID, &snapshot.PolicyID, &snapshot.SHA256,
 		&snapshot.CanonicalJSON, &createdAt, &boundAt, &snapshot.RuntimeGeneration,
 	)

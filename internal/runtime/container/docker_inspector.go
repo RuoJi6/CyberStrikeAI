@@ -165,7 +165,11 @@ func (d *DockerInspector) VerifyRuntimeImage(ctx context.Context, providerID str
 }
 
 func imageInspectionFromLocal(result mobyclient.ImageInspectResult, expected ImageReference) (ImageInspection, error) {
-	if !containsDigest(result.RepoDigests, expected.Digest) {
+	// A locally built image may lose its RepoDigests entry when a deployment
+	// tag advances, while stopped containers still retain the exact immutable
+	// image ID. Exact ID equality is an equally strong content-addressed pin;
+	// registry manifest pins continue to use RepoDigests when IDs differ.
+	if strings.TrimSpace(result.ID) != expected.Digest && !containsDigest(result.RepoDigests, expected.Digest) {
 		return ImageInspection{}, fmt.Errorf("%w: local image does not reference %s", ErrImageDigestMismatch, expected.Digest)
 	}
 	actualPlatform := platformString(ocispec.Platform{

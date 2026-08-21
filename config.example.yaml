@@ -140,6 +140,7 @@ container:
   egress_image_repository: ghcr.io/example/cyberstrike-egress # 自建并发布 container/egress/Dockerfile 生成的最小网关镜像
   egress_image_digest: "" # 启用时必填 sha256:... 不可变 digest
   egress_image_platform: linux/arm64
+  egress_snapshot_dir: data/egress-snapshots # 控制面生成的不可变快照文件；仅网关以只读 bind mount 加载
   initializer_workers: 2
   queue_capacity: 64
   create_timeout_seconds: 120

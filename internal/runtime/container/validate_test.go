@@ -66,13 +66,32 @@ func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T)
 	if err := container.ValidateSpec(spec); err != nil {
 		t.Fatalf("valid gateway spec rejected: %v", err)
 	}
+	withSnapshot := spec
+	gateway := *spec.EgressGateway
+	gateway.BoundarySnapshot = &container.EgressBoundarySnapshotSpec{
+		ID:     "12345678-1234-1234-1234-123456789abc",
+		SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
+	withSnapshot.EgressGateway = &gateway
+	if err := container.ValidateSpec(withSnapshot); err != nil {
+		t.Fatalf("valid gateway snapshot rejected: %v", err)
+	}
+	paddedSnapshot := withSnapshot
+	gateway = *withSnapshot.EgressGateway
+	snapshot := *gateway.BoundarySnapshot
+	snapshot.ID += " "
+	gateway.BoundarySnapshot = &snapshot
+	paddedSnapshot.EgressGateway = &gateway
+	if err := container.ValidateSpec(paddedSnapshot); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("padded gateway snapshot id error = %v", err)
+	}
 	none := spec
 	none.Security.NetworkMode = container.NetworkNone
 	if err := container.ValidateSpec(none); !errors.Is(err, container.ErrInvalidSpecification) {
 		t.Fatalf("none-network gateway error = %v", err)
 	}
 	floating := spec
-	gateway := *spec.EgressGateway
+	gateway = *spec.EgressGateway
 	gateway.Image.Digest = "latest"
 	floating.EgressGateway = &gateway
 	if err := container.ValidateSpec(floating); !errors.Is(err, container.ErrInvalidSpecification) {

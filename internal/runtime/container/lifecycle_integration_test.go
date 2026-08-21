@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,6 +82,129 @@ func TestLifecycleControllerExplicitRebuildAddsPinnedEgressGateway(t *testing.T)
 	}
 	if observed.SpecDigest != container.RuntimeSpecDigest(rebuilt.Spec) {
 		t.Fatalf("gateway runtime digest = %q, want %q", observed.SpecDigest, container.RuntimeSpecDigest(rebuilt.Spec))
+	}
+}
+
+func TestLifecycleControllerUpgradesExistingGatewayWithActiveBoundarySnapshot(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	active, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item2Gateway := lifecycleGatewaySpec()
+	item2Controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{EgressGateway: &item2Gateway})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item2, err := item2Controller.Rebuild(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("create item-2 gateway topology: %v", err)
+	}
+	if item2.Spec.EgressGateway == nil || item2.Spec.EgressGateway.BoundarySnapshot != nil {
+		t.Fatalf("item-2 topology = %#v", item2.Spec)
+	}
+	item3Gateway := item2Gateway
+	item3Gateway.Image.Digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	provider := &recordingBoundarySnapshotProvider{snapshot: container.EgressBoundarySnapshotSpec{ID: active.SnapshotID, SHA256: active.SHA256}}
+	item3Controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &item3Gateway, BoundarySnapshots: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item3, err := item3Controller.Rebuild(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("upgrade existing gateway with active snapshot: %v", err)
+	}
+	if len(provider.snapshotIDs) != 1 || provider.snapshotIDs[0] != "" || item3.Spec.EgressGateway == nil || item3.Spec.EgressGateway.Image.Digest != item3Gateway.Image.Digest || item3.Spec.EgressGateway.BoundarySnapshot == nil || item3.Spec.EgressGateway.BoundarySnapshot.ID != active.SnapshotID || item3.Spec.EgressGateway.BoundarySnapshot.SHA256 != active.SHA256 || item3.RuntimeGeneration != item2.RuntimeGeneration+1 {
+		t.Fatalf("item-3 topology = calls %#v, record %#v", provider.snapshotIDs, item3)
+	}
+}
+
+func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	active, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PrepareConversationBoundaryRebuild(context.Background(), conversationID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider := &recordingBoundarySnapshotProvider{snapshot: container.EgressBoundarySnapshotSpec{
+		ID: pending.SnapshotID, SHA256: pending.SHA256,
+	}}
+	gateway := lifecycleGatewaySpec()
+	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &gateway, BoundarySnapshots: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := container.WithBoundaryRebuildSnapshot(context.Background(), pending.SnapshotID)
+	rebuilt, err := controller.Rebuild(ctx, conversationID)
+	if err != nil {
+		t.Fatalf("rebuild with pending boundary snapshot: %v", err)
+	}
+	if len(provider.snapshotIDs) != 1 || provider.snapshotIDs[0] != pending.SnapshotID || rebuilt.Spec.EgressGateway == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot.ID != pending.SnapshotID || rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 != pending.SHA256 {
+		t.Fatalf("pending snapshot binding = calls %#v, record %#v", provider.snapshotIDs, rebuilt)
+	}
+	activated, err := db.GetConversationBoundarySnapshot(context.Background(), conversationID)
+	if err != nil || activated.SnapshotID != pending.SnapshotID || activated.SnapshotID == active.SnapshotID {
+		t.Fatalf("activated snapshot = %#v, %v", activated, err)
+	}
+
+	maintained, err := controller.Rebuild(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("maintenance rebuild: %v", err)
+	}
+	if len(provider.snapshotIDs) != 1 || maintained.Spec.EgressGateway.BoundarySnapshot == nil || *maintained.Spec.EgressGateway.BoundarySnapshot != *rebuilt.Spec.EgressGateway.BoundarySnapshot {
+		t.Fatalf("maintenance rebuild replaced immutable snapshot: calls %#v, record %#v", provider.snapshotIDs, maintained)
+	}
+
+	nextPending, err := db.PrepareConversationBoundaryRebuild(context.Background(), conversationID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.snapshot = container.EgressBoundarySnapshotSpec{ID: nextPending.SnapshotID, SHA256: nextPending.SHA256}
+	nextCtx := container.WithBoundaryRebuildSnapshot(context.Background(), nextPending.SnapshotID)
+	updated, err := controller.Rebuild(nextCtx, conversationID)
+	if err != nil {
+		t.Fatalf("replace active boundary snapshot with authorized pending snapshot: %v", err)
+	}
+	if len(provider.snapshotIDs) != 2 || provider.snapshotIDs[1] != nextPending.SnapshotID || updated.Spec.EgressGateway == nil || updated.Spec.EgressGateway.BoundarySnapshot == nil || updated.Spec.EgressGateway.BoundarySnapshot.ID != nextPending.SnapshotID || updated.Spec.EgressGateway.BoundarySnapshot.SHA256 != nextPending.SHA256 {
+		t.Fatalf("updated pending snapshot binding = calls %#v, record %#v", provider.snapshotIDs, updated)
+	}
+	nextActive, err := db.GetConversationBoundarySnapshot(context.Background(), conversationID)
+	if err != nil || nextActive.SnapshotID != nextPending.SnapshotID || nextActive.SnapshotID == activated.SnapshotID {
+		t.Fatalf("updated active snapshot = %#v, %v", nextActive, err)
+	}
+}
+
+func TestLifecycleControllerBoundarySnapshotResolutionFailureStopsBeforeManagerRebuild(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	provider := &recordingBoundarySnapshotProvider{err: errors.New("snapshot unavailable")}
+	gateway := lifecycleGatewaySpec()
+	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &gateway, BoundarySnapshots: provider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Rebuild(context.Background(), conversationID); err == nil || !strings.Contains(err.Error(), "snapshot unavailable") {
+		t.Fatalf("snapshot resolution error = %v", err)
+	}
+	for _, call := range manager.Calls() {
+		if call.Operation == containertest.OperationRebuild {
+			t.Fatalf("manager rebuild ran without a trusted snapshot: %#v", manager.Calls())
+		}
+	}
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.LifecycleState != container.LifecycleFailed || record.RuntimeDrift != "boundary_snapshot_unavailable" {
+		t.Fatalf("snapshot failure record = %#v", record)
 	}
 }
 
@@ -286,7 +410,7 @@ func lifecycleFixture(t *testing.T) (*database.DB, *containertest.FakeManager, *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	conversation, err := db.CreateConversation("lifecycle", database.ConversationCreateMeta{})
+	conversation, err := db.CreateConversation("lifecycle", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,4 +471,18 @@ func lifecycleGatewaySpec() container.EgressGatewaySpec {
 			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
 		},
 	}
+}
+
+type recordingBoundarySnapshotProvider struct {
+	snapshot    container.EgressBoundarySnapshotSpec
+	err         error
+	snapshotIDs []string
+}
+
+func (p *recordingBoundarySnapshotProvider) ResolveBoundarySnapshot(_ context.Context, _ string, snapshotID string) (container.EgressBoundarySnapshotSpec, error) {
+	p.snapshotIDs = append(p.snapshotIDs, snapshotID)
+	if p.err != nil {
+		return container.EgressBoundarySnapshotSpec{}, p.err
+	}
+	return p.snapshot, nil
 }

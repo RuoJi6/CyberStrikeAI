@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -1061,6 +1062,7 @@ type ContainerRuntimeConfig struct {
 	EgressImageRepository string                         `yaml:"egress_image_repository,omitempty" json:"egress_image_repository,omitempty"`
 	EgressImageDigest     string                         `yaml:"egress_image_digest,omitempty" json:"egress_image_digest,omitempty"`
 	EgressImagePlatform   string                         `yaml:"egress_image_platform,omitempty" json:"egress_image_platform,omitempty"`
+	EgressSnapshotDir     string                         `yaml:"egress_snapshot_dir,omitempty" json:"egress_snapshot_dir,omitempty"`
 	InitializerWorkers    int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
 	QueueCapacity         int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
 	CreateTimeoutSeconds  int                            `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
@@ -1091,6 +1093,9 @@ type ContainerRuntimeConfig struct {
 }
 
 func (c *ContainerRuntimeConfig) applyDefaults() {
+	if strings.TrimSpace(c.EgressSnapshotDir) == "" {
+		c.EgressSnapshotDir = "data/egress-snapshots"
+	}
 	if c.InitializerWorkers == 0 {
 		c.InitializerWorkers = 2
 	}
@@ -1165,6 +1170,22 @@ func (c *ContainerRuntimeConfig) applyDefaults() {
 	}
 }
 
+func (c *ContainerRuntimeConfig) resolveEgressSnapshotDirectory(configPath string) error {
+	path := strings.TrimSpace(c.EgressSnapshotDir)
+	if path == "" {
+		return errors.New("container.egress_snapshot_dir is required")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(filepath.Dir(configPath), path)
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("resolve container.egress_snapshot_dir: %w", err)
+	}
+	c.EgressSnapshotDir = abs
+	return nil
+}
+
 func (c ContainerRuntimeConfig) validateEnabled() error {
 	if !c.Enabled {
 		return nil
@@ -1177,6 +1198,9 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	}
 	if strings.TrimSpace(c.EgressImageRepository) == "" || strings.TrimSpace(c.EgressImageDigest) == "" || strings.TrimSpace(c.EgressImagePlatform) == "" {
 		return fmt.Errorf("container egress_image_repository, egress_image_digest and egress_image_platform are required when enabled")
+	}
+	if strings.TrimSpace(c.EgressSnapshotDir) == "" {
+		return fmt.Errorf("container egress_snapshot_dir is required when enabled")
 	}
 	if strings.TrimSpace(c.ToolInventoryPath) == "" || strings.TrimSpace(c.ToolInventoryDigest) == "" {
 		return fmt.Errorf("container tool_inventory_path and tool_inventory_digest are required when enabled")
@@ -1577,6 +1601,9 @@ func Load(path string) (*Config, error) {
 		cfg.Audit.MaxDetailBytes = 8192
 	}
 	cfg.Container.applyDefaults()
+	if err := cfg.Container.resolveEgressSnapshotDirectory(path); err != nil {
+		return nil, err
+	}
 	if err := cfg.Container.loadToolInventory(path); err != nil {
 		return nil, err
 	}
@@ -2095,7 +2122,8 @@ func Default() *Config {
 		Container: ContainerRuntimeConfig{
 			InitializerWorkers: 2, QueueCapacity: 64, CreateTimeoutSeconds: 120,
 			IdleStopSeconds: 1800, IdleScanSeconds: 60,
-			NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
+			EgressSnapshotDir: "data/egress-snapshots",
+			NanoCPUs:          1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
 			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30, TmpfsBytes: 64 << 20,
 			MaxConcurrentExec: 2, MaxQueuedExec: 8, LogMaxBytes: 10 << 20, LogMaxFiles: 3,
 			EgressNanoCPUs: 250_000_000, EgressMemoryBytes: 128 << 20, EgressPIDs: 64,

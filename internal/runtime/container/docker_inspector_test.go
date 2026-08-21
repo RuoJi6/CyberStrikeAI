@@ -184,6 +184,26 @@ func TestDockerInspectorRejectsRuntimeConfiguredWithTag(t *testing.T) {
 	}
 }
 
+func TestDockerInspectorAcceptsExactLocalImageIDAfterRepositoryTagMoves(t *testing.T) {
+	image := inspectionImageReference()
+	api := &fakeDockerInspectionAPI{
+		imageResult: mobyclient.ImageInspectResult{InspectResponse: mobyimage.InspectResponse{
+			ID: image.Digest, Architecture: "arm64", Os: "linux", Size: 13 << 20,
+		}},
+		containerResult: mobyclient.ContainerInspectResult{Container: mobycontainer.InspectResponse{
+			ID: "provider-1", Image: image.Digest,
+			Config: &mobycontainer.Config{Image: "alpine@" + image.Digest},
+		}},
+	}
+	verified, err := newDockerInspector(api).VerifyRuntimeImage(context.Background(), "provider-1", image)
+	if err != nil {
+		t.Fatalf("verify exact dangling local image id: %v", err)
+	}
+	if verified.ImageID != image.Digest || verified.ManifestDigest != image.Digest {
+		t.Fatalf("verified exact local image = %#v", verified)
+	}
+}
+
 func inspectionImageReference() ImageReference {
 	return ImageReference{
 		Repository: "alpine",

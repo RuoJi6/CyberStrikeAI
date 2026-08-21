@@ -104,6 +104,18 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 			}
 			return Runtime{}, fmt.Errorf("start egress gateway for runtime %s: %w", id, err)
 		}
+		if spec.EgressGateway.BoundarySnapshot != nil {
+			if err := m.waitForEgressGatewaySnapshot(operationCtx, spec, gateway.ID); err != nil {
+				seconds := int(defaultRuntimeStopTimeout / time.Second)
+				rollbackCtx, rollbackCancel := context.WithTimeout(context.Background(), rollbackTimeout)
+				_, rollbackErr := m.api.ContainerStop(rollbackCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+				rollbackCancel()
+				if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
+					err = errors.Join(err, fmt.Errorf("rollback unready egress gateway start: %w", rollbackErr))
+				}
+				return Runtime{}, err
+			}
+		}
 	}
 	if _, err := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{}); err != nil {
 		if spec.EgressGateway != nil {
@@ -126,6 +138,42 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 		return Runtime{}, fmt.Errorf("%w: runtime %s did not enter running state", ErrRuntimeStateConflict, id)
 	}
 	return started, nil
+}
+
+func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec RuntimeSpec, providerID string) error {
+	reference := boundarySnapshotReference(spec)
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, _, err := m.loadBoundarySnapshot(spec); err != nil {
+			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
+		}
+		result, err := m.api.ContainerInspect(ctx, providerID, mobyclient.ContainerInspectOptions{Size: false})
+		if err != nil {
+			if containerderrdefs.IsNotFound(err) {
+				return fmt.Errorf("%w: egress gateway for runtime %s disappeared", ErrRuntimeNotReady, spec.ID)
+			}
+			if ctx.Err() != nil {
+				return fmt.Errorf("%w: timed out waiting for egress snapshot %s: %v", ErrRuntimeNotReady, reference.ID, ctx.Err())
+			}
+			return fmt.Errorf("%w: inspect egress gateway health: %v", ErrRuntimeNotReady, err)
+		}
+		state := result.Container.State
+		if state == nil {
+			return fmt.Errorf("%w: egress gateway state is missing", ErrRuntimeNotReady)
+		}
+		if state.Running && healthySnapshotReport(state.Health, reference) {
+			return nil
+		}
+		if !state.Running || state.Status == mobycontainer.StateExited || state.Status == mobycontainer.StateDead || (state.Health != nil && state.Health.Status == mobycontainer.Unhealthy) {
+			return fmt.Errorf("%w: egress gateway did not validate snapshot %s", ErrRuntimeNotReady, reference.ID)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: timed out waiting for egress snapshot %s: %v", ErrRuntimeNotReady, reference.ID, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 func (m *DockerManager) Stop(ctx context.Context, id RuntimeID, options StopOptions) (Runtime, error) {
@@ -305,7 +353,7 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 			return Runtime{}, fmt.Errorf("remove workspace volume for rebuild %s: %w", id, removeErr)
 		}
 	}
-	rebuilt, createErr := m.Create(ctx, options.Spec)
+	rebuilt, createErr := m.create(ctx, options.Spec, options.AuthorizedWorkspaceSpecDigest)
 	if createErr != nil {
 		return Runtime{}, fmt.Errorf("rebuild runtime %s after removing the stopped provider: %w", id, createErr)
 	}

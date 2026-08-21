@@ -2,14 +2,20 @@ package container
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/egress"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
+	mobymount "github.com/moby/moby/api/types/mount"
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -26,6 +32,13 @@ func TestRuntimeSpecGatewayOmitemptyPreservesLegacySerialization(t *testing.T) {
 	const legacyDigest = "sha256:0d776c118690811d8cc9ebb09e51be5de550d03873e84a27890bc978b9776574"
 	if actual := RuntimeSpecDigest(spec); actual != legacyDigest {
 		t.Fatalf("legacy digest = %q, want %q", actual, legacyDigest)
+	}
+	item2, err := json.Marshal(gatewayCreationSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(item2), "BoundarySnapshot") {
+		t.Fatalf("item-2 gateway specification gained a nil snapshot field: %s", item2)
 	}
 }
 
@@ -192,6 +205,127 @@ func TestDockerManagerInspectRejectsGatewaySecurityDrift(t *testing.T) {
 	if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
 		t.Fatalf("gateway drift error = %v", err)
 	}
+}
+
+func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthReport(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: root, OperationTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create snapshot gateway: %v", err)
+	}
+	agentOptions := api.createOptsByName[runtimeContainerName(spec.ID)]
+	gatewayOptions := api.createOptsByName[EgressGatewayContainerName(spec.ID)]
+	if len(agentOptions.HostConfig.Binds) != 0 || len(agentOptions.HostConfig.Mounts) != 0 {
+		t.Fatalf("agent received trusted snapshot mount: %#v", agentOptions.HostConfig)
+	}
+	if len(gatewayOptions.HostConfig.Binds) != 0 || len(gatewayOptions.HostConfig.Mounts) != 1 {
+		t.Fatalf("gateway snapshot mounts = %#v / %#v", gatewayOptions.HostConfig.Binds, gatewayOptions.HostConfig.Mounts)
+	}
+	mount := gatewayOptions.HostConfig.Mounts[0]
+	if mount.Type != mobymount.TypeBind || mount.Source != snapshotPath || mount.Target != egress.SnapshotContainerPath || !mount.ReadOnly || mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate {
+		t.Fatalf("gateway snapshot mount = %#v", mount)
+	}
+	if !equalStrings(gatewayOptions.Config.Cmd, egressGatewayCommand(spec, "run")) || !equalHealthcheck(gatewayOptions.Config.Healthcheck, egressGatewayHealthcheck(spec)) {
+		t.Fatalf("gateway snapshot process config = %#v", gatewayOptions.Config)
+	}
+	if gatewayOptions.Config.Labels[LabelEgressSnapshotID] != spec.EgressGateway.BoundarySnapshot.ID || gatewayOptions.Config.Labels[LabelEgressSnapshotSHA256] != spec.EgressGateway.BoundarySnapshot.SHA256 {
+		t.Fatalf("gateway snapshot labels = %#v", gatewayOptions.Config.Labels)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+		t.Fatalf("start snapshot gateway topology: %v", err)
+	}
+	if len(api.startedIDs) != 2 || api.startedIDs[0] != "provider-gateway-1" || api.startedIDs[1] != "provider-agent-1" {
+		t.Fatalf("snapshot-aware start order = %#v", api.startedIDs)
+	}
+}
+
+func TestDockerManagerSnapshotGatewayFailsClosedWhenTrustedFileIsMissing(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("missing snapshot start error = %v", err)
+	}
+	if len(api.startedIDs) != 0 {
+		t.Fatalf("container started without trusted snapshot: %#v", api.startedIDs)
+	}
+}
+
+func TestDockerManagerSnapshotGatewayRejectsMismatchedHealthyReportBeforeAgentStart(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	api.healthOutputs = map[string]string{
+		"provider-gateway-1": `{"event":"boundary_snapshot_healthy","snapshotId":"00000000-0000-0000-0000-000000000000","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: root, OperationTimeout: 350 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeNotReady) {
+		t.Fatalf("mismatched snapshot health error = %v", err)
+	}
+	if len(api.startedIDs) != 1 || api.startedIDs[0] != "provider-gateway-1" {
+		t.Fatalf("agent started before exact snapshot health: %#v", api.startedIDs)
+	}
+	if len(api.stoppedIDs) != 1 || api.stoppedIDs[0] != "provider-gateway-1" {
+		t.Fatalf("unready gateway was not rolled back: %#v", api.stoppedIDs)
+	}
+}
+
+func snapshotGatewayFixture(t *testing.T) (RuntimeSpec, string, string) {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "snapshots")
+	store, err := egress.NewSnapshotStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalJSON := `{"schemaVersion":1,"policyId":"","rules":[]}`
+	digest := sha256.Sum256([]byte(canonicalJSON))
+	reference := egress.SnapshotReference{
+		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:" + hex.EncodeToString(digest[:]),
+	}
+	path, err := store.Put(reference, canonicalJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{ID: reference.ID, SHA256: reference.SHA256}
+	return spec, store.Root(), path
+}
+
+func newSuccessfulSnapshotGatewayCreationAPI(spec RuntimeSpec, ownerID, snapshotPath string) *fakeDockerCreationAPI {
+	api := newSuccessfulGatewayCreationAPI(spec, ownerID)
+	name := EgressGatewayContainerName(spec.ID)
+	gateway := api.containerResults[name]
+	gateway.Container.Config.Cmd = egressGatewayCommand(spec, "run")
+	gateway.Container.Config.Healthcheck = egressGatewayHealthcheck(spec)
+	gateway.Container.HostConfig.Mounts = []mobymount.Mount{{
+		Type: mobymount.TypeBind, Source: snapshotPath,
+		Target: egress.SnapshotContainerPath, ReadOnly: true,
+		BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+	}}
+	api.containerResults[name] = gateway
+	return api
 }
 
 func gatewayCreationSpec() RuntimeSpec {

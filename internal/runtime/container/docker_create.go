@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/egress"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -44,6 +45,8 @@ const (
 	LabelEgressImageRepository = "com.cyberstrike.egress.image-repository"
 	LabelEgressImageDigest     = "com.cyberstrike.egress.image-digest"
 	LabelEgressImagePlatform   = "com.cyberstrike.egress.image-platform"
+	LabelEgressSnapshotID      = "com.cyberstrike.egress.snapshot-id"
+	LabelEgressSnapshotSHA256  = "com.cyberstrike.egress.snapshot-sha256"
 	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
 	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
 	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
@@ -100,6 +103,7 @@ type DockerManagerOptions struct {
 	OperationTimeout     time.Duration
 	GlobalConcurrentExec int
 	GlobalQueuedExec     int
+	EgressSnapshotRoot   string
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -113,6 +117,7 @@ type DockerManager struct {
 	resourceAPI      dockerManagedResourceAPI
 	networkAPI       dockerNetworkAPI
 	volumeAPI        dockerVolumeAPI
+	snapshotStore    *egress.SnapshotStore
 	ownerID          string
 	operationTimeout time.Duration
 }
@@ -148,6 +153,14 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	if operationTimeout < 0 {
 		return nil, fmt.Errorf("%w: operation timeout must be positive", ErrInvalidSpecification)
 	}
+	var snapshotStore *egress.SnapshotStore
+	if strings.TrimSpace(options.EgressSnapshotRoot) != "" {
+		var err error
+		snapshotStore, err = egress.NewSnapshotStore(options.EgressSnapshotRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure egress snapshot store: %w", err)
+		}
+	}
 	globalConcurrent := options.GlobalConcurrentExec
 	if globalConcurrent == 0 {
 		globalConcurrent = defaultGlobalConcurrentExec
@@ -165,10 +178,18 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	resourceAPI, _ := api.(dockerManagedResourceAPI)
 	networkAPI, _ := api.(dockerNetworkAPI)
 	volumeAPI, _ := api.(dockerVolumeAPI)
-	return &DockerManager{DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter, resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI, ownerID: ownerID, operationTimeout: operationTimeout}, nil
+	return &DockerManager{
+		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
+		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
+		snapshotStore: snapshotStore, ownerID: ownerID, operationTimeout: operationTimeout,
+	}, nil
 }
 
 func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, error) {
+	return m.create(ctx, spec, "")
+}
+
+func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorizedWorkspaceSpecDigest string) (Runtime, error) {
 	if m == nil || m.api == nil {
 		return Runtime{}, fmt.Errorf("%w: engine client is not configured", ErrEngineUnavailable)
 	}
@@ -224,7 +245,7 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	}
 	workspaceCreated := false
 	if spec.Workspace.Persistent {
-		workspaceCreated, err = m.ensureOwnedWorkspaceVolume(ctx, spec)
+		workspaceCreated, err = m.ensureOwnedWorkspaceVolume(ctx, spec, authorizedWorkspaceSpecDigest)
 		if err != nil {
 			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, "", spec, err)
 		}
@@ -362,14 +383,14 @@ func conversationNetworkManagedResource(spec RuntimeSpec, providerID string) Man
 	}
 }
 
-func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec RuntimeSpec) (bool, error) {
+func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec RuntimeSpec, authorizedSpecDigest string) (bool, error) {
 	if m.volumeAPI == nil {
 		return false, fmt.Errorf("%w: engine client does not support named volumes", ErrEngineUnavailable)
 	}
 	expected := workspaceManagedResource(spec)
 	result, err := m.volumeAPI.VolumeInspect(ctx, expected.Name, mobyclient.VolumeInspectOptions{})
 	if err == nil {
-		return false, m.verifyWorkspaceVolume(spec, result.Volume)
+		return false, m.verifyWorkspaceVolume(spec, result.Volume, authorizedSpecDigest)
 	}
 	if !containerderrdefs.IsNotFound(err) {
 		return false, fmt.Errorf("inspect workspace volume %s: %w", expected.Name, err)
@@ -380,7 +401,7 @@ func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec Run
 	if err != nil {
 		return false, fmt.Errorf("create workspace volume %s: %w", expected.Name, err)
 	}
-	if err := m.verifyWorkspaceVolume(spec, created.Volume); err != nil {
+	if err := m.verifyWorkspaceVolume(spec, created.Volume, authorizedSpecDigest); err != nil {
 		// VolumeCreate may return a concurrently-created existing volume. If its
 		// immutable labels differ, ownership is ambiguous and automatic deletion
 		// would be unsafe.
@@ -389,14 +410,14 @@ func (m *DockerManager) ensureOwnedWorkspaceVolume(ctx context.Context, spec Run
 	return true, nil
 }
 
-func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolume.Volume) error {
+func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolume.Volume, authorizedSpecDigest string) error {
 	expected := workspaceManagedResource(spec)
 	observed, err := m.resourceFromLabels(ResourceKindWorkspaceVolume, actual.Name, actual.Name, actual.Labels, parseVolumeCreatedAt(actual))
 	if err != nil || !sameManagedResource(expected, observed) {
 		return fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
 	}
 	for key, value := range workspaceVolumeLabels(m.ownerID, spec) {
-		if key == LabelSpecDigest && workspaceVolumeSpecDigestMatches(spec, actual.Labels[key]) {
+		if key == LabelSpecDigest && workspaceVolumeSpecDigestMatches(spec, actual.Labels[key], authorizedSpecDigest) {
 			continue
 		}
 		if actual.Labels[key] != value {
@@ -406,14 +427,29 @@ func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolum
 	return nil
 }
 
-func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual string) bool {
+func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual, authorized string) bool {
 	if actual == RuntimeSpecDigest(spec) {
+		return true
+	}
+	// Rebuild receives this exact digest from the durable pre-migration
+	// specification. It authorizes reuse of only that already-owned persistent
+	// volume while the database independently validates the controlled topology
+	// replacement. Ordinary Create calls never provide this authorization.
+	if sha256DigestPattern.MatchString(strings.TrimSpace(authorized)) && actual == authorized {
 		return true
 	}
 	// Docker volume labels are immutable. A persistent workspace created before
 	// stage 4 retains the digest of an otherwise-identical pre-network or
 	// pre-gateway spec after an explicit controlled topology migration.
 	legacy := spec
+	if legacy.EgressGateway != nil && legacy.EgressGateway.BoundarySnapshot != nil {
+		gateway := *legacy.EgressGateway
+		gateway.BoundarySnapshot = nil
+		legacy.EgressGateway = &gateway
+		if actual == RuntimeSpecDigest(legacy) {
+			return true
+		}
+	}
 	if legacy.EgressGateway != nil {
 		legacy.EgressGateway = nil
 		if actual == RuntimeSpecDigest(legacy) {
@@ -753,5 +789,9 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	labels[LabelEgressTmpfsBytes] = strconv.FormatInt(resources.TmpfsBytes, 10)
 	labels[LabelEgressLogMaxBytes] = strconv.FormatInt(resources.LogMaxBytes, 10)
 	labels[LabelEgressLogMaxFiles] = strconv.Itoa(resources.LogMaxFiles)
+	if gateway.BoundarySnapshot != nil {
+		labels[LabelEgressSnapshotID] = gateway.BoundarySnapshot.ID
+		labels[LabelEgressSnapshotSHA256] = gateway.BoundarySnapshot.SHA256
+	}
 	return labels
 }

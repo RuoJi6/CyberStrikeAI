@@ -137,12 +137,20 @@ type EgressGatewayResources struct {
 	LogMaxFiles int
 }
 
+// EgressBoundarySnapshotSpec identifies the immutable control-plane snapshot
+// that must be mounted read-only and verified before the gateway is ready. The
+// canonical JSON stays in the trusted snapshot store, never in Agent input.
+type EgressBoundarySnapshotSpec struct {
+	ID     string
+	SHA256 string
+}
+
 // EgressGatewaySpec pins the only image that may bridge a conversation's
-// internal network to its dedicated egress network. Protocol policy and the
-// immutable boundary snapshot are added by the following stage-4 items.
+// internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
-	Image     ImageReference
-	Resources EgressGatewayResources
+	Image            ImageReference
+	Resources        EgressGatewayResources
+	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.
@@ -192,8 +200,9 @@ type DeleteOptions struct {
 }
 
 type RebuildOptions struct {
-	Spec            RuntimeSpec
-	RemoveWorkspace bool
+	Spec                          RuntimeSpec
+	RemoveWorkspace               bool
+	AuthorizedWorkspaceSpecDigest string
 }
 
 // ExecStream identifies the Docker multiplexed output stream without exposing

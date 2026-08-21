@@ -308,6 +308,17 @@ func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testin
 	if pending.SnapshotID == initial.SnapshotID || pending.SHA256 == initial.SHA256 || pending.RuntimeGeneration != 2 {
 		t.Fatalf("pending snapshot = %#v; initial = %#v", pending, initial)
 	}
+	resolvedPending, err := db.GetPendingConversationBoundarySnapshot(ctx, conversation.ID, pending.SnapshotID)
+	if err != nil || resolvedPending.SnapshotID != pending.SnapshotID || resolvedPending.SHA256 != pending.SHA256 || resolvedPending.CanonicalJSON != pending.CanonicalJSON {
+		t.Fatalf("resolved exact pending snapshot = %#v, %v", resolvedPending, err)
+	}
+	if _, err := db.GetPendingConversationBoundarySnapshot(ctx, conversation.ID, initial.SnapshotID); !errors.Is(err, ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("active snapshot resolved as pending: %v", err)
+	}
+	otherConversation := createSnapshotTestConversation(t, db, policy.ID)
+	if _, err := db.GetPendingConversationBoundarySnapshot(ctx, otherConversation.ID, pending.SnapshotID); !errors.Is(err, ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("cross-conversation pending snapshot resolved: %v", err)
+	}
 	active, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
 	if err != nil || active.SnapshotID != initial.SnapshotID || active.RuntimeGeneration != 1 {
 		t.Fatalf("snapshot changed before rebuild: %#v, %v", active, err)

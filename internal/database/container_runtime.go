@@ -261,6 +261,61 @@ func (db *DB) Claim(ctx context.Context, conversationID string) (containerruntim
 	return record, updated == 1, getErr
 }
 
+// UpgradeQueuedContainerRuntimeTopology atomically upgrades only a not-yet-
+// claimed runtime's trusted network/gateway topology. It exists for startup
+// recovery of queued records written by earlier stage-4 deployments; created
+// runtimes still require the explicit lifecycle rebuild path.
+func (db *DB) UpgradeQueuedContainerRuntimeTopology(ctx context.Context, conversationID string, target containerruntime.RuntimeSpec) (containerruntime.InitializationRecord, error) {
+	if err := containerruntime.ValidateSpec(target); err != nil {
+		return containerruntime.InitializationRecord{}, err
+	}
+	conversationID = strings.TrimSpace(conversationID)
+	current, err := db.GetContainerInitialization(ctx, conversationID)
+	if err != nil {
+		return containerruntime.InitializationRecord{}, err
+	}
+	if current.Spec.ID != target.ID || current.Spec.ConversationID != target.ConversationID || target.ConversationID != conversationID {
+		return current, fmt.Errorf("%w: queued runtime identity cannot change", containerruntime.ErrRuntimeStateConflict)
+	}
+	baseline := target
+	baseline.Security.NetworkMode = current.Spec.Security.NetworkMode
+	baseline.EgressGateway = current.Spec.EgressGateway
+	if containerruntime.RuntimeSpecDigest(baseline) != containerruntime.RuntimeSpecDigest(current.Spec) {
+		return current, fmt.Errorf("%w: queued runtime upgrade may change only trusted topology", containerruntime.ErrRuntimeStateConflict)
+	}
+	if containerruntime.RuntimeSpecDigest(target) == containerruntime.RuntimeSpecDigest(current.Spec) {
+		return current, nil
+	}
+	if current.Status != containerruntime.InitializationQueued {
+		return current, fmt.Errorf("%w: only a queued runtime topology may be upgraded", containerruntime.ErrRuntimeStateConflict)
+	}
+	currentJSON, err := json.Marshal(current.Spec)
+	if err != nil {
+		return current, fmt.Errorf("encode current queued runtime specification: %w", err)
+	}
+	targetJSON, err := json.Marshal(target)
+	if err != nil {
+		return current, fmt.Errorf("encode upgraded queued runtime specification: %w", err)
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE conversation_container_runtimes
+		SET spec_json = ?, updated_at = ?
+		WHERE conversation_id = ? AND initialization_status = ? AND spec_json = ?
+	`, string(targetJSON), formatSQLiteUTC(time.Now()), conversationID, containerruntime.InitializationQueued, string(currentJSON))
+	if err != nil {
+		return current, fmt.Errorf("upgrade queued container runtime topology: %w", err)
+	}
+	updated, _ := result.RowsAffected()
+	record, getErr := db.GetContainerInitialization(ctx, conversationID)
+	if getErr != nil {
+		return containerruntime.InitializationRecord{}, getErr
+	}
+	if updated != 1 && containerruntime.RuntimeSpecDigest(record.Spec) != containerruntime.RuntimeSpecDigest(target) {
+		return record, fmt.Errorf("%w: queued runtime topology changed concurrently", containerruntime.ErrRuntimeStateConflict)
+	}
+	return record, nil
+}
+
 func (db *DB) Complete(ctx context.Context, conversationID string, runtime containerruntime.Runtime) (containerruntime.InitializationRecord, error) {
 	now := formatSQLiteUTC(time.Now())
 	result, err := db.ExecContext(ctx, `
@@ -706,17 +761,90 @@ func validateLifecycleSpecReplacement(
 		expected.EgressGateway = &gateway
 		changed = true
 	}
+	if replacement.EgressGateway != nil && replacement.EgressGateway.BoundarySnapshot != nil {
+		var currentSnapshot *containerruntime.EgressBoundarySnapshotSpec
+		if current.EgressGateway != nil {
+			currentSnapshot = current.EgressGateway.BoundarySnapshot
+		}
+		requestedSnapshot := replacement.EgressGateway.BoundarySnapshot
+		if !sameEgressBoundarySnapshot(currentSnapshot, requestedSnapshot) {
+			if err := validateLifecycleBoundarySnapshot(ctx, tx, conversationID, operation, *requestedSnapshot); err != nil {
+				return 0, "", err
+			}
+			if expected.EgressGateway == nil {
+				return 0, "", fmt.Errorf("%w: boundary snapshot requires an egress gateway", containerruntime.ErrRuntimeStateConflict)
+			}
+			gateway := *expected.EgressGateway
+			// The one-time item-2 to item-3 migration both introduces the
+			// authorized snapshot and advances the pinned gateway image. Once a
+			// snapshot is present, later policy rebuilds may only replace that
+			// snapshot and must preserve every other gateway field.
+			if current.EgressGateway != nil && currentSnapshot == nil {
+				gateway = *replacement.EgressGateway
+			}
+			snapshot := *requestedSnapshot
+			gateway.BoundarySnapshot = &snapshot
+			expected.EgressGateway = &gateway
+			changed = true
+		}
+	}
 	if !changed {
 		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
 	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network and pinned egress gateway", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, pinned egress gateway, and authorized boundary snapshot", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {
 		return 0, "", fmt.Errorf("encode replacement runtime specification: %w", err)
 	}
 	return 1, string(encoded), nil
+}
+
+func sameEgressBoundarySnapshot(left, right *containerruntime.EgressBoundarySnapshotSpec) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.ID == right.ID && left.SHA256 == right.SHA256
+}
+
+func validateLifecycleBoundarySnapshot(ctx context.Context, tx *sql.Tx, conversationID string, operation containerruntime.LifecycleOperation, requested containerruntime.EgressBoundarySnapshotSpec) error {
+	var authorizedID, authorizedSHA256 string
+	if operation == containerruntime.LifecycleOperationRebuild {
+		err := tx.QueryRowContext(ctx, `
+			SELECT s.id, s.sha256
+			FROM conversation_boundary_rebuilds br
+			JOIN boundary_policy_snapshots s ON s.id = br.pending_snapshot_id
+			WHERE br.conversation_id = ?
+		`, conversationID).Scan(&authorizedID, &authorizedSHA256)
+		if err == nil {
+			if requested.ID != authorizedID || requested.SHA256 != authorizedSHA256 {
+				return fmt.Errorf("%w: replacement boundary snapshot does not match the authorized pending rebuild", containerruntime.ErrRuntimeStateConflict)
+			}
+			return nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("load authorized pending boundary snapshot: %w", err)
+		}
+	}
+	err := tx.QueryRowContext(ctx, `
+		SELECT s.id, s.sha256
+		FROM conversation_boundary_activations a
+		JOIN boundary_policy_snapshots s ON s.id = a.snapshot_id
+		WHERE a.conversation_id = ?
+		ORDER BY a.runtime_generation DESC
+		LIMIT 1
+	`, conversationID).Scan(&authorizedID, &authorizedSHA256)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: conversation has no active boundary snapshot", containerruntime.ErrRuntimeStateConflict)
+	}
+	if err != nil {
+		return fmt.Errorf("load authorized active boundary snapshot: %w", err)
+	}
+	if requested.ID != authorizedID || requested.SHA256 != authorizedSHA256 {
+		return fmt.Errorf("%w: replacement boundary snapshot does not match the active snapshot", containerruntime.ErrRuntimeStateConflict)
+	}
+	return nil
 }
 
 func (db *DB) DeleteLifecycle(ctx context.Context, conversationID string, operation containerruntime.LifecycleOperation) error {

@@ -78,6 +78,13 @@ type LifecycleStore interface {
 	RecoverLifecycle(ctx context.Context) ([]InitializationRecord, error)
 }
 
+// BoundarySnapshotProvider resolves only the active snapshot, or the exact
+// pending snapshot already authorized by an explicit rebuild context. The
+// implementation also materializes the trusted read-only gateway file.
+type BoundarySnapshotProvider interface {
+	ResolveBoundarySnapshot(ctx context.Context, conversationID, snapshotID string) (EgressBoundarySnapshotSpec, error)
+}
+
 // LifecycleController coordinates Docker mutations with durable control-plane
 // state. It never accepts a provider/container ID from a handler.
 type LifecycleController struct {
@@ -85,6 +92,7 @@ type LifecycleController struct {
 	checker       RuntimeReadinessChecker
 	store         LifecycleStore
 	egressGateway *EgressGatewaySpec
+	snapshots     BoundarySnapshotProvider
 }
 
 type LifecycleControllerOptions struct {
@@ -92,6 +100,9 @@ type LifecycleControllerOptions struct {
 	// pre-gateway runtime during an explicit rebuild. New runtime records already
 	// contain the same immutable specification.
 	EgressGateway *EgressGatewaySpec
+	// BoundarySnapshots is optional for legacy/unit-test controllers. Production
+	// supplies it so explicit rebuilds can bind the current immutable snapshot.
+	BoundarySnapshots BoundarySnapshotProvider
 }
 
 func NewLifecycleController(manager RuntimeManager, store LifecycleStore) (*LifecycleController, error) {
@@ -111,7 +122,10 @@ func NewLifecycleControllerWithOptions(manager RuntimeManager, store LifecycleSt
 		gateway = &copy
 	}
 	checker, _ := manager.(RuntimeReadinessChecker)
-	return &LifecycleController{manager: manager, checker: checker, store: store, egressGateway: gateway}, nil
+	return &LifecycleController{
+		manager: manager, checker: checker, store: store,
+		egressGateway: gateway, snapshots: options.BoundarySnapshots,
+	}, nil
 }
 
 func (c *LifecycleController) Start(ctx context.Context, conversationID string) (InitializationRecord, error) {
@@ -181,8 +195,16 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 		})
 	}
 	target := record
-	target.Spec = c.upgradeRuntimeSpec(target.Spec)
-	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{Spec: target.Spec})
+	target.Spec, err = c.upgradeRuntimeSpec(ctx, target.Spec, BoundaryRebuildSnapshotFromContext(ctx))
+	if err != nil {
+		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
+			RuntimeStatus: record.RuntimeStatus, Drift: "boundary_snapshot_unavailable", ReadinessFailed: record.Spec.Readiness.Enabled,
+		})
+	}
+	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{
+		Spec:                          target.Spec,
+		AuthorizedWorkspaceSpecDigest: RuntimeSpecDigest(record.Spec),
+	})
 	if err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus:   StatusFailed,
@@ -310,8 +332,8 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		// the lifecycle completion transaction committed. Adopt only the exact
 		// configured topology transition; every other mismatch remains fail-closed.
 		target := record
-		target.Spec = c.upgradeRuntimeSpec(target.Spec)
-		if RuntimeSpecDigest(target.Spec) != RuntimeSpecDigest(record.Spec) && validateObservedRuntime(target, runtime) == nil {
+		target.Spec, err = c.upgradeRuntimeSpec(ctx, target.Spec, "")
+		if err == nil && RuntimeSpecDigest(target.Spec) != RuntimeSpecDigest(record.Spec) && validateObservedRuntime(target, runtime) == nil {
 			replacement := target.Spec
 			return c.complete(record, LifecycleOperationReconcile, LifecycleCompletion{
 				Runtime: runtime, Drift: "topology_migration_recovered", ReplacementSpec: &replacement,
@@ -411,7 +433,7 @@ func lifecycleFailureAfterRebuild(original, target InitializationRecord, runtime
 	return failure
 }
 
-func (c *LifecycleController) upgradeRuntimeSpec(spec RuntimeSpec) RuntimeSpec {
+func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec RuntimeSpec, requestedSnapshotID string) (RuntimeSpec, error) {
 	if spec.Security.NetworkMode == NetworkNone {
 		spec.Security.NetworkMode = NetworkInternal
 	}
@@ -419,7 +441,30 @@ func (c *LifecycleController) upgradeRuntimeSpec(spec RuntimeSpec) RuntimeSpec {
 		gateway := *c.egressGateway
 		spec.EgressGateway = &gateway
 	}
-	return spec
+	if spec.EgressGateway == nil || c == nil || c.snapshots == nil {
+		return spec, nil
+	}
+	if strings.TrimSpace(requestedSnapshotID) == "" && spec.EgressGateway.BoundarySnapshot != nil {
+		return spec, nil
+	}
+	if spec.EgressGateway.BoundarySnapshot == nil && c.egressGateway != nil {
+		// The first snapshot adoption is also the item-3 gateway upgrade. Use
+		// the currently configured pinned image/resources instead of carrying
+		// the item-2 bootstrap binary into the snapshot-aware topology.
+		gateway := *c.egressGateway
+		spec.EgressGateway = &gateway
+	}
+	snapshot, err := c.snapshots.ResolveBoundarySnapshot(ctx, spec.ConversationID, requestedSnapshotID)
+	if err != nil {
+		return RuntimeSpec{}, fmt.Errorf("resolve gateway boundary snapshot: %w", err)
+	}
+	gateway := *spec.EgressGateway
+	gateway.BoundarySnapshot = &snapshot
+	spec.EgressGateway = &gateway
+	if err := ValidateSpec(spec); err != nil {
+		return RuntimeSpec{}, err
+	}
+	return spec, nil
 }
 
 func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record InitializationRecord, allowMissing bool) (bool, error) {
