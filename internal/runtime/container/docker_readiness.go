@@ -112,6 +112,13 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 	if !validRuntimePolicyDNSSettings(actual.HostConfig, spec) || len(actual.HostConfig.PortBindings) != 0 {
 		return fmt.Errorf("%w: runtime declares DNS, host, link, or port egress settings", ErrRuntimeNotReady)
 	}
+	gatewayAddress := ""
+	if requiresPolicyDNS(spec) {
+		gatewayAddress = actual.HostConfig.DNS[0].String()
+	}
+	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
+		return fmt.Errorf("%w: runtime proxy environment mismatch", ErrRuntimeNotReady)
+	}
 	if actual.NetworkSettings != nil {
 		if len(actual.NetworkSettings.Ports) != 0 {
 			return fmt.Errorf("%w: runtime has an assigned network address or port", ErrRuntimeNotReady)

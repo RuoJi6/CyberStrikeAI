@@ -63,10 +63,16 @@ const (
 	defaultGlobalConcurrentExec    = 32
 	defaultGlobalQueuedExec        = 128
 	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
+	egressGatewayProxyPort         = 3128
 	runtimeKeepaliveScript         = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 )
 
 var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
+
+var runtimeProxyEnvironmentKeys = []string{
+	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+}
 
 type dockerCreationAPI interface {
 	dockerInspectionAPI
@@ -277,6 +283,7 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 			WorkingDir:      "/workspace",
 			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 			Cmd:             []string{runtimeKeepaliveScript},
+			Env:             runtimeProxyEnvironment(spec, gatewayDNS),
 			Labels:          labels,
 		},
 		HostConfig:       runtimeHostConfigWithPolicyDNS(spec, gatewayDNS),
@@ -291,7 +298,7 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 		return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, createErr)
 	}
 
-	runtime, verifyErr := m.verifyCreatedRuntime(ctx, spec, name, labels, createResult)
+	runtime, verifyErr := m.verifyCreatedRuntime(ctx, spec, name, labels, gatewayDNS, createResult)
 	if verifyErr == nil {
 		return runtime, nil
 	}
@@ -528,7 +535,7 @@ func workspaceManagedResource(spec RuntimeSpec) ManagedResource {
 	}
 }
 
-func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSpec, name string, expectedLabels map[string]string, createResult mobyclient.ContainerCreateResult) (Runtime, error) {
+func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSpec, name string, expectedLabels map[string]string, gatewayAddress string, createResult mobyclient.ContainerCreateResult) (Runtime, error) {
 	if strings.TrimSpace(createResult.ID) == "" {
 		return Runtime{}, fmt.Errorf("%w: engine returned an empty provider id", ErrRuntimeStateConflict)
 	}
@@ -551,6 +558,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	}
 	if !matchesRuntimeKeepalive(actual.Config) {
 		return Runtime{}, fmt.Errorf("%w: created runtime keepalive process mismatch", ErrRuntimeStateConflict)
+	}
+	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
+		return Runtime{}, err
 	}
 	for key, expected := range expectedLabels {
 		if actual.Config.Labels[key] != expected {
@@ -676,6 +686,59 @@ func runtimeHostConfigWithPolicyDNS(spec RuntimeSpec, address string) *mobyconta
 		host.DNS = []netip.Addr{parsed}
 	}
 	return host
+}
+
+func runtimeProxyEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
+	if !requiresPolicyDNS(spec) {
+		return nil
+	}
+	proxyURL := "http://" + gatewayAddress + ":" + strconv.Itoa(egressGatewayProxyPort)
+	return []string{
+		"HTTP_PROXY=" + proxyURL,
+		"HTTPS_PROXY=" + proxyURL,
+		"ALL_PROXY=" + proxyURL,
+		"NO_PROXY=",
+		"http_proxy=" + proxyURL,
+		"https_proxy=" + proxyURL,
+		"all_proxy=" + proxyURL,
+		"no_proxy=",
+	}
+}
+
+func verifyRuntimeProxyEnvironment(actual []string, spec RuntimeSpec, gatewayAddress string) error {
+	expectedEntries := runtimeProxyEnvironment(spec, gatewayAddress)
+	expected := make(map[string]string, len(expectedEntries))
+	for _, entry := range expectedEntries {
+		key, value, _ := strings.Cut(entry, "=")
+		expected[key] = value
+	}
+	managed := make(map[string]struct{}, len(runtimeProxyEnvironmentKeys))
+	for _, key := range runtimeProxyEnvironmentKeys {
+		managed[key] = struct{}{}
+	}
+	observed := make(map[string]string, len(expected))
+	for _, entry := range actual {
+		key, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if _, isManaged := managed[key]; !isManaged {
+			continue
+		}
+		if _, duplicate := observed[key]; duplicate {
+			return fmt.Errorf("%w: runtime proxy environment contains duplicate %s", ErrRuntimeStateConflict, key)
+		}
+		observed[key] = value
+	}
+	if len(observed) != len(expected) {
+		return fmt.Errorf("%w: runtime proxy environment keys mismatch", ErrRuntimeStateConflict)
+	}
+	for key, value := range expected {
+		if observed[key] != value {
+			return fmt.Errorf("%w: runtime proxy environment %s mismatch", ErrRuntimeStateConflict, key)
+		}
+	}
+	return nil
 }
 
 func runtimeNetworkingConfig(spec RuntimeSpec, network ManagedResource) *mobynetwork.NetworkingConfig {

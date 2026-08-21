@@ -777,6 +777,11 @@ func (m *DockerManager) verifyObservedSecurityBaseline(ctx context.Context, actu
 	if err := verifyRuntimeSecurityBaseline(host, expected); err != nil {
 		return err
 	}
+	if !requiresPolicyDNS(expected) {
+		if err := verifyRuntimeProxyEnvironment(config.Env, expected, ""); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

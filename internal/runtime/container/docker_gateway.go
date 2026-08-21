@@ -467,6 +467,19 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 		if len(agent.HostConfig.DNS) != 1 || agent.HostConfig.DNS[0].String() != expectedDNS {
 			return fmt.Errorf("%w: agent policy DNS does not match its egress gateway", ErrRuntimeStateConflict)
 		}
+		if agent.Config == nil {
+			return fmt.Errorf("%w: agent proxy environment is unavailable", ErrRuntimeStateConflict)
+		}
+		if err := verifyRuntimeProxyEnvironment(agent.Config.Env, spec, expectedDNS); err != nil {
+			return err
+		}
+	} else if agent != nil {
+		if agent.Config == nil {
+			return fmt.Errorf("%w: agent proxy environment is unavailable", ErrRuntimeStateConflict)
+		}
+		if err := verifyRuntimeProxyEnvironment(agent.Config.Env, spec, ""); err != nil {
+			return err
+		}
 	}
 	if expectedStatus == StatusRunning {
 		if agent == nil || agent.State == nil || !agent.State.Running || len(internalResult.Network.Containers) != 2 || len(egressResult.Network.Containers) != 1 {
