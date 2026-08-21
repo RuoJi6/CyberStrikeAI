@@ -58,11 +58,12 @@ const (
 	LabelEgressLogMaxFiles     = "com.cyberstrike.egress.limit.log-max-files"
 	ResourceKindAgent          = "agent-runtime"
 
-	defaultDockerOperationTimeout = 30 * time.Second
-	rollbackTimeout               = 10 * time.Second
-	defaultGlobalConcurrentExec   = 32
-	defaultGlobalQueuedExec       = 128
-	runtimeKeepaliveScript        = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
+	defaultDockerOperationTimeout  = 30 * time.Second
+	rollbackTimeout                = 10 * time.Second
+	defaultGlobalConcurrentExec    = 32
+	defaultGlobalQueuedExec        = 128
+	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
+	runtimeKeepaliveScript         = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 )
 
 var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
@@ -319,7 +320,8 @@ func (m *DockerManager) ensureOwnedConversationNetwork(ctx context.Context, spec
 	enableIPv4, enableIPv6 := true, false
 	created, err := m.networkAPI.NetworkCreate(ctx, name, mobyclient.NetworkCreateOptions{
 		Driver: "bridge", Scope: "local", EnableIPv4: &enableIPv4, EnableIPv6: &enableIPv6,
-		Internal: true, Attachable: false, Ingress: false, Labels: conversationNetworkLabels(m.ownerID, spec),
+		Internal: true, Attachable: false, Ingress: false, Options: conversationNetworkOptions(),
+		Labels: conversationNetworkLabels(m.ownerID, spec),
 	})
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
@@ -355,13 +357,17 @@ func (m *DockerManager) verifyConversationNetwork(spec RuntimeSpec, expectedSpec
 			return ManagedResource{}, fmt.Errorf("%w: conversation network label %s mismatch", ErrRuntimeStateConflict, key)
 		}
 	}
-	if actual.Driver != "bridge" || actual.Scope != "local" || !actual.Internal || !actual.EnableIPv4 || actual.EnableIPv6 || actual.Attachable || actual.Ingress || actual.ConfigOnly {
+	if actual.Driver != "bridge" || actual.Scope != "local" || !actual.Internal || !actual.EnableIPv4 || actual.EnableIPv6 || actual.Attachable || actual.Ingress || actual.ConfigOnly || len(actual.Options) != 1 || actual.Options[conversationNetworkInhibitIPv4] != "true" {
 		return ManagedResource{}, fmt.Errorf("%w: conversation network isolation settings mismatch", ErrRuntimeStateConflict)
 	}
 	if requireEmpty && (len(actual.Containers) != 0 || len(actual.Services) != 0) {
 		return ManagedResource{}, fmt.Errorf("%w: conversation network already has attached workloads", ErrRuntimeStateConflict)
 	}
 	return observed, nil
+}
+
+func conversationNetworkOptions() map[string]string {
+	return map[string]string{conversationNetworkInhibitIPv4: "true"}
 }
 
 func conversationNetworkLabels(ownerID string, spec RuntimeSpec) map[string]string {

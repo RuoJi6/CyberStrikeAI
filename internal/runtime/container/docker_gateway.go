@@ -439,6 +439,9 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 	if internalEndpoint == nil || egressEndpoint == nil || strings.TrimSpace(internalEndpoint.NetworkID) == "" || strings.TrimSpace(egressEndpoint.NetworkID) == "" {
 		return fmt.Errorf("%w: egress gateway network endpoints are incomplete", ErrRuntimeStateConflict)
 	}
+	if internalEndpoint.Gateway.IsValid() || internalEndpoint.IPv6Gateway.IsValid() {
+		return fmt.Errorf("%w: egress gateway internal network exposes a host gateway", ErrRuntimeStateConflict)
+	}
 	internalResult, err := m.networkAPI.NetworkInspect(ctx, internalEndpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {
 		return fmt.Errorf("inspect egress gateway internal network: %w", err)

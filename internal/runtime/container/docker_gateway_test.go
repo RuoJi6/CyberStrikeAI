@@ -61,7 +61,7 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	egressName := EgressNetworkName(spec.ID)
 	internalOptions := api.networkCreateOptsByName[internalName]
 	egressOptions := api.networkCreateOptsByName[egressName]
-	if !internalOptions.Internal || egressOptions.Internal || internalOptions.Driver != "bridge" || egressOptions.Driver != "bridge" {
+	if !internalOptions.Internal || egressOptions.Internal || internalOptions.Driver != "bridge" || egressOptions.Driver != "bridge" || len(internalOptions.Options) != 1 || internalOptions.Options[conversationNetworkInhibitIPv4] != "true" {
 		t.Fatalf("network options = internal %#v, egress %#v", internalOptions, egressOptions)
 	}
 	agentOptions := api.createOptsByName[runtimeContainerName(spec.ID)]
@@ -208,6 +208,32 @@ func TestDockerManagerInspectRejectsGatewaySecurityDrift(t *testing.T) {
 	api.containerResults[EgressGatewayContainerName(spec.ID)] = gateway
 	if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
 		t.Fatalf("gateway drift error = %v", err)
+	}
+}
+
+func TestDockerManagerInspectRejectsHostGatewayOnInternalEndpoints(t *testing.T) {
+	spec := gatewayCreationSpec()
+	for _, endpointOwner := range []string{"agent", "gateway"} {
+		t.Run(endpointOwner, func(t *testing.T) {
+			api := newSuccessfulGatewayCreationAPI(spec, "instance-01")
+			manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Create(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			name := runtimeContainerName(spec.ID)
+			if endpointOwner == "gateway" {
+				name = EgressGatewayContainerName(spec.ID)
+			}
+			result := api.containerResults[name]
+			result.Container.NetworkSettings.Networks[ConversationNetworkName(spec.ID)].Gateway = netip.MustParseAddr("172.30.0.1")
+			api.containerResults[name] = result
+			if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+				t.Fatalf("host gateway drift error = %v", err)
+			}
+		})
 	}
 }
 

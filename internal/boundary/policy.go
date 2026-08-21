@@ -18,6 +18,8 @@ const (
 	ReasonForbiddenHostname = "forbidden-hostname"
 	ReasonForbiddenAddress  = "forbidden-address"
 	ReasonDockerAPIPort     = "docker-api-port"
+	ReasonDNSServicePort    = "dns-service-port"
+	ReasonForbiddenDNSHost  = "forbidden-dns-service"
 	ReasonDNSRebinding      = "dns-rebinding"
 )
 
@@ -120,6 +122,10 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 	}
 	if target.Port == 2375 || target.Port == 2376 {
 		decision.Reason = ReasonDockerAPIPort
+		return decision, nil
+	}
+	if forbiddenDNSServicePort(target.Port) {
+		decision.Reason = ReasonDNSServicePort
 		return decision, nil
 	}
 	if address, err := netip.ParseAddr(target.Host); err == nil {
@@ -380,7 +386,35 @@ func forbiddenHostnameReason(host string) string {
 		host == "metadata.google.internal" || host == "instance-data.ec2.internal" {
 		return ReasonForbiddenHostname
 	}
+	for _, forbidden := range forbiddenDNSServiceHosts {
+		if host == forbidden || strings.HasSuffix(host, "."+forbidden) {
+			return ReasonForbiddenDNSHost
+		}
+	}
 	return ""
+}
+
+func forbiddenDNSServicePort(port int) bool {
+	switch port {
+	case 53, 784, 853, 8853:
+		return true
+	default:
+		return false
+	}
+}
+
+var forbiddenDNSServiceHosts = []string{
+	"cloudflare-dns.com",
+	"security.cloudflare-dns.com",
+	"family.cloudflare-dns.com",
+	"one.one.one.one",
+	"dns.google",
+	"dns.quad9.net",
+	"doh.opendns.com",
+	"dns.nextdns.io",
+	"dns.adguard-dns.com",
+	"dns.alidns.com",
+	"doh.cleanbrowsing.org",
 }
 
 var specialUsePrefixes = mustPrefixes(

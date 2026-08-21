@@ -101,6 +101,83 @@ func TestProxyRejectsDeniedAmbiguousHTTPSAndAuthOnlyForwardRequests(t *testing.T
 	}
 }
 
+func TestProxyRejectsDNSOverHTTPShapesBeforeTransport(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}}})
+	proxy, err := NewProxy(policy, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("DNS over HTTP request reached transport")
+		return nil, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, target, header, value string
+	}{
+		{name: "standard path", target: "http://allowed.example/dns-query"},
+		{name: "nested standard path", target: "http://allowed.example/resolver/dns-query/"},
+		{name: "wire content type", target: "http://allowed.example/api", header: "Content-Type", value: "application/dns-message; charset=binary"},
+		{name: "JSON accept", target: "http://allowed.example/api", header: "Accept", value: "text/plain, application/dns-json"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.target, nil)
+			if test.header != "" {
+				request.Header.Set(test.header, test.value)
+			}
+			recorder := httptest.NewRecorder()
+			proxy.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusForbidden {
+				t.Fatalf("status = %d", recorder.Code)
+			}
+		})
+	}
+}
+
+func TestProxyReevaluatesRedirectDestinationsAndNeverFollowsUpstreamLocation(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{ID: "origin", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "origin.example", Schemes: []string{"http"}}})
+	var calls atomic.Int32
+	proxy, err := NewProxy(policy, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": {"http://127.0.0.1/private"}},
+			Body:       io.NopCloser(strings.NewReader("redirect")),
+		}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := httptest.NewRecorder()
+	proxy.ServeHTTP(first, httptest.NewRequest(http.MethodGet, "http://origin.example/start", nil))
+	if first.Code != http.StatusFound || first.Header().Get("Location") != "http://127.0.0.1/private" || calls.Load() != 1 {
+		t.Fatalf("first hop = %d %q calls=%d", first.Code, first.Header().Get("Location"), calls.Load())
+	}
+	second := httptest.NewRecorder()
+	proxy.ServeHTTP(second, httptest.NewRequest(http.MethodGet, first.Header().Get("Location"), nil))
+	if second.Code != http.StatusForbidden || calls.Load() != 1 {
+		t.Fatalf("redirect hop = %d calls=%d", second.Code, calls.Load())
+	}
+}
+
+func TestProxyRejectsKnownEncryptedDNSCONNECTBeforeHijackOrDial(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{ID: "would-allow", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "dns.google", Schemes: []string{"https"}}})
+	proxy, err := NewProxy(policy, ProxyOptions{DialContext: func(context.Context, string, string) (net.Conn, error) {
+		t.Fatal("known encrypted DNS target reached dial")
+		return nil, nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
+	request.Host = "dns.google:443"
+	request.RequestURI = request.Host
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("known encrypted DNS CONNECT status = %d", recorder.Code)
+	}
+}
+
 func TestProxyCONNECTWaitsForMatchingSNIThenForwardsClientHello(t *testing.T) {
 	policy := testProxyPolicy(t, boundary.Rule{ID: "connect", Effect: boundary.EffectAllowAttack, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"https"}, Ports: []int{443}}})
 	dialed := make(chan string, 1)
@@ -217,6 +294,27 @@ func TestProxyManagedHTTPTransportPinsValidatedResolutionAndRejectsRebinding(t *
 	rebindingProxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
 	if recorder.Code != http.StatusBadGateway {
 		t.Fatalf("rebinding response = %d", recorder.Code)
+	}
+}
+
+func TestProxyRejectsMixedPublicAndPrivateIPv6ResolutionWithoutDial(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}}})
+	proxy, err := NewProxy(policy, ProxyOptions{
+		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("2606:4700:4700::1111"), netip.MustParseAddr("fd00::53")}, nil
+		},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			t.Fatal("mixed unsafe IPv6 answer reached dial")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("mixed IPv6 response = %d", recorder.Code)
 	}
 }
 

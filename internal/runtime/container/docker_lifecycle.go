@@ -792,6 +792,9 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 	if endpoint == nil || strings.TrimSpace(endpoint.NetworkID) == "" {
 		return fmt.Errorf("%w: runtime conversation network endpoint is incomplete", ErrRuntimeStateConflict)
 	}
+	if endpoint.Gateway.IsValid() || endpoint.IPv6Gateway.IsValid() {
+		return fmt.Errorf("%w: runtime conversation network exposes a host gateway", ErrRuntimeStateConflict)
+	}
 	result, err := m.networkAPI.NetworkInspect(ctx, endpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {
 		if containerderrdefs.IsNotFound(err) {

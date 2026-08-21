@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/netip"
@@ -113,6 +114,10 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	}
 	if !sameForwardAuthority(request.Host, decision.Target) {
 		http.Error(writer, "HTTP Host does not match proxy target", http.StatusBadRequest)
+		return
+	}
+	if isDNSOverHTTP(request, decision.Target.Path) {
+		http.Error(writer, "DNS over HTTP is not permitted", http.StatusForbidden)
 		return
 	}
 	if !proxyDecisionAllowed(decision) {
@@ -307,6 +312,24 @@ func normalizeConnectTarget(request *http.Request) (rawURL, authority, host stri
 
 func proxyDecisionAllowed(decision boundary.Decision) bool {
 	return decision.Allowed && (decision.Effect == boundary.EffectAllowVisit || decision.Effect == boundary.EffectAllowAttack)
+}
+
+func isDNSOverHTTP(request *http.Request, canonicalPath string) bool {
+	path := strings.TrimSuffix(canonicalPath, "/")
+	if path == "/dns-query" || strings.HasSuffix(path, "/dns-query") {
+		return true
+	}
+	for _, header := range []string{"Content-Type", "Accept"} {
+		for _, value := range request.Header.Values(header) {
+			for _, candidate := range strings.Split(value, ",") {
+				mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(candidate))
+				if err == nil && (strings.EqualFold(mediaType, "application/dns-message") || strings.EqualFold(mediaType, "application/dns-json")) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func sameForwardAuthority(hostHeader string, target boundary.RequestTarget) bool {
