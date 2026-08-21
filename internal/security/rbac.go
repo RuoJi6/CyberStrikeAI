@@ -84,6 +84,7 @@ var PermissionCatalog = map[string]string{
 	"monitor:read":         "View execution monitor",
 	"monitor:write":        "Cancel monitor executions",
 	"monitor:delete":       "Delete monitor executions",
+	"boundary:read":        "View and simulate boundary policies",
 }
 
 func HashPassword(password string) (string, error) {

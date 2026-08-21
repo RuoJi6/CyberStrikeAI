@@ -1,0 +1,198 @@
+package handler
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/security"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+func newBoundaryPolicyHandlerTestDB(t *testing.T) (*database.DB, database.BoundaryPolicy) {
+	t.Helper()
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "boundary-handler.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	policy, err := db.CreateBoundaryPolicy(ctx, database.BoundaryPolicy{
+		Name: "simulation", OwnerUserID: "owner-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []database.BoundaryPolicyRule{
+		{
+			ID: "allow-api", PolicyID: policy.ID, Effect: boundary.EffectAllowAttack,
+			Host: "api.example", Schemes: []string{"https"}, Ports: []int{443},
+			PathPrefixes: []string{"/v1"}, Methods: []string{"POST"}, Position: 1,
+		},
+		{
+			ID: "block-admin", PolicyID: policy.ID, Effect: boundary.EffectBlocked,
+			Host: "api.example", PathPrefixes: []string{"/v1/admin"}, Position: 2,
+		},
+	} {
+		if _, err := db.CreateBoundaryPolicyRule(ctx, rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return db, policy
+}
+
+func boundarySimulationRouter(db *database.DB, session security.Session) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.Use(func(c *gin.Context) {
+		c.Set(security.ContextSessionKey, session)
+		c.Next()
+	})
+	router.Use(security.RBACMiddleware(db))
+	router.POST("/api/boundary-policies/:id/simulate", NewBoundaryPolicyHandler(db, zap.NewNop()).SimulatePolicy)
+	return router
+}
+
+func performBoundarySimulation(router *gin.Engine, policyID string, body interface{}) *httptest.ResponseRecorder {
+	payload, _ := json.Marshal(body)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/boundary-policies/"+policyID+"/simulate", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestBoundaryPolicySimulationReturnsMatchedRuleAndNormalizedTarget(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+
+	recorder := performBoundarySimulation(router, policy.ID, map[string]interface{}{
+		"url": "HTTPS://API.EXAMPLE./v1/%72un?x=1", "method": "post",
+		"resolvedIps": []string{"93.184.216.34"},
+	})
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response simulateBoundaryPolicyResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if !response.Allowed || response.PolicyID != policy.ID || response.Effect != boundary.EffectAllowAttack || response.MatchedRuleID != "allow-api" || response.Reason != boundary.ReasonAllowAttack {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.Target.Host != "api.example" || response.Target.Scheme != "https" || response.Target.Port != 443 || response.Target.Path != "/v1/run" || response.Target.Method != "POST" {
+		t.Fatalf("target = %#v", response.Target)
+	}
+}
+
+func TestBoundaryPolicySimulationFailsClosedWithReasons(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+	tests := []struct {
+		name, url, reason, ruleID string
+		resolvedIPs               []string
+	}{
+		{name: "blocked path", url: "https://api.example/v1/admin/users", reason: boundary.ReasonBlockedPath, ruleID: "block-admin", resolvedIPs: []string{"93.184.216.34"}},
+		{name: "default deny", url: "https://unknown.example/", reason: boundary.ReasonDefaultDeny, resolvedIPs: []string{"93.184.216.34"}},
+		{name: "dns rebinding", url: "https://api.example/v1/run", reason: boundary.ReasonDNSRebinding, resolvedIPs: []string{"127.0.0.1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := performBoundarySimulation(router, policy.ID, map[string]interface{}{
+				"url": tc.url, "method": "POST", "resolvedIps": tc.resolvedIPs,
+			})
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+			}
+			var response simulateBoundaryPolicyResponse
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatal(err)
+			}
+			if response.Allowed || response.Reason != tc.reason || response.MatchedRuleID != tc.ruleID {
+				t.Fatalf("response = %#v", response)
+			}
+		})
+	}
+}
+
+func TestBoundaryPolicySimulationRejectsInvalidInputAndMissingPolicy(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+	tests := []struct {
+		name, id string
+		body     interface{}
+		want     int
+	}{
+		{name: "invalid URL", id: policy.ID, body: map[string]interface{}{"url": "not-a-url"}, want: http.StatusBadRequest},
+		{name: "invalid IP", id: policy.ID, body: map[string]interface{}{"url": "https://api.example", "resolvedIps": []string{"999.1.1.1"}}, want: http.StatusBadRequest},
+		{name: "too many IPs", id: policy.ID, body: map[string]interface{}{"url": "https://api.example", "resolvedIps": strings.Split(strings.Repeat("1.1.1.1,", 65), ",")[:65]}, want: http.StatusBadRequest},
+		{name: "missing policy", id: "missing", body: map[string]interface{}{"url": "https://api.example"}, want: http.StatusNotFound},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := performBoundarySimulation(router, tc.id, tc.body)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, tc.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestBoundaryPolicySimulationEnforcesPermissionAndOwnScope(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	body := map[string]interface{}{"url": "https://api.example/v1/run", "method": "POST"}
+	tests := []struct {
+		name    string
+		session security.Session
+		want    int
+	}{
+		{name: "missing permission", session: security.Session{UserID: "owner-1", Scope: database.RBACScopeOwn, Permissions: map[string]bool{}}, want: http.StatusForbidden},
+		{name: "owner", session: security.Session{UserID: "owner-1", Scope: database.RBACScopeOwn, Permissions: map[string]bool{"boundary:read": true}}, want: http.StatusOK},
+		{name: "foreign owner", session: security.Session{UserID: "other", Scope: database.RBACScopeOwn, Permissions: map[string]bool{"boundary:read": true}}, want: http.StatusForbidden},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := performBoundarySimulation(boundarySimulationRouter(db, tc.session), policy.ID, body)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", recorder.Code, tc.want, recorder.Body.String())
+			}
+		})
+	}
+}
+
+func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/openapi/spec", nil)
+	NewOpenAPIHandler(nil, zap.NewNop(), nil, nil).GetOpenAPISpec(context)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &spec); err != nil {
+		t.Fatal(err)
+	}
+	paths := spec["paths"].(map[string]interface{})
+	path, ok := paths["/api/boundary-policies/{id}/simulate"].(map[string]interface{})
+	if !ok || path["post"] == nil {
+		t.Fatalf("boundary simulation path = %#v", path)
+	}
+}

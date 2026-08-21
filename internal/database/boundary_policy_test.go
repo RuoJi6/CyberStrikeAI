@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -184,5 +186,36 @@ func TestBoundaryPolicyRuleCascadeDelete(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("boundary rules survived policy delete: %d", count)
+	}
+}
+
+func TestBoundaryPolicyLookupAndOwnScopeAccess(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-access.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	created, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{
+		Name: "owned policy", OwnerUserID: "owner-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetBoundaryPolicy(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != created.ID || got.Name != created.Name || got.OwnerUserID != "owner-1" || got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+		t.Fatalf("policy = %#v", got)
+	}
+	if !db.UserCanAccessResource("owner-1", RBACScopeOwn, "boundary_policy", created.ID) {
+		t.Fatal("policy owner was denied")
+	}
+	if db.UserCanAccessResource("other", RBACScopeOwn, "boundary_policy", created.ID) {
+		t.Fatal("foreign own-scoped user was allowed")
+	}
+	if _, err := db.GetBoundaryPolicy(ctx, "missing"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("missing policy error = %v", err)
 	}
 }

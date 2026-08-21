@@ -1,0 +1,127 @@
+package handler
+
+import (
+	"database/sql"
+	"errors"
+	"net/http"
+	"net/netip"
+	"strings"
+	"time"
+
+	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/database"
+
+	"github.com/gin-gonic/gin"
+	"go.uber.org/zap"
+)
+
+const maxBoundarySimulationResolvedIPs = 64
+
+// BoundaryPolicyHandler exposes the boundary policy control-plane APIs.
+type BoundaryPolicyHandler struct {
+	db     *database.DB
+	logger *zap.Logger
+}
+
+func NewBoundaryPolicyHandler(db *database.DB, logger *zap.Logger) *BoundaryPolicyHandler {
+	return &BoundaryPolicyHandler{db: db, logger: logger}
+}
+
+type simulateBoundaryPolicyRequest struct {
+	URL         string   `json:"url" binding:"required"`
+	Method      string   `json:"method"`
+	ResolvedIPs []string `json:"resolvedIps"`
+}
+
+type simulateBoundaryPolicyResponse struct {
+	PolicyID      string                 `json:"policyId"`
+	Allowed       bool                   `json:"allowed"`
+	Effect        boundary.Effect        `json:"effect,omitempty"`
+	MatchedRuleID string                 `json:"matchedRuleId,omitempty"`
+	Reason        string                 `json:"reason"`
+	Target        boundary.RequestTarget `json:"target"`
+}
+
+// SimulatePolicy POST /api/boundary-policies/:id/simulate evaluates a draft
+// without changing it or opening container networking. resolvedIps are supplied
+// explicitly so simulation never performs DNS or makes an outbound request.
+func (h *BoundaryPolicyHandler) SimulatePolicy(c *gin.Context) {
+	var req simulateBoundaryPolicyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if len(req.ResolvedIPs) > maxBoundarySimulationResolvedIPs {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "resolvedIps must contain at most 64 addresses"})
+		return
+	}
+	resolvedIPs := make([]netip.Addr, 0, len(req.ResolvedIPs))
+	for _, raw := range req.ResolvedIPs {
+		address, err := netip.ParseAddr(strings.TrimSpace(raw))
+		if err != nil || address.Zone() != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "resolvedIps contains an invalid IP address"})
+			return
+		}
+		resolvedIPs = append(resolvedIPs, address.Unmap())
+	}
+
+	policyID := strings.TrimSpace(c.Param("id"))
+	if policyID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "boundary policy id is required"})
+		return
+	}
+	if _, err := h.db.GetBoundaryPolicy(c.Request.Context(), policyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "boundary policy not found"})
+			return
+		}
+		h.logger.Error("读取边界策略失败", zap.String("policy_id", policyID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load boundary policy"})
+		return
+	}
+	dbRules, err := h.db.ListBoundaryPolicyRules(c.Request.Context(), policyID)
+	if err != nil {
+		h.logger.Error("读取边界规则失败", zap.String("policy_id", policyID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load boundary policy rules"})
+		return
+	}
+	rules := make([]boundary.Rule, 0, len(dbRules))
+	for _, stored := range dbRules {
+		authProfileID := ""
+		if stored.AuthProfileID != nil {
+			authProfileID = *stored.AuthProfileID
+		}
+		rules = append(rules, boundary.Rule{
+			ID:     stored.ID,
+			Effect: stored.Effect,
+			Target: boundary.RuleTarget{
+				Host:         stored.Host,
+				Schemes:      stored.Schemes,
+				Ports:        stored.Ports,
+				PathPrefixes: stored.PathPrefixes,
+				Methods:      stored.Methods,
+			},
+			AuthProfileID: authProfileID,
+			ExpiresAt:     stored.ExpiresAt,
+		})
+	}
+	compiled, err := boundary.NewPolicy(rules)
+	if err != nil {
+		h.logger.Error("编译边界策略失败", zap.String("policy_id", policyID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "boundary policy is invalid"})
+		return
+	}
+	decision, err := compiled.Evaluate(req.URL, req.Method, resolvedIPs, time.Now().UTC())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, simulateBoundaryPolicyResponse{
+		PolicyID:      policyID,
+		Allowed:       decision.Allowed,
+		Effect:        decision.Effect,
+		MatchedRuleID: decision.RuleID,
+		Reason:        decision.Reason,
+		Target:        decision.Target,
+	})
+}

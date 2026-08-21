@@ -11,7 +11,7 @@ var apiDocI18nTagToKey = map[string]string{
 	"知识库": "knowledgeBase", "MCP": "mcp",
 	"FOFA信息收集": "fofaRecon", "终端": "terminal", "WebShell管理": "webshellManagement",
 	"对话附件": "chatUploads", "机器人集成": "robotIntegration", "多代理Markdown": "markdownAgents",
-	"项目管理": "projectManagement", "资产管理": "assetManagement",
+	"项目管理": "projectManagement", "资产管理": "assetManagement", "边界策略": "boundaryPolicy",
 }
 
 var apiDocI18nSummaryToKey = map[string]string{
@@ -74,6 +74,7 @@ var apiDocI18nSummaryToKey = map[string]string{
 	"列出项目":     "listProjects", "创建项目": "createProject", "获取项目": "getProject",
 	"更新项目": "updateProject", "删除项目": "deleteProject",
 	"批量导入资产":        "importAssets",
+	"模拟边界规则判定":      "simulateBoundaryPolicy",
 	"列出或按 key 获取事实": "listProjectFacts", "创建/更新事实": "upsertProjectFact",
 	"获取项目事实攻击路径图": "getProjectFactGraph", "列出项目全部事实边": "listProjectFactEdges",
 	"添加事实边": "createProjectFactEdge", "删除事实边": "deleteProjectFactEdge",

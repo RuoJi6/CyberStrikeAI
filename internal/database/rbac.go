@@ -644,6 +644,8 @@ func (db *DB) userOwnsResource(userID, resourceType, resourceID string) bool {
 		table = "batch_task_queues"
 	case "c2_listener":
 		table = "c2_listeners"
+	case "boundary_policy":
+		table = "boundary_policies"
 	default:
 		return false
 	}
@@ -673,6 +675,8 @@ func (db *DB) SetResourceOwner(resourceType, resourceID, userID string) error {
 		table = "batch_task_queues"
 	case "c2_listener":
 		table = "c2_listeners"
+	case "boundary_policy":
+		table = "boundary_policies"
 	default:
 		return nil
 	}
@@ -697,6 +701,8 @@ func (db *DB) GetResourceOwner(resourceType, resourceID string) string {
 		table = "batch_task_queues"
 	case "c2_listener":
 		table = "c2_listeners"
+	case "boundary_policy":
+		table = "boundary_policies"
 	default:
 		return ""
 	}

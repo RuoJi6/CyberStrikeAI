@@ -119,6 +119,12 @@ func TestRBACResourcePickerRequiresWritePermission(t *testing.T) {
 	}
 }
 
+func TestBoundarySimulationUsesReadPermissionDespitePOST(t *testing.T) {
+	if got := permissionForRequest(http.MethodPost, "/api/boundary-policies/:id/simulate"); got != "boundary:read" {
+		t.Fatalf("boundary simulation permission = %q, want boundary:read", got)
+	}
+}
+
 func TestMCPInvocationPermissionIsSeparateFromMCPAdministration(t *testing.T) {
 	if got := permissionForRequest(http.MethodPost, "/api/mcp"); got != "mcp:execute" {
 		t.Fatalf("MCP invocation permission = %q, want mcp:execute", got)

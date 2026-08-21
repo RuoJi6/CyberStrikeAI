@@ -1350,6 +1350,61 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/boundary-policies/{id}/simulate": map[string]interface{}{
+				"post": map[string]interface{}{
+					"tags":        []string{"边界策略"},
+					"summary":     "模拟边界规则判定",
+					"description": "对指定策略草案执行纯本地确定性判定；不会解析 DNS、发起网络请求或修改策略。",
+					"operationId": "simulateBoundaryPolicy",
+					"parameters": []map[string]interface{}{
+						{
+							"name": "id", "in": "path", "required": true,
+							"schema": map[string]interface{}{"type": "string"},
+						},
+					},
+					"requestBody": map[string]interface{}{
+						"required": true,
+						"content": map[string]interface{}{
+							"application/json": map[string]interface{}{
+								"schema": map[string]interface{}{
+									"type":     "object",
+									"required": []string{"url"},
+									"properties": map[string]interface{}{
+										"url":         map[string]interface{}{"type": "string", "format": "uri"},
+										"method":      map[string]interface{}{"type": "string", "default": "GET"},
+										"resolvedIps": map[string]interface{}{"type": "array", "maxItems": maxBoundarySimulationResolvedIPs, "items": map[string]interface{}{"type": "string"}},
+									},
+								},
+							},
+						},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "返回命中规则、规范化目标和允许或拒绝原因",
+							"content": map[string]interface{}{
+								"application/json": map[string]interface{}{
+									"schema": map[string]interface{}{
+										"type":     "object",
+										"required": []string{"policyId", "allowed", "reason", "target"},
+										"properties": map[string]interface{}{
+											"policyId":      map[string]interface{}{"type": "string"},
+											"allowed":       map[string]interface{}{"type": "boolean"},
+											"effect":        map[string]interface{}{"type": "string", "enum": []string{"allow-visit", "allow-attack", "blocked", "auth-only"}},
+											"matchedRuleId": map[string]interface{}{"type": "string"},
+											"reason":        map[string]interface{}{"type": "string"},
+											"target":        map[string]interface{}{"type": "object"},
+										},
+									},
+								},
+							},
+						},
+						"400": map[string]interface{}{"description": "目标或已解析 IP 无效"},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "权限或资源范围不足"},
+						"404": map[string]interface{}{"description": "边界策略不存在"},
+					},
+				},
+			},
 			"/api/auth/change-password": map[string]interface{}{
 				"post": map[string]interface{}{
 					"tags":        []string{"认证"},

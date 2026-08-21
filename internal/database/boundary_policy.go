@@ -122,6 +122,28 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	return policy, nil
 }
 
+// GetBoundaryPolicy returns one editable boundary policy draft. Callers must
+// enforce the authenticated resource scope before exposing the record.
+func (db *DB) GetBoundaryPolicy(ctx context.Context, policyID string) (BoundaryPolicy, error) {
+	var policy BoundaryPolicy
+	var owner sql.NullString
+	var createdAt, updatedAt string
+	err := db.QueryRowContext(ctx, `
+		SELECT id, name, description, owner_user_id, created_at, updated_at
+		FROM boundary_policies
+		WHERE id = ?
+	`, strings.TrimSpace(policyID)).Scan(
+		&policy.ID, &policy.Name, &policy.Description, &owner, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return BoundaryPolicy{}, err
+	}
+	policy.OwnerUserID = strings.TrimSpace(owner.String)
+	policy.CreatedAt = parseDBTime(createdAt)
+	policy.UpdatedAt = parseDBTime(updatedAt)
+	return policy, nil
+}
+
 func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyRule) (BoundaryPolicyRule, error) {
 	rule.PolicyID = strings.TrimSpace(rule.PolicyID)
 	if rule.PolicyID == "" {
