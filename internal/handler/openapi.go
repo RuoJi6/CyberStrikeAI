@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/egress"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -98,6 +99,72 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 		},
 	}
+	egressProxySummarySchema := map[string]interface{}{
+		"type":     "object",
+		"required": []string{"id", "name", "protocol", "host", "port", "enabled", "credentialsConfigured"},
+		"properties": map[string]interface{}{
+			"id": map[string]interface{}{"type": "string", "format": "uuid"}, "name": map[string]interface{}{"type": "string"},
+			"protocol": map[string]interface{}{"type": "string", "enum": []string{"http", "https", "socks5"}},
+			"host":     map[string]interface{}{"type": "string"}, "port": map[string]interface{}{"type": "integer"},
+			"enabled": map[string]interface{}{"type": "boolean"}, "credentialsConfigured": map[string]interface{}{"type": "boolean"},
+		},
+	}
+	egressProxyGroupMemberSchema := map[string]interface{}{
+		"type":     "object",
+		"required": []string{"proxyId", "priority", "weight", "enabled", "status", "consecutiveFailures", "proxy", "createdAt", "updatedAt"},
+		"properties": map[string]interface{}{
+			"proxyId":             map[string]interface{}{"type": "string", "format": "uuid"},
+			"priority":            map[string]interface{}{"type": "integer", "minimum": 0, "maximum": egress.MaxProxyGroupPriority},
+			"weight":              map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupMemberWeight},
+			"enabled":             map[string]interface{}{"type": "boolean"},
+			"status":              map[string]interface{}{"type": "string", "enum": []string{"available", "disabled", "proxy_disabled", "circuit_open"}},
+			"consecutiveFailures": map[string]interface{}{"type": "integer", "minimum": 0},
+			"circuitOpenUntil":    map[string]interface{}{"type": "string", "format": "date-time"},
+			"lastFailureAt":       map[string]interface{}{"type": "string", "format": "date-time"},
+			"lastSuccessAt":       map[string]interface{}{"type": "string", "format": "date-time"},
+			"lastSelectedAt":      map[string]interface{}{"type": "string", "format": "date-time"},
+			"proxy":               map[string]interface{}{"$ref": "#/components/schemas/EgressProxySummary"},
+			"createdAt":           map[string]interface{}{"type": "string", "format": "date-time"},
+			"updatedAt":           map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	egressProxyGroupSchema := map[string]interface{}{
+		"type":        "object",
+		"description": "失败关闭的代理组。较小 priority 优先；同优先级成员使用平滑加权轮询；熔断成员在冷却结束前不可选。",
+		"required":    []string{"id", "name", "enabled", "failureThreshold", "cooldownSeconds", "failClosed", "members", "createdAt", "updatedAt"},
+		"properties": map[string]interface{}{
+			"id": map[string]interface{}{"type": "string", "format": "uuid"}, "name": map[string]interface{}{"type": "string", "maxLength": 120},
+			"enabled":          map[string]interface{}{"type": "boolean"},
+			"failureThreshold": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupFailureCount},
+			"cooldownSeconds":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupCooldownSecs},
+			"failClosed":       map[string]interface{}{"type": "boolean", "readOnly": true, "enum": []bool{true}},
+			"ownerUserId":      map[string]interface{}{"type": "string"},
+			"members":          map[string]interface{}{"type": "array", "maxItems": egress.MaxProxyGroupMembers, "items": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroupMember"}},
+			"createdAt":        map[string]interface{}{"type": "string", "format": "date-time"}, "updatedAt": map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	egressProxyGroupWriteSchema := map[string]interface{}{
+		"type":     "object",
+		"required": []string{"name"},
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string", "maxLength": 120}, "enabled": map[string]interface{}{"type": "boolean", "default": true},
+			"failureThreshold": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupFailureCount, "default": egress.DefaultProxyFailureCount},
+			"cooldownSeconds":  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupCooldownSecs, "default": egress.DefaultProxyCooldownSecs},
+			"members": map[string]interface{}{
+				"type": "array", "minItems": 1, "maxItems": egress.MaxProxyGroupMembers,
+				"description": "创建时必填；更新时省略可保留现有成员。proxyId 不得重复。",
+				"items": map[string]interface{}{
+					"type": "object", "required": []string{"proxyId", "priority", "weight"},
+					"properties": map[string]interface{}{
+						"proxyId":  map[string]interface{}{"type": "string", "format": "uuid"},
+						"priority": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": egress.MaxProxyGroupPriority},
+						"weight":   map[string]interface{}{"type": "integer", "minimum": 1, "maximum": egress.MaxProxyGroupMemberWeight},
+						"enabled":  map[string]interface{}{"type": "boolean", "default": true},
+					},
+				},
+			},
+		},
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -125,8 +192,12 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 			},
 			"schemas": map[string]interface{}{
-				"EgressProxy":      egressProxySchema,
-				"EgressProxyWrite": egressProxyWriteSchema,
+				"EgressProxy":            egressProxySchema,
+				"EgressProxyWrite":       egressProxyWriteSchema,
+				"EgressProxySummary":     egressProxySummarySchema,
+				"EgressProxyGroupMember": egressProxyGroupMemberSchema,
+				"EgressProxyGroup":       egressProxyGroupSchema,
+				"EgressProxyGroupWrite":  egressProxyGroupWriteSchema,
 				"CreateConversationRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1483,6 +1554,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"summary":     "列出可访问的上游代理",
 					"description": "按当前用户的 RBAC 范围返回安全投影；不返回任何凭据、认证头或加密信封。",
 					"operationId": "listEgressProxies",
+					"parameters": []map[string]interface{}{
+						{"name": "search", "in": "query", "required": false, "description": "按名称、主机、ID 或协议搜索，通配符按普通字符处理", "schema": map[string]interface{}{"type": "string"}},
+						{"name": "limit", "in": "query", "required": false, "schema": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 100, "default": 50}},
+						{"name": "offset", "in": "query", "required": false, "schema": map[string]interface{}{"type": "integer", "minimum": 0, "default": 0}},
+					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{
 							"description": "出站代理列表",
@@ -1533,6 +1609,49 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"tags": []string{"出站代理"}, "summary": "删除上游代理", "operationId": "deleteEgressProxy",
 					"responses": map[string]interface{}{
 						"204": map[string]interface{}{"description": "已删除"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理不存在"},
+					},
+				},
+			},
+			"/api/egress-proxy-groups": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "列出可访问的代理组", "operationId": "listEgressProxyGroups",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "代理组列表", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+							"type": "object", "required": []string{"items"}, "properties": map[string]interface{}{"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroup"}}},
+						}}}},
+						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+				"post": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "创建失败关闭代理组", "operationId": "createEgressProxyGroup",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroupWrite"}}}},
+					"responses": map[string]interface{}{
+						"201": map[string]interface{}{"description": "已创建", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroup"}}}},
+						"400": map[string]interface{}{"description": "配置无效、成员不存在或不可访问"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+			},
+			"/api/egress-proxy-groups/{id}": map[string]interface{}{
+				"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "读取代理组及成员健康状态", "operationId": "getEgressProxyGroup",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "代理组", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroup"}}}},
+						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理组不存在"},
+					},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "更新代理组及成员", "operationId": "updateEgressProxyGroup",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroupWrite"}}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "已更新", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyGroup"}}}},
+						"400": map[string]interface{}{"description": "配置无效、成员不存在或不可访问"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理组不存在"},
+					},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "删除代理组", "operationId": "deleteEgressProxyGroup",
+					"responses": map[string]interface{}{
+						"204": map[string]interface{}{"description": "已删除"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理组不存在"},
 					},
 				},
 			},

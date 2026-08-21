@@ -132,13 +132,15 @@ func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 		http.MethodPut:    "egress:write",
 		http.MethodDelete: "egress:delete",
 	}
-	for method, want := range tests {
-		path := "/api/egress-proxies"
-		if method == http.MethodPut || method == http.MethodDelete {
-			path += "/:id"
-		}
-		if got := permissionForRequest(method, path); got != want {
-			t.Fatalf("%s egress proxy permission = %q, want %q", method, got, want)
+	for _, prefix := range []string{"/api/egress-proxies", "/api/egress-proxy-groups"} {
+		for method, want := range tests {
+			path := prefix
+			if method == http.MethodPut || method == http.MethodDelete {
+				path += "/:id"
+			}
+			if got := permissionForRequest(method, path); got != want {
+				t.Fatalf("%s %s permission = %q, want %q", method, prefix, got, want)
+			}
 		}
 	}
 }

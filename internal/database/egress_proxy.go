@@ -62,7 +62,7 @@ func (db *DB) initEgressProxyTables() error {
 			return err
 		}
 	}
-	return nil
+	return db.initEgressProxyGroupTables()
 }
 
 func normalizeEgressProxy(proxy EgressProxy) (EgressProxy, error) {
@@ -176,6 +176,63 @@ func (db *DB) ListEgressProxies(ctx context.Context, userID, scope string) ([]Eg
 		return nil, fmt.Errorf("list egress proxies: %w", err)
 	}
 	return proxies, nil
+}
+
+// SearchEgressProxies provides the bounded, safe resource search used by the
+// proxy-group multi-member picker. Returned rows remain the same credential-
+// redacted projection as ListEgressProxies.
+func (db *DB) SearchEgressProxies(ctx context.Context, userID, scope, search string, limit, offset int) ([]EgressProxy, int, error) {
+	if limit < 1 || limit > 100 {
+		return nil, 0, fmt.Errorf("egress proxy search limit must be between 1 and 100")
+	}
+	if offset < 0 {
+		return nil, 0, fmt.Errorf("egress proxy search offset must be non-negative")
+	}
+	conditions := make([]string, 0, 2)
+	args := make([]interface{}, 0, 8)
+	if scope != RBACScopeAll {
+		conditions = append(conditions, `(owner_user_id = ? OR id IN (
+			SELECT resource_id FROM rbac_resource_assignments
+			WHERE user_id = ? AND resource_type = 'egress_proxy'
+		))`)
+		args = append(args, strings.TrimSpace(userID), strings.TrimSpace(userID))
+	}
+	if search = strings.TrimSpace(search); search != "" {
+		pattern := "%" + strings.ToLower(strings.NewReplacer(
+			`\`, `\\`, `%`, `\%`, `_`, `\_`,
+		).Replace(search)) + "%"
+		conditions = append(conditions, `(LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\' OR LOWER(protocol) LIKE ? ESCAPE '\')`)
+		args = append(args, pattern, pattern, pattern, pattern)
+	}
+	where := ""
+	if len(conditions) > 0 {
+		where = " WHERE " + strings.Join(conditions, " AND ")
+	}
+	var total int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM egress_proxies`+where, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count egress proxy search: %w", err)
+	}
+	queryArgs := append(append([]interface{}{}, args...), limit, offset)
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, name, protocol, host, port, enabled, credential_ciphertext,
+			credential_updated_at, owner_user_id, created_at, updated_at
+		FROM egress_proxies`+where+` ORDER BY updated_at DESC, id LIMIT ? OFFSET ?`, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("search egress proxies: %w", err)
+	}
+	defer rows.Close()
+	proxies := make([]EgressProxy, 0)
+	for rows.Next() {
+		proxy, err := scanEgressProxy(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		proxies = append(proxies, proxy)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("search egress proxies: %w", err)
+	}
+	return proxies, total, nil
 }
 
 func (db *DB) UpdateEgressProxy(ctx context.Context, proxy EgressProxy) (EgressProxy, error) {

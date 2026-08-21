@@ -24,14 +24,15 @@ const (
 )
 
 var rbacAssignableResourceTables = map[string]string{
-	"project":       "projects",
-	"conversation":  "conversations",
-	"vulnerability": "vulnerabilities",
-	"asset":         "assets",
-	"webshell":      "webshell_connections",
-	"batch_task":    "batch_task_queues",
-	"c2_listener":   "c2_listeners",
-	"egress_proxy":  "egress_proxies",
+	"project":            "projects",
+	"conversation":       "conversations",
+	"vulnerability":      "vulnerabilities",
+	"asset":              "assets",
+	"webshell":           "webshell_connections",
+	"batch_task":         "batch_task_queues",
+	"c2_listener":        "c2_listeners",
+	"egress_proxy":       "egress_proxies",
+	"egress_proxy_group": "egress_proxy_groups",
 }
 
 // RBACUser is a local platform account.
@@ -649,6 +650,8 @@ func (db *DB) userOwnsResource(userID, resourceType, resourceID string) bool {
 		table = "boundary_policies"
 	case "egress_proxy":
 		table = "egress_proxies"
+	case "egress_proxy_group":
+		table = "egress_proxy_groups"
 	default:
 		return false
 	}
@@ -682,6 +685,8 @@ func (db *DB) SetResourceOwner(resourceType, resourceID, userID string) error {
 		table = "boundary_policies"
 	case "egress_proxy":
 		table = "egress_proxies"
+	case "egress_proxy_group":
+		table = "egress_proxy_groups"
 	default:
 		return nil
 	}
@@ -710,6 +715,8 @@ func (db *DB) GetResourceOwner(resourceType, resourceID string) string {
 		table = "boundary_policies"
 	case "egress_proxy":
 		table = "egress_proxies"
+	case "egress_proxy_group":
+		table = "egress_proxy_groups"
 	default:
 		return ""
 	}
@@ -785,6 +792,10 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies
 			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+	case "egress_proxy_group":
+		query = `SELECT id, name, 'fail-closed · ' || failure_threshold || ' failures · ' || cooldown_seconds || 's' FROM egress_proxy_groups
+			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
+			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	}
 
 	queryArgs := []interface{}{pattern, pattern}
@@ -836,6 +847,8 @@ func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, er
 		query = `SELECT COUNT(*) FROM c2_listeners WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "egress_proxy":
 		query = `SELECT COUNT(*) FROM egress_proxies WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
+	case "egress_proxy_group":
+		query = `SELECT COUNT(*) FROM egress_proxy_groups WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	}
 	var total int
 	queryArgs := []interface{}{pattern, pattern}
@@ -932,6 +945,8 @@ func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) 
 		query = `SELECT id, name, type || ' · ' || status FROM c2_listeners WHERE id IN (` + placeholders + `)`
 	case "egress_proxy":
 		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies WHERE id IN (` + placeholders + `)`
+	case "egress_proxy_group":
+		query = `SELECT id, name, 'fail-closed · ' || failure_threshold || ' failures · ' || cooldown_seconds || 's' FROM egress_proxy_groups WHERE id IN (` + placeholders + `)`
 	default:
 		return out, nil
 	}
@@ -1098,7 +1113,7 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 		{"vulnerability", "vulnerabilities"}, {"webshell", "webshell_connections"},
 		{"asset", "assets"},
 		{"batch_task", "batch_task_queues"}, {"c2_listener", "c2_listeners"},
-		{"egress_proxy", "egress_proxies"},
+		{"egress_proxy", "egress_proxies"}, {"egress_proxy_group", "egress_proxy_groups"},
 	}
 	detected := make(map[string]string, len(uniqueIDs))
 	for _, resourceID := range uniqueIDs {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -53,13 +54,36 @@ func (h *EgressProxyHandler) List(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
 		return
 	}
-	proxies, err := h.db.ListEgressProxies(c.Request.Context(), session.UserID, session.Scope)
+	limit, offset, err := parseEgressProxySearchWindow(c.Query("limit"), c.Query("offset"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	proxies, total, err := h.db.SearchEgressProxies(c.Request.Context(), session.UserID, session.Scope, c.Query("search"), limit, offset)
 	if err != nil {
 		h.logger.Error("列出出站代理失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取出站代理"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": proxies})
+	c.JSON(http.StatusOK, gin.H{"items": proxies, "total": total, "limit": limit, "offset": offset})
+}
+
+func parseEgressProxySearchWindow(rawLimit, rawOffset string) (int, int, error) {
+	limit, offset := 50, 0
+	var err error
+	if strings.TrimSpace(rawLimit) != "" {
+		limit, err = strconv.Atoi(strings.TrimSpace(rawLimit))
+		if err != nil || limit < 1 || limit > 100 {
+			return 0, 0, fmt.Errorf("limit must be between 1 and 100")
+		}
+	}
+	if strings.TrimSpace(rawOffset) != "" {
+		offset, err = strconv.Atoi(strings.TrimSpace(rawOffset))
+		if err != nil || offset < 0 {
+			return 0, 0, fmt.Errorf("offset must be non-negative")
+		}
+	}
+	return limit, offset, nil
 }
 
 func (h *EgressProxyHandler) Get(c *gin.Context) {

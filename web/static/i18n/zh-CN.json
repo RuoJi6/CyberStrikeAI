@@ -4560,7 +4560,8 @@
       "webshell": "WebShell 连接",
       "batch_task": "批量任务",
       "c2_listener": "C2 监听器",
-      "egress_proxy": "出站代理"
+      "egress_proxy": "出站代理",
+      "egress_proxy_group": "出站代理组"
     },
     "scopes": {
       "all": {

@@ -431,6 +431,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	projectHandler := handler.NewProjectHandler(db, log.Logger)
 	boundaryPolicyHandler := handler.NewBoundaryPolicyHandler(db, log.Logger)
 	egressProxyHandler := handler.NewEgressProxyHandler(db, credentialCipher, log.Logger)
+	egressProxyGroupHandler := handler.NewEgressProxyGroupHandler(db, log.Logger)
 	rbacHandler := handler.NewRBACHandler(db, log.Logger)
 	rbacHandler.SetAudit(auditSvc)
 	rbacHandler.SetAuthManager(authManager)
@@ -693,6 +694,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		projectHandler,
 		boundaryPolicyHandler,
 		egressProxyHandler,
+		egressProxyGroupHandler,
 		workflowHandler,
 		webshellHandler,
 		chatUploadsHandler,
@@ -1039,6 +1041,7 @@ func setupRoutes(
 	projectHandler *handler.ProjectHandler,
 	boundaryPolicyHandler *handler.BoundaryPolicyHandler,
 	egressProxyHandler *handler.EgressProxyHandler,
+	egressProxyGroupHandler *handler.EgressProxyGroupHandler,
 	workflowHandler *handler.WorkflowHandler,
 	webshellHandler *handler.WebShellHandler,
 	chatUploadsHandler *handler.ChatUploadsHandler,
@@ -1455,6 +1458,11 @@ func setupRoutes(
 		protected.GET("/egress-proxies/:id", egressProxyHandler.Get)
 		protected.PUT("/egress-proxies/:id", egressProxyHandler.Update)
 		protected.DELETE("/egress-proxies/:id", egressProxyHandler.Delete)
+		protected.GET("/egress-proxy-groups", egressProxyGroupHandler.List)
+		protected.POST("/egress-proxy-groups", egressProxyGroupHandler.Create)
+		protected.GET("/egress-proxy-groups/:id", egressProxyGroupHandler.Get)
+		protected.PUT("/egress-proxy-groups/:id", egressProxyGroupHandler.Update)
+		protected.DELETE("/egress-proxy-groups/:id", egressProxyGroupHandler.Delete)
 
 		// WebShell 管理（代理执行 + 连接配置存 SQLite）
 		protected.GET("/webshell/connections", webshellHandler.ListConnections)

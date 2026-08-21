@@ -4572,7 +4572,8 @@
       "webshell": "WebShell Connection",
       "batch_task": "Batch Task",
       "c2_listener": "C2 Listener",
-      "egress_proxy": "Egress Proxy"
+      "egress_proxy": "Egress Proxy",
+      "egress_proxy_group": "Egress Proxy Group"
     },
     "scopes": {
       "all": {
