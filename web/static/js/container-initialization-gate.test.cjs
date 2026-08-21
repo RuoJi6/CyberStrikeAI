@@ -14,6 +14,13 @@ test('容器初始化保持运行态、实时计时并在就绪后续跑', () =>
     assert.match(monitor, /initializationIsActive = initializationState === 'initializing' \|\| initializationState === 'ready'/);
     assert.match(monitor, /progressNode\.dataset\.containerInitializationState = initializationState/);
     assert.match(monitor, /startProgressElapsedClock\(progressId\)/);
+    assert.match(monitor, /initializationStage\.hidden = true/);
+    assert.match(monitor, /initializationState === 'ready'[\s\S]*chat\.progressInProgress/);
+    const initializationCase = monitor.slice(
+        monitor.indexOf("case 'container_initialization':"),
+        monitor.indexOf("case 'error':", monitor.indexOf("case 'container_initialization':"))
+    );
+    assert.doesNotMatch(initializationCase, /addTimelineItem\(/);
     assert.match(monitor, /if \(!initializationIsActive\) \{[\s\S]*upsertTerminalAssistantMessage\(event\.message, preferredMessageId\)/);
     assert.match(monitor, /t\.status === 'running' \|\| t\.status === 'initializing' \|\| t\.status === 'cancelling'/);
     assert.match(monitor, /window\.getConversationExecutionStatus/);
@@ -23,6 +30,13 @@ test('容器初始化保持运行态、实时计时并在就绪后续跑', () =>
     assert.match(monitor, /setChatRuntimeModeLocked\(true\)/);
     assert.match(monitor, /loadConversationsWithGroups\(\)/);
     assert.match(monitor, /containerExecutionBlockedTitle/);
+});
+
+test('容器启动与就绪事件不进入实时或历史正文', () => {
+    assert.match(chat, /function isContainerInitializationProcessDetail\(detail\)/);
+    assert.match(chat, /if \(isContainerInitializationProcessDetail\(d\)\) return false/);
+    assert.equal(zh.chat.containerStartingElapsed, '容器正在启动中 · {{duration}}');
+    assert.equal(en.chat.containerStartingElapsed, 'Container is starting · {{duration}}');
 });
 
 test('容器初始化与失败关闭状态具备中英文文案', () => {

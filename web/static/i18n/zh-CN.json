@@ -755,7 +755,7 @@
     "workspacePersistenceHintEphemeral": "临时工作区：删除容器会永久删除 /workspace 中的全部文件",
     "workspacePersistenceHintPersistent": "持久工作区：使用该对话专属 Docker named volume",
     "containerInitializingTitle": "📦 容器初始化中",
-    "containerStartingElapsed": "容器启动中 · {{duration}}",
+    "containerStartingElapsed": "容器正在启动中 · {{duration}}",
     "containerReadyContinuingTitle": "✅ 容器已就绪，正在继续原请求",
     "containerInitializationFailedTitle": "⚠️ 容器初始化不可用",
     "containerExecutionBlockedTitle": "🛡️ 容器执行保持阻断",

@@ -103,6 +103,24 @@ test('已完成任务仍优先使用持久化耗时', () => {
     assert.match(message.label.innerHTML, /耗时 1 分钟 5 秒/);
 });
 
+test('容器启动只占用顶部计时摘要且就绪后恢复普通对话耗时', () => {
+    const startedAt = '2026-08-12T02:00:00.000Z';
+    const context = createHarness(Date.parse(startedAt) + 31_000);
+    const message = createMessage();
+    message.dataset.turnPhase = 'container_initializing';
+
+    context.setAssistantTurnTiming(message, {
+        startedAt,
+        status: 'running',
+    });
+    assert.match(message.label.innerHTML, /容器正在启动中 · 31 秒/);
+
+    delete message.dataset.turnPhase;
+    context.syncAssistantTurnSummary(message);
+    assert.match(message.label.innerHTML, /已处理 31 秒/);
+    assert.doesNotMatch(message.label.innerHTML, /容器正在启动中/);
+});
+
 test('已中断任务使用固定终态耗时且不再按当前时间增长', () => {
     const context = createHarness(Date.parse('2026-08-13T12:00:00.000Z'));
     const message = createMessage();
@@ -125,7 +143,7 @@ test('历史占位消息存在取消事件时不会再判定为运行中', () =>
     assert.match(chat, /status: status/);
 });
 
-test('过程详情隐藏 Eino 内部诊断但保留真实工具调用', () => {
+test('过程详情隐藏容器启动过程与 Eino 内部诊断但保留真实工具调用', () => {
     const context = {};
     vm.runInNewContext(
         `${processDetailFilterSource(chat)}; this.filterNoiseProcessDetails = filterNoiseProcessDetails;`,
@@ -133,6 +151,16 @@ test('过程详情隐藏 Eino 内部诊断但保留真实工具调用', () => {
     );
 
     const filtered = context.filterNoiseProcessDetails([
+        {
+            eventType: 'container_initialization',
+            message: '对话容器正在启动；容器就绪后将自动继续当前请求。',
+            data: { state: 'initializing' },
+        },
+        {
+            eventType: 'container_initialization',
+            message: '对话容器已就绪，正在继续执行原请求。',
+            data: { state: 'ready' },
+        },
         {
             eventType: 'tool_call',
             data: {

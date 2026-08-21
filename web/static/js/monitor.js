@@ -1513,7 +1513,7 @@ function progressElapsedText(progressId) {
     if (el && el.dataset && el.dataset.containerInitializationState === 'initializing') {
         return typeof window.t === 'function'
             ? window.t('chat.containerStartingElapsed', { duration: duration })
-            : '容器启动中 · ' + duration;
+            : '容器正在启动中 · ' + duration;
     }
     return typeof window.t === 'function'
         ? window.t('chat.turnElapsedRunning', { duration: duration })
@@ -4113,16 +4113,18 @@ function handleStreamEvent(event, progressElement, progressId,
                     ? window.t('chat.containerExecutionBlockedTitle')
                     : '🛡️ 容器执行保持阻断';
             }
-            if (timeline) {
-                addTimelineItem(timeline, 'container_initialization', {
-                    title: initializationTitle,
-                    message: event.message,
-                    data: initializationData,
-                    expanded: true
-                });
-            }
             const initializationStage = document.querySelector(`#${progressId} .progress-stage`);
-            if (initializationStage) initializationStage.textContent = initializationTitle;
+            if (initializationStage) {
+                if (initializationState === 'initializing') {
+                    // 启动状态只显示在顶部实时耗时摘要，避免正文重复出现过程提示。
+                    initializationStage.hidden = true;
+                } else {
+                    initializationStage.hidden = false;
+                    initializationStage.textContent = initializationState === 'ready'
+                        ? (typeof window.t === 'function' ? window.t('chat.progressInProgress') : '渗透测试进行中...')
+                        : initializationTitle;
+                }
+            }
 
             const progressNode = document.getElementById(progressId);
             if (progressNode && progressNode.dataset) {

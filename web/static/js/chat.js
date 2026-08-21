@@ -4064,9 +4064,16 @@ function isInternalEinoDiagnosticDetail(detail) {
     return kind === 'turn_loop_takeover' || kind === 'turn_loop_preempted';
 }
 
+function isContainerInitializationProcessDetail(detail) {
+    return !!(detail && detail.eventType === 'container_initialization');
+}
+
 function filterNoiseProcessDetails(details) {
     if (!Array.isArray(details)) return details;
     return details.filter(function (d) {
+        // 容器启动状态只由顶部的本轮耗时摘要呈现。初始化与就绪事件仍在
+        // 后端持久化，供任务恢复和审计使用，但不应成为对话正文时间线。
+        if (isContainerInitializationProcessDetail(d)) return false;
         if (isEinoAgentHeartbeatProgress(d)) return false;
         if (isModelOutputRecoveryToolCallDetail(d)) return false;
         if (isAnonymousTaskFragmentToolCallDetail(d)) return false;
@@ -5137,7 +5144,7 @@ function syncAssistantTurnSummary(messageElementOrId) {
         if (messageElement.dataset.turnPhase === 'container_initializing') {
             text = typeof window.t === 'function'
                 ? window.t('chat.containerStartingElapsed', { duration: duration })
-                : '容器启动中 · ' + duration;
+                : '容器正在启动中 · ' + duration;
         } else {
             text = typeof window.t === 'function' ? window.t('chat.turnElapsedRunning', { duration: duration }) : '已处理 ' + duration;
         }

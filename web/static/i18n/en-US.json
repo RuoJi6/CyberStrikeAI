@@ -767,7 +767,7 @@
     "workspacePersistenceHintEphemeral": "Temporary workspace: deleting the container permanently deletes every file in /workspace",
     "workspacePersistenceHintPersistent": "Persistent workspace: use this conversation's dedicated Docker named volume",
     "containerInitializingTitle": "📦 Container initializing",
-    "containerStartingElapsed": "Container starting · {{duration}}",
+    "containerStartingElapsed": "Container is starting · {{duration}}",
     "containerReadyContinuingTitle": "✅ Container ready; continuing the original request",
     "containerInitializationFailedTitle": "⚠️ Container initialization unavailable",
     "containerExecutionBlockedTitle": "🛡️ Container execution remains blocked",
