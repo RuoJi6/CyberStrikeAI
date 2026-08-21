@@ -135,6 +135,21 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	if err := validateBoundaryRuleAuthMarker(&rule); err != nil {
 		return BoundaryPolicyRule{}, err
 	}
+	normalizedTarget, err := boundary.NormalizeRuleTarget(boundary.RuleTarget{
+		Host:         rule.Host,
+		Schemes:      rule.Schemes,
+		Ports:        rule.Ports,
+		PathPrefixes: rule.PathPrefixes,
+		Methods:      rule.Methods,
+	})
+	if err != nil {
+		return BoundaryPolicyRule{}, err
+	}
+	rule.Host = normalizedTarget.Host
+	rule.Schemes = normalizedTarget.Schemes
+	rule.Ports = normalizedTarget.Ports
+	rule.PathPrefixes = normalizedTarget.PathPrefixes
+	rule.Methods = normalizedTarget.Methods
 	if rule.ID = strings.TrimSpace(rule.ID); rule.ID == "" {
 		rule.ID = uuid.New().String()
 	}

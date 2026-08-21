@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -31,8 +32,8 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 	authProfileID := "credential-profile-1"
 	tests := []BoundaryPolicyRule{
 		{
-			PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "visit.example",
-			Schemes: []string{"https"}, Ports: []int{443}, Methods: []string{"GET"}, Position: 1,
+			PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "VISIT.example.",
+			Schemes: []string{"HTTPS", "https"}, Ports: []int{443, 443}, Methods: []string{"get"}, Position: 1,
 		},
 		{
 			PolicyID: policy.ID, Effect: boundary.EffectAllowAttack, Host: "attack.example",
@@ -75,12 +76,19 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 	}
 	for i, want := range tests {
 		got := rules[i]
-		if got.Effect != want.Effect || got.Host != want.Host || got.Position != want.Position {
+		wantHost := want.Host
+		if i == 0 {
+			wantHost = "visit.example"
+		}
+		if got.Effect != want.Effect || got.Host != wantHost || got.Position != want.Position {
 			t.Fatalf("rule %d = %#v", i, got)
 		}
 		if !got.Effect.Valid() {
 			t.Fatalf("rule %d has invalid effect %q", i, got.Effect)
 		}
+	}
+	if !reflect.DeepEqual(rules[0].Schemes, []string{"https"}) || !reflect.DeepEqual(rules[0].Ports, []int{443}) || !reflect.DeepEqual(rules[0].Methods, []string{"GET"}) {
+		t.Fatalf("normalized visit rule = %#v", rules[0])
 	}
 	attack := rules[1]
 	if attack.ExpiresAt == nil || !attack.ExpiresAt.Equal(expiresAt) || attack.RateLimit.RequestsPerSecond != 2 || attack.RateLimit.Burst != 5 {
