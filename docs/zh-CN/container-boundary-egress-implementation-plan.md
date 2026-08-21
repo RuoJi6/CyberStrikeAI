@@ -1,7 +1,7 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 3 第 1 项已完成（第 2 项待开始：目标与请求规范化）
+> 当前阶段：阶段 3 第 2 项已完成（第 3 项待开始：默认拒绝、固定优先级和禁止目标集）
 > 最后更新：2026-08-21
 > 工作分支：`codex/docker-agent-runtime`
 
@@ -285,7 +285,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 任务：
 
 - [x] 实现 `allow-visit`、`allow-attack`、`blocked` 和 `auth-only` 访问标记。
-- [ ] 实现域名、IDNA、IPv4/IPv6、端口、scheme、path 和 method 规范化。
+- [x] 实现域名、IDNA、IPv4/IPv6、端口、scheme、path 和 method 规范化。
 - [ ] 实现默认拒绝、固定优先级和禁止目标集。
 - [ ] 实现规则模拟 API，返回命中规则和拒绝原因。
 - [ ] 对话首次启动前生成 canonical JSON 快照与 SHA-256，后续编辑不修改已绑定快照。
@@ -433,7 +433,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 | 0 | 已完成 | 2026-08-20 | `8c2c6bc` | Go 全量通过；前端 115/115 | 源码/文档已同步；服务 active；`GET /` 200 | `#chat` 非空白、无 console 错误；交互进入 `#dashboard` | 执行面全部归属；CGO 候选构建失败已回滚，当前服务健康 |
 | 1 | 已完成 | 2026-08-20 | `58ff685`（第 1 项）；`45e8da3` + `1645256`（第 2 项）；`36ab2d3`（第 3 项）；`7c17fd5`（第 4 项）；`49f0256`（第 5 项）；`338e047`（第 6 项）；`b4024d6`（第 7 项）；`45ef059`（第 8 项）；`93ff9a7`（第 9 项）；`b44f018`（第 10 项）；`99b3e10`（第 11 项） | Go 全包、`go vet ./...`、前端 115/115 及容器/数据库完整 race 通过；fake runtime 覆盖创建、就绪、生命周期、孤儿资源和空闲停止；真实验收发现并修复非 root 镜像的 tmpfs 工作区不可写问题 | 最终 Zig CGO Linux ARM64 服务 SHA-256 `93a33f7f…17c547b`，active / HTTP 200 / `NRestarts=0`；阶段探针 SHA-256 `f2ef6d69…bdc77c2`；仅使用测试机已有 `cyberstrike/agent` ARM64 镜像并跳过远端 manifest，未下载安全工具；两容器 provider 不同、无默认路由、无 Docker Socket、运行时工作区隔离、停止 A 不影响 B、未持久化 tmpfs 恢复后按设计重置，删除后容器/网络/卷残留均为 0 | 通过 SSH 本地转发访问同一测试机 `?qa=20260820-stage1-item11#dashboard`：URL/标题正确，仪表盘非空白，console 日志为空，截图成功；自动化未填写敏感密码 | 阶段 1 全部验收通过；阶段 2 开始后才持久化 host/container 选择、将 Agent 执行路由到容器并实现可选 named volume；当前仍不声称 Agent 已在容器执行；不实现 Agent 浏览器 |
 | 2 | 已完成 | 2026-08-21 | `361ba97`（第 1 项）；`28d9ad2` + `45eb12a`（第 2 项及异步续跑补强）；`a292b52`（第 3 项）；`424e084` + `9926f2c` + `9535a57` + `0fe6fa6` + `629d06f`（第 4 项）；`43c8084` + `637cf14` + `067f513`（第 5 项）；`02d786d` + `0aace18`（第 6 项）；`6125b5c` + `369d35b`（第 7 项）；`9faf158` + `9add95c` + `ef6222b`（第 8 项及弹窗居中补强）；`c09fc40` + `9299fcb`（第 9 项）；`9cc10cd`（第 10 项） | 第 1—8 项详细证据保留于历史版本。第 9 项：Go 全包、静态检查、MCP 定向与 race、前端 126/126 均通过，数据库迁移/回读、伪造审计输入拒绝、ExecutionService、HTTP MCP 直连和 Eino 执行路径均有回归覆盖。第 10 项：host/container 后端契约定向与 race、`go test ./... -count=1`、`go vet ./...`、`go mod tidy -diff`、前端 126/126、`git diff --check` 全部通过，覆盖成功、非零退出、取消和无输出超时 | 第 9 项真实 host/container 审计记录与 Docker inspect/SQLite/API 三方一致。第 10 项已推送并精确部署 `9cc10cd`；Linux ARM64 二进制 SHA-256 `822d0768ae004aac8ee5b65e8cf0bc47759f29cfe0a7e60d432d6d42c467c5cd`，服务 `active/running`、`NRestarts=0`，直连首页、登录、Bearer 鉴权均 HTTP 200，测试源码哈希与本地一致 | 内置浏览器可枚举最终 URL/title，但最终页的 DOM/console/screenshot 连续超时并重置连接，已如实记录并使用本机 Playwright 降级验收。`#mcp-monitor` 真实详情交互显示 `Container`、完整 container ID 和 image digest，1800×1000/390×844 无越界且 console 为空；截图 SHA-256 `083d3c3e…03a1d53` / `7b24992b…bf872a`。第 10 项无 UI 变更 | 阶段 2 第 1—10 项验收全部通过。删除弹窗另在 1800×1000/390×844 真实菜单路径复验居中、全屏遮罩与零 console 错误，未点击最终删除按钮；相关实施、补强和契约测试提交均已推送远端 |
-| 3 | 进行中 | 第 1 项：2026-08-21 | `25a4b0e`（第 1 项） | 四种 effect 领域定向与数据库回读/约束/级联测试通过；定向 race、`go test ./... -count=1`、`go vet ./...`、`go mod tidy -diff`、前端 126/126、`git diff --check` 全部通过 | 已推送并精确部署 `25a4b0e`；Linux ARM64 二进制 SHA-256 `cc000145b181cb9a70961811d429ecd898e2a4c1feb0ed449934f9d5ba0361a3`，服务 `active/running`、`NRestarts=0`、直连首页 HTTP 200，关键源码哈希一致。真实数据库已创建 `boundary_policies` / `boundary_policy_rules`；回滚事务中 4 种合法标记均可写，未知标记、`auth-only` 缺凭据、非 `auth-only` 携凭据均拒绝，回滚后残留 0 | 第 1 项无 UI 变更 | 当前仍为默认拒绝的 `network=none`，未提前开放容器出网或实现后续匹配引擎；第 2 项待开始 |
+| 3 | 进行中 | 第 1—2 项：2026-08-21 | `25a4b0e`（第 1 项）；`7500867`（第 2 项） | 第 1 项四种 effect 领域定向与数据库回读/约束/级联测试通过。第 2 项覆盖域名/IDNA、IPv4/IPv6、默认与显式端口、HTTP(S) scheme、编码 path、method、规则去重排序与幂等性；模糊数字主机、括号差异、userinfo、zone ID、点段/双重编码和非安全字符均有拒绝回归。定向与 race、`go test ./... -count=1`、`go vet ./...`、`go mod tidy -diff`、前端 126/126、`git diff --check` 全部通过 | 第 1 项数据库约束回滚验收通过。第 2 项已推送并精确部署 `7500867`；Linux ARM64 服务二进制 SHA-256 `c5f754a0bd932dc0c3154fe7fa2d8d10f0723091a2dd7783feeaca097c6ab5dd`，boundary 测试二进制 SHA-256 `f58752fe4c81366482a3941b892e41fdac11f2f91fbcb1bae7ace958244284eb` 且 ARM64 规范化用例全通过；服务 `active/running`、`NRestarts=0`，源码哈希一致，直连首页/登录/Bearer 鉴权均 HTTP 200 | 第 1—2 项均无 UI 变更 | 当前仍为默认拒绝的 `network=none`，未提前开放容器出网或实现后续匹配引擎；第 3 项待开始 |
 | 4 | 未开始 | - | - | - | - | - | - |
 | 5 | 未开始 | - | - | - | - | - | - |
 | 6 | 未开始 | - | - | - | - | - | - |
