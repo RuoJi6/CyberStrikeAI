@@ -118,6 +118,8 @@ func permissionForRequest(method, fullPath string) string {
 		return "hitl:write"
 	case strings.HasPrefix(path, "/agent-loop"), strings.HasPrefix(path, "/batch-tasks"):
 		return crudPermission(method, "tasks")
+	case path == "/conversations/:id/egress" && method == http.MethodDelete:
+		return "chat:write"
 	case strings.HasPrefix(path, "/conversations"), strings.HasPrefix(path, "/messages"), strings.HasPrefix(path, "/process-details"):
 		return crudPermission(method, "chat")
 	case strings.HasPrefix(path, "/groups"):
@@ -158,6 +160,11 @@ func permissionForRequest(method, fullPath string) string {
 	case strings.HasPrefix(path, "/vulnerability-alerts"):
 		// This endpoint only changes the authenticated user's own preference.
 		return "vulnerability:read"
+	case path == "/projects/:id/egress-default":
+		if method == http.MethodGet || method == http.MethodHead {
+			return "project:read"
+		}
+		return "project:write"
 	case strings.HasPrefix(path, "/projects"):
 		return crudPermission(method, "project")
 	case path == "/boundary-policies/:id/simulate":
@@ -165,6 +172,11 @@ func permissionForRequest(method, fullPath string) string {
 		return "boundary:read"
 	case strings.HasPrefix(path, "/egress-proxies"), strings.HasPrefix(path, "/egress-proxy-groups"):
 		return crudPermission(method, "egress")
+	case strings.HasPrefix(path, "/egress-defaults"):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "egress:read"
+		}
+		return "egress:write"
 	case strings.HasPrefix(path, "/webshell"):
 		return crudPermission(method, "webshell")
 	case strings.HasPrefix(path, "/c2"):

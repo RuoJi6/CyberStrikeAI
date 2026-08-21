@@ -145,6 +145,27 @@ func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 	}
 }
 
+func TestEgressDefaultRoutesUseSelectionPermissions(t *testing.T) {
+	for _, tc := range []struct {
+		method string
+		path   string
+		want   string
+	}{
+		{http.MethodGet, "/api/egress-defaults/user", "egress:read"},
+		{http.MethodPut, "/api/egress-defaults/user", "egress:write"},
+		{http.MethodDelete, "/api/egress-defaults/user", "egress:write"},
+		{http.MethodGet, "/api/egress-defaults/preview", "egress:read"},
+		{http.MethodGet, "/api/projects/:id/egress-default", "project:read"},
+		{http.MethodPut, "/api/projects/:id/egress-default", "project:write"},
+		{http.MethodDelete, "/api/projects/:id/egress-default", "project:write"},
+		{http.MethodDelete, "/api/conversations/:id/egress", "chat:write"},
+	} {
+		if got := permissionForRequest(tc.method, tc.path); got != tc.want {
+			t.Fatalf("%s %s permission = %q, want %q", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestMCPInvocationPermissionIsSeparateFromMCPAdministration(t *testing.T) {
 	if got := permissionForRequest(http.MethodPost, "/api/mcp"); got != "mcp:execute" {
 		t.Fatalf("MCP invocation permission = %q, want mcp:execute", got)

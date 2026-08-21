@@ -188,7 +188,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	}
 	conversationEgressBindingSchema := map[string]interface{}{
 		"type":        "object",
-		"description": "pending 表示首次启动前的可编辑选择；active 表示已冻结绑定。source=none 是未显式选择的缺省 none，source=conversation 是对话显式选择。",
+		"description": "pending 表示首次启动前的可编辑选择或继承预览；active 表示已冻结绑定。优先级固定为 conversation > project > user > none。",
 		"required":    []string{"conversationId", "state", "mode", "source"},
 		"properties": map[string]interface{}{
 			"conversationId": map[string]interface{}{"type": "string"},
@@ -207,6 +207,19 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"mode":               conversationEgressModeRequestSchema,
 			"egressProxyId":      conversationEgressProxyIDRequestSchema,
 			"egressProxyGroupId": conversationEgressProxyGroupIDRequestSchema,
+		},
+	}
+	egressDefaultViewSchema := map[string]interface{}{
+		"type":        "object",
+		"description": "用户/项目默认值或新对话继承预览的安全投影。configured=false 表示没有任何显式默认；显式 none 的 configured=true。",
+		"required":    []string{"configured", "mode", "source"},
+		"properties": map[string]interface{}{
+			"configured": map[string]interface{}{"type": "boolean"},
+			"mode":       map[string]interface{}{"type": "string", "enum": []string{"none", "proxy", "group"}},
+			"source":     map[string]interface{}{"type": "string", "enum": []string{"none", "project", "user"}},
+			"proxy":      map[string]interface{}{"$ref": "#/components/schemas/EgressProxySummary"},
+			"proxyGroup": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressProxyGroupSummary"},
+			"updatedAt":  map[string]interface{}{"type": "string", "format": "date-time"},
 		},
 	}
 
@@ -245,6 +258,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"ConversationEgressProxyGroupSummary": conversationEgressGroupSummarySchema,
 				"ConversationEgressBinding":           conversationEgressBindingSchema,
 				"ConversationEgressWrite":             conversationEgressWriteSchema,
+				"EgressDefaultView":                   egressDefaultViewSchema,
 				"CreateConversationRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -2101,6 +2115,63 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"403": map[string]interface{}{"description": "缺少对话或出口资源权限"}, "404": map[string]interface{}{"description": "对话或出口资源不存在"},
 						"409": map[string]interface{}{"description": "首次启动已冻结绑定"},
 					},
+				},
+				"delete": map[string]interface{}{
+					"tags":        []string{"出站代理", "对话管理"},
+					"summary":     "清除对话级出口覆盖并恢复默认继承",
+					"description": "需要 chat:write、egress:read 及对话权限。仅首次启动前可用；返回 project > user > none 的最新继承预览。",
+					"operationId": "clearConversationEgress",
+					"parameters": []map[string]interface{}{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "已恢复继承", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressBinding"}}}},
+						"400": map[string]interface{}{"description": "非 container 对话"}, "401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "缺少对话或 egress:read 权限"}, "404": map[string]interface{}{"description": "对话不存在"},
+						"409": map[string]interface{}{"description": "首次启动已冻结绑定"},
+					},
+				},
+			},
+			"/api/egress-defaults/user": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "查看当前用户出口默认值", "operationId": "getUserEgressDefault",
+					"responses": map[string]interface{}{"200": map[string]interface{}{"description": "用户默认值；未配置也返回 configured=false", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressDefaultView"}}}}, "403": map[string]interface{}{"description": "缺少 egress:read 权限"}},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "设置当前用户出口默认值", "operationId": "updateUserEgressDefault",
+					"description": "需要 egress:write、egress:read 及所选出口资源权限。显式 none 与未配置保持可区分。",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressWrite"}}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "已更新", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressDefaultView"}}}}, "400": map[string]interface{}{"description": "模式/资源组合无效"}, "403": map[string]interface{}{"description": "权限不足"}, "404": map[string]interface{}{"description": "出口资源不存在"}},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "删除当前用户出口默认值", "operationId": "deleteUserEgressDefault",
+					"responses": map[string]interface{}{"204": map[string]interface{}{"description": "已删除或原本未配置"}, "403": map[string]interface{}{"description": "缺少 egress:write 权限"}},
+				},
+			},
+			"/api/egress-defaults/preview": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "预览新 container 对话的默认出口继承", "operationId": "previewEgressDefault",
+					"description": "不创建对话或选择记录。提供 projectId 时按 project > user > none 解析，否则按 user > none 解析。",
+					"parameters":  []map[string]interface{}{{"name": "projectId", "in": "query", "required": false, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "有效默认值预览", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressDefaultView"}}}}, "403": map[string]interface{}{"description": "缺少出口或项目权限"}, "404": map[string]interface{}{"description": "项目不存在"}},
+				},
+			},
+			"/api/projects/{id}/egress-default": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理", "项目管理"}, "summary": "查看项目出口默认值", "operationId": "getProjectEgressDefault",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":  map[string]interface{}{"200": map[string]interface{}{"description": "项目默认值；未配置也返回 configured=false", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressDefaultView"}}}}, "403": map[string]interface{}{"description": "缺少项目或 egress:read 权限"}, "404": map[string]interface{}{"description": "项目不存在"}},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站代理", "项目管理"}, "summary": "设置项目出口默认值", "operationId": "updateProjectEgressDefault",
+					"parameters":  []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationEgressWrite"}}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "已更新", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressDefaultView"}}}}, "400": map[string]interface{}{"description": "模式/资源组合无效"}, "403": map[string]interface{}{"description": "权限不足"}, "404": map[string]interface{}{"description": "项目或出口资源不存在"}},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站代理", "项目管理"}, "summary": "删除项目出口默认值", "operationId": "deleteProjectEgressDefault",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":  map[string]interface{}{"204": map[string]interface{}{"description": "已删除或原本未配置"}, "403": map[string]interface{}{"description": "缺少 project:write 或 egress:read 权限"}, "404": map[string]interface{}{"description": "项目不存在"}},
 				},
 			},
 			"/api/conversations/{id}/container-initialization": map[string]interface{}{

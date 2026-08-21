@@ -1200,6 +1200,7 @@ func setupRoutes(
 		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
 		protected.GET("/conversations/:id/egress", conversationHandler.GetConversationEgress)
 		protected.PUT("/conversations/:id/egress", conversationHandler.UpdateConversationEgress)
+		protected.DELETE("/conversations/:id/egress", conversationHandler.ClearConversationEgress)
 		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)
@@ -1440,6 +1441,9 @@ func setupRoutes(
 		protected.GET("/projects/:id/stats", projectHandler.GetProjectStats)
 		protected.GET("/projects/:id/conversations", projectHandler.ListProjectConversations)
 		protected.GET("/projects/:id", projectHandler.GetProject)
+		protected.GET("/projects/:id/egress-default", conversationHandler.GetProjectEgressDefault)
+		protected.PUT("/projects/:id/egress-default", conversationHandler.UpdateProjectEgressDefault)
+		protected.DELETE("/projects/:id/egress-default", conversationHandler.DeleteProjectEgressDefault)
 		protected.PUT("/projects/:id", projectHandler.UpdateProject)
 		protected.DELETE("/projects/:id", projectHandler.DeleteProject)
 		protected.GET("/projects/:id/fact-graph", projectHandler.GetFactGraph)
@@ -1468,6 +1472,10 @@ func setupRoutes(
 		protected.GET("/egress-proxy-groups/:id", egressProxyGroupHandler.Get)
 		protected.PUT("/egress-proxy-groups/:id", egressProxyGroupHandler.Update)
 		protected.DELETE("/egress-proxy-groups/:id", egressProxyGroupHandler.Delete)
+		protected.GET("/egress-defaults/user", conversationHandler.GetUserEgressDefault)
+		protected.PUT("/egress-defaults/user", conversationHandler.UpdateUserEgressDefault)
+		protected.DELETE("/egress-defaults/user", conversationHandler.DeleteUserEgressDefault)
+		protected.GET("/egress-defaults/preview", conversationHandler.PreviewEgressDefault)
 
 		// WebShell 管理（代理执行 + 连接配置存 SQLite）
 		protected.GET("/webshell/connections", webshellHandler.ListConnections)

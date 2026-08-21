@@ -53,6 +53,8 @@ const (
 
 	ConversationEgressSourceNone         = "none"
 	ConversationEgressSourceConversation = "conversation"
+	ConversationEgressSourceProject      = "project"
+	ConversationEgressSourceUser         = "user"
 
 	ConversationEgressStatePending = "pending"
 	ConversationEgressStateActive  = "active"
@@ -265,6 +267,12 @@ func (db *DB) EnsureConversationEgressBinding(ctx context.Context, conversationI
 		source = ConversationEgressSourceConversation
 	} else if !errors.Is(selectionErr, sql.ErrNoRows) {
 		return ConversationEgressBinding{}, fmt.Errorf("load conversation egress selection: %w", selectionErr)
+	} else {
+		choice, resolveErr := resolveConversationEgressDefaultChoice(ctx, tx, conversationID)
+		if resolveErr != nil {
+			return ConversationEgressBinding{}, fmt.Errorf("resolve conversation egress default: %w", resolveErr)
+		}
+		mode, proxyID, proxyGroupID, source = choice.mode, choice.proxyID, choice.proxyGroupID, choice.source
 	}
 	if err := validateConversationEgressTarget(ctx, tx, mode, proxyID, proxyGroupID); err != nil {
 		return ConversationEgressBinding{}, fmt.Errorf("validate conversation egress binding target: %w", err)
@@ -331,18 +339,60 @@ func (db *DB) GetConversationEgress(ctx context.Context, conversationID string) 
 		return ConversationEgressBinding{}, err
 	}
 	var runtimeMode string
-	if err := db.QueryRowContext(ctx, `SELECT runtime_mode FROM conversations WHERE id = ?`, conversationID).Scan(&runtimeMode); err != nil {
+	var projectID, ownerUserID sql.NullString
+	if err := db.QueryRowContext(ctx, `
+		SELECT runtime_mode, project_id, owner_user_id
+		FROM conversations WHERE id = ?
+	`, conversationID).Scan(&runtimeMode, &projectID, &ownerUserID); err != nil {
 		return ConversationEgressBinding{}, err
 	}
 	if runtimeMode != ConversationRuntimeModeContainer {
 		return ConversationEgressBinding{}, fmt.Errorf("conversation egress binding requires a container conversation")
 	}
+	preview, err := resolveEgressDefaultView(ctx, db, ownerUserID.String, projectID.String)
+	if err != nil {
+		return ConversationEgressBinding{}, fmt.Errorf("resolve conversation egress preview: %w", err)
+	}
 	return ConversationEgressBinding{
 		ConversationID: conversationID,
 		State:          ConversationEgressStatePending,
-		Mode:           ConversationEgressModeNone,
-		Source:         ConversationEgressSourceNone,
+		Mode:           preview.Mode,
+		Source:         preview.Source,
+		Proxy:          preview.Proxy,
+		ProxyGroup:     preview.ProxyGroup,
 	}, nil
+}
+
+// ClearConversationEgressSelection removes an explicit pending override so
+// the project/user inheritance preview becomes effective again. Active
+// bindings remain immutable and return ErrConversationEgressBindingActive.
+func (db *DB) ClearConversationEgressSelection(ctx context.Context, conversationID string) (ConversationEgressBinding, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ConversationEgressBinding{}, fmt.Errorf("conversation id is required")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ConversationEgressBinding{}, fmt.Errorf("begin clearing conversation egress selection: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockContainerConversationForEgress(ctx, tx, conversationID); err != nil {
+		return ConversationEgressBinding{}, err
+	}
+	var bindingCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM conversation_egress_bindings WHERE conversation_id = ?`, conversationID).Scan(&bindingCount); err != nil {
+		return ConversationEgressBinding{}, fmt.Errorf("check active conversation egress binding: %w", err)
+	}
+	if bindingCount != 0 {
+		return ConversationEgressBinding{}, ErrConversationEgressBindingActive
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_egress_selections WHERE conversation_id = ?`, conversationID); err != nil {
+		return ConversationEgressBinding{}, fmt.Errorf("clear conversation egress selection: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ConversationEgressBinding{}, fmt.Errorf("commit clearing conversation egress selection: %w", err)
+	}
+	return db.GetConversationEgress(ctx, conversationID)
 }
 
 func (db *DB) GetConversationEgressBinding(ctx context.Context, conversationID string) (ConversationEgressBinding, error) {
