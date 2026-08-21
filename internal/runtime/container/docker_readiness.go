@@ -60,6 +60,11 @@ func (m *DockerManager) ValidateReadiness(ctx context.Context, runtime Runtime, 
 	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return ReadinessReport{}, fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 	}
+	if spec.EgressGateway != nil {
+		if _, err := m.inspectOwnedEgressGateway(ctx, spec, &actual, StatusStopped); err != nil {
+			return ReadinessReport{}, fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
+		}
+	}
 	if err := verifyReadinessIsolation(actual, spec); err != nil {
 		return ReadinessReport{}, err
 	}

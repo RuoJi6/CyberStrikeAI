@@ -179,6 +179,33 @@ func TestContainerResourceClaimsIncludeConversationNetwork(t *testing.T) {
 	}
 }
 
+func TestContainerResourceClaimsIncludeGatewayAndBothNetworks(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, err := db.CreateConversation("gateway topology claims", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.ID = containerruntime.RuntimeID("conversation-" + conversation.ID)
+	spec.Security.NetworkMode = containerruntime.NetworkInternal
+	spec.EgressGateway = databaseGatewaySpec()
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := db.ListManagedResourceClaims(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 4 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindConversationNetwork || claims[2].Kind != containerruntime.ResourceKindEgressGateway || claims[3].Kind != containerruntime.ResourceKindEgressNetwork {
+		t.Fatalf("gateway topology claims = %#v", claims)
+	}
+	for _, claim := range claims {
+		if claim.LogicalID != string(spec.ID) || claim.ConversationID != conversation.ID {
+			t.Fatalf("gateway topology claim identity = %#v", claim)
+		}
+	}
+}
+
 func TestContainerResourceClaimsProtectLegacyNetworkDuringRebuildMigration(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()
@@ -210,7 +237,7 @@ func TestContainerResourceClaimsProtectLegacyNetworkDuringRebuildMigration(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(claims) != 2 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindConversationNetwork || claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != "" {
+		if len(claims) != 4 || claims[0].Kind != containerruntime.ResourceKindAgent || claims[1].Kind != containerruntime.ResourceKindConversationNetwork || claims[1].LogicalID != string(spec.ID) || claims[1].ProviderID != "" || claims[2].Kind != containerruntime.ResourceKindEgressGateway || claims[3].Kind != containerruntime.ResourceKindEgressNetwork {
 			t.Fatalf("%s claims = %#v", stage, claims)
 		}
 	}

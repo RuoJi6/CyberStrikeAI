@@ -18,6 +18,9 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	cfg.Container.ImageRepository = "ghcr.io/usestrix/strix-sandbox"
 	cfg.Container.ImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cfg.Container.ImagePlatform = "linux/arm64"
+	cfg.Container.EgressImageRepository = "ghcr.io/example/cyberstrike-egress"
+	cfg.Container.EgressImageDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cfg.Container.EgressImagePlatform = "linux/arm64"
 	cfg.Container.ToolInventoryPath = "inventory.json"
 	cfg.Container.ToolInventoryDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	cfg.Container.ToolInventory = containerruntime.ToolInventory{
@@ -40,6 +43,9 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	}
 	if spec.Resources.MemoryBytes != 512<<20 || spec.Resources.MaxConcurrentExec != 2 || spec.Resources.MaxQueuedExec != 8 || spec.Resources.LogMaxFiles != 3 {
 		t.Fatalf("spec resources = %#v", spec.Resources)
+	}
+	if spec.EgressGateway == nil || spec.EgressGateway.Image.Digest != cfg.Container.EgressImageDigest || spec.EgressGateway.Resources.MemoryBytes != 128<<20 {
+		t.Fatalf("egress gateway = %#v", spec.EgressGateway)
 	}
 	if !spec.Readiness.Enabled || spec.Readiness.InventoryDigest != cfg.Container.ToolInventoryDigest || len(spec.Readiness.Inventory.Tools) != 1 {
 		t.Fatalf("spec readiness = %#v", spec.Readiness)
@@ -75,6 +81,9 @@ func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
 	cfg.Container.ImageRepository = "ghcr.io/usestrix/strix-sandbox"
 	cfg.Container.ImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	cfg.Container.ImagePlatform = "linux/arm64"
+	cfg.Container.EgressImageRepository = "ghcr.io/example/cyberstrike-egress"
+	cfg.Container.EgressImageDigest = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	cfg.Container.EgressImagePlatform = "linux/arm64"
 	cfg.Container.ToolInventoryDigest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	cfg.Container.ToolInventory = containerruntime.ToolInventory{
 		SchemaVersion: containerruntime.ToolInventorySchemaVersion,

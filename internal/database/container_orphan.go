@@ -50,13 +50,28 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 			return nil, fmt.Errorf("%w: container resource claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
 		}
 		migrationMayOwnNetwork := spec.Security.NetworkMode == containerruntime.NetworkNone &&
-			lifecycleOperation == containerruntime.LifecycleOperationRebuild &&
+			(lifecycleOperation == containerruntime.LifecycleOperationRebuild || lifecycleOperation == containerruntime.LifecycleOperationReconcile) &&
 			(lifecycleState == containerruntime.LifecycleInProgress || lifecycleState == containerruntime.LifecycleFailed)
 		if spec.Security.NetworkMode == containerruntime.NetworkInternal || migrationMayOwnNetwork {
 			claims = append(claims, containerruntime.ManagedResourceClaim{
 				Kind: containerruntime.ResourceKindConversationNetwork, LogicalID: claim.LogicalID,
 				ConversationID: claim.ConversationID,
 			})
+		}
+		migrationMayOwnGateway := spec.EgressGateway == nil &&
+			(lifecycleOperation == containerruntime.LifecycleOperationRebuild || lifecycleOperation == containerruntime.LifecycleOperationReconcile) &&
+			(lifecycleState == containerruntime.LifecycleInProgress || lifecycleState == containerruntime.LifecycleFailed)
+		if spec.EgressGateway != nil || migrationMayOwnGateway {
+			claims = append(claims,
+				containerruntime.ManagedResourceClaim{
+					Kind: containerruntime.ResourceKindEgressGateway, LogicalID: claim.LogicalID,
+					ConversationID: claim.ConversationID,
+				},
+				containerruntime.ManagedResourceClaim{
+					Kind: containerruntime.ResourceKindEgressNetwork, LogicalID: claim.LogicalID,
+					ConversationID: claim.ConversationID,
+				},
+			)
 		}
 		if spec.Workspace.Persistent {
 			expectedName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(claim.LogicalID))

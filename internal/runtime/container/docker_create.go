@@ -18,29 +18,41 @@ import (
 )
 
 const (
-	LabelManaged             = "com.cyberstrike.managed"
-	LabelOwner               = "com.cyberstrike.owner"
-	LabelRuntimeID           = "com.cyberstrike.runtime-id"
-	LabelConversationID      = "com.cyberstrike.conversation-id"
-	LabelResourceKind        = "com.cyberstrike.resource-kind"
-	LabelResourceID          = "com.cyberstrike.resource-id"
-	LabelImageDigest         = "com.cyberstrike.image-digest"
-	LabelImagePlatform       = "com.cyberstrike.image-platform"
-	LabelSpecDigest          = "com.cyberstrike.spec-digest"
-	LabelNanoCPUs            = "com.cyberstrike.limit.nano-cpus"
-	LabelMemoryBytes         = "com.cyberstrike.limit.memory-bytes"
-	LabelPIDs                = "com.cyberstrike.limit.pids"
-	LabelNoFileSoft          = "com.cyberstrike.limit.nofile-soft"
-	LabelNoFileHard          = "com.cyberstrike.limit.nofile-hard"
-	LabelWorkspaceBytes      = "com.cyberstrike.limit.workspace-bytes"
-	LabelTmpfsBytes          = "com.cyberstrike.limit.tmpfs-bytes"
-	LabelLogMaxBytes         = "com.cyberstrike.limit.log-max-bytes"
-	LabelLogMaxFiles         = "com.cyberstrike.limit.log-max-files"
-	LabelWorkspacePath       = "com.cyberstrike.workspace-path"
-	LabelWorkspacePersistent = "com.cyberstrike.workspace-persistent"
-	LabelWorkspaceVolume     = "com.cyberstrike.workspace-volume"
-	LabelNetworkMode         = "com.cyberstrike.network-mode"
-	ResourceKindAgent        = "agent-runtime"
+	LabelManaged               = "com.cyberstrike.managed"
+	LabelOwner                 = "com.cyberstrike.owner"
+	LabelRuntimeID             = "com.cyberstrike.runtime-id"
+	LabelConversationID        = "com.cyberstrike.conversation-id"
+	LabelResourceKind          = "com.cyberstrike.resource-kind"
+	LabelResourceID            = "com.cyberstrike.resource-id"
+	LabelImageDigest           = "com.cyberstrike.image-digest"
+	LabelImagePlatform         = "com.cyberstrike.image-platform"
+	LabelSpecDigest            = "com.cyberstrike.spec-digest"
+	LabelNanoCPUs              = "com.cyberstrike.limit.nano-cpus"
+	LabelMemoryBytes           = "com.cyberstrike.limit.memory-bytes"
+	LabelPIDs                  = "com.cyberstrike.limit.pids"
+	LabelNoFileSoft            = "com.cyberstrike.limit.nofile-soft"
+	LabelNoFileHard            = "com.cyberstrike.limit.nofile-hard"
+	LabelWorkspaceBytes        = "com.cyberstrike.limit.workspace-bytes"
+	LabelTmpfsBytes            = "com.cyberstrike.limit.tmpfs-bytes"
+	LabelLogMaxBytes           = "com.cyberstrike.limit.log-max-bytes"
+	LabelLogMaxFiles           = "com.cyberstrike.limit.log-max-files"
+	LabelWorkspacePath         = "com.cyberstrike.workspace-path"
+	LabelWorkspacePersistent   = "com.cyberstrike.workspace-persistent"
+	LabelWorkspaceVolume       = "com.cyberstrike.workspace-volume"
+	LabelNetworkMode           = "com.cyberstrike.network-mode"
+	LabelEgressGateway         = "com.cyberstrike.egress-gateway"
+	LabelEgressImageRepository = "com.cyberstrike.egress.image-repository"
+	LabelEgressImageDigest     = "com.cyberstrike.egress.image-digest"
+	LabelEgressImagePlatform   = "com.cyberstrike.egress.image-platform"
+	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
+	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
+	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
+	LabelEgressNoFileSoft      = "com.cyberstrike.egress.limit.nofile-soft"
+	LabelEgressNoFileHard      = "com.cyberstrike.egress.limit.nofile-hard"
+	LabelEgressTmpfsBytes      = "com.cyberstrike.egress.limit.tmpfs-bytes"
+	LabelEgressLogMaxBytes     = "com.cyberstrike.egress.limit.log-max-bytes"
+	LabelEgressLogMaxFiles     = "com.cyberstrike.egress.limit.log-max-files"
+	ResourceKindAgent          = "agent-runtime"
 
 	defaultDockerOperationTimeout = 30 * time.Second
 	rollbackTimeout               = 10 * time.Second
@@ -182,19 +194,46 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if _, err := m.InspectLocalImage(ctx, spec.Image); err != nil {
 		return Runtime{}, err
 	}
+	if spec.EgressGateway != nil {
+		gatewayPlatform, gatewayPlatformErr := parsePlatform(spec.EgressGateway.Image.Platform)
+		if gatewayPlatformErr != nil {
+			return Runtime{}, gatewayPlatformErr
+		}
+		if engine.OperatingSys != gatewayPlatform[0] || engine.Architecture != gatewayPlatform[1] {
+			return Runtime{}, fmt.Errorf("%w: engine %s/%s cannot create egress gateway %s", ErrArchitectureMismatch, engine.OperatingSys, engine.Architecture, spec.EgressGateway.Image.Platform)
+		}
+		if _, err := m.InspectLocalImage(ctx, spec.EgressGateway.Image); err != nil {
+			return Runtime{}, err
+		}
+	}
 	networkCreated := false
 	var conversationNetwork ManagedResource
 	if spec.Security.NetworkMode == NetworkInternal {
 		conversationNetwork, networkCreated, err = m.ensureOwnedConversationNetwork(ctx, spec)
 		if err != nil {
-			return Runtime{}, m.rollbackCreatedResources(networkCreated, false, spec, err)
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, false, false, "", spec, err)
+		}
+	}
+	egressNetworkCreated := false
+	var egressNetwork ManagedResource
+	if spec.EgressGateway != nil {
+		egressNetwork, egressNetworkCreated, err = m.ensureOwnedEgressNetwork(ctx, spec)
+		if err != nil {
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, false, "", spec, err)
 		}
 	}
 	workspaceCreated := false
 	if spec.Workspace.Persistent {
 		workspaceCreated, err = m.ensureOwnedWorkspaceVolume(ctx, spec)
 		if err != nil {
-			return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, err)
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, "", spec, err)
+		}
+	}
+	gatewayID := ""
+	if spec.EgressGateway != nil {
+		gatewayID, err = m.createEgressGateway(ctx, spec, conversationNetwork, egressNetwork)
+		if err != nil {
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, err)
 		}
 	}
 
@@ -222,10 +261,10 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
 			conflictErr := fmt.Errorf("%w: %s", ErrAlreadyExists, name)
-			return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, conflictErr)
+			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, conflictErr)
 		}
 		createErr := fmt.Errorf("create runtime %s: %w", spec.ID, err)
-		return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, createErr)
+		return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, createErr)
 	}
 
 	runtime, verifyErr := m.verifyCreatedRuntime(ctx, spec, name, labels, createResult)
@@ -238,7 +277,7 @@ func (m *DockerManager) Create(ctx context.Context, spec RuntimeSpec) (Runtime, 
 	if cleanupErr != nil {
 		return Runtime{}, errors.Join(verifyErr, fmt.Errorf("rollback created runtime %s: %w", createResult.ID, cleanupErr))
 	}
-	return Runtime{}, m.rollbackCreatedResources(networkCreated, workspaceCreated, spec, verifyErr)
+	return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, verifyErr)
 }
 
 func (m *DockerManager) ensureOwnedConversationNetwork(ctx context.Context, spec RuntimeSpec) (ManagedResource, bool, error) {
@@ -371,15 +410,21 @@ func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual string) bool {
 	if actual == RuntimeSpecDigest(spec) {
 		return true
 	}
-	if spec.Security.NetworkMode != NetworkInternal {
-		return false
-	}
 	// Docker volume labels are immutable. A persistent workspace created before
-	// stage 4 retains the digest of the otherwise-identical none-network spec
-	// after its container is explicitly migrated to an internal network.
+	// stage 4 retains the digest of an otherwise-identical pre-network or
+	// pre-gateway spec after an explicit controlled topology migration.
 	legacy := spec
-	legacy.Security.NetworkMode = NetworkNone
-	return actual == RuntimeSpecDigest(legacy)
+	if legacy.EgressGateway != nil {
+		legacy.EgressGateway = nil
+		if actual == RuntimeSpecDigest(legacy) {
+			return true
+		}
+	}
+	if legacy.Security.NetworkMode == NetworkInternal {
+		legacy.Security.NetworkMode = NetworkNone
+		return actual == RuntimeSpecDigest(legacy)
+	}
+	return false
 }
 
 func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpec, cause error) error {
@@ -394,15 +439,29 @@ func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpe
 	return cause
 }
 
-func (m *DockerManager) rollbackCreatedResources(networkCreated, workspaceCreated bool, spec RuntimeSpec, cause error) error {
-	cause = m.rollbackNewWorkspaceVolume(workspaceCreated, spec, cause)
-	if !networkCreated || spec.Security.NetworkMode != NetworkInternal || m.networkAPI == nil {
-		return cause
+func (m *DockerManager) rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated bool, gatewayID string, spec RuntimeSpec, cause error) error {
+	if strings.TrimSpace(gatewayID) != "" {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		_, err := m.api.ContainerRemove(cleanupCtx, gatewayID, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: false})
+		cancel()
+		if err != nil && !containerderrdefs.IsNotFound(err) {
+			cause = errors.Join(cause, fmt.Errorf("rollback egress gateway %s: %w", gatewayID, err))
+		}
 	}
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
-	defer cancel()
-	if err := m.deleteOwnedConversationNetwork(cleanupCtx, spec, RuntimeSpecDigest(spec)); err != nil && !errors.Is(err, ErrNotFound) {
-		return errors.Join(cause, fmt.Errorf("rollback conversation network %s: %w", ConversationNetworkName(spec.ID), err))
+	cause = m.rollbackNewWorkspaceVolume(workspaceCreated, spec, cause)
+	if egressNetworkCreated && spec.EgressGateway != nil && m.networkAPI != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		if err := m.deleteOwnedEgressNetwork(cleanupCtx, spec, RuntimeSpecDigest(spec)); err != nil && !errors.Is(err, ErrNotFound) {
+			cause = errors.Join(cause, fmt.Errorf("rollback egress network %s: %w", EgressNetworkName(spec.ID), err))
+		}
+		cancel()
+	}
+	if networkCreated && spec.Security.NetworkMode == NetworkInternal && m.networkAPI != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
+		if err := m.deleteOwnedConversationNetwork(cleanupCtx, spec, RuntimeSpecDigest(spec)); err != nil && !errors.Is(err, ErrNotFound) {
+			cause = errors.Join(cause, fmt.Errorf("rollback conversation network %s: %w", ConversationNetworkName(spec.ID), err))
+		}
+		cancel()
 	}
 	return cause
 }
@@ -654,7 +713,7 @@ func runtimeContainerName(id RuntimeID) string {
 }
 
 func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		LabelManaged:             "true",
 		LabelOwner:               ownerID,
 		LabelRuntimeID:           string(spec.ID),
@@ -677,4 +736,22 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		LabelWorkspaceVolume:     spec.Workspace.VolumeName,
 		LabelNetworkMode:         string(spec.Security.NetworkMode),
 	}
+	if spec.EgressGateway == nil {
+		return labels
+	}
+	gateway := spec.EgressGateway
+	resources := gateway.Resources
+	labels[LabelEgressGateway] = "true"
+	labels[LabelEgressImageRepository] = gateway.Image.Repository
+	labels[LabelEgressImageDigest] = gateway.Image.Digest
+	labels[LabelEgressImagePlatform] = gateway.Image.Platform
+	labels[LabelEgressNanoCPUs] = strconv.FormatInt(resources.NanoCPUs, 10)
+	labels[LabelEgressMemoryBytes] = strconv.FormatInt(resources.MemoryBytes, 10)
+	labels[LabelEgressPIDs] = strconv.FormatInt(resources.PIDs, 10)
+	labels[LabelEgressNoFileSoft] = strconv.FormatUint(resources.NoFileSoft, 10)
+	labels[LabelEgressNoFileHard] = strconv.FormatUint(resources.NoFileHard, 10)
+	labels[LabelEgressTmpfsBytes] = strconv.FormatInt(resources.TmpfsBytes, 10)
+	labels[LabelEgressLogMaxBytes] = strconv.FormatInt(resources.LogMaxBytes, 10)
+	labels[LabelEgressLogMaxFiles] = strconv.Itoa(resources.LogMaxFiles)
+	return labels
 }

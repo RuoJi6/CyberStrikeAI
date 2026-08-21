@@ -236,6 +236,59 @@ func TestContainerLifecycleSpecReplacementIsRestrictedAndAtomic(t *testing.T) {
 	}
 }
 
+func TestContainerLifecycleSpecReplacementAllowsOnlyPinnedGatewayAddition(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("legacy gateway migration", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.Security.NetworkMode = containerruntime.NetworkInternal
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-internal", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	replacement := spec
+	replacement.EgressGateway = databaseGatewaySpec()
+	observed := containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-gateway", Status: containerruntime.StatusStopped,
+		Image: replacement.Image, SpecDigest: containerruntime.RuntimeSpecDigest(replacement),
+	}
+	migrated, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: observed, IncrementGeneration: true, ReplacementSpec: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.Spec.EgressGateway == nil || migrated.Spec.EgressGateway.Image.Digest != replacement.EgressGateway.Image.Digest || migrated.RuntimeGeneration != 2 {
+		t.Fatalf("gateway migration = %#v", migrated)
+	}
+}
+
+func databaseGatewaySpec() *containerruntime.EgressGatewaySpec {
+	return &containerruntime.EgressGatewaySpec{
+		Image: containerruntime.ImageReference{
+			Repository: "ghcr.io/example/cyberstrike-egress",
+			Digest:     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			Platform:   "linux/arm64",
+		},
+		Resources: containerruntime.EgressGatewayResources{
+			NanoCPUs: 250_000_000, MemoryBytes: 128 << 20, PIDs: 64,
+			NoFileSoft: 512, NoFileHard: 1024, TmpfsBytes: 16 << 20,
+			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
+		},
+	}
+}
+
 func TestContainerLifecycleFailurePersistsAppliedNetworkMigration(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()

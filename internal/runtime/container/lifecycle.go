@@ -29,9 +29,8 @@ type LifecycleCompletion struct {
 	Readiness           *ReadinessReport
 	IncrementGeneration bool
 	Drift               string
-	// ReplacementSpec is set only for the controlled legacy none-network to
-	// per-conversation internal-network migration performed by Rebuild or
-	// recovered by Reconcile.
+	// ReplacementSpec is set only for a controlled legacy topology upgrade
+	// performed by Rebuild or recovered by Reconcile.
 	ReplacementSpec *RuntimeSpec
 }
 
@@ -41,7 +40,7 @@ type LifecycleFailure struct {
 	Drift           string
 	ReadinessFailed bool
 	// AppliedRuntime and ReplacementSpec keep the durable specification aligned
-	// when Docker completed the controlled network migration but readiness did
+	// when Docker completed the controlled topology migration but readiness did
 	// not. They must either both be nil or both describe the same runtime.
 	AppliedRuntime  *Runtime
 	ReplacementSpec *RuntimeSpec
@@ -82,17 +81,37 @@ type LifecycleStore interface {
 // LifecycleController coordinates Docker mutations with durable control-plane
 // state. It never accepts a provider/container ID from a handler.
 type LifecycleController struct {
-	manager RuntimeManager
-	checker RuntimeReadinessChecker
-	store   LifecycleStore
+	manager       RuntimeManager
+	checker       RuntimeReadinessChecker
+	store         LifecycleStore
+	egressGateway *EgressGatewaySpec
+}
+
+type LifecycleControllerOptions struct {
+	// EgressGateway is trusted deployment policy used only to upgrade a durable
+	// pre-gateway runtime during an explicit rebuild. New runtime records already
+	// contain the same immutable specification.
+	EgressGateway *EgressGatewaySpec
 }
 
 func NewLifecycleController(manager RuntimeManager, store LifecycleStore) (*LifecycleController, error) {
+	return NewLifecycleControllerWithOptions(manager, store, LifecycleControllerOptions{})
+}
+
+func NewLifecycleControllerWithOptions(manager RuntimeManager, store LifecycleStore, options LifecycleControllerOptions) (*LifecycleController, error) {
 	if manager == nil || store == nil {
 		return nil, invalidSpec("lifecycle controller requires a runtime manager and durable store")
 	}
+	var gateway *EgressGatewaySpec
+	if options.EgressGateway != nil {
+		if err := ValidateEgressGatewaySpec(*options.EgressGateway); err != nil {
+			return nil, err
+		}
+		copy := *options.EgressGateway
+		gateway = &copy
+	}
 	checker, _ := manager.(RuntimeReadinessChecker)
-	return &LifecycleController{manager: manager, checker: checker, store: store}, nil
+	return &LifecycleController{manager: manager, checker: checker, store: store, egressGateway: gateway}, nil
 }
 
 func (c *LifecycleController) Start(ctx context.Context, conversationID string) (InitializationRecord, error) {
@@ -162,9 +181,7 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 		})
 	}
 	target := record
-	if target.Spec.Security.NetworkMode == NetworkNone {
-		target.Spec.Security.NetworkMode = NetworkInternal
-	}
+	target.Spec = c.upgradeRuntimeSpec(target.Spec)
 	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{Spec: target.Spec})
 	if err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
@@ -179,7 +196,7 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 		})
 	}
 	completion := LifecycleCompletion{Runtime: runtime, IncrementGeneration: true}
-	if target.Spec.Security.NetworkMode != record.Spec.Security.NetworkMode {
+	if RuntimeSpecDigest(target.Spec) != RuntimeSpecDigest(record.Spec) {
 		replacement := target.Spec
 		completion.ReplacementSpec = &replacement
 	}
@@ -289,19 +306,16 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		}
 	}
 	if err := validateObservedRuntime(record, runtime); err != nil {
-		// A process can stop after Docker created the upgraded provider but before
+		// A process can stop after Docker created an upgraded provider but before
 		// the lifecycle completion transaction committed. Adopt only the exact
-		// deterministic none -> internal transition; every other mismatch remains
-		// a fail-closed specification drift.
-		if record.Spec.Security.NetworkMode == NetworkNone {
-			target := record
-			target.Spec.Security.NetworkMode = NetworkInternal
-			if validateObservedRuntime(target, runtime) == nil {
-				replacement := target.Spec
-				return c.complete(record, LifecycleOperationReconcile, LifecycleCompletion{
-					Runtime: runtime, Drift: "network_migration_recovered", ReplacementSpec: &replacement,
-				})
-			}
+		// configured topology transition; every other mismatch remains fail-closed.
+		target := record
+		target.Spec = c.upgradeRuntimeSpec(target.Spec)
+		if RuntimeSpecDigest(target.Spec) != RuntimeSpecDigest(record.Spec) && validateObservedRuntime(target, runtime) == nil {
+			replacement := target.Spec
+			return c.complete(record, LifecycleOperationReconcile, LifecycleCompletion{
+				Runtime: runtime, Drift: "topology_migration_recovered", ReplacementSpec: &replacement,
+			})
 		}
 		return c.failObserved(record, "specification_drift", "容器身份或镜像与不可变运行时规格不一致")
 	}
@@ -388,13 +402,24 @@ func validateObservedRuntime(record InitializationRecord, runtime Runtime) error
 
 func lifecycleFailureAfterRebuild(original, target InitializationRecord, runtime Runtime, drift string) LifecycleFailure {
 	failure := LifecycleFailure{RuntimeStatus: runtime.Status, Drift: drift, ReadinessFailed: true}
-	if original.Spec.Security.NetworkMode != target.Spec.Security.NetworkMode {
+	if RuntimeSpecDigest(original.Spec) != RuntimeSpecDigest(target.Spec) {
 		applied := runtime
 		replacement := target.Spec
 		failure.AppliedRuntime = &applied
 		failure.ReplacementSpec = &replacement
 	}
 	return failure
+}
+
+func (c *LifecycleController) upgradeRuntimeSpec(spec RuntimeSpec) RuntimeSpec {
+	if spec.Security.NetworkMode == NetworkNone {
+		spec.Security.NetworkMode = NetworkInternal
+	}
+	if spec.EgressGateway == nil && c != nil && c.egressGateway != nil {
+		gateway := *c.egressGateway
+		spec.EgressGateway = &gateway
+	}
+	return spec
 }
 
 func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record InitializationRecord, allowMissing bool) (bool, error) {

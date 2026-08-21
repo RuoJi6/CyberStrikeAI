@@ -1053,30 +1053,41 @@ type AgentConfig struct {
 // ContainerRuntimeConfig is disabled unless explicitly enabled. Image identity
 // is immutable and resource values are control-plane policy, not request data.
 type ContainerRuntimeConfig struct {
-	Enabled              bool                           `yaml:"enabled" json:"enabled"`
-	OwnerID              string                         `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
-	ImageRepository      string                         `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
-	ImageDigest          string                         `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
-	ImagePlatform        string                         `yaml:"image_platform,omitempty" json:"image_platform,omitempty"`
-	InitializerWorkers   int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
-	QueueCapacity        int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
-	CreateTimeoutSeconds int                            `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
-	IdleStopSeconds      int                            `yaml:"idle_stop_seconds,omitempty" json:"idle_stop_seconds,omitempty"`
-	IdleScanSeconds      int                            `yaml:"idle_scan_seconds,omitempty" json:"idle_scan_seconds,omitempty"`
-	NanoCPUs             int64                          `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
-	MemoryBytes          int64                          `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
-	PIDs                 int64                          `yaml:"pids,omitempty" json:"pids,omitempty"`
-	NoFileSoft           uint64                         `yaml:"nofile_soft,omitempty" json:"nofile_soft,omitempty"`
-	NoFileHard           uint64                         `yaml:"nofile_hard,omitempty" json:"nofile_hard,omitempty"`
-	WorkspaceBytes       int64                          `yaml:"workspace_bytes,omitempty" json:"workspace_bytes,omitempty"`
-	TmpfsBytes           int64                          `yaml:"tmpfs_bytes,omitempty" json:"tmpfs_bytes,omitempty"`
-	MaxConcurrentExec    int                            `yaml:"max_concurrent_exec,omitempty" json:"max_concurrent_exec,omitempty"`
-	MaxQueuedExec        int                            `yaml:"max_queued_exec,omitempty" json:"max_queued_exec,omitempty"`
-	LogMaxBytes          int64                          `yaml:"log_max_bytes,omitempty" json:"log_max_bytes,omitempty"`
-	LogMaxFiles          int                            `yaml:"log_max_files,omitempty" json:"log_max_files,omitempty"`
-	ToolInventoryPath    string                         `yaml:"tool_inventory_path,omitempty" json:"tool_inventory_path,omitempty"`
-	ToolInventoryDigest  string                         `yaml:"tool_inventory_digest,omitempty" json:"tool_inventory_digest,omitempty"`
-	ToolInventory        containerruntime.ToolInventory `yaml:"-" json:"-"`
+	Enabled               bool                           `yaml:"enabled" json:"enabled"`
+	OwnerID               string                         `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
+	ImageRepository       string                         `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
+	ImageDigest           string                         `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
+	ImagePlatform         string                         `yaml:"image_platform,omitempty" json:"image_platform,omitempty"`
+	EgressImageRepository string                         `yaml:"egress_image_repository,omitempty" json:"egress_image_repository,omitempty"`
+	EgressImageDigest     string                         `yaml:"egress_image_digest,omitempty" json:"egress_image_digest,omitempty"`
+	EgressImagePlatform   string                         `yaml:"egress_image_platform,omitempty" json:"egress_image_platform,omitempty"`
+	InitializerWorkers    int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
+	QueueCapacity         int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
+	CreateTimeoutSeconds  int                            `yaml:"create_timeout_seconds,omitempty" json:"create_timeout_seconds,omitempty"`
+	IdleStopSeconds       int                            `yaml:"idle_stop_seconds,omitempty" json:"idle_stop_seconds,omitempty"`
+	IdleScanSeconds       int                            `yaml:"idle_scan_seconds,omitempty" json:"idle_scan_seconds,omitempty"`
+	NanoCPUs              int64                          `yaml:"nano_cpus,omitempty" json:"nano_cpus,omitempty"`
+	MemoryBytes           int64                          `yaml:"memory_bytes,omitempty" json:"memory_bytes,omitempty"`
+	PIDs                  int64                          `yaml:"pids,omitempty" json:"pids,omitempty"`
+	NoFileSoft            uint64                         `yaml:"nofile_soft,omitempty" json:"nofile_soft,omitempty"`
+	NoFileHard            uint64                         `yaml:"nofile_hard,omitempty" json:"nofile_hard,omitempty"`
+	WorkspaceBytes        int64                          `yaml:"workspace_bytes,omitempty" json:"workspace_bytes,omitempty"`
+	TmpfsBytes            int64                          `yaml:"tmpfs_bytes,omitempty" json:"tmpfs_bytes,omitempty"`
+	MaxConcurrentExec     int                            `yaml:"max_concurrent_exec,omitempty" json:"max_concurrent_exec,omitempty"`
+	MaxQueuedExec         int                            `yaml:"max_queued_exec,omitempty" json:"max_queued_exec,omitempty"`
+	LogMaxBytes           int64                          `yaml:"log_max_bytes,omitempty" json:"log_max_bytes,omitempty"`
+	LogMaxFiles           int                            `yaml:"log_max_files,omitempty" json:"log_max_files,omitempty"`
+	EgressNanoCPUs        int64                          `yaml:"egress_nano_cpus,omitempty" json:"egress_nano_cpus,omitempty"`
+	EgressMemoryBytes     int64                          `yaml:"egress_memory_bytes,omitempty" json:"egress_memory_bytes,omitempty"`
+	EgressPIDs            int64                          `yaml:"egress_pids,omitempty" json:"egress_pids,omitempty"`
+	EgressNoFileSoft      uint64                         `yaml:"egress_nofile_soft,omitempty" json:"egress_nofile_soft,omitempty"`
+	EgressNoFileHard      uint64                         `yaml:"egress_nofile_hard,omitempty" json:"egress_nofile_hard,omitempty"`
+	EgressTmpfsBytes      int64                          `yaml:"egress_tmpfs_bytes,omitempty" json:"egress_tmpfs_bytes,omitempty"`
+	EgressLogMaxBytes     int64                          `yaml:"egress_log_max_bytes,omitempty" json:"egress_log_max_bytes,omitempty"`
+	EgressLogMaxFiles     int                            `yaml:"egress_log_max_files,omitempty" json:"egress_log_max_files,omitempty"`
+	ToolInventoryPath     string                         `yaml:"tool_inventory_path,omitempty" json:"tool_inventory_path,omitempty"`
+	ToolInventoryDigest   string                         `yaml:"tool_inventory_digest,omitempty" json:"tool_inventory_digest,omitempty"`
+	ToolInventory         containerruntime.ToolInventory `yaml:"-" json:"-"`
 }
 
 func (c *ContainerRuntimeConfig) applyDefaults() {
@@ -1128,6 +1139,30 @@ func (c *ContainerRuntimeConfig) applyDefaults() {
 	if c.LogMaxFiles == 0 {
 		c.LogMaxFiles = 3
 	}
+	if c.EgressNanoCPUs == 0 {
+		c.EgressNanoCPUs = 250_000_000
+	}
+	if c.EgressMemoryBytes == 0 {
+		c.EgressMemoryBytes = 128 << 20
+	}
+	if c.EgressPIDs == 0 {
+		c.EgressPIDs = 64
+	}
+	if c.EgressNoFileSoft == 0 {
+		c.EgressNoFileSoft = 512
+	}
+	if c.EgressNoFileHard == 0 {
+		c.EgressNoFileHard = 1024
+	}
+	if c.EgressTmpfsBytes == 0 {
+		c.EgressTmpfsBytes = 16 << 20
+	}
+	if c.EgressLogMaxBytes == 0 {
+		c.EgressLogMaxBytes = 2 << 20
+	}
+	if c.EgressLogMaxFiles == 0 {
+		c.EgressLogMaxFiles = 2
+	}
 }
 
 func (c ContainerRuntimeConfig) validateEnabled() error {
@@ -1139,6 +1174,9 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	}
 	if strings.TrimSpace(c.ImageRepository) == "" || strings.TrimSpace(c.ImageDigest) == "" || strings.TrimSpace(c.ImagePlatform) == "" {
 		return fmt.Errorf("container image_repository, image_digest and image_platform are required when enabled")
+	}
+	if strings.TrimSpace(c.EgressImageRepository) == "" || strings.TrimSpace(c.EgressImageDigest) == "" || strings.TrimSpace(c.EgressImagePlatform) == "" {
+		return fmt.Errorf("container egress_image_repository, egress_image_digest and egress_image_platform are required when enabled")
 	}
 	if strings.TrimSpace(c.ToolInventoryPath) == "" || strings.TrimSpace(c.ToolInventoryDigest) == "" {
 		return fmt.Errorf("container tool_inventory_path and tool_inventory_digest are required when enabled")
@@ -1172,6 +1210,18 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 			Enabled:         true,
 			InventoryDigest: strings.TrimSpace(c.ToolInventoryDigest),
 			Inventory:       c.ToolInventory,
+		},
+		EgressGateway: &containerruntime.EgressGatewaySpec{
+			Image: containerruntime.ImageReference{
+				Repository: strings.TrimSpace(c.EgressImageRepository),
+				Digest:     strings.TrimSpace(c.EgressImageDigest),
+				Platform:   strings.TrimSpace(c.EgressImagePlatform),
+			},
+			Resources: containerruntime.EgressGatewayResources{
+				NanoCPUs: c.EgressNanoCPUs, MemoryBytes: c.EgressMemoryBytes, PIDs: c.EgressPIDs,
+				NoFileSoft: c.EgressNoFileSoft, NoFileHard: c.EgressNoFileHard,
+				TmpfsBytes: c.EgressTmpfsBytes, LogMaxBytes: c.EgressLogMaxBytes, LogMaxFiles: c.EgressLogMaxFiles,
+			},
 		},
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
@@ -2048,6 +2098,9 @@ func Default() *Config {
 			NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
 			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30, TmpfsBytes: 64 << 20,
 			MaxConcurrentExec: 2, MaxQueuedExec: 8, LogMaxBytes: 10 << 20, LogMaxFiles: 3,
+			EgressNanoCPUs: 250_000_000, EgressMemoryBytes: 128 << 20, EgressPIDs: 64,
+			EgressNoFileSoft: 512, EgressNoFileHard: 1024, EgressTmpfsBytes: 16 << 20,
+			EgressLogMaxBytes: 2 << 20, EgressLogMaxFiles: 2,
 		},
 		Security: SecurityConfig{
 			Tools:    []ToolConfig{}, // 工具配置应该从 config.yaml 或 tools/ 目录加载

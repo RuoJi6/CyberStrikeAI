@@ -73,6 +73,33 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if err := ValidateReadinessPolicy(spec.Readiness, spec.Image); err != nil {
 		return err
 	}
+	if spec.EgressGateway != nil {
+		if spec.Security.NetworkMode != NetworkInternal {
+			return invalidSpec("egress gateway requires the per-conversation internal network")
+		}
+		if err := ValidateEgressGatewaySpec(*spec.EgressGateway); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateEgressGatewaySpec rejects an unpinned or effectively unlimited
+// gateway before any Docker resource is created.
+func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
+	if err := ValidateImageReference(spec.Image); err != nil {
+		return fmt.Errorf("egress gateway: %w", err)
+	}
+	resources := spec.Resources
+	if resources.NanoCPUs <= 0 || resources.MemoryBytes <= 0 || resources.PIDs <= 0 {
+		return invalidSpec("egress gateway cpu, memory and pid limits must be positive")
+	}
+	if resources.NoFileSoft == 0 || resources.NoFileHard == 0 || resources.NoFileSoft > resources.NoFileHard || resources.NoFileHard > math.MaxInt64 {
+		return invalidSpec("egress gateway nofile limits must be positive, ordered and within engine range")
+	}
+	if resources.TmpfsBytes <= 0 || resources.LogMaxBytes <= 0 || resources.LogMaxFiles <= 0 {
+		return invalidSpec("egress gateway tmpfs and log rotation limits must be positive")
+	}
 	return nil
 }
 

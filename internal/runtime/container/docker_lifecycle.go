@@ -93,7 +93,26 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 	if runtime.Status != StatusStopped {
 		return Runtime{}, fmt.Errorf("%w: cannot start runtime %s in %s", ErrRuntimeStateConflict, id, runtime.Status)
 	}
+	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime)
+	if err != nil {
+		return Runtime{}, err
+	}
+	if spec.EgressGateway != nil {
+		if _, err := m.api.ContainerStart(operationCtx, gateway.ID, mobyclient.ContainerStartOptions{}); err != nil {
+			if containerderrdefs.IsNotFound(err) {
+				return Runtime{}, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id)
+			}
+			return Runtime{}, fmt.Errorf("start egress gateway for runtime %s: %w", id, err)
+		}
+	}
 	if _, err := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{}); err != nil {
+		if spec.EgressGateway != nil {
+			seconds := int(defaultRuntimeStopTimeout / time.Second)
+			_, rollbackErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+			if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
+				err = errors.Join(err, fmt.Errorf("rollback egress gateway start: %w", rollbackErr))
+			}
+		}
 		if containerderrdefs.IsNotFound(err) {
 			return Runtime{}, fmt.Errorf("%w: runtime %s", ErrNotFound, id)
 		}
@@ -135,12 +154,28 @@ func (m *DockerManager) Stop(ctx context.Context, id RuntimeID, options StopOpti
 	if runtime.Status != StatusRunning && runtime.Status != StatusStarting {
 		return Runtime{}, fmt.Errorf("%w: cannot stop runtime %s in %s", ErrRuntimeStateConflict, id, runtime.Status)
 	}
+	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime)
+	if err != nil {
+		return Runtime{}, err
+	}
 	seconds := int((timeout + time.Second - 1) / time.Second)
 	if _, err := m.api.ContainerStop(operationCtx, runtime.ProviderID, mobyclient.ContainerStopOptions{Timeout: &seconds}); err != nil {
 		if containerderrdefs.IsNotFound(err) {
 			return Runtime{}, fmt.Errorf("%w: runtime %s", ErrNotFound, id)
 		}
 		return Runtime{}, fmt.Errorf("stop runtime %s: %w", id, err)
+	}
+	if spec.EgressGateway != nil {
+		if _, err := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds}); err != nil {
+			_, rollbackErr := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{})
+			if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
+				err = errors.Join(err, fmt.Errorf("rollback agent stop: %w", rollbackErr))
+			}
+			if containerderrdefs.IsNotFound(err) {
+				return Runtime{}, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id)
+			}
+			return Runtime{}, fmt.Errorf("stop egress gateway for runtime %s: %w", id, err)
+		}
 	}
 	stopped, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
@@ -150,6 +185,25 @@ func (m *DockerManager) Stop(ctx context.Context, id RuntimeID, options StopOpti
 		return Runtime{}, fmt.Errorf("%w: runtime %s did not enter stopped state", ErrRuntimeStateConflict, id)
 	}
 	return stopped, nil
+}
+
+func (m *DockerManager) inspectRuntimeTopology(ctx context.Context, runtime Runtime) (RuntimeSpec, mobycontainer.InspectResponse, error) {
+	result, err := m.api.ContainerInspect(ctx, runtime.ProviderID, mobyclient.ContainerInspectOptions{Size: false})
+	if err != nil {
+		return RuntimeSpec{}, mobycontainer.InspectResponse{}, fmt.Errorf("inspect runtime topology %s: %w", runtime.ID, err)
+	}
+	if result.Container.Config == nil {
+		return RuntimeSpec{}, mobycontainer.InspectResponse{}, fmt.Errorf("%w: runtime topology labels are missing", ErrRuntimeStateConflict)
+	}
+	spec, err := runtimeSecuritySpecFromLabels(result.Container.Config.Labels)
+	if err != nil {
+		return RuntimeSpec{}, mobycontainer.InspectResponse{}, fmt.Errorf("%w: runtime topology labels are invalid", ErrRuntimeStateConflict)
+	}
+	if spec.EgressGateway == nil {
+		return spec, mobycontainer.InspectResponse{}, nil
+	}
+	gateway, err := m.inspectOwnedEgressGateway(ctx, spec, &result.Container, runtime.Status)
+	return spec, gateway, err
 }
 
 func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options RebuildOptions) (Runtime, error) {
@@ -177,11 +231,68 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 		if contextErr != nil {
 			return Runtime{}, contextErr
 		}
+		inspection, inspectErr := m.api.ContainerInspect(operationCtx, current.ProviderID, mobyclient.ContainerInspectOptions{Size: false})
+		if inspectErr != nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("inspect stopped runtime %s for rebuild: %w", id, inspectErr)
+		}
+		if inspection.Container.Config == nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("%w: stopped runtime %s topology labels are missing", ErrRuntimeStateConflict, id)
+		}
+		currentSpec, specErr := runtimeSecuritySpecFromLabels(inspection.Container.Config.Labels)
+		if specErr != nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("%w: runtime %s topology labels are invalid", ErrRuntimeStateConflict, id)
+		}
+		var gateway mobycontainer.InspectResponse
+		if currentSpec.EgressGateway != nil {
+			gateway, specErr = m.inspectOwnedEgressGateway(operationCtx, currentSpec, &inspection.Container, StatusStopped)
+			if specErr != nil {
+				cancel()
+				return Runtime{}, specErr
+			}
+		}
 		_, removeErr := m.api.ContainerRemove(operationCtx, current.ProviderID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false})
-		cancel()
 		if removeErr != nil && !containerderrdefs.IsNotFound(removeErr) {
+			cancel()
 			return Runtime{}, fmt.Errorf("remove stopped runtime %s for rebuild: %w", id, removeErr)
 		}
+		if currentSpec.EgressGateway != nil {
+			if _, gatewayRemoveErr := m.api.ContainerRemove(operationCtx, gateway.ID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false}); gatewayRemoveErr != nil && !containerderrdefs.IsNotFound(gatewayRemoveErr) {
+				cancel()
+				return Runtime{}, fmt.Errorf("remove stopped egress gateway %s for rebuild: %w", id, gatewayRemoveErr)
+			}
+			if networkErr := m.deleteOwnedEgressNetwork(operationCtx, currentSpec, inspection.Container.Config.Labels[LabelSpecDigest]); networkErr != nil && !errors.Is(networkErr, ErrNotFound) {
+				cancel()
+				return Runtime{}, fmt.Errorf("remove egress network %s for rebuild: %w", id, networkErr)
+			}
+		}
+		if currentSpec.Security.NetworkMode == NetworkInternal {
+			if networkErr := m.deleteOwnedConversationNetwork(operationCtx, currentSpec, inspection.Container.Config.Labels[LabelSpecDigest]); networkErr != nil && !errors.Is(networkErr, ErrNotFound) {
+				cancel()
+				return Runtime{}, fmt.Errorf("remove conversation network %s for rebuild: %w", id, networkErr)
+			}
+		}
+		cancel()
+	} else {
+		operationCtx, cancel, contextErr := m.operationContext(ctx)
+		if contextErr != nil {
+			return Runtime{}, contextErr
+		}
+		if _, cleanupErr := m.deleteOwnedEgressGatewayByRuntimeID(operationCtx, id); cleanupErr != nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("recover egress gateway before rebuild %s: %w", id, cleanupErr)
+		}
+		if _, cleanupErr := m.deleteOwnedEgressNetworkByRuntimeID(operationCtx, id); cleanupErr != nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("recover egress network before rebuild %s: %w", id, cleanupErr)
+		}
+		if _, cleanupErr := m.deleteOwnedConversationNetworkByRuntimeID(operationCtx, id); cleanupErr != nil {
+			cancel()
+			return Runtime{}, fmt.Errorf("recover conversation network before rebuild %s: %w", id, cleanupErr)
+		}
+		cancel()
 	}
 	if options.RemoveWorkspace && options.Spec.Workspace.Persistent {
 		operationCtx, cancel, contextErr := m.operationContext(ctx)
@@ -213,6 +324,14 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 	runtime, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
+			removedGateway, gatewayErr := m.deleteOwnedEgressGatewayByRuntimeID(operationCtx, id)
+			if gatewayErr != nil {
+				return gatewayErr
+			}
+			removedEgressNetwork, egressNetworkErr := m.deleteOwnedEgressNetworkByRuntimeID(operationCtx, id)
+			if egressNetworkErr != nil {
+				return egressNetworkErr
+			}
 			removedNetwork, networkErr := m.deleteOwnedConversationNetworkByRuntimeID(operationCtx, id)
 			if networkErr != nil {
 				return networkErr
@@ -224,7 +343,7 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 					return err
 				}
 			}
-			if removedNetwork || removedWorkspace {
+			if removedGateway || removedEgressNetwork || removedNetwork || removedWorkspace {
 				return nil
 			}
 		}
@@ -250,6 +369,18 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 			return fmt.Errorf("%w: runtime %s", ErrNotFound, id)
 		}
 		return fmt.Errorf("delete runtime %s: %w", id, err)
+	}
+	if securitySpec.EgressGateway != nil {
+		gateway, gatewayErr := m.inspectOwnedEgressGateway(operationCtx, securitySpec, &inspection.Container, StatusStopped)
+		if gatewayErr != nil {
+			return fmt.Errorf("inspect runtime %s egress gateway before deletion: %w", id, gatewayErr)
+		}
+		if _, gatewayErr = m.api.ContainerRemove(operationCtx, gateway.ID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false}); gatewayErr != nil && !containerderrdefs.IsNotFound(gatewayErr) {
+			return fmt.Errorf("delete runtime %s egress gateway: %w", id, gatewayErr)
+		}
+		if err := m.deleteOwnedEgressNetwork(operationCtx, securitySpec, inspection.Container.Config.Labels[LabelSpecDigest]); err != nil && !errors.Is(err, ErrNotFound) {
+			return fmt.Errorf("delete runtime %s egress network: %w", id, err)
+		}
 	}
 	if securitySpec.Security.NetworkMode == NetworkInternal {
 		if err := m.deleteOwnedConversationNetwork(operationCtx, securitySpec, inspection.Container.Config.Labels[LabelSpecDigest]); err != nil && !errors.Is(err, ErrNotFound) {
@@ -287,6 +418,102 @@ func (m *DockerManager) deleteOwnedConversationNetwork(ctx context.Context, spec
 		return err
 	}
 	return nil
+}
+
+func (m *DockerManager) deleteOwnedEgressNetwork(ctx context.Context, spec RuntimeSpec, expectedSpecDigest string) error {
+	if m.networkAPI == nil {
+		return fmt.Errorf("%w: engine client does not support egress networks", ErrEngineUnavailable)
+	}
+	name := EgressNetworkName(spec.ID)
+	result, err := m.networkAPI.NetworkInspect(ctx, name, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: egress network %s", ErrNotFound, name)
+		}
+		return fmt.Errorf("inspect egress network %s: %w", name, err)
+	}
+	resource, err := m.verifyEgressNetwork(spec, expectedSpecDigest, result.Network, result.Network.ID, true)
+	if err != nil {
+		return err
+	}
+	if _, err := m.networkAPI.NetworkRemove(ctx, resource.ProviderID, mobyclient.NetworkRemoveOptions{}); err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return fmt.Errorf("%w: egress network %s", ErrNotFound, name)
+		}
+		return err
+	}
+	return nil
+}
+
+func (m *DockerManager) deleteOwnedEgressGatewayByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
+	result, err := m.api.ContainerInspect(ctx, EgressGatewayContainerName(id), mobyclient.ContainerInspectOptions{Size: false})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect egress gateway %s: %w", id, err)
+	}
+	actual := result.Container
+	if actual.Config == nil || actual.State == nil || strings.TrimSpace(actual.ID) == "" {
+		return false, fmt.Errorf("%w: egress gateway inspection is incomplete", ErrRuntimeStateConflict)
+	}
+	labels := actual.Config.Labels
+	if labels[LabelRuntimeID] != string(id) || labels[LabelNetworkMode] != gatewayNetworkModeLabel || !sha256DigestPattern.MatchString(labels[LabelSpecDigest]) {
+		return false, fmt.Errorf("%w: egress gateway runtime labels mismatch", ErrRuntimeStateConflict)
+	}
+	spec := RuntimeSpec{ID: id, ConversationID: strings.TrimSpace(labels[LabelConversationID])}
+	expected := egressGatewayManagedResource(spec, actual.ID)
+	observed, observeErr := m.resourceFromLabels(ResourceKindEgressGateway, actual.ID, strings.TrimPrefix(actual.Name, "/"), labels, gatewayCreatedAt(actual))
+	if observeErr != nil || !sameManagedResource(expected, observed) {
+		return false, fmt.Errorf("%w: egress gateway ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if actual.State.Running {
+		seconds := int(defaultRuntimeStopTimeout / time.Second)
+		if _, err := m.api.ContainerStop(ctx, actual.ID, mobyclient.ContainerStopOptions{Timeout: &seconds}); err != nil && !containerderrdefs.IsNotFound(err) {
+			return false, fmt.Errorf("stop egress gateway %s: %w", id, err)
+		}
+	}
+	if _, err := m.api.ContainerRemove(ctx, actual.ID, mobyclient.ContainerRemoveOptions{Force: false, RemoveVolumes: false}); err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *DockerManager) deleteOwnedEgressNetworkByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
+	if m.networkAPI == nil {
+		return false, nil
+	}
+	name := EgressNetworkName(id)
+	result, err := m.networkAPI.NetworkInspect(ctx, name, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect egress network %s: %w", name, err)
+	}
+	labels := result.Network.Labels
+	if labels[LabelRuntimeID] != string(id) || labels[LabelNetworkMode] != egressNetworkModeLabel || !sha256DigestPattern.MatchString(labels[LabelSpecDigest]) {
+		return false, fmt.Errorf("%w: egress network runtime labels mismatch", ErrRuntimeStateConflict)
+	}
+	spec := RuntimeSpec{ID: id, ConversationID: strings.TrimSpace(labels[LabelConversationID])}
+	expected := egressNetworkManagedResource(spec, result.Network.ID)
+	observed, observeErr := m.resourceFromLabels(ResourceKindEgressNetwork, result.Network.ID, result.Network.Name, labels, result.Network.Created.UTC())
+	if observeErr != nil || !sameManagedResource(expected, observed) {
+		return false, fmt.Errorf("%w: egress network ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if result.Network.Driver != "bridge" || result.Network.Scope != "local" || result.Network.Internal || !result.Network.EnableIPv4 || result.Network.EnableIPv6 || result.Network.Attachable || result.Network.Ingress || result.Network.ConfigOnly || len(result.Network.Containers) != 0 || len(result.Network.Services) != 0 {
+		return false, fmt.Errorf("%w: egress network is unsafe to delete", ErrRuntimeStateConflict)
+	}
+	if _, err := m.networkAPI.NetworkRemove(ctx, result.Network.ID, mobyclient.NetworkRemoveOptions{}); err != nil {
+		if containerderrdefs.IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 func (m *DockerManager) deleteOwnedConversationNetworkByRuntimeID(ctx context.Context, id RuntimeID) (bool, error) {
@@ -418,6 +645,15 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 		return Runtime{}, fmt.Errorf("%w: runtime %s creation time is invalid", ErrRuntimeStateConflict, expectedID)
 	}
 	status, warnings := observedRuntimeStatus(actual.State)
+	securitySpec, err := runtimeSecuritySpecFromLabels(labels)
+	if err != nil {
+		return Runtime{}, fmt.Errorf("%w: runtime %s egress labels are invalid", ErrRuntimeStateConflict, expectedID)
+	}
+	if securitySpec.EgressGateway != nil {
+		if _, err := m.inspectOwnedEgressGateway(ctx, securitySpec, &actual, status); err != nil {
+			return Runtime{}, err
+		}
+	}
 	updatedAt := latestRuntimeTimestamp(createdAt, actual.State.StartedAt, actual.State.FinishedAt)
 	return Runtime{
 		ID:             expectedID,
@@ -518,7 +754,11 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 	if _, err := m.verifyConversationNetwork(spec, actual.Config.Labels[LabelSpecDigest], result.Network, endpoint.NetworkID, false); err != nil {
 		return err
 	}
-	if len(result.Network.Services) != 0 || len(result.Network.Containers) > 1 {
+	expectedAttachments := 1
+	if spec.EgressGateway != nil {
+		expectedAttachments = 2
+	}
+	if len(result.Network.Services) != 0 || len(result.Network.Containers) > expectedAttachments {
 		return fmt.Errorf("%w: conversation network has unexpected attached workloads", ErrRuntimeStateConflict)
 	}
 	if len(result.Network.Containers) == 0 {
@@ -527,9 +767,26 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 		}
 		return nil
 	}
+	if actual.State == nil || !actual.State.Running || len(result.Network.Containers) != expectedAttachments {
+		return fmt.Errorf("%w: conversation network active attachment count mismatch", ErrRuntimeStateConflict)
+	}
 	attached, ok := result.Network.Containers[actual.ID]
 	if !ok || (strings.TrimSpace(attached.Name) != "" && strings.TrimSpace(attached.Name) != strings.TrimPrefix(actual.Name, "/")) {
 		return fmt.Errorf("%w: conversation network attachment identity mismatch", ErrRuntimeStateConflict)
+	}
+	if spec.EgressGateway != nil {
+		foundGateway := false
+		for providerID, candidate := range result.Network.Containers {
+			if providerID == actual.ID {
+				continue
+			}
+			if strings.TrimSpace(candidate.Name) == EgressGatewayContainerName(spec.ID) {
+				foundGateway = true
+			}
+		}
+		if !foundGateway {
+			return fmt.Errorf("%w: conversation network gateway attachment identity mismatch", ErrRuntimeStateConflict)
+		}
 	}
 	return nil
 }
@@ -610,6 +867,10 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 	if networkMode != NetworkNone && networkMode != NetworkInternal {
 		return RuntimeSpec{}, errors.New("invalid network mode label")
 	}
+	gateway, err := egressGatewaySpecFromAgentLabels(labels)
+	if err != nil {
+		return RuntimeSpec{}, err
+	}
 	return RuntimeSpec{
 		ID: runtimeID, ConversationID: conversationID,
 		Resources: ResourceLimits{
@@ -617,8 +878,9 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard,
 			WorkspaceBytes: workspaceBytes, LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles64),
 		},
-		Security:  SecurityProfile{NetworkMode: networkMode, TmpfsBytes: tmpfsBytes},
-		Workspace: WorkspaceSpec{Persistent: persistent, VolumeName: volumeName, MountPath: workspacePath},
+		Security:      SecurityProfile{NetworkMode: networkMode, TmpfsBytes: tmpfsBytes},
+		Workspace:     WorkspaceSpec{Persistent: persistent, VolumeName: volumeName, MountPath: workspacePath},
+		EgressGateway: gateway,
 	}, nil
 }
 

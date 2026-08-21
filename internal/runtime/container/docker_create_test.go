@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -22,56 +23,103 @@ import (
 
 type fakeDockerCreationAPI struct {
 	*fakeDockerInspectionAPI
-	createResult       mobyclient.ContainerCreateResult
-	createErr          error
-	createOpts         mobyclient.ContainerCreateOptions
-	removeErr          error
-	removedID          string
-	removeOpts         mobyclient.ContainerRemoveOptions
-	pathStats          map[string]mobycontainer.PathStat
-	pathStatErrs       map[string]error
-	listResult         mobyclient.ContainerListResult
-	listErr            error
-	startErr           error
-	stopErr            error
-	startedID          string
-	stoppedID          string
-	stopOpts           mobyclient.ContainerStopOptions
-	execCreateOpts     mobyclient.ExecCreateOptions
-	execContainerID    string
-	execID             string
-	execStdout         string
-	execStderr         string
-	execStdin          []byte
-	execStdinBytes     int
-	execAttachOpts     mobyclient.ExecAttachOptions
-	execExitCode       int
-	execRunning        bool
-	volumes            map[string]mobyvolume.Volume
-	volumeCreateOpts   mobyclient.VolumeCreateOptions
-	volumeCreateErr    error
-	volumeCreateCalls  int
-	volumeInspectErr   error
-	volumeRemoved      string
-	volumeRemoveErr    error
-	networks           map[string]mobynetwork.Inspect
-	networkCreateOpts  mobyclient.NetworkCreateOptions
-	networkCreateName  string
-	networkCreateErr   error
-	networkCreateCalls int
-	networkRemoved     string
-	networkRemoveErr   error
+	createResult            mobyclient.ContainerCreateResult
+	createErr               error
+	createOpts              mobyclient.ContainerCreateOptions
+	createResults           map[string]mobyclient.ContainerCreateResult
+	createErrs              map[string]error
+	createOptsByName        map[string]mobyclient.ContainerCreateOptions
+	containerResults        map[string]mobyclient.ContainerInspectResult
+	imageResults            map[string]mobyclient.ImageInspectResult
+	removeErr               error
+	removedID               string
+	removedIDs              []string
+	removeOpts              mobyclient.ContainerRemoveOptions
+	pathStats               map[string]mobycontainer.PathStat
+	pathStatErrs            map[string]error
+	listResult              mobyclient.ContainerListResult
+	listErr                 error
+	startErr                error
+	startErrs               map[string]error
+	stopErr                 error
+	stopErrs                map[string]error
+	startedID               string
+	startedIDs              []string
+	stoppedID               string
+	stoppedIDs              []string
+	stopOpts                mobyclient.ContainerStopOptions
+	execCreateOpts          mobyclient.ExecCreateOptions
+	execContainerID         string
+	execID                  string
+	execStdout              string
+	execStderr              string
+	execStdin               []byte
+	execStdinBytes          int
+	execAttachOpts          mobyclient.ExecAttachOptions
+	execExitCode            int
+	execRunning             bool
+	volumes                 map[string]mobyvolume.Volume
+	volumeCreateOpts        mobyclient.VolumeCreateOptions
+	volumeCreateErr         error
+	volumeCreateCalls       int
+	volumeInspectErr        error
+	volumeRemoved           string
+	volumeRemoveErr         error
+	networks                map[string]mobynetwork.Inspect
+	networkCreateOpts       mobyclient.NetworkCreateOptions
+	networkCreateOptsByName map[string]mobyclient.NetworkCreateOptions
+	networkCreateName       string
+	networkCreateErr        error
+	networkCreateCalls      int
+	networkRemoved          string
+	networksRemoved         []string
+	networkRemoveErr        error
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {
 	f.createOpts = options
+	if f.createOptsByName == nil {
+		f.createOptsByName = make(map[string]mobyclient.ContainerCreateOptions)
+	}
+	f.createOptsByName[options.Name] = options
+	if f.createResults != nil {
+		return f.createResults[options.Name], f.createErrs[options.Name]
+	}
 	return f.createResult, f.createErr
+}
+
+func (f *fakeDockerCreationAPI) ContainerInspect(ctx context.Context, id string, options mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error) {
+	if f.containerResults != nil {
+		for key, result := range f.containerResults {
+			if key == id || result.Container.ID == id || strings.TrimPrefix(result.Container.Name, "/") == id {
+				return result, nil
+			}
+		}
+		return mobyclient.ContainerInspectResult{}, containerderrdefs.ErrNotFound.WithMessage("container not found")
+	}
+	return f.fakeDockerInspectionAPI.ContainerInspect(ctx, id, options)
+}
+
+func (f *fakeDockerCreationAPI) ImageInspect(ctx context.Context, ref string, options ...mobyclient.ImageInspectOption) (mobyclient.ImageInspectResult, error) {
+	if f.imageResults != nil {
+		if result, ok := f.imageResults[ref]; ok {
+			return result, nil
+		}
+		return mobyclient.ImageInspectResult{}, containerderrdefs.ErrNotFound.WithMessage("image not found")
+	}
+	return f.fakeDockerInspectionAPI.ImageInspect(ctx, ref, options...)
 }
 
 func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, options mobyclient.ContainerRemoveOptions) (mobyclient.ContainerRemoveResult, error) {
 	f.removedID = id
+	f.removedIDs = append(f.removedIDs, id)
 	f.removeOpts = options
 	if f.removeErr == nil {
+		for key, result := range f.containerResults {
+			if key == id || result.Container.ID == id {
+				delete(f.containerResults, key)
+			}
+		}
 		for name, network := range f.networks {
 			delete(network.Containers, id)
 			f.networks[name] = network
@@ -83,6 +131,10 @@ func (f *fakeDockerCreationAPI) ContainerRemove(_ context.Context, id string, op
 func (f *fakeDockerCreationAPI) NetworkCreate(_ context.Context, name string, options mobyclient.NetworkCreateOptions) (mobyclient.NetworkCreateResult, error) {
 	f.networkCreateName = name
 	f.networkCreateOpts = options
+	if f.networkCreateOptsByName == nil {
+		f.networkCreateOptsByName = make(map[string]mobyclient.NetworkCreateOptions)
+	}
+	f.networkCreateOptsByName[name] = options
 	f.networkCreateCalls++
 	if f.networkCreateErr != nil {
 		return mobyclient.NetworkCreateResult{}, f.networkCreateErr
@@ -93,7 +145,7 @@ func (f *fakeDockerCreationAPI) NetworkCreate(_ context.Context, name string, op
 	if _, exists := f.networks[name]; exists {
 		return mobyclient.NetworkCreateResult{}, containerderrdefs.ErrConflict.WithMessage("network exists")
 	}
-	id := "provider-network-1"
+	id := "provider-network-" + strconv.Itoa(f.networkCreateCalls)
 	enableIPv4 := options.EnableIPv4 == nil || *options.EnableIPv4
 	enableIPv6 := options.EnableIPv6 != nil && *options.EnableIPv6
 	f.networks[name] = mobynetwork.Inspect{Network: mobynetwork.Network{
@@ -116,6 +168,7 @@ func (f *fakeDockerCreationAPI) NetworkInspect(_ context.Context, idOrName strin
 
 func (f *fakeDockerCreationAPI) NetworkRemove(_ context.Context, id string, _ mobyclient.NetworkRemoveOptions) (mobyclient.NetworkRemoveResult, error) {
 	f.networkRemoved = id
+	f.networksRemoved = append(f.networksRemoved, id)
 	if f.networkRemoveErr != nil {
 		return mobyclient.NetworkRemoveResult{}, f.networkRemoveErr
 	}
@@ -179,36 +232,73 @@ func (f *fakeDockerCreationAPI) ContainerList(_ context.Context, _ mobyclient.Co
 
 func (f *fakeDockerCreationAPI) ContainerStart(_ context.Context, id string, _ mobyclient.ContainerStartOptions) (mobyclient.ContainerStartResult, error) {
 	f.startedID = id
-	if f.startErr == nil && f.containerResult.Container.State != nil {
-		f.containerResult.Container.State.Status = mobycontainer.StateRunning
-		f.containerResult.Container.State.Running = true
-		if f.containerResult.Container.NetworkSettings != nil {
-			for name := range f.containerResult.Container.NetworkSettings.Networks {
-				if network, ok := f.networks[name]; ok {
-					if network.Containers == nil {
-						network.Containers = make(map[string]mobynetwork.EndpointResource)
-					}
-					network.Containers[id] = mobynetwork.EndpointResource{Name: strings.TrimPrefix(f.containerResult.Container.Name, "/")}
-					f.networks[name] = network
+	f.startedIDs = append(f.startedIDs, id)
+	startErr := f.startErr
+	if f.startErrs != nil && f.startErrs[id] != nil {
+		startErr = f.startErrs[id]
+	}
+	if startErr == nil {
+		result := &f.containerResult
+		resultKey := ""
+		if f.containerResults != nil {
+			result = nil
+			for key, candidate := range f.containerResults {
+				if key == id || candidate.Container.ID == id {
+					copy := candidate
+					result = &copy
+					resultKey = key
+					break
 				}
 			}
 		}
+		if result != nil && result.Container.State != nil {
+			result.Container.State.Status = mobycontainer.StateRunning
+			result.Container.State.Running = true
+			if result.Container.NetworkSettings != nil {
+				for name := range result.Container.NetworkSettings.Networks {
+					if network, ok := f.networks[name]; ok {
+						if network.Containers == nil {
+							network.Containers = make(map[string]mobynetwork.EndpointResource)
+						}
+						network.Containers[id] = mobynetwork.EndpointResource{Name: strings.TrimPrefix(result.Container.Name, "/")}
+						f.networks[name] = network
+					}
+				}
+			}
+			if resultKey != "" {
+				f.containerResults[resultKey] = *result
+			}
+		}
 	}
-	return mobyclient.ContainerStartResult{}, f.startErr
+	return mobyclient.ContainerStartResult{}, startErr
 }
 
 func (f *fakeDockerCreationAPI) ContainerStop(_ context.Context, id string, options mobyclient.ContainerStopOptions) (mobyclient.ContainerStopResult, error) {
 	f.stoppedID = id
+	f.stoppedIDs = append(f.stoppedIDs, id)
 	f.stopOpts = options
-	if f.stopErr == nil && f.containerResult.Container.State != nil {
-		f.containerResult.Container.State.Status = mobycontainer.StateExited
-		f.containerResult.Container.State.Running = false
+	stopErr := f.stopErr
+	if f.stopErrs != nil && f.stopErrs[id] != nil {
+		stopErr = f.stopErrs[id]
+	}
+	if stopErr == nil {
+		if f.containerResults == nil && f.containerResult.Container.State != nil {
+			f.containerResult.Container.State.Status = mobycontainer.StateExited
+			f.containerResult.Container.State.Running = false
+		}
+		for key, candidate := range f.containerResults {
+			if key == id || candidate.Container.ID == id {
+				candidate.Container.State.Status = mobycontainer.StateExited
+				candidate.Container.State.Running = false
+				f.containerResults[key] = candidate
+			}
+		}
 		for name, network := range f.networks {
 			delete(network.Containers, id)
 			f.networks[name] = network
 		}
 	}
-	return mobyclient.ContainerStopResult{}, f.stopErr
+	return mobyclient.ContainerStopResult{}, stopErr
 }
 
 func (f *fakeDockerCreationAPI) ContainerStatPath(_ context.Context, _ string, options mobyclient.ContainerStatPathOptions) (mobyclient.ContainerStatPathResult, error) {

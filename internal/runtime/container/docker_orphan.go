@@ -38,7 +38,11 @@ func (m *DockerManager) ListOwnedResources(ctx context.Context) ([]ManagedResour
 		if len(item.Names) > 0 {
 			name = strings.TrimPrefix(item.Names[0], "/")
 		}
-		resource, resourceErr := m.resourceFromLabels(ResourceKindAgent, item.ID, name, item.Labels, time.Unix(item.Created, 0).UTC())
+		kind := strings.TrimSpace(item.Labels[LabelResourceKind])
+		if kind != ResourceKindAgent && kind != ResourceKindEgressGateway {
+			return nil, fmt.Errorf("%w: unsupported owner-labelled container kind %q", ErrRuntimeStateConflict, kind)
+		}
+		resource, resourceErr := m.resourceFromLabels(kind, item.ID, name, item.Labels, time.Unix(item.Created, 0).UTC())
 		if resourceErr != nil {
 			return nil, resourceErr
 		}
@@ -49,7 +53,11 @@ func (m *DockerManager) ListOwnedResources(ctx context.Context) ([]ManagedResour
 		return nil, fmt.Errorf("list owner-labelled networks: %w", err)
 	}
 	for _, item := range networks.Items {
-		resource, resourceErr := m.resourceFromLabels(ResourceKindConversationNetwork, item.ID, item.Name, item.Labels, item.Created.UTC())
+		kind := strings.TrimSpace(item.Labels[LabelResourceKind])
+		if kind != ResourceKindConversationNetwork && kind != ResourceKindEgressNetwork {
+			return nil, fmt.Errorf("%w: unsupported owner-labelled network kind %q", ErrRuntimeStateConflict, kind)
+		}
+		resource, resourceErr := m.resourceFromLabels(kind, item.ID, item.Name, item.Labels, item.Created.UTC())
 		if resourceErr != nil {
 			return nil, resourceErr
 		}
@@ -86,9 +94,9 @@ func (m *DockerManager) DeleteOwnedResource(ctx context.Context, resource Manage
 	}
 	defer cancel()
 	switch resource.Kind {
-	case ResourceKindAgent:
+	case ResourceKindAgent, ResourceKindEgressGateway:
 		return m.deleteOwnedContainerResource(operationCtx, resource)
-	case ResourceKindConversationNetwork:
+	case ResourceKindConversationNetwork, ResourceKindEgressNetwork:
 		return m.deleteOwnedNetworkResource(operationCtx, resource)
 	case ResourceKindWorkspaceVolume:
 		return m.deleteOwnedVolumeResource(operationCtx, resource)
@@ -106,7 +114,7 @@ func (m *DockerManager) deleteOwnedContainerResource(ctx context.Context, expect
 	if actual.Config == nil || actual.State == nil {
 		return fmt.Errorf("%w: owner-labelled container inspection is incomplete", ErrRuntimeStateConflict)
 	}
-	observed, err := m.resourceFromLabels(ResourceKindAgent, actual.ID, strings.TrimPrefix(actual.Name, "/"), actual.Config.Labels, time.Time{})
+	observed, err := m.resourceFromLabels(expected.Kind, actual.ID, strings.TrimPrefix(actual.Name, "/"), actual.Config.Labels, time.Time{})
 	if err != nil || !sameManagedResource(expected, observed) {
 		return fmt.Errorf("%w: owner-labelled container identity changed before cleanup", ErrRuntimeStateConflict)
 	}
@@ -131,7 +139,7 @@ func (m *DockerManager) deleteOwnedNetworkResource(ctx context.Context, expected
 		return mapManagedResourceNotFound(err, expected)
 	}
 	actual := result.Network
-	observed, err := m.resourceFromLabels(ResourceKindConversationNetwork, actual.ID, actual.Name, actual.Labels, actual.Created.UTC())
+	observed, err := m.resourceFromLabels(expected.Kind, actual.ID, actual.Name, actual.Labels, actual.Created.UTC())
 	if err != nil || !sameManagedResource(expected, observed) {
 		return fmt.Errorf("%w: owner-labelled network identity changed before cleanup", ErrRuntimeStateConflict)
 	}
@@ -168,7 +176,7 @@ func (m *DockerManager) resourceFromLabels(kind, providerID, name string, labels
 		return ManagedResource{}, fmt.Errorf("%w: managed %s ownership labels mismatch", ErrRuntimeStateConflict, kind)
 	}
 	logicalID := strings.TrimSpace(labels[LabelResourceID])
-	if kind == ResourceKindAgent {
+	if kind == ResourceKindAgent || kind == ResourceKindEgressGateway {
 		logicalID = strings.TrimSpace(labels[LabelRuntimeID])
 	}
 	resource := ManagedResource{
@@ -194,6 +202,10 @@ func managedResourceName(kind, logicalID string) string {
 		return runtimeContainerName(RuntimeID(logicalID))
 	case ResourceKindConversationNetwork:
 		return "cyberstrike-network-" + logicalID
+	case ResourceKindEgressGateway:
+		return "cyberstrike-egress-" + logicalID
+	case ResourceKindEgressNetwork:
+		return "cyberstrike-egress-network-" + logicalID
 	case ResourceKindWorkspaceVolume:
 		return "cyberstrike-workspace-" + logicalID
 	default:

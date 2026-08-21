@@ -61,6 +61,56 @@ func TestLifecycleControllerPersistsStartStopRebuildAndDelete(t *testing.T) {
 	}
 }
 
+func TestLifecycleControllerExplicitRebuildAddsPinnedEgressGateway(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	gateway := lifecycleGatewaySpec()
+	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{EgressGateway: &gateway})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := controller.Rebuild(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("rebuild with gateway: %v", err)
+	}
+	if rebuilt.Spec.Security.NetworkMode != container.NetworkInternal || rebuilt.Spec.EgressGateway == nil || rebuilt.Spec.EgressGateway.Image.Digest != gateway.Image.Digest || rebuilt.RuntimeGeneration != 2 {
+		t.Fatalf("rebuilt gateway topology = %#v", rebuilt)
+	}
+	observed, err := manager.Inspect(context.Background(), rebuilt.RuntimeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed.SpecDigest != container.RuntimeSpecDigest(rebuilt.Spec) {
+		t.Fatalf("gateway runtime digest = %q, want %q", observed.SpecDigest, container.RuntimeSpecDigest(rebuilt.Spec))
+	}
+}
+
+func TestLifecycleControllerReconcileRecoversCommittedGatewayUpgrade(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := lifecycleGatewaySpec()
+	replacement := record.Spec
+	replacement.Security.NetworkMode = container.NetworkInternal
+	replacement.EgressGateway = &gateway
+	runtime, err := manager.Rebuild(context.Background(), record.RuntimeID, container.RebuildOptions{Spec: replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{EgressGateway: &gateway})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := controller.Reconcile(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("reconcile interrupted gateway upgrade: %v", err)
+	}
+	if reconciled.Spec.EgressGateway == nil || reconciled.Spec.EgressGateway.Image.Digest != gateway.Image.Digest || reconciled.ProviderID != runtime.ProviderID || reconciled.RuntimeDrift != "topology_migration_recovered" {
+		t.Fatalf("reconciled gateway upgrade = %#v", reconciled)
+	}
+}
+
 func TestLifecycleControllerReconcileRecoversCommittedDockerNetworkMigration(t *testing.T) {
 	db, manager, controller, conversationID := lifecycleFixture(t)
 	record, err := db.GetContainerInitialization(context.Background(), conversationID)
@@ -81,7 +131,7 @@ func TestLifecycleControllerReconcileRecoversCommittedDockerNetworkMigration(t *
 	if err != nil {
 		t.Fatalf("reconcile interrupted network migration: %v", err)
 	}
-	if reconciled.Spec.Security.NetworkMode != container.NetworkInternal || reconciled.ProviderID != runtime.ProviderID || reconciled.RuntimeDrift != "network_migration_recovered" {
+	if reconciled.Spec.Security.NetworkMode != container.NetworkInternal || reconciled.ProviderID != runtime.ProviderID || reconciled.RuntimeDrift != "topology_migration_recovered" {
 		t.Fatalf("reconciled migration = %#v", reconciled)
 	}
 	if reconciled.RuntimeGeneration != record.RuntimeGeneration {
@@ -281,5 +331,20 @@ func lifecycleSpec(conversationID string) container.RuntimeSpec {
 			NetworkMode: container.NetworkNone, SeccompProfile: "default", TmpfsBytes: 64 << 20,
 		},
 		Workspace: container.WorkspaceSpec{MountPath: "/workspace"},
+	}
+}
+
+func lifecycleGatewaySpec() container.EgressGatewaySpec {
+	return container.EgressGatewaySpec{
+		Image: container.ImageReference{
+			Repository: "ghcr.io/example/cyberstrike-egress",
+			Digest:     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			Platform:   "linux/arm64",
+		},
+		Resources: container.EgressGatewayResources{
+			NanoCPUs: 250_000_000, MemoryBytes: 128 << 20, PIDs: 64,
+			NoFileSoft: 512, NoFileHard: 1024, TmpfsBytes: 16 << 20,
+			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
+		},
 	}
 }

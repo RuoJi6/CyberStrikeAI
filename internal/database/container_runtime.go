@@ -694,12 +694,23 @@ func validateLifecycleSpecReplacement(
 		return 0, "", fmt.Errorf("decode current runtime specification for lifecycle replacement: %w", err)
 	}
 	expected := current
-	if current.Security.NetworkMode != containerruntime.NetworkNone {
-		return 0, "", fmt.Errorf("%w: only a legacy none-network runtime can be migrated", containerruntime.ErrRuntimeStateConflict)
+	changed := false
+	if current.Security.NetworkMode == containerruntime.NetworkNone {
+		expected.Security.NetworkMode = containerruntime.NetworkInternal
+		changed = true
+	} else if current.Security.NetworkMode != containerruntime.NetworkInternal {
+		return 0, "", fmt.Errorf("%w: current runtime network mode cannot be migrated", containerruntime.ErrRuntimeStateConflict)
 	}
-	expected.Security.NetworkMode = containerruntime.NetworkInternal
+	if current.EgressGateway == nil && replacement.EgressGateway != nil {
+		gateway := *replacement.EgressGateway
+		expected.EgressGateway = &gateway
+		changed = true
+	}
+	if !changed {
+		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
+	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only change network mode from none to internal", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network and pinned egress gateway", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {

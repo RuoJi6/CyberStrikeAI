@@ -48,6 +48,45 @@ func TestValidateSpec(t *testing.T) {
 	}
 }
 
+func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T) {
+	spec := validSpec()
+	spec.Security.NetworkMode = container.NetworkInternal
+	spec.EgressGateway = &container.EgressGatewaySpec{
+		Image: container.ImageReference{
+			Repository: "ghcr.io/example/cyberstrike-egress",
+			Digest:     "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			Platform:   "linux/arm64",
+		},
+		Resources: container.EgressGatewayResources{
+			NanoCPUs: 250_000_000, MemoryBytes: 128 << 20, PIDs: 64,
+			NoFileSoft: 512, NoFileHard: 1024, TmpfsBytes: 16 << 20,
+			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
+		},
+	}
+	if err := container.ValidateSpec(spec); err != nil {
+		t.Fatalf("valid gateway spec rejected: %v", err)
+	}
+	none := spec
+	none.Security.NetworkMode = container.NetworkNone
+	if err := container.ValidateSpec(none); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("none-network gateway error = %v", err)
+	}
+	floating := spec
+	gateway := *spec.EgressGateway
+	gateway.Image.Digest = "latest"
+	floating.EgressGateway = &gateway
+	if err := container.ValidateSpec(floating); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("floating gateway image error = %v", err)
+	}
+	unlimited := spec
+	gateway = *spec.EgressGateway
+	gateway.Resources.MemoryBytes = 0
+	unlimited.EgressGateway = &gateway
+	if err := container.ValidateSpec(unlimited); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("unlimited gateway error = %v", err)
+	}
+}
+
 func validSpec() container.RuntimeSpec {
 	return container.RuntimeSpec{
 		ID:             "runtime-1",

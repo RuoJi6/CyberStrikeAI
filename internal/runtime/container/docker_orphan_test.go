@@ -105,6 +105,38 @@ func TestDockerManagerListsAndDeletesOnlyOwnerLabelledResources(t *testing.T) {
 	}
 }
 
+func TestDockerManagerListsGatewayTopologyAsIndependentlyOwnedResources(t *testing.T) {
+	ownerID := "instance-01"
+	spec := gatewayCreationSpec()
+	creationAPI := newSuccessfulGatewayCreationAPI(spec, ownerID)
+	creationAPI.listResult = mobyclient.ContainerListResult{Items: []mobycontainer.Summary{
+		{ID: "provider-agent-1", Names: []string{"/" + runtimeContainerName(spec.ID)}, Labels: runtimeLabels(ownerID, spec), Created: time.Now().Unix()},
+		{ID: "provider-gateway-1", Names: []string{"/" + EgressGatewayContainerName(spec.ID)}, Labels: egressGatewayLabels(ownerID, spec), Created: time.Now().Unix()},
+	}}
+	internal := mobynetwork.Network{
+		ID: "provider-network-1", Name: ConversationNetworkName(spec.ID), Labels: conversationNetworkLabels(ownerID, spec), Created: time.Now().UTC(),
+	}
+	egress := mobynetwork.Network{
+		ID: "provider-network-2", Name: EgressNetworkName(spec.ID), Labels: egressNetworkLabels(ownerID, spec), Created: time.Now().UTC(),
+	}
+	api := &fakeDockerManagedResourceAPI{
+		fakeDockerCreationAPI: creationAPI,
+		networkListResult:     mobyclient.NetworkListResult{Items: []mobynetwork.Summary{{Network: internal}, {Network: egress}}},
+		volumeListResult:      mobyclient.VolumeListResult{},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := manager.ListOwnedResources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 4 || resources[0].Kind != ResourceKindAgent || resources[1].Kind != ResourceKindConversationNetwork || resources[2].Kind != ResourceKindEgressGateway || resources[3].Kind != ResourceKindEgressNetwork {
+		t.Fatalf("gateway owned resources = %#v", resources)
+	}
+}
+
 func TestDockerManagerOrphanDeletionRevalidatesLabelsAndAttachments(t *testing.T) {
 	ownerID := "instance-01"
 	logicalID := "network-unsafe"

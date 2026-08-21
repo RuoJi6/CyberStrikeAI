@@ -10,6 +10,8 @@ import (
 
 const (
 	ResourceKindConversationNetwork = "conversation-network"
+	ResourceKindEgressGateway       = "egress-gateway"
+	ResourceKindEgressNetwork       = "egress-network"
 	ResourceKindWorkspaceVolume     = "workspace-volume"
 )
 
@@ -273,7 +275,7 @@ func validateManagedResource(resource ManagedResource) error {
 
 func validManagedResourceKind(kind string) bool {
 	switch kind {
-	case ResourceKindAgent, ResourceKindConversationNetwork, ResourceKindWorkspaceVolume:
+	case ResourceKindAgent, ResourceKindConversationNetwork, ResourceKindEgressGateway, ResourceKindEgressNetwork, ResourceKindWorkspaceVolume:
 		return true
 	default:
 		return false

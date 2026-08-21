@@ -33,7 +33,10 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		_ = manager.Close()
 		return nil, nil, nil, nil, err
 	}
-	controller, err := containerruntime.NewLifecycleController(manager, db)
+	gatewaySpec := conversationEgressGatewaySpec(cfg)
+	controller, err := containerruntime.NewLifecycleControllerWithOptions(manager, db, containerruntime.LifecycleControllerOptions{
+		EgressGateway: &gatewaySpec,
+	})
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
@@ -87,6 +90,9 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		zap.String("imageRepository", cfg.Container.ImageRepository),
 		zap.String("imageDigest", cfg.Container.ImageDigest),
 		zap.String("imagePlatform", cfg.Container.ImagePlatform),
+		zap.String("egressImageRepository", cfg.Container.EgressImageRepository),
+		zap.String("egressImageDigest", cfg.Container.EgressImageDigest),
+		zap.String("egressImagePlatform", cfg.Container.EgressImagePlatform),
 		zap.String("toolInventoryDigest", cfg.Container.ToolInventoryDigest),
 		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
@@ -183,6 +189,10 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			InventoryDigest: strings.TrimSpace(cfg.Container.ToolInventoryDigest),
 			Inventory:       cfg.Container.ToolInventory,
 		},
+		EgressGateway: func() *containerruntime.EgressGatewaySpec {
+			gateway := conversationEgressGatewaySpec(cfg)
+			return &gateway
+		}(),
 	}
 	if workspacePersistent {
 		spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeName(spec.ID)
@@ -191,4 +201,24 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 		return containerruntime.RuntimeSpec{}, err
 	}
 	return spec, nil
+}
+
+func conversationEgressGatewaySpec(cfg *config.Config) containerruntime.EgressGatewaySpec {
+	return containerruntime.EgressGatewaySpec{
+		Image: containerruntime.ImageReference{
+			Repository: strings.TrimSpace(cfg.Container.EgressImageRepository),
+			Digest:     strings.TrimSpace(cfg.Container.EgressImageDigest),
+			Platform:   strings.TrimSpace(cfg.Container.EgressImagePlatform),
+		},
+		Resources: containerruntime.EgressGatewayResources{
+			NanoCPUs:    cfg.Container.EgressNanoCPUs,
+			MemoryBytes: cfg.Container.EgressMemoryBytes,
+			PIDs:        cfg.Container.EgressPIDs,
+			NoFileSoft:  cfg.Container.EgressNoFileSoft,
+			NoFileHard:  cfg.Container.EgressNoFileHard,
+			TmpfsBytes:  cfg.Container.EgressTmpfsBytes,
+			LogMaxBytes: cfg.Container.EgressLogMaxBytes,
+			LogMaxFiles: cfg.Container.EgressLogMaxFiles,
+		},
+	}
 }

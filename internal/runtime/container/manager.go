@@ -123,6 +123,28 @@ type WorkspaceSpec struct {
 	MountPath  string
 }
 
+// EgressGatewayResources contains the independently enforced limits for the
+// per-conversation egress sidecar. The gateway never receives a workspace or
+// an exec queue, so those agent-only limits are deliberately absent here.
+type EgressGatewayResources struct {
+	NanoCPUs    int64
+	MemoryBytes int64
+	PIDs        int64
+	NoFileSoft  uint64
+	NoFileHard  uint64
+	TmpfsBytes  int64
+	LogMaxBytes int64
+	LogMaxFiles int
+}
+
+// EgressGatewaySpec pins the only image that may bridge a conversation's
+// internal network to its dedicated egress network. Protocol policy and the
+// immutable boundary snapshot are added by the following stage-4 items.
+type EgressGatewaySpec struct {
+	Image     ImageReference
+	Resources EgressGatewayResources
+}
+
 // RuntimeSpec is the desired immutable specification for one conversation.
 type RuntimeSpec struct {
 	ID             RuntimeID
@@ -132,6 +154,10 @@ type RuntimeSpec struct {
 	Security       SecurityProfile
 	Workspace      WorkspaceSpec
 	Readiness      ReadinessPolicy
+	// Omitempty preserves the exact JSON and digest of durable pre-gateway
+	// specifications. Existing runtimes therefore remain inspectable until an
+	// explicit rebuild performs the controlled topology upgrade.
+	EgressGateway *EgressGatewaySpec `json:",omitempty"`
 }
 
 // Runtime is the engine-observed state returned to the control plane.
