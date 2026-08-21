@@ -134,7 +134,7 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	var output lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0"})
+		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0"})
 	}()
 	deadline := time.Now().Add(time.Second)
 	for !strings.Contains(output.String(), reference.SHA256) && time.Now().Before(deadline) {

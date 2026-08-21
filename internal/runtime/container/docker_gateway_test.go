@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,9 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	}
 	agentOptions := api.createOptsByName[runtimeContainerName(spec.ID)]
 	gatewayOptions := api.createOptsByName[EgressGatewayContainerName(spec.ID)]
+	if len(agentOptions.HostConfig.DNS) != 0 {
+		t.Fatalf("legacy snapshot-less gateway unexpectedly became policy DNS: %#v", agentOptions.HostConfig.DNS)
+	}
 	if len(agentOptions.NetworkingConfig.EndpointsConfig) != 1 || agentOptions.NetworkingConfig.EndpointsConfig[internalName] == nil || agentOptions.NetworkingConfig.EndpointsConfig[egressName] != nil {
 		t.Fatalf("agent network endpoints = %#v", agentOptions.NetworkingConfig)
 	}
@@ -224,6 +228,9 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	if len(agentOptions.HostConfig.Binds) != 0 || len(agentOptions.HostConfig.Mounts) != 0 {
 		t.Fatalf("agent received trusted snapshot mount: %#v", agentOptions.HostConfig)
 	}
+	if len(agentOptions.HostConfig.DNS) != 1 || agentOptions.HostConfig.DNS[0].String() != "172.30.0.2" || len(agentOptions.HostConfig.DNSOptions) != 0 || len(agentOptions.HostConfig.DNSSearch) != 0 {
+		t.Fatalf("agent policy DNS = %#v", agentOptions.HostConfig)
+	}
 	if len(gatewayOptions.HostConfig.Binds) != 0 || len(gatewayOptions.HostConfig.Mounts) != 1 {
 		t.Fatalf("gateway snapshot mounts = %#v / %#v", gatewayOptions.HostConfig.Binds, gatewayOptions.HostConfig.Mounts)
 	}
@@ -242,6 +249,38 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	}
 	if len(api.startedIDs) != 2 || api.startedIDs[0] != "provider-gateway-1" || api.startedIDs[1] != "provider-agent-1" {
 		t.Fatalf("snapshot-aware start order = %#v", api.startedIDs)
+	}
+}
+
+func TestDockerManagerRejectsPolicyDNSDriftAndMissingGatewayAddress(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := manager.Create(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := api.containerResults[runtimeContainerName(spec.ID)]
+	agent.Container.HostConfig.DNS = []netip.Addr{netip.MustParseAddr("172.30.0.9")}
+	api.containerResults[runtimeContainerName(spec.ID)] = agent
+	if _, err := manager.Inspect(context.Background(), runtime.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("policy DNS drift error = %v", err)
+	}
+
+	missingAPI := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	gatewayName := EgressGatewayContainerName(spec.ID)
+	gateway := missingAPI.containerResults[gatewayName]
+	gateway.Container.NetworkSettings.Networks[ConversationNetworkName(spec.ID)].IPAddress = netip.Addr{}
+	missingAPI.containerResults[gatewayName] = gateway
+	missingManager, err := newDockerManager(missingAPI, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missingManager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("missing gateway policy DNS address error = %v", err)
 	}
 }
 
@@ -359,8 +398,12 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 	agent.Container.ID = agentID
 	agent.Container.Image = agentImageID
 	agent.Container.Config.Image = agentPinned
+	policyDNSAddress := netip.MustParseAddr("172.30.0.2")
+	if requiresPolicyDNS(spec) {
+		agent.Container.HostConfig.DNS = []netip.Addr{policyDNSAddress}
+	}
 	agent.Container.NetworkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
-		ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1"},
+		ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: netip.MustParseAddr("172.30.0.3")},
 	}}
 	gateway := mobyclient.ContainerInspectResult{Container: mobycontainer.InspectResponse{
 		ID: gatewayID, Created: created, Name: "/" + EgressGatewayContainerName(spec.ID), Image: gatewayImageID,
@@ -371,8 +414,8 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 		},
 		HostConfig: egressGatewayHostConfig(spec),
 		NetworkSettings: &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
-			ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1"},
-			EgressNetworkName(spec.ID):       {NetworkID: "provider-network-2"},
+			ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: policyDNSAddress},
+			EgressNetworkName(spec.ID):       {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2")},
 		}},
 	}}
 	agentImage := mobyclient.ImageInspectResult{InspectResponse: mobyimage.InspectResponse{

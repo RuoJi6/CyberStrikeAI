@@ -125,21 +125,21 @@ func egressGatewayManagedResource(spec RuntimeSpec, providerID string) ManagedRe
 	}
 }
 
-func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource) (string, error) {
+func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource) (string, string, error) {
 	if spec.EgressGateway == nil {
-		return "", invalidSpec("egress gateway specification is required")
+		return "", "", invalidSpec("egress gateway specification is required")
 	}
 	gateway := *spec.EgressGateway
 	platform, err := parsePlatform(gateway.Image.Platform)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	pinned, _ := pinnedImageReference(gateway.Image)
 	name := EgressGatewayContainerName(spec.ID)
 	labels := egressGatewayLabels(m.ownerID, spec)
 	config, hostConfig, err := m.egressGatewayContainerConfig(spec, labels)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	result, err := m.api.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 		Name: name, Image: pinned,
@@ -150,21 +150,43 @@ func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpe
 	})
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
-			return "", fmt.Errorf("%w: %s", ErrAlreadyExists, name)
+			return "", "", fmt.Errorf("%w: %s", ErrAlreadyExists, name)
 		}
-		return "", fmt.Errorf("create egress gateway %s: %w", spec.ID, err)
+		return "", "", fmt.Errorf("create egress gateway %s: %w", spec.ID, err)
 	}
 	if strings.TrimSpace(result.ID) == "" {
-		return "", fmt.Errorf("%w: engine returned an empty egress gateway id", ErrRuntimeStateConflict)
+		return "", "", fmt.Errorf("%w: engine returned an empty egress gateway id", ErrRuntimeStateConflict)
 	}
 	inspected, err := m.api.ContainerInspect(ctx, result.ID, mobyclient.ContainerInspectOptions{Size: false})
 	if err != nil {
-		return result.ID, fmt.Errorf("inspect created egress gateway %s: %w", result.ID, err)
+		return result.ID, "", fmt.Errorf("inspect created egress gateway %s: %w", result.ID, err)
 	}
 	if err := m.verifyEgressGatewayInspection(ctx, spec, inspected.Container, nil, StatusStopped, RuntimeSpecDigest(spec)); err != nil {
-		return result.ID, err
+		return result.ID, "", err
 	}
-	return result.ID, nil
+	if !requiresPolicyDNS(spec) {
+		return result.ID, "", nil
+	}
+	address, err := egressGatewayPolicyDNSAddress(inspected.Container, spec)
+	if err != nil {
+		return result.ID, "", err
+	}
+	return result.ID, address, nil
+}
+
+func requiresPolicyDNS(spec RuntimeSpec) bool {
+	return spec.EgressGateway != nil && spec.EgressGateway.BoundarySnapshot != nil
+}
+
+func egressGatewayPolicyDNSAddress(gateway mobycontainer.InspectResponse, spec RuntimeSpec) (string, error) {
+	if gateway.NetworkSettings == nil {
+		return "", fmt.Errorf("%w: egress gateway has no network settings for policy DNS", ErrRuntimeStateConflict)
+	}
+	endpoint := gateway.NetworkSettings.Networks[ConversationNetworkName(spec.ID)]
+	if endpoint == nil || !endpoint.IPAddress.IsValid() || !endpoint.IPAddress.Is4() || endpoint.IPAddress.IsUnspecified() || endpoint.IPAddress.IsLoopback() || endpoint.IPAddress.IsMulticast() || endpoint.IPAddress.IsLinkLocalUnicast() || endpoint.IPAddress.Zone() != "" {
+		return "", fmt.Errorf("%w: egress gateway policy DNS address is invalid", ErrRuntimeStateConflict)
+	}
+	return endpoint.IPAddress.String(), nil
 }
 
 func (m *DockerManager) inspectOwnedEgressGateway(ctx context.Context, spec RuntimeSpec, agent *mobycontainer.InspectResponse, expectedStatus Status) (mobycontainer.InspectResponse, error) {
@@ -433,6 +455,15 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 	}
 	if len(internalResult.Network.Services) != 0 || len(egressResult.Network.Services) != 0 {
 		return fmt.Errorf("%w: gateway networks contain unexpected services", ErrRuntimeStateConflict)
+	}
+	if requiresPolicyDNS(spec) && agent != nil && agent.HostConfig != nil {
+		expectedDNS, dnsErr := egressGatewayPolicyDNSAddress(gateway, spec)
+		if dnsErr != nil {
+			return dnsErr
+		}
+		if len(agent.HostConfig.DNS) != 1 || agent.HostConfig.DNS[0].String() != expectedDNS {
+			return fmt.Errorf("%w: agent policy DNS does not match its egress gateway", ErrRuntimeStateConflict)
+		}
 	}
 	if expectedStatus == StatusRunning {
 		if agent == nil || agent.State == nil || !agent.State.Running || len(internalResult.Network.Containers) != 2 || len(egressResult.Network.Containers) != 1 {

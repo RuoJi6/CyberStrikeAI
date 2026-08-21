@@ -50,8 +50,10 @@ type snapshotEnvelope struct {
 }
 
 type GatewayOptions struct {
-	ListenAddress string
-	Proxy         ProxyOptions
+	ListenAddress    string
+	DNSListenAddress string
+	Proxy            ProxyOptions
+	DNS              DNSOptions
 }
 
 // SnapshotStore materializes immutable database snapshots into a trusted host
@@ -263,6 +265,10 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if err != nil {
 		return err
 	}
+	dnsHandler, err := NewPolicyDNS(policy, options.DNS)
+	if err != nil {
+		return err
+	}
 	listenAddress := strings.TrimSpace(options.ListenAddress)
 	if listenAddress == "" {
 		listenAddress = DefaultProxyListenAddress
@@ -274,6 +280,11 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if err != nil {
 		return fmt.Errorf("listen for egress proxy: %w", err)
 	}
+	dnsPacket, dnsTCP, err := listenPolicyDNS(normalizedDNSListenAddress(options.DNSListenAddress))
+	if err != nil {
+		_ = listener.Close()
+		return err
+	}
 	server := &http.Server{
 		Handler: proxy, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
@@ -281,24 +292,52 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	report.Event = "boundary_snapshot_loaded"
 	if output != nil {
 		if err := json.NewEncoder(output).Encode(report); err != nil {
-			_ = listener.Close()
+			closeGatewayListeners(listener, dnsPacket, dnsTCP)
 			return fmt.Errorf("report loaded boundary snapshot: %w", err)
 		}
 	}
-	done := make(chan struct{})
+	type serverResult struct {
+		name string
+		err  error
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	results := make(chan serverResult, 3)
+	go func() { results <- serverResult{name: "HTTP proxy", err: server.Serve(listener)} }()
 	go func() {
-		select {
-		case <-ctx.Done():
-			_ = server.Close()
-		case <-done:
-		}
+		results <- serverResult{name: "UDP policy DNS", err: servePolicyDNSUDP(runCtx, dnsPacket, dnsHandler)}
 	}()
-	err = server.Serve(listener)
-	close(done)
-	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+	go func() {
+		results <- serverResult{name: "TCP policy DNS", err: servePolicyDNSTCP(runCtx, dnsTCP, dnsHandler)}
+	}()
+
+	var first serverResult
+	completed := 0
+	select {
+	case <-ctx.Done():
+	case first = <-results:
+		completed = 1
+	}
+	cancel()
+	_ = server.Close()
+	closeGatewayListeners(listener, dnsPacket, dnsTCP)
+	for completed < 3 {
+		result := <-results
+		completed++
+		if first.name == "" && result.err != nil && !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, net.ErrClosed) {
+			first = result
+		}
+	}
+	if ctx.Err() != nil {
 		return nil
 	}
-	return fmt.Errorf("serve egress proxy: %w", err)
+	if first.name == "" {
+		return errors.New("egress gateway servers stopped unexpectedly")
+	}
+	if first.err == nil {
+		return fmt.Errorf("%s stopped unexpectedly", first.name)
+	}
+	return fmt.Errorf("serve %s: %w", first.name, first.err)
 }
 
 func CheckSnapshot(path string, reference SnapshotReference, output io.Writer) error {

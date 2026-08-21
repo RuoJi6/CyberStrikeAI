@@ -37,6 +37,19 @@ type Decision struct {
 	Target  RequestTarget `json:"target"`
 }
 
+// DNSDecision is the policy result for resolving one canonical hostname. DNS
+// has no request scheme, port, method, or path, so it permits a name when at
+// least one active allow rule can use that name and denies it when an
+// unconditional host/network block applies. The request proxy still evaluates
+// every concrete HTTP request independently.
+type DNSDecision struct {
+	Allowed bool   `json:"allowed"`
+	Effect  Effect `json:"effect,omitempty"`
+	RuleID  string `json:"ruleId,omitempty"`
+	Reason  string `json:"reason"`
+	Host    string `json:"host"`
+}
+
 type Policy struct {
 	rules []compiledRule
 }
@@ -166,6 +179,101 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		decision.Reason = ReasonAllowVisit
 	}
 	return decision, nil
+}
+
+// EvaluateDNS decides whether the policy DNS service may resolve rawHost.
+// resolvedIPs must contain every address returned by the upstream resolver;
+// one unsafe address denies the complete answer to prevent rebinding.
+func (p *Policy) EvaluateDNS(rawHost string, resolvedIPs []netip.Addr, now time.Time) (DNSDecision, error) {
+	host, err := NormalizeHost(rawHost)
+	if err != nil {
+		return DNSDecision{}, err
+	}
+	decision := DNSDecision{Host: host, Reason: ReasonDefaultDeny}
+	if reason := forbiddenHostnameReason(host); reason != "" {
+		decision.Reason = reason
+		return decision, nil
+	}
+	if address, parseErr := netip.ParseAddr(host); parseErr == nil && forbiddenAddress(address) {
+		decision.Reason = ReasonForbiddenAddress
+		return decision, nil
+	}
+	for _, address := range resolvedIPs {
+		if !address.IsValid() || address.Zone() != "" || forbiddenAddress(address.Unmap()) {
+			decision.Reason = ReasonDNSRebinding
+			return decision, nil
+		}
+	}
+
+	blocks := make([]compiledRule, 0)
+	allows := make([]compiledRule, 0)
+	for _, rule := range p.rules {
+		if rule.ExpiresAt != nil && !now.Before(*rule.ExpiresAt) {
+			continue
+		}
+		if rule.Effect == EffectBlocked && dnsRuleUnconditionallyBlocks(rule, host, resolvedIPs) {
+			blocks = append(blocks, rule)
+			continue
+		}
+		if rule.prefix == nil && rule.Target.Host == host && rule.Effect.AllowsRequest() {
+			allows = append(allows, rule)
+		}
+	}
+	if len(blocks) != 0 {
+		sort.Slice(blocks, func(i, j int) bool {
+			leftSpecificity, rightSpecificity := ruleSpecificity(blocks[i]), ruleSpecificity(blocks[j])
+			if leftSpecificity != rightSpecificity {
+				return leftSpecificity > rightSpecificity
+			}
+			return blocks[i].ID < blocks[j].ID
+		})
+		decision.Effect = EffectBlocked
+		decision.RuleID = blocks[0].ID
+		decision.Reason = ReasonBlockedTarget
+		return decision, nil
+	}
+	if len(allows) == 0 {
+		return decision, nil
+	}
+	sort.Slice(allows, func(i, j int) bool {
+		left, right := ruleRank(allows[i]), ruleRank(allows[j])
+		if left != right {
+			return left > right
+		}
+		leftSpecificity, rightSpecificity := ruleSpecificity(allows[i]), ruleSpecificity(allows[j])
+		if leftSpecificity != rightSpecificity {
+			return leftSpecificity > rightSpecificity
+		}
+		return allows[i].ID < allows[j].ID
+	})
+	winner := allows[0]
+	decision.Allowed = true
+	decision.Effect = winner.Effect
+	decision.RuleID = winner.ID
+	switch winner.Effect {
+	case EffectAllowAttack:
+		decision.Reason = ReasonAllowAttack
+	case EffectAuthOnly:
+		decision.Reason = ReasonAuthOnly
+	case EffectAllowVisit:
+		decision.Reason = ReasonAllowVisit
+	}
+	return decision, nil
+}
+
+func dnsRuleUnconditionallyBlocks(rule compiledRule, host string, resolvedIPs []netip.Addr) bool {
+	if len(rule.Target.Schemes) != 0 || len(rule.Target.Ports) != 0 || len(rule.Target.PathPrefixes) != 0 || len(rule.Target.Methods) != 0 {
+		return false
+	}
+	if rule.prefix == nil {
+		return rule.Target.Host == host
+	}
+	for _, address := range resolvedIPs {
+		if address.IsValid() && rule.prefix.Contains(address.Unmap()) {
+			return true
+		}
+	}
+	return false
 }
 
 func ruleMatches(rule compiledRule, target RequestTarget) bool {

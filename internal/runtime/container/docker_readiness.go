@@ -109,7 +109,7 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 	default:
 		return fmt.Errorf("%w: runtime network mode is invalid", ErrRuntimeNotReady)
 	}
-	if len(actual.HostConfig.DNS) != 0 || len(actual.HostConfig.DNSOptions) != 0 || len(actual.HostConfig.DNSSearch) != 0 || len(actual.HostConfig.ExtraHosts) != 0 || len(actual.HostConfig.Links) != 0 || len(actual.HostConfig.PortBindings) != 0 {
+	if !validRuntimePolicyDNSSettings(actual.HostConfig, spec) || len(actual.HostConfig.PortBindings) != 0 {
 		return fmt.Errorf("%w: runtime declares DNS, host, link, or port egress settings", ErrRuntimeNotReady)
 	}
 	if actual.NetworkSettings != nil {

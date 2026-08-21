@@ -184,6 +184,46 @@ func TestPolicyAllowsExplicitPublicIPAndBlocksConfiguredNetwork(t *testing.T) {
 	}
 }
 
+func TestPolicyDNSAllowsOnlyNamesWithActiveRulesAndRejectsUnsafeAnswers(t *testing.T) {
+	now := time.Date(2026, 8, 21, 18, 0, 0, 0, time.UTC)
+	expired := now.Add(-time.Second)
+	policy, err := NewPolicy([]Rule{
+		{ID: "visit", Effect: EffectAllowVisit, Target: RuleTarget{Host: "allowed.example", Schemes: []string{"http"}, Methods: []string{"GET"}}},
+		{ID: "attack", Effect: EffectAllowAttack, Target: RuleTarget{Host: "allowed.example", Schemes: []string{"https"}, Ports: []int{443}, PathPrefixes: []string{"/api"}}},
+		{ID: "blocked-path", Effect: EffectBlocked, Target: RuleTarget{Host: "allowed.example", PathPrefixes: []string{"/admin"}}},
+		{ID: "blocked-host", Effect: EffectBlocked, Target: RuleTarget{Host: "blocked.example"}},
+		{ID: "expired", Effect: EffectAllowVisit, Target: RuleTarget{Host: "expired.example"}, ExpiresAt: &expired},
+		{ID: "blocked-network", Effect: EffectBlocked, Target: RuleTarget{Host: "93.184.216.0/24"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed, err := policy.EvaluateDNS("ALLOWED.EXAMPLE.", []netip.Addr{netip.MustParseAddr("8.8.8.8")}, now)
+	if err != nil || !allowed.Allowed || allowed.Host != "allowed.example" || allowed.RuleID != "attack" || allowed.Reason != ReasonAllowAttack {
+		t.Fatalf("allowed DNS decision = %#v, %v", allowed, err)
+	}
+	for _, test := range []struct {
+		name, host, reason string
+		addresses          []netip.Addr
+	}{
+		{name: "unknown", host: "unknown.example", reason: ReasonDefaultDeny},
+		{name: "blocked host", host: "blocked.example", reason: ReasonBlockedTarget},
+		{name: "expired", host: "expired.example", reason: ReasonDefaultDeny},
+		{name: "forbidden hostname", host: "metadata.google.internal", reason: ReasonForbiddenHostname},
+		{name: "private rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("192.168.1.2")}, reason: ReasonDNSRebinding},
+		{name: "mixed rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}, reason: ReasonDNSRebinding},
+		{name: "blocked public network", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}, reason: ReasonBlockedTarget},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			decision, decisionErr := policy.EvaluateDNS(test.host, test.addresses, now)
+			if decisionErr != nil || decision.Allowed || decision.Reason != test.reason {
+				t.Fatalf("DNS decision = %#v, %v", decision, decisionErr)
+			}
+		})
+	}
+}
+
 func TestPolicySkipsExpiredRulesAndValidatesPolicyShape(t *testing.T) {
 	now := time.Date(2026, 8, 21, 12, 0, 0, 0, time.UTC)
 	expired := now.Add(-time.Second)

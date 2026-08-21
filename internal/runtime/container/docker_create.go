@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -251,8 +252,9 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 		}
 	}
 	gatewayID := ""
+	gatewayDNS := ""
 	if spec.EgressGateway != nil {
-		gatewayID, err = m.createEgressGateway(ctx, spec, conversationNetwork, egressNetwork)
+		gatewayID, gatewayDNS, err = m.createEgressGateway(ctx, spec, conversationNetwork, egressNetwork)
 		if err != nil {
 			return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, err)
 		}
@@ -276,7 +278,7 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 			Cmd:             []string{runtimeKeepaliveScript},
 			Labels:          labels,
 		},
-		HostConfig:       runtimeHostConfig(spec),
+		HostConfig:       runtimeHostConfigWithPolicyDNS(spec, gatewayDNS),
 		NetworkingConfig: runtimeNetworkingConfig(spec, conversationNetwork),
 	})
 	if err != nil {
@@ -552,6 +554,11 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return Runtime{}, err
 	}
+	if spec.EgressGateway != nil {
+		if _, err := m.inspectOwnedEgressGateway(ctx, spec, &actual, StatusStopped); err != nil {
+			return Runtime{}, err
+		}
+	}
 	image, err := m.VerifyRuntimeImage(ctx, createResult.ID, spec.Image)
 	if err != nil {
 		return Runtime{}, err
@@ -656,6 +663,15 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 	return host
 }
 
+func runtimeHostConfigWithPolicyDNS(spec RuntimeSpec, address string) *mobycontainer.HostConfig {
+	host := runtimeHostConfig(spec)
+	if requiresPolicyDNS(spec) {
+		parsed, _ := netip.ParseAddr(address)
+		host.DNS = []netip.Addr{parsed}
+	}
+	return host
+}
+
 func runtimeNetworkingConfig(spec RuntimeSpec, network ManagedResource) *mobynetwork.NetworkingConfig {
 	if spec.Security.NetworkMode != NetworkInternal {
 		return nil
@@ -690,6 +706,9 @@ func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec Runtim
 	if actual.RestartPolicy.Name != mobycontainer.RestartPolicyDisabled {
 		return fmt.Errorf("%w: created runtime restart policy mismatch", ErrRuntimeStateConflict)
 	}
+	if !validRuntimePolicyDNSSettings(actual, spec) {
+		return fmt.Errorf("%w: created runtime declares unsupported DNS, host, or link settings", ErrRuntimeStateConflict)
+	}
 	if actual.LogConfig.Type != expected.LogConfig.Type || len(actual.LogConfig.Config) != len(expected.LogConfig.Config) {
 		return fmt.Errorf("%w: created runtime log rotation driver mismatch", ErrRuntimeStateConflict)
 	}
@@ -716,6 +735,20 @@ func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec Runtim
 		return err
 	}
 	return nil
+}
+
+func validRuntimePolicyDNSSettings(actual *mobycontainer.HostConfig, spec RuntimeSpec) bool {
+	if actual == nil || len(actual.DNSOptions) != 0 || len(actual.DNSSearch) != 0 || len(actual.ExtraHosts) != 0 || len(actual.Links) != 0 {
+		return false
+	}
+	if !requiresPolicyDNS(spec) {
+		return len(actual.DNS) == 0
+	}
+	if len(actual.DNS) != 1 {
+		return false
+	}
+	address := actual.DNS[0]
+	return address.IsValid() && address.Is4() && !address.IsUnspecified() && !address.IsLoopback() && !address.IsMulticast() && !address.IsLinkLocalUnicast() && address.Zone() == ""
 }
 
 func verifyWorkspaceHostMounts(actual []mobymount.Mount, spec RuntimeSpec) error {
