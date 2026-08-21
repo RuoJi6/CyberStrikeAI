@@ -223,7 +223,8 @@ chmod 0444 "$auth_snapshot_path"
 auth_snapshot_sha="sha256:$(sha256sum "$auth_snapshot_path" | awk '{print $1}')"
 
 auth_secret_probe=stage5-auth-secret-probe
-auth_profiles_id=stage5-auth-profiles
+auth_profiles_id="auth-$auth_snapshot_id-aaaaaaaaaaaaaaaa"
+cross_snapshot_auth_profiles_id=auth-33333333-3333-4333-8333-333333333333-aaaaaaaaaaaaaaaa
 auth_profiles_json='{"schemaVersion":1,"bindingSalt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profiles":[{"id":"profile-integration","headerName":"X-Integration-Auth","headerValue":"stage5-auth-secret-probe"}]}'
 printf '%s' "$auth_profiles_json" >"$auth_profiles_path"
 chmod 0444 "$auth_profiles_path"
@@ -326,10 +327,16 @@ expect_failure docker run --rm --network none --read-only --user 65532:65532 --c
   --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha"
 expect_failure docker run --rm --network none --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
   --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
+  --mount type=bind,source="$auth_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
+  "$CYBERSTRIKE_EGRESS_IMAGE" check \
+  --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha" \
+  --auth-profiles-path /etc/cyberstrike/auth-profiles.json --auth-profiles-id "$cross_snapshot_auth_profiles_id" --auth-profiles-sha256 "$auth_profiles_sha"
+expect_failure docker run --rm --network none --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
   --mount type=bind,source="$mismatch_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" check \
   --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha" \
-  --auth-profiles-path /etc/cyberstrike/auth-profiles.json --auth-profiles-id mismatch-auth --auth-profiles-sha256 "$mismatch_profiles_sha"
+  --auth-profiles-path /etc/cyberstrike/auth-profiles.json --auth-profiles-id "auth-$auth_snapshot_id-bbbbbbbbbbbbbbbb" --auth-profiles-sha256 "$mismatch_profiles_sha"
 
 chmod 0644 "$auth_profiles_path"
 for _ in $(seq 1 60); do
@@ -347,4 +354,4 @@ printf 'proxy_protocol=allowed_http_%s denied_matrix_passed\n' "$allowed_status"
 printf 'bypass_regression=direct,dns,doh,ipv6,no_proxy,external_proxy_blocked\n'
 printf 'gateway_crash=proxy_and_direct_blocked agent_running=true\n'
 printf 'upstream_unavailable=http_502 direct_fallback=false credential_metadata_leak=false\n'
-printf 'auth_only=http_204 override=true agent_read=false metadata_leak=false mismatch_fail_closed=true integrity_exit=true\n'
+printf 'auth_only=http_204 override=true agent_read=false metadata_leak=false mismatch_fail_closed=true cross_snapshot_reuse=false integrity_exit=true\n'

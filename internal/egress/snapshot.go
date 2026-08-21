@@ -299,6 +299,9 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		if options.Proxy.AuthProfiles != nil {
 			return errors.New("egress auth profiles must have only one trusted source")
 		}
+		if authErr := validateAuthProfilesSnapshotBinding(reference, *options.AuthProfiles); authErr != nil {
+			return authErr
+		}
 		document, authErr := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
 		if authErr != nil {
 			return authErr
@@ -449,6 +452,9 @@ func CheckGatewayWithOptions(path string, reference SnapshotReference, options G
 	if strings.TrimSpace(options.AuthProfilesPath) != "" || options.AuthProfiles != nil {
 		if strings.TrimSpace(options.AuthProfilesPath) == "" || options.AuthProfiles == nil {
 			return errors.New("egress auth profiles path and reference must be configured together")
+		}
+		if err := validateAuthProfilesSnapshotBinding(reference, *options.AuthProfiles); err != nil {
+			return err
 		}
 		document, err := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
 		if err != nil {

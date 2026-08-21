@@ -94,7 +94,7 @@ func TestCheckGatewayRequiresExactAuthProfilesForPolicy(t *testing.T) {
 	document := NewAuthProfilesDocument(strings.Repeat("d", 64), []GatewayAuthProfile{{
 		ID: "profile-1", HeaderName: "Authorization", HeaderValue: "Bearer secret",
 	}})
-	authReference, authPath, err := authStore.Put("auth-check-1", document)
+	authReference, authPath, err := authStore.Put("auth-"+snapshotReference.ID+"-aaaaaaaaaaaaaaaa", document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestCheckGatewayRequiresExactAuthProfilesForPolicy(t *testing.T) {
 	mismatch := NewAuthProfilesDocument(strings.Repeat("e", 64), []GatewayAuthProfile{{
 		ID: "profile-2", HeaderName: "Authorization", HeaderValue: "Bearer other",
 	}})
-	mismatchReference, mismatchPath, err := authStore.Put("auth-check-2", mismatch)
+	mismatchReference, mismatchPath, err := authStore.Put("auth-"+snapshotReference.ID+"-bbbbbbbbbbbbbbbb", mismatch)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +116,15 @@ func TestCheckGatewayRequiresExactAuthProfilesForPolicy(t *testing.T) {
 		AuthProfilesPath: mismatchPath, AuthProfiles: &mismatchReference,
 	}, nil); err == nil {
 		t.Fatal("gateway health accepted the wrong auth profile set")
+	}
+	crossSnapshotReference, crossSnapshotPath, err := authStore.Put("auth-33333333-3333-4333-8333-333333333333-aaaaaaaaaaaaaaaa", document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckGatewayWithOptions(snapshotPath, snapshotReference, GatewayOptions{
+		AuthProfilesPath: crossSnapshotPath, AuthProfiles: &crossSnapshotReference,
+	}, nil); !errors.Is(err, ErrAuthProfilesIntegrity) {
+		t.Fatalf("cross-snapshot auth profiles error = %v", err)
 	}
 }
 

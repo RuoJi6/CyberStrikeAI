@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"testing"
@@ -150,9 +151,14 @@ func (f *fakeDockerCreationAPI) NetworkCreate(_ context.Context, name string, op
 	id := "provider-network-" + strconv.Itoa(f.networkCreateCalls)
 	enableIPv4 := options.EnableIPv4 == nil || *options.EnableIPv4
 	enableIPv6 := options.EnableIPv6 != nil && *options.EnableIPv6
+	subnet := netip.MustParsePrefix("172.31.0.0/16")
+	if options.Internal {
+		subnet = netip.MustParsePrefix("172.30.0.0/16")
+	}
 	f.networks[name] = mobynetwork.Inspect{Network: mobynetwork.Network{
 		ID: id, Name: name, Created: time.Date(2026, 8, 21, 2, 0, 0, 0, time.UTC),
 		Scope: options.Scope, Driver: options.Driver, EnableIPv4: enableIPv4, EnableIPv6: enableIPv6,
+		IPAM:     mobynetwork.IPAM{Config: []mobynetwork.IPAMConfig{{Subnet: subnet}}},
 		Internal: options.Internal, Attachable: options.Attachable, Ingress: options.Ingress,
 		ConfigOnly: options.ConfigOnly, Options: cloneLabels(options.Options), Labels: cloneLabels(options.Labels),
 	}}

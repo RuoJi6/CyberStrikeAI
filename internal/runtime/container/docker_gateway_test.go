@@ -260,6 +260,10 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	if len(agentOptions.HostConfig.DNS) != 1 || agentOptions.HostConfig.DNS[0].String() != "172.30.0.2" || len(agentOptions.HostConfig.DNSOptions) != 0 || len(agentOptions.HostConfig.DNSSearch) != 0 {
 		t.Fatalf("agent policy DNS = %#v", agentOptions.HostConfig)
 	}
+	internalEndpoint := gatewayOptions.NetworkingConfig.EndpointsConfig[ConversationNetworkName(spec.ID)]
+	if internalEndpoint == nil || internalEndpoint.IPAMConfig == nil || internalEndpoint.IPAMConfig.IPv4Address.String() != "172.30.0.2" {
+		t.Fatalf("gateway static policy DNS endpoint = %#v", internalEndpoint)
+	}
 	if expected := runtimeProxyEnvironment(spec, "172.30.0.2"); !equalStrings(agentOptions.Config.Env, expected) {
 		t.Fatalf("agent proxy environment = %#v, want %#v", agentOptions.Config.Env, expected)
 	}
@@ -364,7 +368,7 @@ func TestDockerManagerBindsAuthProfilesOnlyIntoGatewayAndRejectsMissingOrWritabl
 	document := egress.NewAuthProfilesDocument(strings.Repeat("c", 64), []egress.GatewayAuthProfile{{
 		ID: "profile-1", HeaderName: "Authorization", HeaderValue: "Bearer gateway-auth-secret",
 	}})
-	authReference, authPath, err := authStore.Put("auth-runtime-1", document)
+	authReference, authPath, err := authStore.Put("auth-"+spec.EgressGateway.BoundarySnapshot.ID+"-aaaaaaaaaaaaaaaa", document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -426,6 +430,27 @@ func TestDockerManagerBindsAuthProfilesOnlyIntoGatewayAndRejectsMissingOrWritabl
 	}
 }
 
+func TestDockerManagerRejectsCrossConversationGatewayIdentityBeforeAgentCreation(t *testing.T) {
+	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	gatewayName := EgressGatewayContainerName(spec.ID)
+	gateway := api.containerResults[gatewayName]
+	gateway.Container.Config.Labels[LabelConversationID] = "conversation-other"
+	api.containerResults[gatewayName] = gateway
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: snapshotRoot, OperationTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("cross-conversation gateway identity error = %v", err)
+	}
+	if _, created := api.createOptsByName[runtimeContainerName(spec.ID)]; created {
+		t.Fatal("agent creation proceeded after cross-conversation gateway identity reuse")
+	}
+}
+
 func TestDockerManagerRejectsPolicyDNSDriftAndMissingGatewayAddress(t *testing.T) {
 	spec, root, snapshotPath := snapshotGatewayFixture(t)
 	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
@@ -447,7 +472,9 @@ func TestDockerManagerRejectsPolicyDNSDriftAndMissingGatewayAddress(t *testing.T
 	missingAPI := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
 	gatewayName := EgressGatewayContainerName(spec.ID)
 	gateway := missingAPI.containerResults[gatewayName]
-	gateway.Container.NetworkSettings.Networks[ConversationNetworkName(spec.ID)].IPAddress = netip.Addr{}
+	missingEndpoint := gateway.Container.NetworkSettings.Networks[ConversationNetworkName(spec.ID)]
+	missingEndpoint.IPAddress = netip.Addr{}
+	missingEndpoint.IPAMConfig = nil
 	missingAPI.containerResults[gatewayName] = gateway
 	missingManager, err := newDockerManager(missingAPI, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
 	if err != nil {
@@ -455,6 +482,24 @@ func TestDockerManagerRejectsPolicyDNSDriftAndMissingGatewayAddress(t *testing.T
 	}
 	if _, err := missingManager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
 		t.Fatalf("missing gateway policy DNS address error = %v", err)
+	}
+}
+
+func TestDockerManagerAcceptsStoppedGatewayStaticPolicyDNSAddress(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	gatewayName := EgressGatewayContainerName(spec.ID)
+	gateway := api.containerResults[gatewayName]
+	endpoint := gateway.Container.NetworkSettings.Networks[ConversationNetworkName(spec.ID)]
+	endpoint.IPAMConfig = &mobynetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr("172.30.0.2")}
+	endpoint.IPAddress = netip.Addr{}
+	api.containerResults[gatewayName] = gateway
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create with stopped static gateway address: %v", err)
 	}
 }
 
@@ -685,8 +730,11 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 		},
 		HostConfig: egressGatewayHostConfig(spec),
 		NetworkSettings: &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
-			ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: policyDNSAddress},
-			EgressNetworkName(spec.ID):       {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2")},
+			ConversationNetworkName(spec.ID): {
+				NetworkID: "provider-network-1", IPAddress: policyDNSAddress,
+				IPAMConfig: &mobynetwork.EndpointIPAMConfig{IPv4Address: policyDNSAddress},
+			},
+			EgressNetworkName(spec.ID): {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2")},
 		}},
 	}}
 	agentImage := mobyclient.ImageInspectResult{InspectResponse: mobyimage.InspectResponse{

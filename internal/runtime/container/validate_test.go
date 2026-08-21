@@ -85,6 +85,35 @@ func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T)
 	if err := container.ValidateSpec(withRoute); err != nil {
 		t.Fatalf("valid gateway upstream route rejected: %v", err)
 	}
+	crossConversationRoute := withRoute
+	gatewayWithCrossConversationRoute := *withRoute.EgressGateway
+	gatewayWithCrossConversationRoute.UpstreamRoute = &container.EgressUpstreamRouteSpec{
+		ID: "conversation-2", SHA256: withRoute.EgressGateway.UpstreamRoute.SHA256,
+	}
+	crossConversationRoute.EgressGateway = &gatewayWithCrossConversationRoute
+	if err := container.ValidateSpec(crossConversationRoute); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("cross-conversation upstream route error = %v", err)
+	}
+	withAuthProfiles := withSnapshot
+	gatewayWithAuthProfiles := *withSnapshot.EgressGateway
+	gatewayWithAuthProfiles.AuthProfiles = &container.EgressAuthProfilesSpec{
+		ID:     "auth-" + gatewayWithAuthProfiles.BoundarySnapshot.ID + "-aaaaaaaaaaaaaaaa",
+		SHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	withAuthProfiles.EgressGateway = &gatewayWithAuthProfiles
+	if err := container.ValidateSpec(withAuthProfiles); err != nil {
+		t.Fatalf("snapshot-bound auth profiles rejected: %v", err)
+	}
+	crossSnapshotAuthProfiles := withAuthProfiles
+	gatewayWithCrossSnapshotAuthProfiles := *withAuthProfiles.EgressGateway
+	gatewayWithCrossSnapshotAuthProfiles.AuthProfiles = &container.EgressAuthProfilesSpec{
+		ID:     "auth-00000000-0000-4000-8000-000000000000-aaaaaaaaaaaaaaaa",
+		SHA256: withAuthProfiles.EgressGateway.AuthProfiles.SHA256,
+	}
+	crossSnapshotAuthProfiles.EgressGateway = &gatewayWithCrossSnapshotAuthProfiles
+	if err := container.ValidateSpec(crossSnapshotAuthProfiles); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("cross-snapshot auth profiles error = %v", err)
+	}
 	routeWithoutSnapshot := spec
 	gatewayRouteWithoutSnapshot := *spec.EgressGateway
 	gatewayRouteWithoutSnapshot.UpstreamRoute = withRoute.EgressGateway.UpstreamRoute

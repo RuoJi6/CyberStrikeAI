@@ -13,6 +13,7 @@ import (
 var sha256DigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 var snapshotIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$`)
 var generatedNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var authProfilesVersionPattern = regexp.MustCompile(`^[a-f0-9]{16}$`)
 
 // ValidateSpec rejects ambiguous or unsafe runtime requests before an engine
 // implementation sees them.
@@ -81,6 +82,9 @@ func ValidateSpec(spec RuntimeSpec) error {
 		if err := ValidateEgressGatewaySpec(*spec.EgressGateway); err != nil {
 			return err
 		}
+		if spec.EgressGateway.UpstreamRoute != nil && spec.EgressGateway.UpstreamRoute.ID != spec.ConversationID {
+			return invalidSpec("egress gateway upstream route must be bound to the conversation")
+		}
 	}
 	return nil
 }
@@ -135,6 +139,11 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 		}
 		if spec.BoundarySnapshot == nil {
 			return invalidSpec("egress gateway auth profiles require a boundary snapshot")
+		}
+		prefix := "auth-" + spec.BoundarySnapshot.ID + "-"
+		version := strings.TrimPrefix(id, prefix)
+		if version == id || !authProfilesVersionPattern.MatchString(version) {
+			return invalidSpec("egress gateway auth profiles must be bound to the boundary snapshot")
 		}
 	}
 	return nil

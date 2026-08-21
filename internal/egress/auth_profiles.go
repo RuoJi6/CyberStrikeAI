@@ -28,9 +28,10 @@ const (
 )
 
 var (
-	ErrAuthProfilesIntegrity = errors.New("egress auth profiles integrity check failed")
-	authProfileIDPattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
-	headerNamePattern        = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+	ErrAuthProfilesIntegrity   = errors.New("egress auth profiles integrity check failed")
+	authProfileIDPattern       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+	authProfilesVersionPattern = regexp.MustCompile(`^[a-f0-9]{16}$`)
+	headerNamePattern          = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 )
 
 type AuthProfilesReference struct {
@@ -225,6 +226,21 @@ func validateAuthProfilesReference(reference AuthProfilesReference) error {
 	}
 	if reference.SHA256 != strings.TrimSpace(reference.SHA256) || !snapshotDigestPattern.MatchString(reference.SHA256) {
 		return fmt.Errorf("%w: auth profiles digest is invalid", ErrAuthProfilesIntegrity)
+	}
+	return nil
+}
+
+func validateAuthProfilesSnapshotBinding(snapshot SnapshotReference, reference AuthProfilesReference) error {
+	if err := validateSnapshotReference(snapshot); err != nil {
+		return err
+	}
+	if err := validateAuthProfilesReference(reference); err != nil {
+		return err
+	}
+	prefix := "auth-" + snapshot.ID + "-"
+	version := strings.TrimPrefix(reference.ID, prefix)
+	if version == reference.ID || !authProfilesVersionPattern.MatchString(version) {
+		return fmt.Errorf("%w: auth profiles are not bound to the boundary snapshot", ErrAuthProfilesIntegrity)
 	}
 	return nil
 }

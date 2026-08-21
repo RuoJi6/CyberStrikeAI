@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -137,6 +138,14 @@ func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpe
 	pinned, _ := pinnedImageReference(gateway.Image)
 	name := EgressGatewayContainerName(spec.ID)
 	labels := egressGatewayLabels(m.ownerID, spec)
+	policyDNSAddress := ""
+	if requiresPolicyDNS(spec) {
+		address, addressErr := m.conversationNetworkPolicyDNSAddress(ctx, spec, conversationNetwork)
+		if addressErr != nil {
+			return "", "", addressErr
+		}
+		policyDNSAddress = address.String()
+	}
 	config, hostConfig, err := m.egressGatewayContainerConfig(spec, labels)
 	if err != nil {
 		return "", "", err
@@ -146,7 +155,7 @@ func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpe
 		Platform:         &ocispec.Platform{OS: platform[0], Architecture: platform[1], Variant: platform[2]},
 		Config:           config,
 		HostConfig:       hostConfig,
-		NetworkingConfig: egressGatewayNetworkingConfig(spec, conversationNetwork, egressNetwork),
+		NetworkingConfig: egressGatewayNetworkingConfig(spec, conversationNetwork, egressNetwork, policyDNSAddress),
 	})
 	if err != nil {
 		if containerderrdefs.IsConflict(err) {
@@ -171,6 +180,9 @@ func (m *DockerManager) createEgressGateway(ctx context.Context, spec RuntimeSpe
 	if err != nil {
 		return result.ID, "", err
 	}
+	if address != policyDNSAddress {
+		return result.ID, "", fmt.Errorf("%w: egress gateway policy DNS address changed during creation", ErrRuntimeStateConflict)
+	}
 	return result.ID, address, nil
 }
 
@@ -183,10 +195,76 @@ func egressGatewayPolicyDNSAddress(gateway mobycontainer.InspectResponse, spec R
 		return "", fmt.Errorf("%w: egress gateway has no network settings for policy DNS", ErrRuntimeStateConflict)
 	}
 	endpoint := gateway.NetworkSettings.Networks[ConversationNetworkName(spec.ID)]
-	if endpoint == nil || !endpoint.IPAddress.IsValid() || !endpoint.IPAddress.Is4() || endpoint.IPAddress.IsUnspecified() || endpoint.IPAddress.IsLoopback() || endpoint.IPAddress.IsMulticast() || endpoint.IPAddress.IsLinkLocalUnicast() || endpoint.IPAddress.Zone() != "" {
+	if endpoint == nil {
+		return "", fmt.Errorf("%w: egress gateway policy DNS address is invalid", ErrRuntimeStateConflict)
+	}
+	configured := netip.Addr{}
+	if endpoint.IPAMConfig != nil {
+		configured = endpoint.IPAMConfig.IPv4Address
+	}
+	if configured.IsValid() {
+		if !validPolicyDNSAddress(configured) {
+			return "", fmt.Errorf("%w: egress gateway configured policy DNS address is invalid", ErrRuntimeStateConflict)
+		}
+		if endpoint.IPAddress.IsValid() && endpoint.IPAddress != configured {
+			return "", fmt.Errorf("%w: egress gateway operational policy DNS address mismatch", ErrRuntimeStateConflict)
+		}
+		return configured.String(), nil
+	}
+	if !validPolicyDNSAddress(endpoint.IPAddress) {
 		return "", fmt.Errorf("%w: egress gateway policy DNS address is invalid", ErrRuntimeStateConflict)
 	}
 	return endpoint.IPAddress.String(), nil
+}
+
+func validPolicyDNSAddress(address netip.Addr) bool {
+	return address.IsValid() && address.Is4() && !address.IsUnspecified() && !address.IsLoopback() &&
+		!address.IsMulticast() && !address.IsLinkLocalUnicast() && address.Zone() == ""
+}
+
+func (m *DockerManager) conversationNetworkPolicyDNSAddress(ctx context.Context, spec RuntimeSpec, network ManagedResource) (netip.Addr, error) {
+	if m.networkAPI == nil {
+		return netip.Addr{}, fmt.Errorf("%w: engine client does not support conversation network inspection", ErrEngineUnavailable)
+	}
+	result, err := m.networkAPI.NetworkInspect(ctx, network.ProviderID, mobyclient.NetworkInspectOptions{})
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("inspect conversation network policy DNS range: %w", err)
+	}
+	if _, err := m.verifyConversationNetwork(spec, RuntimeSpecDigest(spec), result.Network, network.ProviderID, true); err != nil {
+		return netip.Addr{}, err
+	}
+	var subnet netip.Prefix
+	var config mobynetwork.IPAMConfig
+	for _, candidate := range result.Network.IPAM.Config {
+		masked := candidate.Subnet.Masked()
+		if !masked.IsValid() || !masked.Addr().Is4() {
+			continue
+		}
+		if subnet.IsValid() {
+			return netip.Addr{}, fmt.Errorf("%w: conversation network has ambiguous IPv4 policy DNS ranges", ErrRuntimeStateConflict)
+		}
+		subnet = masked
+		config = candidate
+	}
+	if !subnet.IsValid() || subnet.Bits() > 29 {
+		return netip.Addr{}, fmt.Errorf("%w: conversation network has no usable IPv4 policy DNS range", ErrRuntimeStateConflict)
+	}
+	address := subnet.Addr().Next().Next()
+	for attempts := 0; attempts < 256 && subnet.Contains(address); attempts++ {
+		next := address.Next()
+		if !next.IsValid() || !subnet.Contains(next) {
+			break
+		}
+		reserved := address == config.Gateway
+		for _, auxiliary := range config.AuxAddress {
+			reserved = reserved || address == auxiliary
+		}
+		if !reserved && validPolicyDNSAddress(address) {
+			return address, nil
+		}
+		address = next
+	}
+	return netip.Addr{}, fmt.Errorf("%w: conversation network has no available IPv4 policy DNS address", ErrRuntimeStateConflict)
 }
 
 func (m *DockerManager) inspectOwnedEgressGateway(ctx context.Context, spec RuntimeSpec, agent *mobycontainer.InspectResponse, expectedStatus Status) (mobycontainer.InspectResponse, error) {
@@ -553,9 +631,13 @@ func healthySnapshotReport(health *mobycontainer.Health, reference egress.Snapsh
 	return report.AuthProfilesID == authReference.ID && report.AuthProfilesSHA256 == authReference.SHA256
 }
 
-func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource) *mobynetwork.NetworkingConfig {
+func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource, policyDNSAddress string) *mobynetwork.NetworkingConfig {
+	internalEndpoint := &mobynetwork.EndpointSettings{NetworkID: conversationNetwork.ProviderID}
+	if strings.TrimSpace(policyDNSAddress) != "" {
+		internalEndpoint.IPAMConfig = &mobynetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr(policyDNSAddress)}
+	}
 	return &mobynetwork.NetworkingConfig{EndpointsConfig: map[string]*mobynetwork.EndpointSettings{
-		ConversationNetworkName(spec.ID): {NetworkID: conversationNetwork.ProviderID},
+		ConversationNetworkName(spec.ID): internalEndpoint,
 		EgressNetworkName(spec.ID):       {NetworkID: egressNetwork.ProviderID},
 	}}
 }
@@ -612,6 +694,9 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 		}
 	}
 	if expectedStatus == StatusRunning {
+		if requiresPolicyDNS(spec) && !validPolicyDNSAddress(internalEndpoint.IPAddress) {
+			return fmt.Errorf("%w: running egress gateway has no operational policy DNS address", ErrRuntimeStateConflict)
+		}
 		if agent == nil || agent.State == nil || !agent.State.Running || len(internalResult.Network.Containers) != 2 || len(egressResult.Network.Containers) != 1 {
 			return fmt.Errorf("%w: running gateway network attachment count mismatch", ErrRuntimeStateConflict)
 		}

@@ -103,6 +103,10 @@ func TestMaterializeConversationAuthProfilesIsGatewayOnlyAndFailsClosed(t *testi
 	if strings.Contains(spec.ID+spec.SHA256, secret) {
 		t.Fatal("safe runtime auth profiles reference exposed credential")
 	}
+	wantPrefix := "auth-" + snapshot.SnapshotID + "-"
+	if !strings.HasPrefix(spec.ID, wantPrefix) || len(strings.TrimPrefix(spec.ID, wantPrefix)) != 16 {
+		t.Fatalf("auth profiles reference %q is not bound to snapshot %q", spec.ID, snapshot.SnapshotID)
+	}
 	loaded, err := egress.LoadAuthProfiles(filepath.Join(store.Root(), spec.ID+".json"), egress.AuthProfilesReference{ID: spec.ID, SHA256: spec.SHA256})
 	if err != nil || len(loaded.Profiles) != 1 || loaded.Profiles[0].HeaderValue != secret {
 		t.Fatalf("loaded gateway auth profiles = %#v, %v", loaded, err)
