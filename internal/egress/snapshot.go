@@ -10,10 +10,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
+
+	"cyberstrike-ai/internal/boundary"
 )
 
 const (
@@ -42,6 +47,11 @@ type snapshotEnvelope struct {
 	SchemaVersion int               `json:"schemaVersion"`
 	PolicyID      string            `json:"policyId"`
 	Rules         []json.RawMessage `json:"rules"`
+}
+
+type GatewayOptions struct {
+	ListenAddress string
+	Proxy         ProxyOptions
 }
 
 // SnapshotStore materializes immutable database snapshots into a trusted host
@@ -154,54 +164,72 @@ func (s *SnapshotStore) Put(reference SnapshotReference, canonicalJSON string) (
 }
 
 func LoadSnapshot(path string, reference SnapshotReference) (SnapshotReport, error) {
+	report, _, err := loadPolicySnapshot(path, reference)
+	return report, err
+}
+
+func LoadPolicySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, error) {
+	return loadPolicySnapshot(path, reference)
+}
+
+func loadPolicySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, error) {
 	if err := validateSnapshotReference(reference); err != nil {
-		return SnapshotReport{}, err
+		return SnapshotReport{}, nil, err
 	}
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return SnapshotReport{}, fmt.Errorf("open egress snapshot: %w", err)
+		return SnapshotReport{}, nil, fmt.Errorf("open egress snapshot: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return SnapshotReport{}, fmt.Errorf("stat egress snapshot: %w", err)
+		return SnapshotReport{}, nil, fmt.Errorf("stat egress snapshot: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o222 != 0 || info.Size() < 2 || info.Size() > maxSnapshotBytes {
-		return SnapshotReport{}, fmt.Errorf("%w: snapshot file type or size is invalid", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: snapshot file type or size is invalid", ErrSnapshotIntegrity)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, maxSnapshotBytes+1))
 	if err != nil {
-		return SnapshotReport{}, fmt.Errorf("read egress snapshot: %w", err)
+		return SnapshotReport{}, nil, fmt.Errorf("read egress snapshot: %w", err)
 	}
-	return validateSnapshotBytes(reference, content)
+	return validateSnapshotPolicyBytes(reference, content)
 }
 
 func validateSnapshotBytes(reference SnapshotReference, content []byte) (SnapshotReport, error) {
+	report, _, err := validateSnapshotPolicyBytes(reference, content)
+	return report, err
+}
+
+func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (SnapshotReport, *boundary.Policy, error) {
 	if err := validateSnapshotReference(reference); err != nil {
-		return SnapshotReport{}, err
+		return SnapshotReport{}, nil, err
 	}
 	digestBytes := sha256.Sum256(content)
 	actual := "sha256:" + hex.EncodeToString(digestBytes[:])
 	if subtle.ConstantTimeCompare([]byte(actual), []byte(reference.SHA256)) != 1 {
-		return SnapshotReport{}, fmt.Errorf("%w: SHA-256 mismatch", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: SHA-256 mismatch", ErrSnapshotIntegrity)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	var document snapshotEnvelope
 	if err := decoder.Decode(&document); err != nil {
-		return SnapshotReport{}, fmt.Errorf("%w: decode snapshot: %v", ErrSnapshotIntegrity, err)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: decode snapshot: %v", ErrSnapshotIntegrity, err)
 	}
 	var extra interface{}
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return SnapshotReport{}, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
 	}
 	if document.SchemaVersion != 1 || document.Rules == nil {
-		return SnapshotReport{}, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
 	}
 	if document.PolicyID == "" && len(document.Rules) != 0 {
-		return SnapshotReport{}, fmt.Errorf("%w: default-deny snapshot contains rules", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, fmt.Errorf("%w: default-deny snapshot contains rules", ErrSnapshotIntegrity)
 	}
-	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, nil
+	policy, err := compileSnapshotPolicy(document.Rules)
+	if err != nil {
+		return SnapshotReport{}, nil, err
+	}
+	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, policy, nil
 }
 
 func validateSnapshotReference(reference SnapshotReference) error {
@@ -216,22 +244,61 @@ func validateSnapshotReference(reference SnapshotReference) error {
 	return nil
 }
 
-func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReference, output io.Writer) error {
+func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReference, output io.Writer, configured ...GatewayOptions) error {
 	if ctx == nil {
 		return errors.New("egress gateway context is required")
 	}
-	report, err := LoadSnapshot(path, reference)
+	if len(configured) > 1 {
+		return errors.New("egress gateway accepts at most one options value")
+	}
+	options := GatewayOptions{}
+	if len(configured) == 1 {
+		options = configured[0]
+	}
+	report, policy, err := LoadPolicySnapshot(path, reference)
 	if err != nil {
 		return err
+	}
+	proxy, err := NewProxy(policy, options.Proxy)
+	if err != nil {
+		return err
+	}
+	listenAddress := strings.TrimSpace(options.ListenAddress)
+	if listenAddress == "" {
+		listenAddress = DefaultProxyListenAddress
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
+	listener, err := net.Listen("tcp", listenAddress)
+	if err != nil {
+		return fmt.Errorf("listen for egress proxy: %w", err)
+	}
+	server := &http.Server{
+		Handler: proxy, ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
 	}
 	report.Event = "boundary_snapshot_loaded"
 	if output != nil {
 		if err := json.NewEncoder(output).Encode(report); err != nil {
+			_ = listener.Close()
 			return fmt.Errorf("report loaded boundary snapshot: %w", err)
 		}
 	}
-	<-ctx.Done()
-	return nil
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = server.Close()
+		case <-done:
+		}
+	}()
+	err = server.Serve(listener)
+	close(done)
+	if errors.Is(err, http.ErrServerClosed) || ctx.Err() != nil {
+		return nil
+	}
+	return fmt.Errorf("serve egress proxy: %w", err)
 }
 
 func CheckSnapshot(path string, reference SnapshotReference, output io.Writer) error {

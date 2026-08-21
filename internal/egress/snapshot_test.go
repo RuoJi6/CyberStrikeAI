@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"cyberstrike-ai/internal/boundary"
 )
 
 const testSnapshotID = "12345678-1234-1234-1234-123456789abc"
@@ -83,7 +85,7 @@ func TestSnapshotStorePublishesImmutableReadOnlyFile(t *testing.T) {
 }
 
 func TestLoadSnapshotRejectsDigestSchemaAndFileDrift(t *testing.T) {
-	valid := `{"schemaVersion":1,"policyId":"policy-1","rules":[{}]}`
+	valid := `{"schemaVersion":1,"policyId":"","rules":[]}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")
 	if err := os.WriteFile(path, []byte(valid), 0o444); err != nil {
 		t.Fatal(err)
@@ -131,7 +133,9 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var output lockedBuffer
 	done := make(chan error, 1)
-	go func() { done <- RunWithSnapshot(ctx, path, reference, &output) }()
+	go func() {
+		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0"})
+	}()
 	deadline := time.Now().Add(time.Second)
 	for !strings.Contains(output.String(), reference.SHA256) && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -147,5 +151,35 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("gateway did not stop")
+	}
+}
+
+func TestLoadPolicySnapshotCompilesCanonicalRulesAndRejectsNonCanonicalTargets(t *testing.T) {
+	valid := `{"schemaVersion":1,"policyId":"policy-1","rules":[{"id":"rule-1","effect":"allow-visit","host":"allowed.example","schemes":["http"],"ports":[80],"pathPrefixes":["/api"],"methods":["GET"],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}]}`
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(path, []byte(valid), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	reference := testSnapshot(t, valid)
+	report, policy, err := LoadPolicySnapshot(path, reference)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := policy.Evaluate("http://allowed.example/api/items", "GET", nil, time.Now())
+	if err != nil || !decision.Allowed || decision.Effect != boundary.EffectAllowVisit || report.SnapshotID != reference.ID || report.SHA256 != reference.SHA256 {
+		t.Fatalf("compiled policy decision/report = %#v / %#v / %v", decision, report, err)
+	}
+	nonCanonical := strings.Replace(valid, `"host":"allowed.example"`, `"host":"ALLOWED.EXAMPLE."`, 1)
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(nonCanonical), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadPolicySnapshot(path, testSnapshot(t, nonCanonical)); !errors.Is(err, ErrSnapshotIntegrity) {
+		t.Fatalf("non-canonical snapshot error = %v", err)
 	}
 }
