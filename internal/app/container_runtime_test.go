@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -36,7 +38,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	snapshot := containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot)
+	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,11 +163,116 @@ func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
 	}
 	spec, err := conversationContainerSpec(cfg, "conversation-01", true, containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !spec.Workspace.Persistent || spec.Workspace.VolumeName != "cyberstrike-workspace-conversation-conversation-01" {
 		t.Fatalf("workspace = %#v", spec.Workspace)
+	}
+}
+
+func TestMaterializeConversationUpstreamRouteKeepsSecretsGatewayOnlyAndFailsClosed(t *testing.T) {
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "upstream-route.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cipher, err := egress.NewCredentialCipher(bytes.Repeat([]byte{0x51}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, _ := json.Marshal(egress.ProxyCredentials{Username: "gateway-user", Password: "gateway-secret"})
+	ciphertext, err := cipher.Encrypt("proxy-a", credentials)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyA, err := db.CreateEgressProxy(context.Background(), database.EgressProxy{
+		ID: "proxy-a", Name: "Proxy A", Protocol: egress.UpstreamProtocolHTTP,
+		Host: "proxy.example", Port: 3128, Enabled: true, OwnerUserID: "owner-1",
+		CredentialCiphertext: ciphertext,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyB, err := db.CreateEgressProxy(context.Background(), database.EgressProxy{
+		ID: "proxy-b", Name: "Proxy B", Protocol: egress.UpstreamProtocolSOCKS5,
+		Host: "disabled.proxy.example", Port: 1080, Enabled: false, OwnerUserID: "owner-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := egress.NewUpstreamRouteStore(filepath.Join(t.TempDir(), "routes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxyConversation, err := db.CreateConversation("proxy route", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetConversationEgressSelection(context.Background(), proxyConversation.ID, database.ConversationEgressModeProxy, proxyA.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	proxyBinding, err := db.EnsureConversationEgressBinding(context.Background(), proxyConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxySpec, err := materializeConversationUpstreamRoute(context.Background(), db, cipher, store, proxyBinding)
+	if err != nil || proxySpec == nil {
+		t.Fatalf("proxy route spec = %#v, err=%v", proxySpec, err)
+	}
+	loadedProxy, err := egress.LoadUpstreamRoute(filepath.Join(store.Root(), proxySpec.ID+".json"), egress.UpstreamRouteReference{ID: proxySpec.ID, SHA256: proxySpec.SHA256})
+	if err != nil || loadedProxy.Proxy == nil || loadedProxy.Proxy.Username != "gateway-user" || loadedProxy.Proxy.Password != "gateway-secret" {
+		t.Fatalf("loaded proxy route = %#v, err=%v", loadedProxy, err)
+	}
+	safeSpec, _ := json.Marshal(proxySpec)
+	if bytes.Contains(safeSpec, []byte("gateway-user")) || bytes.Contains(safeSpec, []byte("gateway-secret")) || bytes.Contains(safeSpec, []byte(ciphertext)) {
+		t.Fatal("runtime route reference exposed credentials")
+	}
+
+	group, err := db.CreateEgressProxyGroup(context.Background(), database.EgressProxyGroup{
+		ID: "group-a", Name: "Group A", Enabled: true, FailureThreshold: 2, CooldownSeconds: 30,
+		OwnerUserID: "owner-1", Members: []database.EgressProxyGroupMember{
+			{ProxyID: proxyA.ID, Priority: 0, Weight: 3, Enabled: true},
+			{ProxyID: proxyB.ID, Priority: 1, Weight: 1, Enabled: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupConversation, err := db.CreateConversation("group route", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetConversationEgressSelection(context.Background(), groupConversation.ID, database.ConversationEgressModeGroup, "", group.ID); err != nil {
+		t.Fatal(err)
+	}
+	groupBinding, err := db.EnsureConversationEgressBinding(context.Background(), groupConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupSpec, err := materializeConversationUpstreamRoute(context.Background(), db, cipher, store, groupBinding)
+	if err != nil || groupSpec == nil {
+		t.Fatalf("group route spec = %#v, err=%v", groupSpec, err)
+	}
+	loadedGroup, err := egress.LoadUpstreamRoute(filepath.Join(store.Root(), groupSpec.ID+".json"), egress.UpstreamRouteReference{ID: groupSpec.ID, SHA256: groupSpec.SHA256})
+	if err != nil || loadedGroup.Group == nil || len(loadedGroup.Group.Members) != 1 || loadedGroup.Group.Members[0].Proxy.ID != proxyA.ID {
+		t.Fatalf("loaded group route = %#v, err=%v", loadedGroup, err)
+	}
+
+	disabledConversation, err := db.CreateConversation("disabled route", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetConversationEgressSelection(context.Background(), disabledConversation.ID, database.ConversationEgressModeProxy, proxyB.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	disabledBinding, err := db.EnsureConversationEgressBinding(context.Background(), disabledConversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := materializeConversationUpstreamRoute(context.Background(), db, cipher, store, disabledBinding); !errors.Is(err, database.ErrNoAvailableEgressProxy) {
+		t.Fatalf("disabled proxy route error = %v", err)
 	}
 }

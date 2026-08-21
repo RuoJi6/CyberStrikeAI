@@ -48,6 +48,8 @@ const (
 	LabelEgressImagePlatform   = "com.cyberstrike.egress.image-platform"
 	LabelEgressSnapshotID      = "com.cyberstrike.egress.snapshot-id"
 	LabelEgressSnapshotSHA256  = "com.cyberstrike.egress.snapshot-sha256"
+	LabelEgressUpstreamRouteID = "com.cyberstrike.egress.upstream-route-id"
+	LabelEgressUpstreamSHA256  = "com.cyberstrike.egress.upstream-route-sha256"
 	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
 	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
 	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
@@ -112,6 +114,7 @@ type DockerManagerOptions struct {
 	GlobalConcurrentExec int
 	GlobalQueuedExec     int
 	EgressSnapshotRoot   string
+	EgressUpstreamRoot   string
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -126,6 +129,7 @@ type DockerManager struct {
 	networkAPI       dockerNetworkAPI
 	volumeAPI        dockerVolumeAPI
 	snapshotStore    *egress.SnapshotStore
+	upstreamStore    *egress.UpstreamRouteStore
 	ownerID          string
 	operationTimeout time.Duration
 }
@@ -169,6 +173,14 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 			return nil, fmt.Errorf("configure egress snapshot store: %w", err)
 		}
 	}
+	var upstreamStore *egress.UpstreamRouteStore
+	if strings.TrimSpace(options.EgressUpstreamRoot) != "" {
+		var err error
+		upstreamStore, err = egress.NewUpstreamRouteStore(options.EgressUpstreamRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure egress upstream route store: %w", err)
+		}
+	}
 	globalConcurrent := options.GlobalConcurrentExec
 	if globalConcurrent == 0 {
 		globalConcurrent = defaultGlobalConcurrentExec
@@ -189,7 +201,7 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	return &DockerManager{
 		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
 		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
-		snapshotStore: snapshotStore, ownerID: ownerID, operationTimeout: operationTimeout,
+		snapshotStore: snapshotStore, upstreamStore: upstreamStore, ownerID: ownerID, operationTimeout: operationTimeout,
 	}, nil
 }
 
@@ -457,6 +469,14 @@ func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual, authorized strin
 	// stage 4 retains the digest of an otherwise-identical pre-network or
 	// pre-gateway spec after an explicit controlled topology migration.
 	legacy := spec
+	if legacy.EgressGateway != nil && legacy.EgressGateway.UpstreamRoute != nil {
+		gateway := *legacy.EgressGateway
+		gateway.UpstreamRoute = nil
+		legacy.EgressGateway = &gateway
+		if actual == RuntimeSpecDigest(legacy) {
+			return true
+		}
+	}
 	if legacy.EgressGateway != nil && legacy.EgressGateway.BoundarySnapshot != nil {
 		gateway := *legacy.EgressGateway
 		gateway.BoundarySnapshot = nil
@@ -894,6 +914,10 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	if gateway.BoundarySnapshot != nil {
 		labels[LabelEgressSnapshotID] = gateway.BoundarySnapshot.ID
 		labels[LabelEgressSnapshotSHA256] = gateway.BoundarySnapshot.SHA256
+	}
+	if gateway.UpstreamRoute != nil {
+		labels[LabelEgressUpstreamRouteID] = gateway.UpstreamRoute.ID
+		labels[LabelEgressUpstreamSHA256] = gateway.UpstreamRoute.SHA256
 	}
 	return labels
 }

@@ -14,6 +14,7 @@ egress_network="cs-egress-out-$test_suffix"
 gateway_container="cs-egress-gateway-$test_suffix"
 agent_container="cs-egress-agent-$test_suffix"
 snapshot_path="$test_root/boundary.json"
+route_path="$test_root/upstream.json"
 
 cleanup() {
   docker rm -f "$agent_container" "$gateway_container" >/dev/null 2>&1 || true
@@ -144,7 +145,70 @@ expect_failure docker exec "$agent_container" curl -sS --connect-timeout 2 --max
 expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null http://example.com/'
 [[ "$(docker inspect --format '{{.State.Running}}' "$agent_container")" == true ]] || fail "agent stopped with the gateway"
 
+# A configured upstream is a mandatory hop. Recreate the gateway with an
+# unreachable HTTP proxy and a synthetic credential marker: allowed targets
+# must return 502 and must never fall back to the gateway's direct egress.
+docker rm -f "$agent_container" "$gateway_container" >/dev/null
+route_id=stage5-fail-closed
+route_secret_probe=stage5-route-secret-probe
+route_json='{"schemaVersion":1,"mode":"proxy","proxy":{"id":"unavailable-http","protocol":"http","host":"127.0.0.1","port":9,"username":"integration-user","password":"stage5-route-secret-probe"}}'
+printf '%s' "$route_json" >"$route_path"
+chmod 0444 "$route_path"
+route_sha="sha256:$(sha256sum "$route_path" | awk '{print $1}')"
+
+docker run -d --name "$gateway_container" --network "$internal_network" \
+  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  --mount type=bind,source="$snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
+  --mount type=bind,source="$route_path",target=/etc/cyberstrike/upstream.json,readonly \
+  "$CYBERSTRIKE_EGRESS_IMAGE" run \
+  --snapshot-path /etc/cyberstrike/boundary.json \
+  --snapshot-id "$snapshot_id" \
+  --snapshot-sha256 "$snapshot_sha" \
+  --upstream-route-path /etc/cyberstrike/upstream.json \
+  --upstream-route-id "$route_id" \
+  --upstream-route-sha256 "$route_sha" >/dev/null
+docker network connect "$egress_network" "$gateway_container"
+
+for _ in $(seq 1 60); do
+  docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
+  sleep 0.1
+done
+if ! docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded'; then
+  docker inspect --format 'fail_closed_gateway_state={{json .State}}' "$gateway_container" >&2 || true
+  docker logs "$gateway_container" >&2 || true
+  fail "upstream-routed gateway did not report its loaded snapshot"
+fi
+route_health=$(docker exec "$gateway_container" /cyberstrike-egress check \
+  --snapshot-path /etc/cyberstrike/boundary.json \
+  --snapshot-id "$snapshot_id" \
+  --snapshot-sha256 "$snapshot_sha" \
+  --upstream-route-path /etc/cyberstrike/upstream.json \
+  --upstream-route-id "$route_id" \
+  --upstream-route-sha256 "$route_sha")
+grep -q "\"upstreamRouteId\":\"$route_id\"" <<<"$route_health" || fail "gateway health omitted the exact upstream route"
+grep -q "\"upstreamRouteSha256\":\"$route_sha\"" <<<"$route_health" || fail "gateway health omitted the exact upstream route digest"
+[[ "$(docker inspect --format '{{len .Mounts}}' "$gateway_container")" == 2 ]] || fail "upstream-routed gateway does not have exactly two trusted mounts"
+inspect_json=$(docker inspect "$gateway_container")
+if grep -Fq "$route_secret_probe" <<<"$inspect_json"; then
+  fail "upstream credential leaked into gateway inspect metadata"
+fi
+if docker logs "$gateway_container" 2>&1 | grep -Fq "$route_secret_probe"; then
+  fail "upstream credential leaked into gateway logs"
+fi
+
+gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.IPAddress}}{{end}}" "$gateway_container")
+[[ -n "$gateway_ip" ]] || fail "upstream-routed gateway internal address is empty"
+proxy="http://$gateway_ip:3128"
+expect_status 502 docker run --rm --network "$internal_network" --dns "$gateway_ip" \
+  --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$proxy" --env 'NO_PROXY=' \
+  --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$proxy" --env 'no_proxy=' \
+  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c \
+  "curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com/"
+expect_failure docker run --rm --network "$internal_network" --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c \
+  'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null http://example.com/'
+
 printf 'docker_topology=isolated internal=2 egress=1\n'
 printf 'proxy_protocol=allowed_http_%s denied_matrix_passed\n' "$allowed_status"
 printf 'bypass_regression=direct,dns,doh,ipv6,no_proxy,external_proxy_blocked\n'
 printf 'gateway_crash=proxy_and_direct_blocked agent_running=true\n'
+printf 'upstream_unavailable=http_502 direct_fallback=false credential_metadata_leak=false\n'

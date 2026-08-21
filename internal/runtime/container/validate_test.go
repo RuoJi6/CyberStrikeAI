@@ -67,21 +67,37 @@ func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T)
 		t.Fatalf("valid gateway spec rejected: %v", err)
 	}
 	withSnapshot := spec
-	gateway := *spec.EgressGateway
-	gateway.BoundarySnapshot = &container.EgressBoundarySnapshotSpec{
+	gatewayWithSnapshot := *spec.EgressGateway
+	gatewayWithSnapshot.BoundarySnapshot = &container.EgressBoundarySnapshotSpec{
 		ID:     "12345678-1234-1234-1234-123456789abc",
 		SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
 	}
-	withSnapshot.EgressGateway = &gateway
+	withSnapshot.EgressGateway = &gatewayWithSnapshot
 	if err := container.ValidateSpec(withSnapshot); err != nil {
 		t.Fatalf("valid gateway snapshot rejected: %v", err)
 	}
+	withRoute := withSnapshot
+	gatewayWithRoute := *withSnapshot.EgressGateway
+	gatewayWithRoute.UpstreamRoute = &container.EgressUpstreamRouteSpec{
+		ID: "conversation-1", SHA256: "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	}
+	withRoute.EgressGateway = &gatewayWithRoute
+	if err := container.ValidateSpec(withRoute); err != nil {
+		t.Fatalf("valid gateway upstream route rejected: %v", err)
+	}
+	routeWithoutSnapshot := spec
+	gatewayRouteWithoutSnapshot := *spec.EgressGateway
+	gatewayRouteWithoutSnapshot.UpstreamRoute = withRoute.EgressGateway.UpstreamRoute
+	routeWithoutSnapshot.EgressGateway = &gatewayRouteWithoutSnapshot
+	if err := container.ValidateSpec(routeWithoutSnapshot); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("upstream route without boundary snapshot error = %v", err)
+	}
 	paddedSnapshot := withSnapshot
-	gateway = *withSnapshot.EgressGateway
-	snapshot := *gateway.BoundarySnapshot
+	gatewayWithPaddedSnapshot := *withSnapshot.EgressGateway
+	snapshot := *gatewayWithPaddedSnapshot.BoundarySnapshot
 	snapshot.ID += " "
-	gateway.BoundarySnapshot = &snapshot
-	paddedSnapshot.EgressGateway = &gateway
+	gatewayWithPaddedSnapshot.BoundarySnapshot = &snapshot
+	paddedSnapshot.EgressGateway = &gatewayWithPaddedSnapshot
 	if err := container.ValidateSpec(paddedSnapshot); !errors.Is(err, container.ErrInvalidSpecification) {
 		t.Fatalf("padded gateway snapshot id error = %v", err)
 	}
@@ -91,16 +107,16 @@ func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T)
 		t.Fatalf("none-network gateway error = %v", err)
 	}
 	floating := spec
-	gateway = *spec.EgressGateway
-	gateway.Image.Digest = "latest"
-	floating.EgressGateway = &gateway
+	gatewayWithFloatingImage := *spec.EgressGateway
+	gatewayWithFloatingImage.Image.Digest = "latest"
+	floating.EgressGateway = &gatewayWithFloatingImage
 	if err := container.ValidateSpec(floating); !errors.Is(err, container.ErrInvalidSpecification) {
 		t.Fatalf("floating gateway image error = %v", err)
 	}
 	unlimited := spec
-	gateway = *spec.EgressGateway
-	gateway.Resources.MemoryBytes = 0
-	unlimited.EgressGateway = &gateway
+	gatewayWithUnlimitedMemory := *spec.EgressGateway
+	gatewayWithUnlimitedMemory.Resources.MemoryBytes = 0
+	unlimited.EgressGateway = &gatewayWithUnlimitedMemory
 	if err := container.ValidateSpec(unlimited); !errors.Is(err, container.ErrInvalidSpecification) {
 		t.Fatalf("unlimited gateway error = %v", err)
 	}

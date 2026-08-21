@@ -148,6 +148,9 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if _, _, err := m.loadBoundarySnapshot(spec); err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 		}
+		if _, _, err := m.loadUpstreamRoute(spec); err != nil {
+			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
+		}
 		result, err := m.api.ContainerInspect(ctx, providerID, mobyclient.ContainerInspectOptions{Size: false})
 		if err != nil {
 			if containerderrdefs.IsNotFound(err) {
@@ -162,7 +165,7 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if state == nil {
 			return fmt.Errorf("%w: egress gateway state is missing", ErrRuntimeNotReady)
 		}
-		if state.Running && healthySnapshotReport(state.Health, reference) {
+		if state.Running && healthySnapshotReport(state.Health, reference, upstreamRouteReference(spec)) {
 			return nil
 		}
 		if !state.Running || state.Status == mobycontainer.StateExited || state.Status == mobycontainer.StateDead || (state.Health != nil && state.Health.Status == mobycontainer.Unhealthy) {

@@ -509,7 +509,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerErr := setupConversationContainerRuntime(cfg, db, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
@@ -518,8 +518,13 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
-			if _, egressErr := db.EnsureConversationEgressBinding(ctx, conversationID); egressErr != nil {
+			binding, egressErr := db.EnsureConversationEgressBinding(ctx, conversationID)
+			if egressErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation upstream egress: %w", egressErr)
+			}
+			upstreamRoute, egressErr := materializeConversationUpstreamRoute(ctx, db, credentialCipher, containerUpstreamStore, binding)
+			if egressErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation upstream egress: %w", egressErr)
 			}
 			snapshot, snapshotErr := db.EnsureConversationBoundarySnapshot(ctx, conversationID)
 			if snapshotErr != nil {
@@ -533,7 +538,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec)
+			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}

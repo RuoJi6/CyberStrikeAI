@@ -284,6 +284,77 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	}
 }
 
+func TestDockerManagerBindsGatewayOnlyUpstreamRouteAndRejectsMissingOrWritableRoute(t *testing.T) {
+	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
+	routeStore, err := egress.NewUpstreamRouteStore(filepath.Join(t.TempDir(), "upstream-routes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeReference, routePath, err := routeStore.Put(spec.ConversationID, egress.NewProxyUpstreamRoute(egress.UpstreamEndpoint{
+		ID: "proxy-route", Protocol: egress.UpstreamProtocolHTTP, Host: "proxy.example", Port: 3128,
+		Username: "gateway-user", Password: "gateway-secret",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.EgressGateway.UpstreamRoute = &EgressUpstreamRouteSpec{ID: routeReference.ID, SHA256: routeReference.SHA256}
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	gatewayName := EgressGatewayContainerName(spec.ID)
+	gateway := api.containerResults[gatewayName]
+	gateway.Container.HostConfig.Mounts = append(gateway.Container.HostConfig.Mounts, mobymount.Mount{
+		Type: mobymount.TypeBind, Source: routePath, Target: egress.UpstreamRouteContainerPath, ReadOnly: true,
+		BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+	})
+	api.containerResults[gatewayName] = gateway
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: snapshotRoot, EgressUpstreamRoot: routeStore.Root(), OperationTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create upstream-routed gateway: %v", err)
+	}
+	agentOptions := api.createOptsByName[runtimeContainerName(spec.ID)]
+	gatewayOptions := api.createOptsByName[gatewayName]
+	if len(agentOptions.HostConfig.Mounts) != 0 || strings.Contains(strings.Join(agentOptions.Config.Env, "\n"), "gateway-secret") {
+		t.Fatalf("agent received upstream route material: %#v", agentOptions)
+	}
+	if len(gatewayOptions.HostConfig.Mounts) != 2 {
+		t.Fatalf("gateway trusted mounts = %#v", gatewayOptions.HostConfig.Mounts)
+	}
+	commandText := strings.Join(gatewayOptions.Config.Cmd, " ")
+	labelsJSON, _ := json.Marshal(gatewayOptions.Config.Labels)
+	if strings.Contains(commandText, "gateway-user") || strings.Contains(commandText, "gateway-secret") || strings.Contains(string(labelsJSON), "gateway-user") || strings.Contains(string(labelsJSON), "gateway-secret") {
+		t.Fatal("gateway command or labels exposed upstream credentials")
+	}
+	if gatewayOptions.Config.Labels[LabelEgressUpstreamRouteID] != routeReference.ID || gatewayOptions.Config.Labels[LabelEgressUpstreamSHA256] != routeReference.SHA256 {
+		t.Fatalf("gateway upstream labels = %#v", gatewayOptions.Config.Labels)
+	}
+
+	missingManager, err := newDockerManager(newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath), DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: snapshotRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := missingManager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("missing upstream route store error = %v", err)
+	}
+	if err := os.Chmod(routePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writableManager, err := newDockerManager(newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath), DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: snapshotRoot, EgressUpstreamRoot: routeStore.Root(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writableManager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("writable upstream route error = %v", err)
+	}
+}
+
 func TestDockerManagerRejectsPolicyDNSDriftAndMissingGatewayAddress(t *testing.T) {
 	spec, root, snapshotPath := snapshotGatewayFixture(t)
 	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)

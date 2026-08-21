@@ -111,6 +111,19 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 			return invalidSpec("egress gateway boundary snapshot digest must be a lowercase sha256 digest")
 		}
 	}
+	if spec.UpstreamRoute != nil {
+		id := strings.TrimSpace(spec.UpstreamRoute.ID)
+		if id != spec.UpstreamRoute.ID || !generatedNamePattern.MatchString(id) {
+			return invalidSpec("egress gateway upstream route id must be canonical and label-safe")
+		}
+		digest := strings.TrimSpace(spec.UpstreamRoute.SHA256)
+		if digest != spec.UpstreamRoute.SHA256 || !sha256DigestPattern.MatchString(digest) {
+			return invalidSpec("egress gateway upstream route digest must be a lowercase sha256 digest")
+		}
+		if spec.BoundarySnapshot == nil {
+			return invalidSpec("egress gateway upstream route requires a boundary snapshot")
+		}
+	}
 	return nil
 }
 

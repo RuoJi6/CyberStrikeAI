@@ -39,9 +39,11 @@ type SnapshotReference struct {
 }
 
 type SnapshotReport struct {
-	Event      string `json:"event"`
-	SnapshotID string `json:"snapshotId"`
-	SHA256     string `json:"sha256"`
+	Event               string `json:"event"`
+	SnapshotID          string `json:"snapshotId"`
+	SHA256              string `json:"sha256"`
+	UpstreamRouteID     string `json:"upstreamRouteId,omitempty"`
+	UpstreamRouteSHA256 string `json:"upstreamRouteSha256,omitempty"`
 }
 
 type snapshotEnvelope struct {
@@ -54,6 +56,8 @@ type GatewayOptions struct {
 	ListenAddress         string
 	DNSListenAddress      string
 	SnapshotCheckInterval time.Duration
+	UpstreamRoutePath     string
+	UpstreamRoute         *UpstreamRouteReference
 	Proxy                 ProxyOptions
 	DNS                   DNSOptions
 }
@@ -269,6 +273,21 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(options.UpstreamRoutePath) != "" || options.UpstreamRoute != nil {
+		if strings.TrimSpace(options.UpstreamRoutePath) == "" || options.UpstreamRoute == nil {
+			return errors.New("egress upstream route path and reference must be configured together")
+		}
+		if options.Proxy.UpstreamRoute != nil {
+			return errors.New("egress upstream route must have only one trusted source")
+		}
+		route, routeErr := LoadUpstreamRoute(options.UpstreamRoutePath, *options.UpstreamRoute)
+		if routeErr != nil {
+			return routeErr
+		}
+		options.Proxy.UpstreamRoute = &route
+		report.UpstreamRouteID = options.UpstreamRoute.ID
+		report.UpstreamRouteSHA256 = options.UpstreamRoute.SHA256
+	}
 	proxy, err := NewProxy(policy, options.Proxy)
 	if err != nil {
 		return err
@@ -321,7 +340,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	go func() {
 		results <- serverResult{
 			name: "snapshot integrity monitor",
-			err:  monitorSnapshotIntegrity(runCtx, path, reference, options.SnapshotCheckInterval),
+			err:  monitorGatewayIntegrity(runCtx, path, reference, options.UpstreamRoutePath, options.UpstreamRoute, options.SnapshotCheckInterval),
 		}
 	}()
 
@@ -354,7 +373,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	return fmt.Errorf("serve %s: %w", first.name, first.err)
 }
 
-func monitorSnapshotIntegrity(ctx context.Context, path string, reference SnapshotReference, interval time.Duration) error {
+func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, interval time.Duration) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -365,14 +384,33 @@ func monitorSnapshotIntegrity(ctx context.Context, path string, reference Snapsh
 			if _, err := LoadSnapshot(path, reference); err != nil {
 				return fmt.Errorf("revalidate immutable snapshot: %w", err)
 			}
+			if routeReference != nil {
+				if _, err := LoadUpstreamRoute(routePath, *routeReference); err != nil {
+					return fmt.Errorf("revalidate immutable upstream route: %w", err)
+				}
+			}
 		}
 	}
 }
 
 func CheckSnapshot(path string, reference SnapshotReference, output io.Writer) error {
+	return CheckGateway(path, reference, "", nil, output)
+}
+
+func CheckGateway(path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, output io.Writer) error {
 	report, err := LoadSnapshot(path, reference)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(routePath) != "" || routeReference != nil {
+		if strings.TrimSpace(routePath) == "" || routeReference == nil {
+			return errors.New("egress upstream route path and reference must be configured together")
+		}
+		if _, err := LoadUpstreamRoute(routePath, *routeReference); err != nil {
+			return err
+		}
+		report.UpstreamRouteID = routeReference.ID
+		report.UpstreamRouteSHA256 = routeReference.SHA256
 	}
 	report.Event = "boundary_snapshot_healthy"
 	if output == nil {

@@ -145,12 +145,21 @@ type EgressBoundarySnapshotSpec struct {
 	SHA256 string
 }
 
+// EgressUpstreamRouteSpec identifies the immutable gateway-only route file.
+// The document itself may contain proxy credentials and is never serialized
+// into the runtime specification, labels, command line, or Agent environment.
+type EgressUpstreamRouteSpec struct {
+	ID     string
+	SHA256 string
+}
+
 // EgressGatewaySpec pins the only image that may bridge a conversation's
 // internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
 	Image            ImageReference
 	Resources        EgressGatewayResources
 	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
+	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.

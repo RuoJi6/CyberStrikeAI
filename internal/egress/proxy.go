@@ -3,6 +3,7 @@ package egress
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,8 @@ type ProxyOptions struct {
 	DialContext        DialContextFunc
 	LookupNetIP        LookupNetIPFunc
 	Transport          http.RoundTripper
+	UpstreamRoute      *UpstreamRoute
+	UpstreamTLSConfig  *tls.Config
 	Now                func() time.Time
 	ClientHelloTimeout time.Duration
 	MaxClientHello     int
@@ -55,10 +58,13 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	if options.ClientHelloTimeout < 0 || options.MaxClientHello < 0 {
 		return nil, errors.New("egress proxy limits must not be negative")
 	}
-	dialContext := options.DialContext
-	if dialContext == nil {
+	if options.UpstreamRoute != nil && options.Transport != nil {
+		return nil, errors.New("egress upstream route cannot be combined with a custom HTTP transport")
+	}
+	baseDialContext := options.DialContext
+	if baseDialContext == nil {
 		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-		dialContext = dialer.DialContext
+		baseDialContext = dialer.DialContext
 	}
 	lookupNetIP := options.LookupNetIP
 	if lookupNetIP == nil {
@@ -67,6 +73,14 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	now := options.Now
 	if now == nil {
 		now = time.Now
+	}
+	dialContext := baseDialContext
+	if options.UpstreamRoute != nil {
+		upstream, err := newUpstreamDialer(*options.UpstreamRoute, baseDialContext, options.UpstreamTLSConfig, now)
+		if err != nil {
+			return nil, fmt.Errorf("configure egress upstream route: %w", err)
+		}
+		dialContext = upstream.DialContext
 	}
 	helloTimeout := options.ClientHelloTimeout
 	if helloTimeout == 0 {

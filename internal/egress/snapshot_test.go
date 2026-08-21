@@ -190,6 +190,55 @@ func TestConfiguredGatewayStopsWhenSnapshotIntegrityDrifts(t *testing.T) {
 	}
 }
 
+func TestConfiguredGatewayReportsAndMonitorsImmutableUpstreamRoute(t *testing.T) {
+	content := `{"schemaVersion":1,"policyId":"","rules":[]}`
+	snapshotPath := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(snapshotPath, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	snapshotReference := testSnapshot(t, content)
+	routeStore, err := NewUpstreamRouteStore(filepath.Join(t.TempDir(), "routes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routeReference, routePath, err := routeStore.Put("conversation-1", NewProxyUpstreamRoute(UpstreamEndpoint{
+		ID: "proxy-1", Protocol: UpstreamProtocolHTTP, Host: "proxy.example", Port: 3128,
+		Username: "monitor-user", Password: "monitor-secret",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var output lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWithSnapshot(ctx, snapshotPath, snapshotReference, &output, GatewayOptions{
+			ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
+			UpstreamRoutePath: routePath, UpstreamRoute: &routeReference,
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(output.String(), routeReference.SHA256) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	startup := output.String()
+	if !strings.Contains(startup, `"upstreamRouteId":"conversation-1"`) || !strings.Contains(startup, routeReference.SHA256) || strings.Contains(startup, "monitor-user") || strings.Contains(startup, "monitor-secret") {
+		t.Fatalf("gateway upstream startup report = %q", startup)
+	}
+	if err := os.Chmod(routePath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUpstreamRouteIntegrity) || !strings.Contains(err.Error(), "snapshot integrity monitor") {
+			t.Fatalf("upstream route drift shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway did not stop after upstream route integrity drift")
+	}
+}
+
 func TestConfiguredGatewayRejectsNegativeSnapshotCheckInterval(t *testing.T) {
 	err := RunWithSnapshot(context.Background(), "unused", SnapshotReference{}, nil, GatewayOptions{SnapshotCheckInterval: -time.Nanosecond})
 	if err == nil || !strings.Contains(err.Error(), "check interval") {
