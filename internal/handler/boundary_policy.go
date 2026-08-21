@@ -10,6 +10,7 @@ import (
 
 	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/security"
 
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
@@ -25,6 +26,33 @@ type BoundaryPolicyHandler struct {
 
 func NewBoundaryPolicyHandler(db *database.DB, logger *zap.Logger) *BoundaryPolicyHandler {
 	return &BoundaryPolicyHandler{db: db, logger: logger}
+}
+
+// GetConversationSnapshot GET /api/conversations/:id/boundary returns the
+// immutable document actually bound to a conversation, never the editable
+// source policy draft.
+func (h *BoundaryPolicyHandler) GetConversationSnapshot(c *gin.Context) {
+	conversationID := strings.TrimSpace(c.Param("id"))
+	session, ok := security.CurrentSession(c)
+	if !ok || !h.db.UserCanAccessResource(session.UserID, session.ScopeFor("chat:read"), "conversation", conversationID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该对话"})
+		return
+	}
+	if _, err := h.db.GetConversationLite(conversationID); err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		return
+	}
+	snapshot, err := h.db.GetConversationBoundarySnapshot(c.Request.Context(), conversationID)
+	if errors.Is(err, database.ErrConversationBoundarySnapshotNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "该对话尚未绑定边界快照"})
+		return
+	}
+	if err != nil {
+		h.logger.Error("读取对话边界快照失败", zap.String("conversation_id", conversationID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "边界快照不可读"})
+		return
+	}
+	c.JSON(http.StatusOK, snapshot)
 }
 
 type simulateBoundaryPolicyRequest struct {

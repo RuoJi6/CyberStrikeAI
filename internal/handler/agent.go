@@ -387,6 +387,7 @@ type ChatRequest struct {
 	ProjectID            string                  `json:"projectId,omitempty"`           // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
 	RuntimeMode          string                  `json:"runtimeMode,omitempty"`         // 新对话执行位置：host | container；存量对话忽略请求值
 	WorkspacePersistent  bool                    `json:"workspacePersistent,omitempty"` // 新容器对话是否使用专属 named volume；存量对话忽略请求值
+	BoundaryPolicyID     string                  `json:"boundaryPolicyId,omitempty"`    // 新容器对话首次启动时锁定的边界策略草案；存量对话忽略
 	Role                 string                  `json:"role,omitempty"`                // 角色名称
 	Attachments          []ChatAttachment        `json:"attachments,omitempty"`
 	WebShellConnectionID string                  `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具

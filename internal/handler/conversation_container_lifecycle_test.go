@@ -53,7 +53,7 @@ func (f *fakeConversationContainerLifecycle) Reconcile(ctx context.Context, id s
 
 func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	db, owner := setupConversationRBACTest(t)
-	conversation, err := db.CreateConversation("container lifecycle", database.ConversationCreateMeta{})
+	conversation, err := db.CreateConversation("container lifecycle", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,6 +76,9 @@ func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	})
 	if response.Code != http.StatusOK || controller.action != "start" || controller.conversationID != conversation.ID {
 		t.Fatalf("start response=%d %s call=%s/%s", response.Code, response.Body.String(), controller.action, controller.conversationID)
+	}
+	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
+		t.Fatalf("start did not bind boundary snapshot first: %v", err)
 	}
 
 	other, err := db.CreateRBACUser("container-lifecycle-other", "Other", "hash", true, nil)
@@ -156,7 +159,7 @@ func TestDeleteConversationContainerReportsWorkspacePolicy(t *testing.T) {
 
 func TestConversationContainerLifecycleMapsStateConflict(t *testing.T) {
 	db, owner := setupConversationRBACTest(t)
-	conversation, err := db.CreateConversation("conflict runtime", database.ConversationCreateMeta{})
+	conversation, err := db.CreateConversation("conflict runtime", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
 	if err != nil {
 		t.Fatal(err)
 	}

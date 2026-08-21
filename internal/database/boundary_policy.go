@@ -45,6 +45,40 @@ CREATE TABLE IF NOT EXISTS boundary_policy_rules (
 	)
 );`
 
+const createConversationBoundaryPolicySelectionsTable = `
+CREATE TABLE IF NOT EXISTS conversation_boundary_policy_selections (
+	conversation_id TEXT PRIMARY KEY,
+	policy_id TEXT NOT NULL,
+	selected_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+	FOREIGN KEY (policy_id) REFERENCES boundary_policies(id) ON DELETE RESTRICT
+);`
+
+const createBoundaryPolicySnapshotsTable = `
+CREATE TABLE IF NOT EXISTS boundary_policy_snapshots (
+	id TEXT PRIMARY KEY,
+	source_policy_id TEXT NOT NULL DEFAULT '',
+	canonical_json TEXT NOT NULL,
+	sha256 TEXT NOT NULL CHECK (
+		length(sha256) = 71
+		AND substr(sha256, 1, 7) = 'sha256:'
+		AND substr(sha256, 8) = lower(substr(sha256, 8))
+		AND substr(sha256, 8) NOT GLOB '*[^0-9a-f]*'
+	),
+	created_at DATETIME NOT NULL,
+	CHECK (json_valid(canonical_json)),
+	CHECK (canonical_json = json(canonical_json))
+);`
+
+const createConversationBoundaryBindingsTable = `
+CREATE TABLE IF NOT EXISTS conversation_boundary_bindings (
+	conversation_id TEXT PRIMARY KEY,
+	snapshot_id TEXT NOT NULL UNIQUE,
+	bound_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+	FOREIGN KEY (snapshot_id) REFERENCES boundary_policy_snapshots(id) ON DELETE RESTRICT
+);`
+
 type BoundaryPolicy struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
@@ -82,6 +116,34 @@ func (db *DB) initBoundaryPolicyTables() error {
 	}
 	if _, err := db.Exec(createBoundaryPolicyRulesTable); err != nil {
 		return err
+	}
+	if _, err := db.Exec(createConversationBoundaryPolicySelectionsTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(createBoundaryPolicySnapshotsTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(createConversationBoundaryBindingsTable); err != nil {
+		return err
+	}
+	for _, statement := range []string{
+		`CREATE TRIGGER IF NOT EXISTS boundary_policy_snapshots_no_update
+		 BEFORE UPDATE ON boundary_policy_snapshots
+		 BEGIN SELECT RAISE(ABORT, 'boundary policy snapshots are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS boundary_policy_snapshots_no_delete
+		 BEFORE DELETE ON boundary_policy_snapshots
+		 BEGIN SELECT RAISE(ABORT, 'boundary policy snapshots are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS conversation_boundary_bindings_no_update
+		 BEFORE UPDATE ON conversation_boundary_bindings
+		 BEGIN SELECT RAISE(ABORT, 'conversation boundary bindings are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS conversation_boundary_bindings_no_live_delete
+		 BEFORE DELETE ON conversation_boundary_bindings
+		 WHEN EXISTS (SELECT 1 FROM conversations WHERE id = OLD.conversation_id)
+		 BEGIN SELECT RAISE(ABORT, 'live conversation boundary bindings are immutable'); END`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			return err
+		}
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_boundary_policies_owner ON boundary_policies(owner_user_id, updated_at)`); err != nil {
 		return err

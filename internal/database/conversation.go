@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -59,7 +60,7 @@ func (db *DB) CreateConversation(title string, meta ConversationCreateMeta) (*Co
 // CreateConversationWithWebshell 创建新对话，可选绑定 WebShell 连接 ID（为空则普通对话）
 func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string, meta ConversationCreateMeta) (*Conversation, error) {
 	id := uuid.New().String()
-	now := time.Now()
+	now := time.Now().UTC()
 
 	projectID := strings.TrimSpace(meta.ProjectID)
 	if projectID != "" {
@@ -76,32 +77,57 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if meta.WorkspacePersistent && runtimeMode != ConversationRuntimeModeContainer {
 		return nil, fmt.Errorf("持久化工作区只能用于 container 对话")
 	}
+	boundaryPolicyID := strings.TrimSpace(meta.BoundaryPolicyID)
+	if boundaryPolicyID != "" {
+		if runtimeMode != ConversationRuntimeModeContainer {
+			return nil, fmt.Errorf("边界策略只能用于 container 对话")
+		}
+		if _, err := db.GetBoundaryPolicy(context.Background(), boundaryPolicyID); err != nil {
+			return nil, fmt.Errorf("边界策略不存在: %w", err)
+		}
+	}
 
 	wsID := strings.TrimSpace(webshellConnectionID)
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("开始创建对话事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
 	switch {
 	case wsID != "" && projectID != "":
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
 		)
 	case wsID != "":
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			id, title, now, now, wsID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
 		)
 	case projectID != "":
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			id, title, now, now, projectID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
 		)
 	default:
-		_, err = db.Exec(
+		_, err = tx.Exec(
 			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			id, title, now, now, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
 		)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("创建对话失败: %w", err)
+	}
+	if boundaryPolicyID != "" {
+		if _, err = tx.Exec(`
+			INSERT INTO conversation_boundary_policy_selections (conversation_id, policy_id, selected_at)
+			VALUES (?, ?, ?)
+		`, id, boundaryPolicyID, formatSQLiteUTC(now)); err != nil {
+			return nil, fmt.Errorf("选择对话边界策略失败: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("提交创建对话事务失败: %w", err)
 	}
 
 	conv := &Conversation{
@@ -118,6 +144,7 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if wsID != "" {
 		meta.WebShellConnectionID = wsID
 	}
+	meta.BoundaryPolicyID = boundaryPolicyID
 	notifyConversationCreated(conv, meta)
 	return conv, nil
 }

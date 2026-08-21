@@ -195,4 +195,62 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	if !ok || path["post"] == nil {
 		t.Fatalf("boundary simulation path = %#v", path)
 	}
+	conversationPath, ok := paths["/api/conversations/{id}/boundary"].(map[string]interface{})
+	if !ok || conversationPath["get"] == nil {
+		t.Fatalf("conversation boundary path = %#v", conversationPath)
+	}
+	schemas := spec["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	if schemas["ConversationBoundarySnapshot"] == nil {
+		t.Fatal("ConversationBoundarySnapshot schema is missing")
+	}
+}
+
+func TestGetConversationBoundarySnapshotEnforcesConversationScope(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	conversation, err := db.CreateConversation("bounded", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, BoundaryPolicyID: policy.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetResourceOwner("conversation", conversation.ID, "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	want, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewBoundaryPolicyHandler(db, zap.NewNop())
+	perform := func(session security.Session) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		context.Request = httptest.NewRequest(http.MethodGet, "/api/conversations/"+conversation.ID+"/boundary", nil)
+		context.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+		context.Set(security.ContextSessionKey, session)
+		handler.GetConversationSnapshot(context)
+		return recorder
+	}
+	owner := perform(security.Session{
+		UserID: "owner-1", Scope: database.RBACScopeOwn,
+		Permissions:      map[string]bool{"chat:read": true},
+		PermissionScopes: map[string]string{"chat:read": database.RBACScopeOwn},
+	})
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner status = %d: %s", owner.Code, owner.Body.String())
+	}
+	var got database.ConversationBoundarySnapshot
+	if err := json.Unmarshal(owner.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.SnapshotID != want.SnapshotID || got.SHA256 != want.SHA256 || got.CanonicalJSON != want.CanonicalJSON {
+		t.Fatalf("snapshot = %#v; want %#v", got, want)
+	}
+	foreign := perform(security.Session{
+		UserID: "foreign", Scope: database.RBACScopeOwn,
+		Permissions:      map[string]bool{"chat:read": true},
+		PermissionScopes: map[string]string{"chat:read": database.RBACScopeOwn},
+	})
+	if foreign.Code != http.StatusForbidden {
+		t.Fatalf("foreign status = %d: %s", foreign.Code, foreign.Body.String())
+	}
 }

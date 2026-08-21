@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -353,6 +354,48 @@ func TestPrepareMultiAgentSessionPersistsRuntimeModeOnlyWhenCreating(t *testing.
 		RuntimeMode: "docker",
 	}, c, "test"); err == nil {
 		t.Fatal("invalid new-conversation runtime mode was accepted")
+	}
+}
+
+func TestPrepareMultiAgentSessionSelectsBoundaryPolicyForNewContainerConversation(t *testing.T) {
+	db, user := setupConversationRBACTest(t)
+	policy, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{
+		Name: "agent selected", OwnerUserID: user.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &AgentHandler{db: db, logger: zap.NewNop()}
+	newContext := func(boundaryPermission bool) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/eino-agent/stream", nil)
+		permissions := map[string]bool{"chat:write": true}
+		if boundaryPermission {
+			permissions["boundary:read"] = true
+		}
+		c.Set(security.ContextSessionKey, security.Session{
+			UserID: user.ID, Scope: database.RBACScopeAssigned, Permissions: permissions,
+			PermissionScopes: map[string]string{"boundary:read": database.RBACScopeOwn},
+		})
+		return c
+	}
+	request := &ChatRequest{
+		Message: "create bounded container", RuntimeMode: database.ConversationRuntimeModeContainer,
+		BoundaryPolicyID: policy.ID,
+	}
+	if _, err := h.prepareMultiAgentSession(request, newContext(false), "test"); err == nil || !strings.Contains(err.Error(), "boundary:read") {
+		t.Fatalf("missing permission error = %v", err)
+	}
+	prepared, err := h.prepareMultiAgentSession(request, newContext(true), "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var selected string
+	if err := db.QueryRow(`SELECT policy_id FROM conversation_boundary_policy_selections WHERE conversation_id = ?`, prepared.ConversationID).Scan(&selected); err != nil {
+		t.Fatal(err)
+	}
+	if selected != policy.ID {
+		t.Fatalf("selected policy = %q", selected)
 	}
 }
 

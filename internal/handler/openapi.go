@@ -56,6 +56,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"default":     false,
 		"description": "仅在新建 container 对话时生效。false 使用临时 /workspace，删除容器即删除文件；true 使用系统生成的每对话 Docker named volume。创建后不可修改。",
 	}
+	boundaryPolicyRequestSchema := map[string]interface{}{
+		"type":        "string",
+		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示默认拒绝空策略。",
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -102,6 +106,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "对话创建时选定的执行位置；创建后不由后续消息修改",
 						},
 						"workspacePersistent": workspacePersistenceRequestSchema,
+						"boundaryPolicyId":    boundaryPolicyRequestSchema,
 					},
 				},
 				"SetConversationProjectRequest": map[string]interface{}{
@@ -215,6 +220,29 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "是否使用该对话专属 Docker named volume；false 表示容器删除时临时工作区文件随之删除",
 						},
 					},
+				},
+				"ConversationBoundarySnapshot": map[string]interface{}{
+					"type":        "object",
+					"description": "对话首次容器启动前绑定的不可变边界快照。canonicalJson 与 document 表示同一内容，sha256 对 canonicalJson 的 UTF-8 字节计算。",
+					"properties": map[string]interface{}{
+						"snapshotId":     map[string]interface{}{"type": "string"},
+						"conversationId": map[string]interface{}{"type": "string"},
+						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示默认拒绝空策略"},
+						"sha256":         map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"canonicalJson":  map[string]interface{}{"type": "string"},
+						"document": map[string]interface{}{
+							"type":     "object",
+							"required": []string{"schemaVersion", "policyId", "rules"},
+							"properties": map[string]interface{}{
+								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1}},
+								"policyId":      map[string]interface{}{"type": "string"},
+								"rules":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+							},
+						},
+						"createdAt": map[string]interface{}{"type": "string", "format": "date-time"},
+						"boundAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+					},
+					"required": []string{"snapshotId", "conversationId", "policyId", "sha256", "canonicalJson", "document", "createdAt", "boundAt"},
 				},
 				"ContainerInitialization": map[string]interface{}{
 					"type":        "object",
@@ -1750,6 +1778,27 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/conversations/{id}/boundary": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"边界策略", "对话管理"},
+					"summary":     "查看对话已绑定边界快照",
+					"description": "返回对话实际绑定的不可变 canonical JSON 及 SHA-256，不返回可编辑草案的当前内容。",
+					"operationId": "getConversationBoundarySnapshot",
+					"parameters": []map[string]interface{}{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "返回已绑定快照",
+							"content":     map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationBoundarySnapshot"}}},
+						},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权访问该对话"},
+						"404": map[string]interface{}{"description": "对话不存在或尚未绑定快照"},
+						"500": map[string]interface{}{"description": "快照完整性校验失败"},
+					},
+				},
+			},
 			"/api/conversations/{id}/container-initialization": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},
@@ -1879,6 +1928,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1932,6 +1982,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,
@@ -1980,6 +2031,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										},
 										"runtimeMode":         runtimeModeRequestSchema,
 										"workspacePersistent": workspacePersistenceRequestSchema,
+										"boundaryPolicyId":    boundaryPolicyRequestSchema,
 										"role": map[string]interface{}{
 											"type":        "string",
 											"description": "角色名称（可选）",
@@ -2045,6 +2097,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"role":                 map[string]interface{}{"type": "string"},
 										"webshellConnectionId": map[string]interface{}{"type": "string"},
 										"finalization":         finalizationRequestSchema,

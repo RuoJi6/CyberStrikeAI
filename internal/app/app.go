@@ -496,6 +496,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+			if _, snapshotErr := db.EnsureConversationBoundarySnapshot(ctx, conversationID); snapshotErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", snapshotErr)
+			}
 			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
@@ -1160,6 +1163,7 @@ func setupRoutes(
 		protected.POST("/conversations", conversationHandler.CreateConversation)
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
+		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
 		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)

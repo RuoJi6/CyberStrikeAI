@@ -2,7 +2,9 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -91,6 +93,77 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	}, handler.CreateConversation)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("host persistence status = %d, want %d: %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+}
+
+func TestCreateConversationSelectsBoundaryPolicyWithIndependentRBAC(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, user := setupConversationRBACTest(t)
+	policy, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{
+		Name: "assigned boundary", OwnerUserID: "another-owner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	request := map[string]interface{}{
+		"title": "bounded", "runtimeMode": database.ConversationRuntimeModeContainer,
+		"boundaryPolicyId": policy.ID,
+	}
+	perform := func(session security.Session, body interface{}) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(body)
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/conversations", bytes.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		c.Set(security.ContextSessionKey, session)
+		handler.CreateConversation(c)
+		return w
+	}
+	baseSession := security.Session{
+		UserID: user.ID, Username: user.Username, Scope: database.RBACScopeAssigned,
+		Permissions: map[string]bool{"chat:write": true},
+		PermissionScopes: map[string]string{
+			"chat:write": database.RBACScopeAssigned, "boundary:read": database.RBACScopeOwn,
+		},
+	}
+	response := perform(baseSession, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing boundary permission status = %d: %s", response.Code, response.Body.String())
+	}
+	baseSession.Permissions["boundary:read"] = true
+	response = perform(baseSession, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("unassigned policy status = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := db.Exec(`UPDATE boundary_policies SET owner_user_id = ? WHERE id = ?`, user.ID, policy.ID); err != nil {
+		t.Fatal(err)
+	}
+	response = perform(baseSession, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("owned policy status = %d: %s", response.Code, response.Body.String())
+	}
+	var created database.Conversation
+	if err := json.Unmarshal(response.Body.Bytes(), &created); err != nil {
+		t.Fatal(err)
+	}
+	var selectedPolicyID string
+	if err := db.QueryRow(`SELECT policy_id FROM conversation_boundary_policy_selections WHERE conversation_id = ?`, created.ID).Scan(&selectedPolicyID); err != nil {
+		t.Fatal(err)
+	}
+	if selectedPolicyID != policy.ID {
+		t.Fatalf("selected policy = %q", selectedPolicyID)
+	}
+	if _, err := db.GetConversationBoundarySnapshot(context.Background(), created.ID); !errors.Is(err, database.ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("snapshot was bound before first start: %v", err)
+	}
+	hostRequest := map[string]interface{}{
+		"title": "invalid host", "runtimeMode": database.ConversationRuntimeModeHost,
+		"boundaryPolicyId": policy.ID,
+	}
+	response = perform(baseSession, hostRequest)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("host policy status = %d: %s", response.Code, response.Body.String())
 	}
 }
 

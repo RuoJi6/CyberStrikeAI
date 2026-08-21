@@ -118,6 +118,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := createProperties["workspacePersistent"]; !ok {
 		t.Fatal("CreateConversationRequest schema is missing workspacePersistent")
 	}
+	if _, ok := createProperties["boundaryPolicyId"]; !ok {
+		t.Fatal("CreateConversationRequest schema is missing boundaryPolicyId")
+	}
 	gateSchema, ok := schemas["ContainerExecutionGateResponse"].(map[string]interface{})
 	if !ok {
 		t.Fatal("ContainerExecutionGateResponse schema is missing")
@@ -140,6 +143,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		}
 		if _, ok := requestProperties["workspacePersistent"]; !ok {
 			t.Fatalf("%s request schema is missing workspacePersistent", route)
+		}
+		if _, ok := requestProperties["boundaryPolicyId"]; !ok {
+			t.Fatalf("%s request schema is missing boundaryPolicyId", route)
 		}
 	}
 	for _, route := range []string{"/api/eino-agent", "/api/multi-agent"} {

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -120,6 +121,9 @@ func (h *ConversationHandler) authorizeConversationContainer(c *gin.Context) (st
 }
 
 func (h *ConversationHandler) containerLifecycleStart(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
+	if _, err := h.db.EnsureConversationBoundarySnapshot(ctx, id); err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
+	}
 	return h.containerLifecycle.Start(ctx, id)
 }
 
@@ -128,6 +132,9 @@ func (h *ConversationHandler) containerLifecycleStop(ctx context.Context, id str
 }
 
 func (h *ConversationHandler) containerLifecycleRebuild(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
+	if _, err := h.db.EnsureConversationBoundarySnapshot(ctx, id); err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
+	}
 	return h.containerLifecycle.Rebuild(ctx, id)
 }
 

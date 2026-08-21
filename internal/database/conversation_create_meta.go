@@ -9,6 +9,7 @@ type ConversationCreateMeta struct {
 	AgentMode            string
 	RuntimeMode          string
 	WorkspacePersistent  bool
+	BoundaryPolicyID     string
 	ClientIP             string
 	SessionHint          string
 }

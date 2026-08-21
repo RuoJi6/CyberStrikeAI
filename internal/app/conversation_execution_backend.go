@@ -59,6 +59,9 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	if r.container == nil || r.lifecycle == nil {
 		return nil, fmt.Errorf("container execution backend is unavailable for conversation %s", conversationID)
 	}
+	if _, err := r.db.GetConversationBoundarySnapshot(ctx, conversationID); err != nil {
+		return nil, fmt.Errorf("load boundary snapshot for conversation %s: %w", conversationID, err)
+	}
 	record, err := r.db.GetContainerInitialization(ctx, conversationID)
 	if err != nil {
 		return nil, fmt.Errorf("load container runtime for conversation %s: %w", conversationID, err)

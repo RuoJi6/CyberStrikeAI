@@ -23,7 +23,8 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
-	initializer, err := containerruntime.NewInitializer(manager, db, containerruntime.InitializerOptions{
+	initializerStore := &boundarySnapshotInitializationStore{DB: db}
+	initializer, err := containerruntime.NewInitializer(manager, initializerStore, containerruntime.InitializerOptions{
 		Workers:       cfg.Container.InitializerWorkers,
 		QueueCapacity: cfg.Container.QueueCapacity,
 		CreateTimeout: time.Duration(cfg.Container.CreateTimeoutSeconds) * time.Second,
@@ -43,6 +44,14 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
 		return nil, nil, nil, nil, err
+	}
+	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	err = db.EnsureContainerRuntimeBoundarySnapshots(migrationCtx)
+	migrationCancel()
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, nil, fmt.Errorf("bind boundary snapshots for durable container runtimes: %w", err)
 	}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = initializer.Recover(recoverCtx)
@@ -70,6 +79,23 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
 	return initializer, manager, controller, orphanScanner, nil
+}
+
+// boundarySnapshotInitializationStore is the final fail-closed guard before a
+// worker claims durable initialization work. It also covers queued work resumed
+// during process startup, which does not pass through the chat scheduler.
+type boundarySnapshotInitializationStore struct {
+	*database.DB
+}
+
+func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, bool, error) {
+	if s == nil || s.DB == nil {
+		return containerruntime.InitializationRecord{}, false, fmt.Errorf("boundary snapshot initialization store is not configured")
+	}
+	if _, err := s.DB.EnsureConversationBoundarySnapshot(ctx, conversationID); err != nil {
+		return containerruntime.InitializationRecord{}, false, fmt.Errorf("bind conversation boundary snapshot before runtime claim: %w", err)
+	}
+	return s.DB.Claim(ctx, conversationID)
 }
 
 func logContainerOrphanScan(logger *zap.Logger, report containerruntime.OrphanScanReport, err error) {

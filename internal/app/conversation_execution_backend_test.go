@@ -39,6 +39,9 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
+		t.Fatal(err)
+	}
 	spec := appExecutionSpec(conversation.ID)
 	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
 		t.Fatal(err)
@@ -81,6 +84,29 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	record, err := db.GetContainerInitialization(context.Background(), conversation.ID)
 	if err != nil || record.RuntimeStatus != containerruntime.StatusRunning {
 		t.Fatalf("runtime was not durably started: %#v err=%v", record, err)
+	}
+}
+
+func TestConversationExecutionBackendResolverFailsClosedWithoutBoundarySnapshot(t *testing.T) {
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "execution-backend-no-boundary.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conversation, err := db.CreateConversation("container", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := containertest.NewFakeManager(containerruntime.EngineInfo{Available: true})
+	lifecycle, err := containerruntime.NewLifecycleController(manager, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := newConversationExecutionBackendResolver(db, &appFakeRuntimeExecutor{}, lifecycle)
+	ctx := mcp.WithMCPConversationID(context.Background(), conversation.ID)
+	backend, err := resolver.ResolveExecutionBackend(ctx)
+	if err == nil || backend != nil || !strings.Contains(err.Error(), "boundary snapshot") {
+		t.Fatalf("expected missing boundary snapshot failure, backend=%T err=%v", backend, err)
 	}
 }
 

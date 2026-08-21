@@ -68,6 +68,21 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
 			return nil, fmt.Errorf("新对话 workspacePersistent 只能用于 container")
 		}
+		boundaryPolicyID := strings.TrimSpace(req.BoundaryPolicyID)
+		if boundaryPolicyID != "" {
+			if runtimeMode != database.ConversationRuntimeModeContainer {
+				return nil, fmt.Errorf("新对话 boundaryPolicyId 只能用于 container")
+			}
+			if !session.Permissions["boundary:read"] {
+				return nil, fmt.Errorf("缺少 boundary:read 权限")
+			}
+			if _, policyErr := h.db.GetBoundaryPolicy(c.Request.Context(), boundaryPolicyID); policyErr != nil {
+				return nil, fmt.Errorf("边界策略不存在")
+			}
+			if !h.db.UserCanAccessResource(session.UserID, session.ScopeFor("boundary:read"), "boundary_policy", boundaryPolicyID) {
+				return nil, fmt.Errorf("无权访问该边界策略")
+			}
+		}
 		title := safeTruncateString(req.Message, 50)
 		var err error
 		meta := audit.ConversationCreateMetaFromGin(c, source)
@@ -76,6 +91,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.AgentMode = chatRequestAgentMode(req, source)
 		meta.RuntimeMode = runtimeMode
 		meta.WorkspacePersistent = req.WorkspacePersistent
+		meta.BoundaryPolicyID = boundaryPolicyID
 		if webshellID != "" {
 			meta.Source = source + "_webshell"
 			meta.WebShellConnectionID = webshellID

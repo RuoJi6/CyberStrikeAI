@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -100,6 +101,7 @@ type CreateConversationRequest struct {
 	ProjectID           string `json:"projectId,omitempty"`
 	RuntimeMode         string `json:"runtimeMode,omitempty"`
 	WorkspacePersistent bool   `json:"workspacePersistent,omitempty"`
+	BoundaryPolicyID    string `json:"boundaryPolicyId,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -133,6 +135,16 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.WorkspacePersistent = req.WorkspacePersistent
+	meta.BoundaryPolicyID = strings.TrimSpace(req.BoundaryPolicyID)
+	if meta.BoundaryPolicyID != "" {
+		if runtimeMode != database.ConversationRuntimeModeContainer {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 只能用于 container 对话"})
+			return
+		}
+		if !h.conversationBoundaryPolicyAllowed(c, meta.BoundaryPolicyID) {
+			return
+		}
+	}
 	if !h.conversationProjectAllowed(c, meta.ProjectID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
 		return
@@ -152,6 +164,28 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, conv)
+}
+
+func (h *ConversationHandler) conversationBoundaryPolicyAllowed(c *gin.Context, policyID string) bool {
+	session, ok := security.CurrentSession(c)
+	if !ok || !session.Permissions["boundary:read"] {
+		c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
+		return false
+	}
+	if _, err := h.db.GetBoundaryPolicy(c.Request.Context(), policyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+			return false
+		}
+		h.logger.Error("读取对话边界策略失败", zap.String("policy_id", policyID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取边界策略失败"})
+		return false
+	}
+	if !h.db.UserCanAccessResource(session.UserID, session.ScopeFor("boundary:read"), "boundary_policy", policyID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该边界策略"})
+		return false
+	}
+	return true
 }
 
 // SetConversationProject 设置或清除对话绑定的项目
