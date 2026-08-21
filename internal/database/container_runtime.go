@@ -788,11 +788,32 @@ func validateLifecycleSpecReplacement(
 			changed = true
 		}
 	}
+	if replacement.EgressGateway != nil && replacement.EgressGateway.BoundarySnapshot != nil {
+		var currentAuthProfiles *containerruntime.EgressAuthProfilesSpec
+		if current.EgressGateway != nil {
+			currentAuthProfiles = current.EgressGateway.AuthProfiles
+		}
+		requestedAuthProfiles := replacement.EgressGateway.AuthProfiles
+		if !sameEgressAuthProfiles(currentAuthProfiles, requestedAuthProfiles) {
+			if expected.EgressGateway == nil || expected.EgressGateway.BoundarySnapshot == nil {
+				return 0, "", fmt.Errorf("%w: auth profiles require an authorized boundary snapshot", containerruntime.ErrRuntimeStateConflict)
+			}
+			gateway := *expected.EgressGateway
+			if requestedAuthProfiles == nil {
+				gateway.AuthProfiles = nil
+			} else {
+				authProfiles := *requestedAuthProfiles
+				gateway.AuthProfiles = &authProfiles
+			}
+			expected.EgressGateway = &gateway
+			changed = true
+		}
+	}
 	if !changed {
 		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
 	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, pinned egress gateway, and authorized boundary snapshot", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, pinned egress gateway, authorized boundary snapshot, and gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {
@@ -802,6 +823,13 @@ func validateLifecycleSpecReplacement(
 }
 
 func sameEgressBoundarySnapshot(left, right *containerruntime.EgressBoundarySnapshotSpec) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.ID == right.ID && left.SHA256 == right.SHA256
+}
+
+func sameEgressAuthProfiles(left, right *containerruntime.EgressAuthProfilesSpec) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}

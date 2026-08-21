@@ -32,6 +32,12 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 	}
 	expiresAt := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	authProfileID := "credential-profile-1"
+	if _, err := db.CreateEgressAuthProfile(ctx, EgressAuthProfile{
+		ID: authProfileID, Name: "Credential profile", HeaderName: "Authorization", Enabled: true, OwnerUserID: "owner-1",
+	}); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
 	tests := []BoundaryPolicyRule{
 		{
 			PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "VISIT.example.",

@@ -50,6 +50,8 @@ const (
 	LabelEgressSnapshotSHA256  = "com.cyberstrike.egress.snapshot-sha256"
 	LabelEgressUpstreamRouteID = "com.cyberstrike.egress.upstream-route-id"
 	LabelEgressUpstreamSHA256  = "com.cyberstrike.egress.upstream-route-sha256"
+	LabelEgressAuthProfilesID  = "com.cyberstrike.egress.auth-profiles-id"
+	LabelEgressAuthSHA256      = "com.cyberstrike.egress.auth-profiles-sha256"
 	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
 	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
 	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
@@ -109,12 +111,13 @@ type dockerVolumeAPI interface {
 
 // DockerManagerOptions contains control-plane identity, never request data.
 type DockerManagerOptions struct {
-	OwnerID              string
-	OperationTimeout     time.Duration
-	GlobalConcurrentExec int
-	GlobalQueuedExec     int
-	EgressSnapshotRoot   string
-	EgressUpstreamRoot   string
+	OwnerID                string
+	OperationTimeout       time.Duration
+	GlobalConcurrentExec   int
+	GlobalQueuedExec       int
+	EgressSnapshotRoot     string
+	EgressUpstreamRoot     string
+	EgressAuthProfilesRoot string
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -122,16 +125,17 @@ type DockerManagerOptions struct {
 // ownership labels before touching a container.
 type DockerManager struct {
 	*DockerInspector
-	api              dockerCreationAPI
-	execAPI          dockerExecAPI
-	execLimiter      *ExecLimiter
-	resourceAPI      dockerManagedResourceAPI
-	networkAPI       dockerNetworkAPI
-	volumeAPI        dockerVolumeAPI
-	snapshotStore    *egress.SnapshotStore
-	upstreamStore    *egress.UpstreamRouteStore
-	ownerID          string
-	operationTimeout time.Duration
+	api               dockerCreationAPI
+	execAPI           dockerExecAPI
+	execLimiter       *ExecLimiter
+	resourceAPI       dockerManagedResourceAPI
+	networkAPI        dockerNetworkAPI
+	volumeAPI         dockerVolumeAPI
+	snapshotStore     *egress.SnapshotStore
+	upstreamStore     *egress.UpstreamRouteStore
+	authProfilesStore *egress.AuthProfilesStore
+	ownerID           string
+	operationTimeout  time.Duration
 }
 
 var _ RuntimeManager = (*DockerManager)(nil)
@@ -181,6 +185,14 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 			return nil, fmt.Errorf("configure egress upstream route store: %w", err)
 		}
 	}
+	var authProfilesStore *egress.AuthProfilesStore
+	if strings.TrimSpace(options.EgressAuthProfilesRoot) != "" {
+		var err error
+		authProfilesStore, err = egress.NewAuthProfilesStore(options.EgressAuthProfilesRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure egress auth profiles store: %w", err)
+		}
+	}
 	globalConcurrent := options.GlobalConcurrentExec
 	if globalConcurrent == 0 {
 		globalConcurrent = defaultGlobalConcurrentExec
@@ -201,7 +213,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	return &DockerManager{
 		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
 		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
-		snapshotStore: snapshotStore, upstreamStore: upstreamStore, ownerID: ownerID, operationTimeout: operationTimeout,
+		snapshotStore: snapshotStore, upstreamStore: upstreamStore, authProfilesStore: authProfilesStore,
+		ownerID: ownerID, operationTimeout: operationTimeout,
 	}, nil
 }
 
@@ -469,6 +482,14 @@ func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual, authorized strin
 	// stage 4 retains the digest of an otherwise-identical pre-network or
 	// pre-gateway spec after an explicit controlled topology migration.
 	legacy := spec
+	if legacy.EgressGateway != nil && legacy.EgressGateway.AuthProfiles != nil {
+		gateway := *legacy.EgressGateway
+		gateway.AuthProfiles = nil
+		legacy.EgressGateway = &gateway
+		if actual == RuntimeSpecDigest(legacy) {
+			return true
+		}
+	}
 	if legacy.EgressGateway != nil && legacy.EgressGateway.UpstreamRoute != nil {
 		gateway := *legacy.EgressGateway
 		gateway.UpstreamRoute = nil
@@ -918,6 +939,10 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	if gateway.UpstreamRoute != nil {
 		labels[LabelEgressUpstreamRouteID] = gateway.UpstreamRoute.ID
 		labels[LabelEgressUpstreamSHA256] = gateway.UpstreamRoute.SHA256
+	}
+	if gateway.AuthProfiles != nil {
+		labels[LabelEgressAuthProfilesID] = gateway.AuthProfiles.ID
+		labels[LabelEgressAuthSHA256] = gateway.AuthProfiles.SHA256
 	}
 	return labels
 }

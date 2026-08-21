@@ -271,6 +271,10 @@ func (f *fakeDockerCreationAPI) ContainerStart(_ context.Context, id string, _ m
 						report["upstreamRouteId"] = routeID
 						report["upstreamRouteSha256"] = result.Container.Config.Labels[LabelEgressUpstreamSHA256]
 					}
+					if authID := result.Container.Config.Labels[LabelEgressAuthProfilesID]; authID != "" {
+						report["authProfilesId"] = authID
+						report["authProfilesSha256"] = result.Container.Config.Labels[LabelEgressAuthSHA256]
+					}
 					encoded, _ := json.Marshal(report)
 					output = string(encoded) + "\n"
 				}

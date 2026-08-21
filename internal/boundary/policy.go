@@ -32,11 +32,12 @@ type Rule struct {
 }
 
 type Decision struct {
-	Allowed bool          `json:"allowed"`
-	Effect  Effect        `json:"effect,omitempty"`
-	RuleID  string        `json:"ruleId,omitempty"`
-	Reason  string        `json:"reason"`
-	Target  RequestTarget `json:"target"`
+	Allowed       bool          `json:"allowed"`
+	Effect        Effect        `json:"effect,omitempty"`
+	RuleID        string        `json:"ruleId,omitempty"`
+	AuthProfileID string        `json:"authProfileId,omitempty"`
+	Reason        string        `json:"reason"`
+	Target        RequestTarget `json:"target"`
 }
 
 // DNSDecision is the policy result for resolving one canonical hostname. DNS
@@ -167,6 +168,7 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 	winner := matches[0]
 	decision.Effect = winner.Effect
 	decision.RuleID = winner.ID
+	decision.AuthProfileID = winner.AuthProfileID
 	switch winner.Effect {
 	case EffectBlocked:
 		if len(winner.Target.PathPrefixes) > 0 {
@@ -185,6 +187,26 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		decision.Reason = ReasonAllowVisit
 	}
 	return decision, nil
+}
+
+// AuthProfileIDs returns the canonical set of credential profiles referenced
+// by this immutable policy. Profile contents remain gateway-only material.
+func (p *Policy) AuthProfileIDs() []string {
+	if p == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, rule := range p.rules {
+		if rule.Effect == EffectAuthOnly && rule.AuthProfileID != "" {
+			seen[rule.AuthProfileID] = struct{}{}
+		}
+	}
+	result := make([]string, 0, len(seen))
+	for id := range seen {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // EvaluateDNS decides whether the policy DNS service may resolve rawHost.

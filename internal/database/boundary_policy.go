@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -39,6 +40,7 @@ CREATE TABLE IF NOT EXISTS boundary_policy_rules (
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
 	FOREIGN KEY (policy_id) REFERENCES boundary_policies(id) ON DELETE CASCADE,
+	FOREIGN KEY (auth_profile_id) REFERENCES egress_auth_profiles(id) ON DELETE RESTRICT,
 	CHECK (
 		(effect = 'auth-only' AND auth_profile_id IS NOT NULL AND length(trim(auth_profile_id)) > 0)
 		OR (effect <> 'auth-only' AND auth_profile_id IS NULL)
@@ -170,6 +172,20 @@ func (db *DB) initBoundaryPolicyTables() error {
 		return err
 	}
 	for _, statement := range []string{
+		`CREATE TRIGGER IF NOT EXISTS boundary_policy_rules_auth_profile_insert
+		 BEFORE INSERT ON boundary_policy_rules
+		 WHEN NEW.auth_profile_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM egress_auth_profiles WHERE id = NEW.auth_profile_id)
+		 BEGIN SELECT RAISE(ABORT, 'boundary auth profile does not exist'); END`,
+		`CREATE TRIGGER IF NOT EXISTS boundary_policy_rules_auth_profile_update
+		 BEFORE UPDATE OF auth_profile_id ON boundary_policy_rules
+		 WHEN NEW.auth_profile_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM egress_auth_profiles WHERE id = NEW.auth_profile_id)
+		 BEGIN SELECT RAISE(ABORT, 'boundary auth profile does not exist'); END`,
+		`CREATE TRIGGER IF NOT EXISTS egress_auth_profiles_restrict_delete
+		 BEFORE DELETE ON egress_auth_profiles
+		 WHEN EXISTS (SELECT 1 FROM boundary_policy_rules WHERE auth_profile_id = OLD.id)
+		 BEGIN SELECT RAISE(ABORT, 'egress auth profile is referenced by a boundary rule'); END`,
 		`CREATE TRIGGER IF NOT EXISTS boundary_policy_snapshots_no_update
 		 BEFORE UPDATE ON boundary_policy_snapshots
 		 BEGIN SELECT RAISE(ABORT, 'boundary policy snapshots are immutable'); END`,
@@ -271,6 +287,14 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	rule.Effect = effect
 	if err := validateBoundaryRuleAuthMarker(&rule); err != nil {
 		return BoundaryPolicyRule{}, err
+	}
+	if rule.AuthProfileID != nil {
+		if _, err := db.GetEgressAuthProfile(ctx, *rule.AuthProfileID); err != nil {
+			if errors.Is(err, ErrEgressAuthProfileNotFound) {
+				return BoundaryPolicyRule{}, fmt.Errorf("auth-only boundary rule references an unknown auth profile")
+			}
+			return BoundaryPolicyRule{}, fmt.Errorf("load auth profile for boundary rule: %w", err)
+		}
 	}
 	normalizedTarget, err := boundary.NormalizeRuleTarget(boundary.RuleTarget{
 		Host:         rule.Host,

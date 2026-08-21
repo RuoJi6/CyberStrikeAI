@@ -44,6 +44,8 @@ type SnapshotReport struct {
 	SHA256              string `json:"sha256"`
 	UpstreamRouteID     string `json:"upstreamRouteId,omitempty"`
 	UpstreamRouteSHA256 string `json:"upstreamRouteSha256,omitempty"`
+	AuthProfilesID      string `json:"authProfilesId,omitempty"`
+	AuthProfilesSHA256  string `json:"authProfilesSha256,omitempty"`
 }
 
 type snapshotEnvelope struct {
@@ -58,6 +60,8 @@ type GatewayOptions struct {
 	SnapshotCheckInterval time.Duration
 	UpstreamRoutePath     string
 	UpstreamRoute         *UpstreamRouteReference
+	AuthProfilesPath      string
+	AuthProfiles          *AuthProfilesReference
 	Proxy                 ProxyOptions
 	DNS                   DNSOptions
 }
@@ -288,6 +292,21 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		report.UpstreamRouteID = options.UpstreamRoute.ID
 		report.UpstreamRouteSHA256 = options.UpstreamRoute.SHA256
 	}
+	if strings.TrimSpace(options.AuthProfilesPath) != "" || options.AuthProfiles != nil {
+		if strings.TrimSpace(options.AuthProfilesPath) == "" || options.AuthProfiles == nil {
+			return errors.New("egress auth profiles path and reference must be configured together")
+		}
+		if options.Proxy.AuthProfiles != nil {
+			return errors.New("egress auth profiles must have only one trusted source")
+		}
+		document, authErr := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
+		if authErr != nil {
+			return authErr
+		}
+		options.Proxy.AuthProfiles = &document
+		report.AuthProfilesID = options.AuthProfiles.ID
+		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
+	}
 	proxy, err := NewProxy(policy, options.Proxy)
 	if err != nil {
 		return err
@@ -340,7 +359,10 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	go func() {
 		results <- serverResult{
 			name: "snapshot integrity monitor",
-			err:  monitorGatewayIntegrity(runCtx, path, reference, options.UpstreamRoutePath, options.UpstreamRoute, options.SnapshotCheckInterval),
+			err: monitorGatewayIntegrity(runCtx, path, reference,
+				options.UpstreamRoutePath, options.UpstreamRoute,
+				options.AuthProfilesPath, options.AuthProfiles,
+				options.SnapshotCheckInterval),
 		}
 	}()
 
@@ -373,7 +395,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	return fmt.Errorf("serve %s: %w", first.name, first.err)
 }
 
-func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, interval time.Duration) error {
+func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, authPath string, authReference *AuthProfilesReference, interval time.Duration) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -389,6 +411,11 @@ func monitorGatewayIntegrity(ctx context.Context, path string, reference Snapsho
 					return fmt.Errorf("revalidate immutable upstream route: %w", err)
 				}
 			}
+			if authReference != nil {
+				if _, err := LoadAuthProfiles(authPath, *authReference); err != nil {
+					return fmt.Errorf("revalidate immutable auth profiles: %w", err)
+				}
+			}
 		}
 	}
 }
@@ -398,19 +425,41 @@ func CheckSnapshot(path string, reference SnapshotReference, output io.Writer) e
 }
 
 func CheckGateway(path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, output io.Writer) error {
-	report, err := LoadSnapshot(path, reference)
+	return CheckGatewayWithOptions(path, reference, GatewayOptions{
+		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
+	}, output)
+}
+
+func CheckGatewayWithOptions(path string, reference SnapshotReference, options GatewayOptions, output io.Writer) error {
+	report, policy, err := LoadPolicySnapshot(path, reference)
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(routePath) != "" || routeReference != nil {
-		if strings.TrimSpace(routePath) == "" || routeReference == nil {
+	if strings.TrimSpace(options.UpstreamRoutePath) != "" || options.UpstreamRoute != nil {
+		if strings.TrimSpace(options.UpstreamRoutePath) == "" || options.UpstreamRoute == nil {
 			return errors.New("egress upstream route path and reference must be configured together")
 		}
-		if _, err := LoadUpstreamRoute(routePath, *routeReference); err != nil {
+		if _, err := LoadUpstreamRoute(options.UpstreamRoutePath, *options.UpstreamRoute); err != nil {
 			return err
 		}
-		report.UpstreamRouteID = routeReference.ID
-		report.UpstreamRouteSHA256 = routeReference.SHA256
+		report.UpstreamRouteID = options.UpstreamRoute.ID
+		report.UpstreamRouteSHA256 = options.UpstreamRoute.SHA256
+	}
+	var authDocument *AuthProfilesDocument
+	if strings.TrimSpace(options.AuthProfilesPath) != "" || options.AuthProfiles != nil {
+		if strings.TrimSpace(options.AuthProfilesPath) == "" || options.AuthProfiles == nil {
+			return errors.New("egress auth profiles path and reference must be configured together")
+		}
+		document, err := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
+		if err != nil {
+			return err
+		}
+		authDocument = &document
+		report.AuthProfilesID = options.AuthProfiles.ID
+		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
+	}
+	if _, err := authProfilesForPolicy(policy, authDocument); err != nil {
+		return err
 	}
 	report.Event = "boundary_snapshot_healthy"
 	if output == nil {

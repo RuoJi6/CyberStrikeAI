@@ -124,6 +124,19 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 			return invalidSpec("egress gateway upstream route requires a boundary snapshot")
 		}
 	}
+	if spec.AuthProfiles != nil {
+		id := strings.TrimSpace(spec.AuthProfiles.ID)
+		if id != spec.AuthProfiles.ID || !generatedNamePattern.MatchString(id) {
+			return invalidSpec("egress gateway auth profiles id must be canonical and label-safe")
+		}
+		digest := strings.TrimSpace(spec.AuthProfiles.SHA256)
+		if digest != spec.AuthProfiles.SHA256 || !sha256DigestPattern.MatchString(digest) {
+			return invalidSpec("egress gateway auth profiles digest must be a lowercase sha256 digest")
+		}
+		if spec.BoundarySnapshot == nil {
+			return invalidSpec("egress gateway auth profiles require a boundary snapshot")
+		}
+	}
 	return nil
 }
 

@@ -226,7 +226,7 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if status != expectedStatus {
 		return fmt.Errorf("%w: egress gateway state %s does not match agent state %s", ErrRuntimeStateConflict, status, expectedStatus)
 	}
-	if expectedStatus == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec)) {
+	if expectedStatus == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec), authProfilesReference(spec)) {
 		return fmt.Errorf("%w: running egress gateway does not report the exact healthy snapshot", ErrRuntimeStateConflict)
 	}
 	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
@@ -302,6 +302,17 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 			BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
 		})
 	}
+	if spec.EgressGateway.AuthProfiles != nil {
+		authPath, _, err := m.loadAuthProfiles(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		hostConfig.Mounts = append(hostConfig.Mounts, mobymount.Mount{
+			Type: mobymount.TypeBind, Source: authPath,
+			Target: egress.AuthProfilesContainerPath, ReadOnly: true,
+			BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+		})
+	}
 	return config, hostConfig, nil
 }
 
@@ -322,6 +333,14 @@ func egressGatewayCommand(spec RuntimeSpec, action string) []string {
 			"--upstream-route-path", egress.UpstreamRouteContainerPath,
 			"--upstream-route-id", route.ID,
 			"--upstream-route-sha256", route.SHA256,
+		)
+	}
+	if spec.EgressGateway.AuthProfiles != nil {
+		auth := spec.EgressGateway.AuthProfiles
+		command = append(command,
+			"--auth-profiles-path", egress.AuthProfilesContainerPath,
+			"--auth-profiles-id", auth.ID,
+			"--auth-profiles-sha256", auth.SHA256,
 		)
 	}
 	return command
@@ -390,6 +409,33 @@ func (m *DockerManager) loadUpstreamRoute(spec RuntimeSpec) (string, egress.Upst
 	return path, route, nil
 }
 
+func authProfilesReference(spec RuntimeSpec) *egress.AuthProfilesReference {
+	if spec.EgressGateway == nil || spec.EgressGateway.AuthProfiles == nil {
+		return nil
+	}
+	auth := spec.EgressGateway.AuthProfiles
+	return &egress.AuthProfilesReference{ID: auth.ID, SHA256: auth.SHA256}
+}
+
+func (m *DockerManager) loadAuthProfiles(spec RuntimeSpec) (string, egress.AuthProfilesDocument, error) {
+	reference := authProfilesReference(spec)
+	if reference == nil {
+		return "", egress.AuthProfilesDocument{}, nil
+	}
+	if m.authProfilesStore == nil {
+		return "", egress.AuthProfilesDocument{}, fmt.Errorf("%w: egress auth profiles store is not configured", ErrRuntimeStateConflict)
+	}
+	path, err := m.authProfilesStore.Path(*reference)
+	if err != nil {
+		return "", egress.AuthProfilesDocument{}, fmt.Errorf("%w: resolve egress auth profiles: %v", ErrRuntimeStateConflict, err)
+	}
+	document, err := egress.LoadAuthProfiles(path, *reference)
+	if err != nil {
+		return "", egress.AuthProfilesDocument{}, fmt.Errorf("%w: verify egress auth profiles: %v", ErrRuntimeStateConflict, err)
+	}
+	return path, document, nil
+}
+
 func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.HostConfig, spec RuntimeSpec) error {
 	expected := egressGatewayHostConfig(spec)
 	if actual.NetworkMode != expected.NetworkMode || actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
@@ -411,6 +457,13 @@ func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.Host
 				return err
 			}
 			expectedMounts[egress.UpstreamRouteContainerPath] = routePath
+		}
+		if spec.EgressGateway.AuthProfiles != nil {
+			authPath, _, err := m.loadAuthProfiles(spec)
+			if err != nil {
+				return err
+			}
+			expectedMounts[egress.AuthProfilesContainerPath] = authPath
 		}
 		if len(actual.Mounts) != len(expectedMounts) {
 			return fmt.Errorf("%w: egress gateway trusted mount count mismatch", ErrRuntimeStateConflict)
@@ -472,7 +525,7 @@ func equalHealthcheck(actual, expected *mobycontainer.HealthConfig) bool {
 	return equalStrings(actual.Test, expected.Test) && actual.Interval == expected.Interval && actual.Timeout == expected.Timeout && actual.StartPeriod == expected.StartPeriod && actual.StartInterval == expected.StartInterval && actual.Retries == expected.Retries
 }
 
-func healthySnapshotReport(health *mobycontainer.Health, reference egress.SnapshotReference, routeReference *egress.UpstreamRouteReference) bool {
+func healthySnapshotReport(health *mobycontainer.Health, reference egress.SnapshotReference, routeReference *egress.UpstreamRouteReference, authReference *egress.AuthProfilesReference) bool {
 	if health == nil || health.Status != mobycontainer.Healthy || len(health.Log) == 0 {
 		return false
 	}
@@ -488,9 +541,16 @@ func healthySnapshotReport(health *mobycontainer.Health, reference egress.Snapsh
 		return false
 	}
 	if routeReference == nil {
-		return report.UpstreamRouteID == "" && report.UpstreamRouteSHA256 == ""
+		if report.UpstreamRouteID != "" || report.UpstreamRouteSHA256 != "" {
+			return false
+		}
+	} else if report.UpstreamRouteID != routeReference.ID || report.UpstreamRouteSHA256 != routeReference.SHA256 {
+		return false
 	}
-	return report.UpstreamRouteID == routeReference.ID && report.UpstreamRouteSHA256 == routeReference.SHA256
+	if authReference == nil {
+		return report.AuthProfilesID == "" && report.AuthProfilesSHA256 == ""
+	}
+	return report.AuthProfilesID == authReference.ID && report.AuthProfilesSHA256 == authReference.SHA256
 }
 
 func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource) *mobynetwork.NetworkingConfig {
@@ -598,6 +658,10 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 		labels[LabelEgressUpstreamRouteID] = gateway.UpstreamRoute.ID
 		labels[LabelEgressUpstreamSHA256] = gateway.UpstreamRoute.SHA256
 	}
+	if gateway.AuthProfiles != nil {
+		labels[LabelEgressAuthProfilesID] = gateway.AuthProfiles.ID
+		labels[LabelEgressAuthSHA256] = gateway.AuthProfiles.SHA256
+	}
 	return labels
 }
 
@@ -610,6 +674,7 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressLogMaxBytes, LabelEgressLogMaxFiles,
 		LabelEgressSnapshotID, LabelEgressSnapshotSHA256,
 		LabelEgressUpstreamRouteID, LabelEgressUpstreamSHA256,
+		LabelEgressAuthProfilesID, LabelEgressAuthSHA256,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -675,6 +740,11 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 	routeSHA256 := strings.TrimSpace(labels[LabelEgressUpstreamSHA256])
 	if routeID != "" || routeSHA256 != "" {
 		gateway.UpstreamRoute = &EgressUpstreamRouteSpec{ID: routeID, SHA256: routeSHA256}
+	}
+	authID := strings.TrimSpace(labels[LabelEgressAuthProfilesID])
+	authSHA256 := strings.TrimSpace(labels[LabelEgressAuthSHA256])
+	if authID != "" || authSHA256 != "" {
+		gateway.AuthProfiles = &EgressAuthProfilesSpec{ID: authID, SHA256: authSHA256}
 	}
 	if err := ValidateEgressGatewaySpec(*gateway); err != nil {
 		return nil, err

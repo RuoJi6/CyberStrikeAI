@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -54,7 +55,7 @@ func TestProxyForwardsOnlyAuthorizedAbsoluteHTTPAndStripsProxyHeaders(t *testing
 	}
 }
 
-func TestProxyRejectsDeniedAmbiguousHTTPSAndAuthOnlyForwardRequests(t *testing.T) {
+func TestProxyRejectsDeniedAndAmbiguousForwardRequests(t *testing.T) {
 	allowed := testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
 	proxy, err := NewProxy(allowed, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("denied request reached transport")
@@ -83,21 +84,101 @@ func TestProxyRejectsDeniedAmbiguousHTTPSAndAuthOnlyForwardRequests(t *testing.T
 			}
 		})
 	}
+}
+
+func TestProxyAuthOnlyInjectsGatewayCredentialAndRejectsMissingOrExtraProfiles(t *testing.T) {
 	authPolicy := testProxyPolicy(t, boundary.Rule{
 		ID: "auth", Effect: boundary.EffectAuthOnly, AuthProfileID: "profile-1",
-		Target: boundary.RuleTarget{Host: "auth.example", Schemes: []string{"http"}},
+		Target: boundary.RuleTarget{Host: "auth.example", Schemes: []string{"http", "https"}},
 	})
-	authProxy, err := NewProxy(authPolicy, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-		t.Fatal("auth-only request reached transport before credential injection exists")
-		return nil, nil
+	if _, err := NewProxy(authPolicy, ProxyOptions{}); err == nil {
+		t.Fatal("auth-only policy was accepted without gateway credentials")
+	}
+	document := NewAuthProfilesDocument(strings.Repeat("a", 64), []GatewayAuthProfile{{
+		ID: "profile-1", HeaderName: "Authorization", HeaderValue: "Bearer gateway-secret",
+	}})
+	authProxy, err := NewProxy(authPolicy, ProxyOptions{AuthProfiles: &document, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Values("Authorization"); len(got) != 1 || got[0] != "Bearer gateway-secret" {
+			t.Fatalf("gateway credential injection = %#v", got)
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
 	})})
 	if err != nil {
 		t.Fatal(err)
 	}
+	request := httptest.NewRequest(http.MethodGet, "http://auth.example/", nil)
+	request.Header.Add("Authorization", "Bearer agent-spoof")
+	request.Header.Add("Authorization", "Bearer duplicate")
 	recorder := httptest.NewRecorder()
-	authProxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://auth.example/", nil))
-	if recorder.Code != http.StatusForbidden {
+	authProxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("auth-only status = %d", recorder.Code)
+	}
+	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
+	connect.Host = "auth.example:443"
+	connect.RequestURI = connect.Host
+	connectRecorder := httptest.NewRecorder()
+	authProxy.ServeHTTP(connectRecorder, connect)
+	if connectRecorder.Code != http.StatusForbidden {
+		t.Fatalf("auth-only CONNECT status = %d", connectRecorder.Code)
+	}
+	extra := NewAuthProfilesDocument(strings.Repeat("b", 64), []GatewayAuthProfile{
+		{ID: "profile-1", HeaderName: "Authorization", HeaderValue: "Bearer one"},
+		{ID: "profile-2", HeaderName: "X-API-Key", HeaderValue: "two"},
+	})
+	if _, err := NewProxy(authPolicy, ProxyOptions{AuthProfiles: &extra}); err == nil {
+		t.Fatal("unreferenced gateway credential profile was accepted")
+	}
+}
+
+func TestProxyAuthOnlySurvivesResolvedTargetReevaluationWithoutDirectCredentialExposure(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "auth", Effect: boundary.EffectAuthOnly, AuthProfileID: "profile-1",
+		Target: boundary.RuleTarget{Host: "auth.example", Schemes: []string{"http"}},
+	})
+	document := NewAuthProfilesDocument(strings.Repeat("f", 64), []GatewayAuthProfile{{
+		ID: "profile-1", HeaderName: "X-Api-Key", HeaderValue: "gateway-only-key",
+	}})
+	dialed := make(chan error, 1)
+	proxy, err := NewProxy(policy, ProxyOptions{
+		AuthProfiles: &document,
+		LookupNetIP: func(_ context.Context, network, host string) ([]netip.Addr, error) {
+			if network != "ip" || host != "auth.example" {
+				t.Fatalf("lookup = %q %q", network, host)
+			}
+			return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
+		},
+		DialContext: func(_ context.Context, network, address string) (net.Conn, error) {
+			if network != "tcp" || address != "93.184.216.34:80" {
+				t.Fatalf("dial = %q %q", network, address)
+			}
+			client, server := net.Pipe()
+			go func() {
+				defer server.Close()
+				request, err := http.ReadRequest(bufio.NewReader(server))
+				if err == nil && request.Header.Get("X-Api-Key") != "gateway-only-key" {
+					err = errors.New("gateway credential was not injected")
+				}
+				if err == nil {
+					_, err = io.WriteString(server, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+				}
+				dialed <- err
+			}()
+			return client, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://auth.example/resource", nil)
+	request.Header.Set("X-Api-Key", "agent-spoof")
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("auth-only resolved response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if err := <-dialed; err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -32,6 +32,7 @@ type ProxyOptions struct {
 	LookupNetIP        LookupNetIPFunc
 	Transport          http.RoundTripper
 	UpstreamRoute      *UpstreamRoute
+	AuthProfiles       *AuthProfilesDocument
 	UpstreamTLSConfig  *tls.Config
 	Now                func() time.Time
 	ClientHelloTimeout time.Duration
@@ -46,6 +47,7 @@ type Proxy struct {
 	dialContext        DialContextFunc
 	lookupNetIP        LookupNetIPFunc
 	transport          http.RoundTripper
+	authProfiles       map[string]GatewayAuthProfile
 	now                func() time.Time
 	clientHelloTimeout time.Duration
 	maxClientHello     int
@@ -60,6 +62,10 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	}
 	if options.UpstreamRoute != nil && options.Transport != nil {
 		return nil, errors.New("egress upstream route cannot be combined with a custom HTTP transport")
+	}
+	authProfiles, err := authProfilesForPolicy(policy, options.AuthProfiles)
+	if err != nil {
+		return nil, err
 	}
 	baseDialContext := options.DialContext
 	if baseDialContext == nil {
@@ -91,7 +97,7 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		maxHello = defaultMaxClientHello
 	}
 	proxy := &Proxy{
-		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, now: now,
+		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello,
 	}
 	if proxy.transport == nil {
@@ -102,6 +108,38 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		}
 	}
 	return proxy, nil
+}
+
+func authProfilesForPolicy(policy *boundary.Policy, document *AuthProfilesDocument) (map[string]GatewayAuthProfile, error) {
+	if policy == nil {
+		return nil, errors.New("egress proxy policy is required")
+	}
+	requiredProfiles := policy.AuthProfileIDs()
+	profiles := make(map[string]GatewayAuthProfile, len(requiredProfiles))
+	if len(requiredProfiles) == 0 {
+		if document != nil {
+			return nil, errors.New("egress auth profiles are not referenced by the boundary policy")
+		}
+		return profiles, nil
+	}
+	if document == nil {
+		return nil, errors.New("egress auth profiles are required by the boundary policy")
+	}
+	copy := *document
+	copy.Profiles = append([]GatewayAuthProfile(nil), document.Profiles...)
+	if err := validateAuthProfilesDocument(&copy); err != nil {
+		return nil, fmt.Errorf("configure egress auth profiles: %w", err)
+	}
+	profiles = copy.profileMap()
+	if len(profiles) != len(requiredProfiles) {
+		return nil, errors.New("egress auth profiles do not exactly match the boundary policy")
+	}
+	for _, id := range requiredProfiles {
+		if _, ok := profiles[id]; !ok {
+			return nil, fmt.Errorf("egress auth profile %q is missing", id)
+		}
+	}
+	return profiles, nil
 }
 
 func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -134,7 +172,15 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "DNS over HTTP is not permitted", http.StatusForbidden)
 		return
 	}
-	if !proxyDecisionAllowed(decision) {
+	var authProfile *GatewayAuthProfile
+	if decision.Effect == boundary.EffectAuthOnly {
+		profile, ok := p.authProfiles[decision.AuthProfileID]
+		if !decision.Allowed || !ok {
+			http.Error(writer, "egress authentication profile unavailable", http.StatusForbidden)
+			return
+		}
+		authProfile = &profile
+	} else if !proxyDecisionAllowed(decision) {
 		http.Error(writer, "egress policy denied request", http.StatusForbidden)
 		return
 	}
@@ -150,6 +196,7 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	outbound.Host = canonicalAuthority
 	outbound = outbound.WithContext(context.WithValue(outbound.Context(), proxyDialContextKey{}, proxyDialAuthorization{
 		rawURL: outbound.URL.String(), method: outbound.Method, target: decision.Target,
+		ruleID: decision.RuleID, effect: decision.Effect, authProfileID: decision.AuthProfileID,
 	}))
 	outbound.Header = request.Header.Clone()
 	removeHopByHopHeaders(outbound.Header)
@@ -157,6 +204,9 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	outbound.Header.Del("X-Forwarded-For")
 	outbound.Header.Del("X-Forwarded-Host")
 	outbound.Header.Del("X-Forwarded-Proto")
+	if authProfile != nil {
+		applyAuthProfile(outbound.Header, *authProfile)
+	}
 
 	response, err := p.transport.RoundTrip(outbound)
 	if err != nil {
@@ -214,7 +264,10 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 
-	upstream, err := p.dialAuthorized(request.Context(), sniURL, http.MethodConnect, targetHost, targetPort)
+	upstream, err := p.dialAuthorized(request.Context(), proxyDialAuthorization{
+		rawURL: sniURL, method: http.MethodConnect, target: sniDecision.Target,
+		ruleID: sniDecision.RuleID, effect: sniDecision.Effect,
+	}, targetHost, targetPort)
 	if err != nil {
 		return
 	}
@@ -228,9 +281,12 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 type proxyDialContextKey struct{}
 
 type proxyDialAuthorization struct {
-	rawURL string
-	method string
-	target boundary.RequestTarget
+	rawURL        string
+	method        string
+	target        boundary.RequestTarget
+	ruleID        string
+	effect        boundary.Effect
+	authProfileID string
 }
 
 func (p *Proxy) dialHTTPContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -253,10 +309,10 @@ func (p *Proxy) dialHTTPContext(ctx context.Context, network, address string) (n
 	if err != nil || host != authorization.target.Host || port != authorization.target.Port {
 		return nil, errors.New("HTTP transport dial target changed after authorization")
 	}
-	return p.dialAuthorized(ctx, authorization.rawURL, authorization.method, host, port)
+	return p.dialAuthorized(ctx, authorization, host, port)
 }
 
-func (p *Proxy) dialAuthorized(ctx context.Context, rawURL, method, host string, port int) (net.Conn, error) {
+func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAuthorization, host string, port int) (net.Conn, error) {
 	addresses := make([]netip.Addr, 0, 4)
 	if address, err := netip.ParseAddr(host); err == nil {
 		addresses = append(addresses, address.Unmap())
@@ -278,8 +334,10 @@ func (p *Proxy) dialAuthorized(ctx context.Context, rawURL, method, host string,
 			addresses = append(addresses, address)
 		}
 	}
-	decision, err := p.policy.Evaluate(rawURL, method, addresses, p.now().UTC())
-	if err != nil || !proxyDecisionAllowed(decision) {
+	decision, err := p.policy.Evaluate(authorization.rawURL, authorization.method, addresses, p.now().UTC())
+	if err != nil || !decision.Allowed || decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || decision.AuthProfileID != authorization.authProfileID ||
+		(decision.Effect == boundary.EffectAuthOnly && p.authProfiles[decision.AuthProfileID].ID == "") ||
+		(decision.Effect != boundary.EffectAuthOnly && !proxyDecisionAllowed(decision)) {
 		return nil, errors.New("resolved egress target failed policy re-evaluation")
 	}
 	var lastErr error

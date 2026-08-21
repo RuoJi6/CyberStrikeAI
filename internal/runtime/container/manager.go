@@ -153,6 +153,13 @@ type EgressUpstreamRouteSpec struct {
 	SHA256 string
 }
 
+// EgressAuthProfilesSpec identifies the immutable gateway-only credential
+// document. The runtime specification contains only this safe reference.
+type EgressAuthProfilesSpec struct {
+	ID     string
+	SHA256 string
+}
+
 // EgressGatewaySpec pins the only image that may bridge a conversation's
 // internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
@@ -160,6 +167,7 @@ type EgressGatewaySpec struct {
 	Resources        EgressGatewayResources
 	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
 	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
+	AuthProfiles     *EgressAuthProfilesSpec     `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.

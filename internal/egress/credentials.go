@@ -60,18 +60,26 @@ func NewCredentialCipher(key []byte) (*CredentialCipher, error) {
 }
 
 func (c *CredentialCipher) Encrypt(proxyID string, plaintext []byte) (string, error) {
+	return c.encryptScoped("proxy", proxyID, plaintext)
+}
+
+func (c *CredentialCipher) EncryptAuthProfile(profileID string, plaintext []byte) (string, error) {
+	return c.encryptScoped("auth-profile", profileID, plaintext)
+}
+
+func (c *CredentialCipher) encryptScoped(scope, recordID string, plaintext []byte) (string, error) {
 	if c == nil || c.aead == nil {
 		return "", errors.New("egress credential cipher is not configured")
 	}
-	proxyID = strings.TrimSpace(proxyID)
-	if proxyID == "" {
-		return "", errors.New("proxy id is required for credential encryption")
+	recordID = strings.TrimSpace(recordID)
+	if recordID == "" {
+		return "", errors.New("credential record id is required for encryption")
 	}
 	nonce := make([]byte, c.aead.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", fmt.Errorf("generate egress credential nonce: %w", err)
 	}
-	sealed := c.aead.Seal(nonce, nonce, plaintext, credentialAAD(proxyID))
+	sealed := c.aead.Seal(nonce, nonce, plaintext, credentialAAD(scope, recordID))
 	return strings.Join([]string{
 		credentialEnvelopeVersion,
 		c.keyID,
@@ -80,12 +88,20 @@ func (c *CredentialCipher) Encrypt(proxyID string, plaintext []byte) (string, er
 }
 
 func (c *CredentialCipher) Decrypt(proxyID, envelope string) ([]byte, error) {
+	return c.decryptScoped("proxy", proxyID, envelope)
+}
+
+func (c *CredentialCipher) DecryptAuthProfile(profileID, envelope string) ([]byte, error) {
+	return c.decryptScoped("auth-profile", profileID, envelope)
+}
+
+func (c *CredentialCipher) decryptScoped(scope, recordID, envelope string) ([]byte, error) {
 	if c == nil || c.aead == nil {
 		return nil, errors.New("egress credential cipher is not configured")
 	}
-	proxyID = strings.TrimSpace(proxyID)
-	if proxyID == "" {
-		return nil, errors.New("proxy id is required for credential decryption")
+	recordID = strings.TrimSpace(recordID)
+	if recordID == "" {
+		return nil, errors.New("credential record id is required for decryption")
 	}
 	parts := strings.Split(strings.TrimSpace(envelope), ".")
 	if len(parts) != 3 || parts[0] != credentialEnvelopeVersion || parts[1] == "" || parts[2] == "" {
@@ -100,15 +116,15 @@ func (c *CredentialCipher) Decrypt(proxyID, envelope string) ([]byte, error) {
 	}
 	nonce := sealed[:c.aead.NonceSize()]
 	ciphertext := sealed[c.aead.NonceSize():]
-	plaintext, err := c.aead.Open(nil, nonce, ciphertext, credentialAAD(proxyID))
+	plaintext, err := c.aead.Open(nil, nonce, ciphertext, credentialAAD(scope, recordID))
 	if err != nil {
 		return nil, fmt.Errorf("%w: authentication failed", ErrCredentialEnvelopeInvalid)
 	}
 	return plaintext, nil
 }
 
-func credentialAAD(proxyID string) []byte {
-	return []byte("cyberstrike-egress-proxy:" + credentialEnvelopeVersion + ":" + proxyID)
+func credentialAAD(scope, recordID string) []byte {
+	return []byte("cyberstrike-egress-" + scope + ":" + credentialEnvelopeVersion + ":" + recordID)
 }
 
 // LoadOrCreateCredentialCipher loads a stable server-only key or creates one

@@ -38,7 +38,7 @@ func main() {
 }
 
 func runConfigured(args []string) error {
-	path, reference, routePath, routeReference, err := parseGatewayFlags("run", args)
+	path, reference, routePath, routeReference, authPath, authReference, err := parseGatewayFlags("run", args)
 	if err != nil {
 		return err
 	}
@@ -46,18 +46,22 @@ func runConfigured(args []string) error {
 	defer stop()
 	return egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
+		AuthProfilesPath: authPath, AuthProfiles: authReference,
 	})
 }
 
 func checkConfigured(args []string) error {
-	path, reference, routePath, routeReference, err := parseGatewayFlags("check", args)
+	path, reference, routePath, routeReference, authPath, authReference, err := parseGatewayFlags("check", args)
 	if err != nil {
 		return err
 	}
-	return egress.CheckGateway(path, reference, routePath, routeReference, os.Stdout)
+	return egress.CheckGatewayWithOptions(path, reference, egress.GatewayOptions{
+		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
+		AuthProfilesPath: authPath, AuthProfiles: authReference,
+	}, os.Stdout)
 }
 
-func parseGatewayFlags(command string, args []string) (string, egress.SnapshotReference, string, *egress.UpstreamRouteReference, error) {
+func parseGatewayFlags(command string, args []string) (string, egress.SnapshotReference, string, *egress.UpstreamRouteReference, string, *egress.AuthProfilesReference, error) {
 	set := flag.NewFlagSet(command, flag.ContinueOnError)
 	set.SetOutput(os.Stderr)
 	path := set.String("snapshot-path", "", "read-only boundary snapshot path")
@@ -66,22 +70,34 @@ func parseGatewayFlags(command string, args []string) (string, egress.SnapshotRe
 	routePath := set.String("upstream-route-path", "", "read-only upstream route path")
 	routeID := set.String("upstream-route-id", "", "immutable upstream route id")
 	routeDigest := set.String("upstream-route-sha256", "", "expected upstream route SHA-256")
+	authPath := set.String("auth-profiles-path", "", "read-only auth profiles path")
+	authID := set.String("auth-profiles-id", "", "immutable auth profiles id")
+	authDigest := set.String("auth-profiles-sha256", "", "expected auth profiles SHA-256")
 	if err := set.Parse(args); err != nil {
-		return "", egress.SnapshotReference{}, "", nil, err
+		return "", egress.SnapshotReference{}, "", nil, "", nil, err
 	}
 	if set.NArg() != 0 || strings.TrimSpace(*path) == "" {
-		return "", egress.SnapshotReference{}, "", nil, fmt.Errorf("%s requires snapshot path, id and SHA-256", command)
+		return "", egress.SnapshotReference{}, "", nil, "", nil, fmt.Errorf("%s requires snapshot path, id and SHA-256", command)
 	}
 	reference := egress.SnapshotReference{ID: strings.TrimSpace(*id), SHA256: strings.TrimSpace(*digest)}
 	routeConfigured := strings.TrimSpace(*routePath) != "" || strings.TrimSpace(*routeID) != "" || strings.TrimSpace(*routeDigest) != ""
-	if !routeConfigured {
-		return strings.TrimSpace(*path), reference, "", nil, nil
+	if routeConfigured && (strings.TrimSpace(*routePath) == "" || strings.TrimSpace(*routeID) == "" || strings.TrimSpace(*routeDigest) == "") {
+		return "", egress.SnapshotReference{}, "", nil, "", nil, fmt.Errorf("%s requires all upstream route flags together", command)
 	}
-	if strings.TrimSpace(*routePath) == "" || strings.TrimSpace(*routeID) == "" || strings.TrimSpace(*routeDigest) == "" {
-		return "", egress.SnapshotReference{}, "", nil, fmt.Errorf("%s requires all upstream route flags together", command)
+	var routeReference *egress.UpstreamRouteReference
+	if routeConfigured {
+		routeReference = &egress.UpstreamRouteReference{ID: strings.TrimSpace(*routeID), SHA256: strings.TrimSpace(*routeDigest)}
 	}
-	routeReference := &egress.UpstreamRouteReference{ID: strings.TrimSpace(*routeID), SHA256: strings.TrimSpace(*routeDigest)}
-	return strings.TrimSpace(*path), reference, strings.TrimSpace(*routePath), routeReference, nil
+	authConfigured := strings.TrimSpace(*authPath) != "" || strings.TrimSpace(*authID) != "" || strings.TrimSpace(*authDigest) != ""
+	if authConfigured && (strings.TrimSpace(*authPath) == "" || strings.TrimSpace(*authID) == "" || strings.TrimSpace(*authDigest) == "") {
+		return "", egress.SnapshotReference{}, "", nil, "", nil, fmt.Errorf("%s requires all auth profiles flags together", command)
+	}
+	var authReference *egress.AuthProfilesReference
+	if authConfigured {
+		authReference = &egress.AuthProfilesReference{ID: strings.TrimSpace(*authID), SHA256: strings.TrimSpace(*authDigest)}
+	}
+	return strings.TrimSpace(*path), reference, strings.TrimSpace(*routePath), routeReference,
+		strings.TrimSpace(*authPath), authReference, nil
 }
 
 func parseSnapshotFlags(command string, args []string) (string, egress.SnapshotReference, error) {

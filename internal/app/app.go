@@ -432,6 +432,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	boundaryPolicyHandler := handler.NewBoundaryPolicyHandler(db, log.Logger)
 	egressProxyHandler := handler.NewEgressProxyHandler(db, credentialCipher, log.Logger)
 	egressProxyGroupHandler := handler.NewEgressProxyGroupHandler(db, log.Logger)
+	egressAuthProfileHandler := handler.NewEgressAuthProfileHandler(db, credentialCipher, log.Logger)
 	rbacHandler := handler.NewRBACHandler(db, log.Logger)
 	rbacHandler.SetAudit(auditSvc)
 	rbacHandler.SetAuthManager(authManager)
@@ -509,7 +510,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
@@ -534,11 +535,15 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if snapshotErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation boundary snapshot: %w", snapshotErr)
 			}
+			authProfiles, authErr := materializeConversationAuthProfiles(ctx, db, credentialCipher, containerAuthProfilesStore, snapshot)
+			if authErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation auth profiles: %w", authErr)
+			}
 			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute)
+			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute, authProfiles)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
@@ -703,6 +708,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		boundaryPolicyHandler,
 		egressProxyHandler,
 		egressProxyGroupHandler,
+		egressAuthProfileHandler,
 		workflowHandler,
 		webshellHandler,
 		chatUploadsHandler,
@@ -1050,6 +1056,7 @@ func setupRoutes(
 	boundaryPolicyHandler *handler.BoundaryPolicyHandler,
 	egressProxyHandler *handler.EgressProxyHandler,
 	egressProxyGroupHandler *handler.EgressProxyGroupHandler,
+	egressAuthProfileHandler *handler.EgressAuthProfileHandler,
 	workflowHandler *handler.WorkflowHandler,
 	webshellHandler *handler.WebShellHandler,
 	chatUploadsHandler *handler.ChatUploadsHandler,
@@ -1477,6 +1484,11 @@ func setupRoutes(
 		protected.GET("/egress-proxy-groups/:id", egressProxyGroupHandler.Get)
 		protected.PUT("/egress-proxy-groups/:id", egressProxyGroupHandler.Update)
 		protected.DELETE("/egress-proxy-groups/:id", egressProxyGroupHandler.Delete)
+		protected.GET("/egress-auth-profiles", egressAuthProfileHandler.List)
+		protected.POST("/egress-auth-profiles", egressAuthProfileHandler.Create)
+		protected.GET("/egress-auth-profiles/:id", egressAuthProfileHandler.Get)
+		protected.PUT("/egress-auth-profiles/:id", egressAuthProfileHandler.Update)
+		protected.DELETE("/egress-auth-profiles/:id", egressAuthProfileHandler.Delete)
 		protected.GET("/egress-defaults/user", conversationHandler.GetUserEgressDefault)
 		protected.PUT("/egress-defaults/user", conversationHandler.UpdateUserEgressDefault)
 		protected.DELETE("/egress-defaults/user", conversationHandler.DeleteUserEgressDefault)

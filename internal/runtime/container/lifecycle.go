@@ -85,6 +85,10 @@ type BoundarySnapshotProvider interface {
 	ResolveBoundarySnapshot(ctx context.Context, conversationID, snapshotID string) (EgressBoundarySnapshotSpec, error)
 }
 
+type AuthProfilesProvider interface {
+	ResolveAuthProfiles(ctx context.Context, conversationID, snapshotID string) (*EgressAuthProfilesSpec, error)
+}
+
 // LifecycleController coordinates Docker mutations with durable control-plane
 // state. It never accepts a provider/container ID from a handler.
 type LifecycleController struct {
@@ -93,6 +97,7 @@ type LifecycleController struct {
 	store         LifecycleStore
 	egressGateway *EgressGatewaySpec
 	snapshots     BoundarySnapshotProvider
+	authProfiles  AuthProfilesProvider
 }
 
 type LifecycleControllerOptions struct {
@@ -103,6 +108,7 @@ type LifecycleControllerOptions struct {
 	// BoundarySnapshots is optional for legacy/unit-test controllers. Production
 	// supplies it so explicit rebuilds can bind the current immutable snapshot.
 	BoundarySnapshots BoundarySnapshotProvider
+	AuthProfiles      AuthProfilesProvider
 }
 
 func NewLifecycleController(manager RuntimeManager, store LifecycleStore) (*LifecycleController, error) {
@@ -124,7 +130,7 @@ func NewLifecycleControllerWithOptions(manager RuntimeManager, store LifecycleSt
 	checker, _ := manager.(RuntimeReadinessChecker)
 	return &LifecycleController{
 		manager: manager, checker: checker, store: store,
-		egressGateway: gateway, snapshots: options.BoundarySnapshots,
+		egressGateway: gateway, snapshots: options.BoundarySnapshots, authProfiles: options.AuthProfiles,
 	}, nil
 }
 
@@ -445,6 +451,18 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 		return spec, nil
 	}
 	if strings.TrimSpace(requestedSnapshotID) == "" && spec.EgressGateway.BoundarySnapshot != nil {
+		if c.authProfiles != nil {
+			authProfiles, err := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, "")
+			if err != nil {
+				return RuntimeSpec{}, fmt.Errorf("resolve gateway auth profiles: %w", err)
+			}
+			gateway := *spec.EgressGateway
+			gateway.AuthProfiles = authProfiles
+			spec.EgressGateway = &gateway
+		}
+		if err := ValidateSpec(spec); err != nil {
+			return RuntimeSpec{}, err
+		}
 		return spec, nil
 	}
 	if spec.EgressGateway.BoundarySnapshot == nil && c.egressGateway != nil {
@@ -460,6 +478,13 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 	}
 	gateway := *spec.EgressGateway
 	gateway.BoundarySnapshot = &snapshot
+	if c.authProfiles != nil {
+		authProfiles, authErr := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, requestedSnapshotID)
+		if authErr != nil {
+			return RuntimeSpec{}, fmt.Errorf("resolve gateway auth profiles: %w", authErr)
+		}
+		gateway.AuthProfiles = authProfiles
+	}
 	spec.EgressGateway = &gateway
 	if err := ValidateSpec(spec); err != nil {
 		return RuntimeSpec{}, err

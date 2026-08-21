@@ -110,6 +110,34 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 		},
 	}
+	egressAuthProfileSchema := map[string]interface{}{
+		"type":        "object",
+		"description": "安全的目标认证档案投影。响应只说明凭据是否已配置，永不返回凭据值或加密信封。",
+		"required":    []string{"id", "name", "headerName", "enabled", "credentialsConfigured", "createdAt", "updatedAt"},
+		"properties": map[string]interface{}{
+			"id":                    map[string]interface{}{"type": "string", "format": "uuid"},
+			"name":                  map[string]interface{}{"type": "string", "maxLength": 120},
+			"headerName":            map[string]interface{}{"type": "string", "maxLength": 128, "description": "网关覆盖并唯一注入的规范化端到端 HTTP 头名称"},
+			"enabled":               map[string]interface{}{"type": "boolean"},
+			"credentialsConfigured": map[string]interface{}{"type": "boolean"},
+			"ownerUserId":           map[string]interface{}{"type": "string"},
+			"credentialUpdatedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+			"createdAt":             map[string]interface{}{"type": "string", "format": "date-time"},
+			"updatedAt":             map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	egressAuthProfileWriteSchema := map[string]interface{}{
+		"type": "object", "required": []string{"name", "headerName"},
+		"properties": map[string]interface{}{
+			"name":       map[string]interface{}{"type": "string", "maxLength": 120},
+			"headerName": map[string]interface{}{"type": "string", "maxLength": 128},
+			"enabled":    map[string]interface{}{"type": "boolean", "default": true},
+			"credential": map[string]interface{}{
+				"type": "string", "nullable": true, "writeOnly": true, "maxLength": egress.MaxAuthProfileSecretBytes,
+				"description": "省略时更新操作保留现有凭据；null 清除；字符串替换。任何响应均不会返回此字段。",
+			},
+		},
+	}
 	egressProxySummarySchema := map[string]interface{}{
 		"type":     "object",
 		"required": []string{"id", "name", "protocol", "host", "port", "enabled", "credentialsConfigured"},
@@ -251,6 +279,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"schemas": map[string]interface{}{
 				"EgressProxy":                         egressProxySchema,
 				"EgressProxyWrite":                    egressProxyWriteSchema,
+				"EgressAuthProfile":                   egressAuthProfileSchema,
+				"EgressAuthProfileWrite":              egressAuthProfileWriteSchema,
 				"EgressProxySummary":                  egressProxySummarySchema,
 				"EgressProxyGroupMember":              egressProxyGroupMemberSchema,
 				"EgressProxyGroup":                    egressProxyGroupSchema,
@@ -1717,6 +1747,41 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"responses": map[string]interface{}{
 						"204": map[string]interface{}{"description": "已删除"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理组不存在"},
 					},
+				},
+			},
+			"/api/egress-auth-profiles": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "列出可访问的目标认证档案", "operationId": "listEgressAuthProfiles",
+					"description": "仅返回无凭据安全投影。原始凭据只会出现在网关专用只读文件中。",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "认证档案列表", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+							"type": "object", "required": []string{"items"}, "properties": map[string]interface{}{"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfile"}}},
+						}}}}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+				"post": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "创建目标认证档案", "operationId": "createEgressAuthProfile",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfileWrite"}}}},
+					"responses": map[string]interface{}{
+						"201": map[string]interface{}{"description": "已创建", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfile"}}}},
+						"400": map[string]interface{}{"description": "头名称或凭据无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+			},
+			"/api/egress-auth-profiles/{id}": map[string]interface{}{
+				"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "读取目标认证档案", "operationId": "getEgressAuthProfile",
+					"responses": map[string]interface{}{"200": map[string]interface{}{"description": "安全认证档案投影", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfile"}}}}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "认证档案不存在"}},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "更新目标认证档案", "operationId": "updateEgressAuthProfile",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfileWrite"}}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "已更新", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuthProfile"}}}}, "400": map[string]interface{}{"description": "配置无效"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "认证档案不存在"}},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "删除未被边界规则引用的认证档案", "operationId": "deleteEgressAuthProfile",
+					"responses": map[string]interface{}{"204": map[string]interface{}{"description": "已删除"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "认证档案不存在"}, "409": map[string]interface{}{"description": "仍被边界规则引用"}},
 				},
 			},
 			"/api/auth/change-password": map[string]interface{}{
