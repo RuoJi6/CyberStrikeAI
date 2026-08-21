@@ -22,8 +22,9 @@ import (
 )
 
 const (
-	SnapshotContainerPath = "/etc/cyberstrike/boundary.json"
-	maxSnapshotBytes      = 4 << 20
+	SnapshotContainerPath        = "/etc/cyberstrike/boundary.json"
+	maxSnapshotBytes             = 4 << 20
+	defaultSnapshotCheckInterval = time.Second
 )
 
 var (
@@ -50,10 +51,11 @@ type snapshotEnvelope struct {
 }
 
 type GatewayOptions struct {
-	ListenAddress    string
-	DNSListenAddress string
-	Proxy            ProxyOptions
-	DNS              DNSOptions
+	ListenAddress         string
+	DNSListenAddress      string
+	SnapshotCheckInterval time.Duration
+	Proxy                 ProxyOptions
+	DNS                   DNSOptions
 }
 
 // SnapshotStore materializes immutable database snapshots into a trusted host
@@ -257,6 +259,12 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if len(configured) == 1 {
 		options = configured[0]
 	}
+	if options.SnapshotCheckInterval < 0 {
+		return errors.New("egress snapshot check interval must not be negative")
+	}
+	if options.SnapshotCheckInterval == 0 {
+		options.SnapshotCheckInterval = defaultSnapshotCheckInterval
+	}
 	report, policy, err := LoadPolicySnapshot(path, reference)
 	if err != nil {
 		return err
@@ -302,13 +310,19 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan serverResult, 3)
+	results := make(chan serverResult, 4)
 	go func() { results <- serverResult{name: "HTTP proxy", err: server.Serve(listener)} }()
 	go func() {
 		results <- serverResult{name: "UDP policy DNS", err: servePolicyDNSUDP(runCtx, dnsPacket, dnsHandler)}
 	}()
 	go func() {
 		results <- serverResult{name: "TCP policy DNS", err: servePolicyDNSTCP(runCtx, dnsTCP, dnsHandler)}
+	}()
+	go func() {
+		results <- serverResult{
+			name: "snapshot integrity monitor",
+			err:  monitorSnapshotIntegrity(runCtx, path, reference, options.SnapshotCheckInterval),
+		}
 	}()
 
 	var first serverResult
@@ -321,7 +335,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	cancel()
 	_ = server.Close()
 	closeGatewayListeners(listener, dnsPacket, dnsTCP)
-	for completed < 3 {
+	for completed < 4 {
 		result := <-results
 		completed++
 		if first.name == "" && result.err != nil && !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, net.ErrClosed) {
@@ -338,6 +352,21 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		return fmt.Errorf("%s stopped unexpectedly", first.name)
 	}
 	return fmt.Errorf("serve %s: %w", first.name, first.err)
+}
+
+func monitorSnapshotIntegrity(ctx context.Context, path string, reference SnapshotReference, interval time.Duration) error {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if _, err := LoadSnapshot(path, reference); err != nil {
+				return fmt.Errorf("revalidate immutable snapshot: %w", err)
+			}
+		}
+	}
 }
 
 func CheckSnapshot(path string, reference SnapshotReference, output io.Writer) error {

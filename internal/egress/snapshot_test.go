@@ -154,6 +154,49 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	}
 }
 
+func TestConfiguredGatewayStopsWhenSnapshotIntegrityDrifts(t *testing.T) {
+	content := `{"schemaVersion":1,"policyId":"","rules":[]}`
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	reference := testSnapshot(t, content)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var output lockedBuffer
+	done := make(chan error, 1)
+	go func() {
+		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{
+			ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
+		})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for !strings.Contains(output.String(), `"event":"boundary_snapshot_loaded"`) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !strings.Contains(output.String(), `"event":"boundary_snapshot_loaded"`) {
+		t.Fatalf("startup report = %q", output.String())
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrSnapshotIntegrity) || !strings.Contains(err.Error(), "snapshot integrity monitor") {
+			t.Fatalf("snapshot drift shutdown error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("gateway did not stop after snapshot integrity drift")
+	}
+}
+
+func TestConfiguredGatewayRejectsNegativeSnapshotCheckInterval(t *testing.T) {
+	err := RunWithSnapshot(context.Background(), "unused", SnapshotReference{}, nil, GatewayOptions{SnapshotCheckInterval: -time.Nanosecond})
+	if err == nil || !strings.Contains(err.Error(), "check interval") {
+		t.Fatalf("negative snapshot check interval error = %v", err)
+	}
+}
+
 func TestLoadPolicySnapshotCompilesCanonicalRulesAndRejectsNonCanonicalTargets(t *testing.T) {
 	valid := `{"schemaVersion":1,"policyId":"policy-1","rules":[{"id":"rule-1","effect":"allow-visit","host":"allowed.example","schemes":["http"],"ports":[80],"pathPrefixes":["/api"],"methods":["GET"],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}]}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")

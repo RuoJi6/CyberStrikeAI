@@ -418,6 +418,47 @@ func TestDockerManagerSnapshotGatewayRejectsMismatchedHealthyReportBeforeAgentSt
 	}
 }
 
+func TestDockerManagerInspectRejectsRunningSnapshotGatewayFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*mobycontainer.State)
+	}{
+		{name: "crashed", mutate: func(state *mobycontainer.State) {
+			state.Status = mobycontainer.StateExited
+			state.Running = false
+		}},
+		{name: "unhealthy", mutate: func(state *mobycontainer.State) {
+			state.Health.Status = mobycontainer.Unhealthy
+		}},
+		{name: "snapshot report mismatch", mutate: func(state *mobycontainer.State) {
+			state.Health.Log[len(state.Health.Log)-1].Output = `{"event":"boundary_snapshot_healthy","snapshotId":"00000000-0000-0000-0000-000000000000","sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			spec, root, snapshotPath := snapshotGatewayFixture(t)
+			api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+			manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Create(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+				t.Fatal(err)
+			}
+			name := EgressGatewayContainerName(spec.ID)
+			gateway := api.containerResults[name]
+			test.mutate(gateway.Container.State)
+			api.containerResults[name] = gateway
+			if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+				t.Fatalf("running snapshot gateway failure error = %v", err)
+			}
+		})
+	}
+}
+
 func snapshotGatewayFixture(t *testing.T) (RuntimeSpec, string, string) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "snapshots")
