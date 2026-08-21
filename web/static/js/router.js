@@ -1,5 +1,24 @@
 // 页面路由管理
 let currentPage = null;
+let containerMobileSidebarAutoCollapsed = false;
+
+function syncContainerManagementSidebar(pageId) {
+    const sidebar = document.getElementById('main-sidebar');
+    if (!sidebar || typeof window.matchMedia !== 'function') return;
+
+    const isContainerPage = (window.CONTAINER_MANAGEMENT_PAGES || []).includes(pageId);
+    const shouldAutoCollapse = isContainerPage && window.matchMedia('(max-width: 760px)').matches;
+    if (shouldAutoCollapse) {
+        sidebar.classList.add('collapsed');
+        containerMobileSidebarAutoCollapsed = true;
+        return;
+    }
+
+    if (containerMobileSidebarAutoCollapsed) {
+        sidebar.classList.toggle('collapsed', localStorage.getItem('sidebarCollapsed') === 'true');
+        containerMobileSidebarAutoCollapsed = false;
+    }
+}
 
 /** chat、漏洞管理页在切换时保留当前 hash 上的查询串（如 ?conversation= / ?conversation_id=） */
 function buildHashForPage(pageId) {
@@ -110,7 +129,8 @@ function initRouter() {
         const hashParts = hash.split('?');
         let pageId = hashParts[0];
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
+        if (pageId && routablePages.includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(0);
@@ -155,6 +175,7 @@ function switchPage(pageId) {
     // 显示目标页面
     targetPage.classList.add('active');
     currentPage = pageId;
+    syncContainerManagementSidebar(pageId);
         
     const newHash = buildHashForPage(pageId);
     if (window.location.hash.slice(1) !== newHash) {
@@ -254,6 +275,16 @@ function updateNavState(pageId) {
         if (submenuItem) {
             submenuItem.classList.add('active');
         }
+    } else if ((window.CONTAINER_MANAGEMENT_PAGES || []).includes(pageId)) {
+        const containerItem = document.querySelector('.nav-item[data-page="container-management"]');
+        if (containerItem) {
+            containerItem.classList.add('active');
+            containerItem.classList.add('expanded');
+        }
+        const submenuItem = document.querySelector(`.nav-submenu-item[data-page="${pageId}"]`);
+        if (submenuItem) {
+            submenuItem.classList.add('active');
+        }
     } else if (pageId === 'roles-management') {
         // 角色子菜单项
         const rolesItem = document.querySelector('.nav-item[data-page="roles"]');
@@ -340,10 +371,14 @@ function showSubmenuPopup(navItem, menuId) {
     const popup = document.createElement('div');
     popup.className = 'submenu-popup';
     popup.dataset.menuId = menuId;
+    popup.setAttribute('role', 'menu');
     popup.style.position = 'fixed';
     popup.style.left = (rect.right + 8) + 'px';
-    popup.style.top = rect.top + 'px';
+    popup.style.top = Math.max(8, rect.top) + 'px';
     popup.style.zIndex = '1000';
+    popup.style.maxHeight = 'calc(100vh - 16px)';
+    popup.style.overflowY = 'auto';
+    popup.style.overscrollBehavior = 'contain';
     
     // 复制子菜单项到弹出菜单
     const submenuItems = submenu.querySelectorAll('.nav-submenu-item');
@@ -351,6 +386,8 @@ function showSubmenuPopup(navItem, menuId) {
         const popupItem = document.createElement('div');
         popupItem.className = 'submenu-popup-item';
         popupItem.textContent = item.textContent.trim();
+        popupItem.setAttribute('role', 'menuitem');
+        popupItem.tabIndex = 0;
         
         // 检查是否是当前激活的页面
         const pageId = item.getAttribute('data-page');
@@ -358,7 +395,7 @@ function showSubmenuPopup(navItem, menuId) {
             popupItem.classList.add('active');
         }
         
-        popupItem.onclick = function(e) {
+        const activatePopupItem = function(e) {
             e.stopPropagation();
             e.preventDefault();
             
@@ -372,10 +409,25 @@ function showSubmenuPopup(navItem, menuId) {
             popup.remove();
             document.removeEventListener('click', closePopup);
         };
+        popupItem.onclick = activatePopupItem;
+        popupItem.onkeydown = function(e) {
+            if (e.key === 'Enter' || e.key === ' ') {
+                activatePopupItem(e);
+            }
+        };
         popup.appendChild(popupItem);
     });
     
     document.body.appendChild(popup);
+
+    // 折叠侧栏可能位于长导航的底部；将弹出菜单夹在真实视口内，
+    // 避免窄屏下后半段菜单项落到屏幕外。
+    const popupRect = popup.getBoundingClientRect();
+    const viewportMargin = 8;
+    const maxTop = Math.max(viewportMargin, window.innerHeight - popupRect.height - viewportMargin);
+    const maxLeft = Math.max(viewportMargin, window.innerWidth - popupRect.width - viewportMargin);
+    popup.style.top = Math.min(Math.max(viewportMargin, rect.top), maxTop) + 'px';
+    popup.style.left = Math.min(Math.max(viewportMargin, rect.right + 8), maxLeft) + 'px';
     
     // 点击外部关闭弹出菜单
     const closePopup = function(e) {
@@ -576,6 +628,17 @@ async function initPage(pageId) {
                 loadMarkdownAgents();
             }
             break;
+        case 'container-overview':
+        case 'conversation-containers':
+        case 'runtime-environments':
+        case 'boundary-rules':
+        case 'egress-proxies':
+        case 'network-activity':
+        case 'egress-audit':
+            if (typeof initContainerManagementPage === 'function') {
+                initContainerManagementPage(pageId);
+            }
+            break;
         case 'c2-listeners':
         case 'c2-sessions':
         case 'c2-tasks':
@@ -600,6 +663,16 @@ document.addEventListener('DOMContentLoaded', function() {
     initRouter();
     document.documentElement.classList.remove('initial-route-pending');
     initSidebarState();
+
+    if (typeof window.matchMedia === 'function') {
+        const containerMobileQuery = window.matchMedia('(max-width: 760px)');
+        const syncContainerSidebarForViewport = () => syncContainerManagementSidebar(currentPage);
+        if (typeof containerMobileQuery.addEventListener === 'function') {
+            containerMobileQuery.addEventListener('change', syncContainerSidebarForViewport);
+        } else if (typeof containerMobileQuery.addListener === 'function') {
+            containerMobileQuery.addListener(syncContainerSidebarForViewport);
+        }
+    }
     
     // 监听hash变化
     window.addEventListener('hashchange', function() {
@@ -609,7 +682,8 @@ document.addEventListener('DOMContentLoaded', function() {
         let pageId = hashParts[0];
         
         if (pageId === 'c2') pageId = 'c2-listeners';
-        if (pageId && ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles'].includes(pageId)) {
+        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
+        if (pageId && routablePages.includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
                 scheduleChatConversationFromHash(0);

@@ -3810,6 +3810,175 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
     }
 }
 
+/* Stage 6: 容器管理按管理域拆分为独立页面，避免单页长滚动。 */
+.container-management-page {
+    min-height: 100%;
+    background:
+        radial-gradient(circle at 88% 2%, color-mix(in srgb, var(--primary-color) 9%, transparent) 0, transparent 32%),
+        var(--bg-primary);
+}
+
+.container-management-shell {
+    width: min(1180px, 100%);
+    margin: 0 auto;
+    padding: 30px 34px 44px;
+}
+
+.container-management-header {
+    align-items: flex-end;
+    min-height: 112px;
+    margin: 0;
+    padding: 0 0 24px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.container-management-header > div {
+    min-width: 0;
+}
+
+.container-management-eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 10px;
+    color: var(--primary-color);
+    font-size: 0.76rem;
+    font-weight: 700;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.container-management-eyebrow::before {
+    width: 7px;
+    height: 7px;
+    border-radius: 999px;
+    background: currentColor;
+    content: "";
+}
+
+.container-management-page-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: clamp(1.65rem, 2vw, 2.1rem);
+    line-height: 1.18;
+    letter-spacing: -0.025em;
+}
+
+.container-management-header p {
+    max-width: 720px;
+    margin: 10px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.94rem;
+    line-height: 1.65;
+}
+
+.container-management-content {
+    padding: 28px 0 0;
+}
+
+.container-management-surface {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 18px;
+    min-height: 132px;
+    padding: 24px;
+    border: 1px solid color-mix(in srgb, var(--border-color) 86%, var(--primary-color));
+    border-radius: 18px;
+    background: color-mix(in srgb, var(--bg-secondary) 92%, transparent);
+    box-shadow: 0 18px 40px color-mix(in srgb, #0f172a 7%, transparent);
+}
+
+.container-management-surface-icon {
+    display: grid;
+    place-items: center;
+    width: 46px;
+    height: 46px;
+    border: 1px solid color-mix(in srgb, var(--primary-color) 28%, transparent);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--primary-color) 10%, var(--bg-primary));
+    color: var(--primary-color);
+    font-size: 1.2rem;
+    font-weight: 700;
+}
+
+.container-management-surface h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 1rem;
+    line-height: 1.4;
+}
+
+.container-management-surface p {
+    margin: 7px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.88rem;
+    line-height: 1.6;
+}
+
+.container-management-phase {
+    justify-self: end;
+    padding: 7px 11px;
+    border: 1px solid color-mix(in srgb, var(--primary-color) 24%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--primary-color) 8%, transparent);
+    color: color-mix(in srgb, var(--primary-color) 82%, var(--text-primary));
+    font-size: 0.76rem;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+html[data-theme="dark"] .container-management-page {
+    background:
+        radial-gradient(circle at 88% 2%, color-mix(in srgb, var(--primary-color) 13%, transparent) 0, transparent 32%),
+        var(--bg-primary);
+}
+
+html[data-theme="dark"] .container-management-surface {
+    background: color-mix(in srgb, var(--bg-secondary) 88%, #111827);
+    box-shadow: 0 22px 48px rgba(0, 0, 0, 0.2);
+}
+
+@media (max-width: 760px) {
+    body:has(.container-management-page.active) .main-layout {
+        position: relative;
+    }
+
+    body:has(.container-management-page.active) .main-sidebar:not(.collapsed) {
+        position: absolute;
+        inset: 0 auto 0 0;
+        z-index: 50;
+        width: min(82vw, 280px);
+        box-shadow: 12px 0 28px rgba(15, 23, 42, 0.18);
+    }
+
+    .container-management-shell {
+        padding: 22px 18px 34px;
+    }
+
+    .container-management-header {
+        min-height: 0;
+        padding-bottom: 20px;
+    }
+
+    .container-management-content {
+        padding-top: 20px;
+    }
+
+    .container-management-surface {
+        grid-template-columns: auto minmax(0, 1fr);
+        gap: 14px;
+        padding: 20px;
+        border-radius: 16px;
+    }
+
+    .container-management-phase {
+        grid-column: 1 / -1;
+        justify-self: start;
+        margin-left: 60px;
+    }
+}
+
 .message {
     margin-bottom: 24px;
     display: flex;
