@@ -1,15 +1,18 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"cyberstrike-ai/internal/database"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
+	"cyberstrike-ai/internal/security"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )
@@ -20,6 +23,7 @@ type fakeConversationContainerLifecycle struct {
 	action          string
 	conversationID  string
 	removeWorkspace bool
+	rebuild         func(context.Context, string) (containerruntime.InitializationRecord, error)
 }
 
 func (f *fakeConversationContainerLifecycle) call(_ context.Context, action, conversationID string) (containerruntime.InitializationRecord, error) {
@@ -37,6 +41,11 @@ func (f *fakeConversationContainerLifecycle) Stop(ctx context.Context, id string
 }
 
 func (f *fakeConversationContainerLifecycle) Rebuild(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
+	if f.rebuild != nil {
+		f.action = "rebuild"
+		f.conversationID = id
+		return f.rebuild(ctx, id)
+	}
 	return f.call(ctx, "rebuild", id)
 }
 
@@ -175,5 +184,146 @@ func TestConversationContainerLifecycleMapsStateConflict(t *testing.T) {
 	})
 	if response.Code != http.StatusConflict {
 		t.Fatalf("conflict response=%d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConversationContainerBoundaryChangeRequiresSuccessfulExplicitRebuild(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	ctx := context.Background()
+	oldPolicy, err := db.CreateBoundaryPolicy(ctx, database.BoundaryPolicy{ID: "lifecycle-old-policy", Name: "Old", OwnerUserID: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPolicy, err := db.CreateBoundaryPolicy(ctx, database.BoundaryPolicy{ID: "lifecycle-new-policy", Name: "New", OwnerUserID: owner.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := db.CreateConversation("boundary rebuild", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, BoundaryPolicyID: oldPolicy.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerBoundaryRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "handler-provider-1", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeConversationContainerLifecycle{}
+	controller.rebuild = func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+		if _, err := db.BeginLifecycle(ctx, conversationID, containerruntime.LifecycleOperationRebuild); err != nil {
+			return containerruntime.InitializationRecord{}, err
+		}
+		return db.CompleteLifecycle(ctx, conversationID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+			Runtime:             containerruntime.Runtime{ID: spec.ID, ProviderID: "handler-provider-2", Status: containerruntime.StatusStopped},
+			IncrementGeneration: true,
+		})
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerLifecycleController(controller)
+
+	response := performConversationRequest(owner, http.MethodPost, "/api/conversations/"+conversation.ID+"/container/rebuild", map[string]interface{}{
+		"boundaryPolicyId": newPolicy.ID,
+	}, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+		handler.RebuildConversationContainer(c)
+	})
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("missing boundary:read response=%d %s", response.Code, response.Body.String())
+	}
+	if pending, err := db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID); err != nil || pending {
+		t.Fatalf("unauthorized rebuild staged a snapshot: %v, %v", pending, err)
+	}
+	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
+		"boundaryPolicyId": nil,
+	}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("null policy response=%d %s", response.Code, response.Body.String())
+	}
+	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
+		"boundaryPolicyId": newPolicy.ID, "unexpected": true,
+	}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("unknown field response=%d %s", response.Code, response.Body.String())
+	}
+
+	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
+		"boundaryPolicyId": newPolicy.ID,
+	}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusOK {
+		t.Fatalf("rebuild response=%d %s", response.Code, response.Body.String())
+	}
+	active, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.PolicyID != newPolicy.ID || active.SnapshotID == initial.SnapshotID || active.RuntimeGeneration != 2 {
+		t.Fatalf("active snapshot = %#v, %v", active, err)
+	}
+
+	controller.rebuild = func(context.Context, string) (containerruntime.InitializationRecord, error) {
+		return containerruntime.InitializationRecord{}, containerruntime.ErrRuntimeStateConflict
+	}
+	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
+		"boundaryPolicyId": oldPolicy.ID,
+	}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusConflict {
+		t.Fatalf("failed rebuild response=%d %s", response.Code, response.Body.String())
+	}
+	afterFailure, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || afterFailure.SnapshotID != active.SnapshotID || afterFailure.RuntimeGeneration != active.RuntimeGeneration {
+		t.Fatalf("failed rebuild changed active snapshot: %#v, %v", afterFailure, err)
+	}
+	pending, err := db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID)
+	if err != nil || pending {
+		t.Fatalf("failed rebuild pending state = %v, %v", pending, err)
+	}
+}
+
+func performBoundaryRebuildRequest(user *database.RBACUser, conversationID string, body interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+	payload, _ := json.Marshal(body)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/conversations/"+conversationID+"/container/rebuild", bytes.NewReader(payload))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: conversationID}}
+	c.Set(security.ContextSessionKey, security.Session{
+		UserID: user.ID, Username: user.Username, Scope: database.RBACScopeAssigned,
+		Permissions:      map[string]bool{"chat:write": true, "boundary:read": true},
+		PermissionScopes: map[string]string{"boundary:read": database.RBACScopeOwn},
+	})
+	handler(c)
+	return response
+}
+
+func handlerBoundaryRuntimeSpec(conversationID string) containerruntime.RuntimeSpec {
+	return containerruntime.RuntimeSpec{
+		ID: containerruntime.RuntimeID("runtime-" + conversationID), ConversationID: conversationID,
+		Image: containerruntime.ImageReference{
+			Repository: "ghcr.io/usestrix/strix-sandbox",
+			Digest:     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			Platform:   "linux/arm64",
+		},
+		Resources: containerruntime.ResourceLimits{
+			NanoCPUs: 1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
+			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30,
+			MaxConcurrentExec: 2, MaxQueuedExec: 8, LogMaxBytes: 10 << 20, LogMaxFiles: 3,
+		},
+		Security: containerruntime.SecurityProfile{
+			ReadOnlyRootFS: true, NoNewPrivileges: true, DropAllCapabilities: true,
+			NetworkMode: containerruntime.NetworkNone, SeccompProfile: "default", TmpfsBytes: 64 << 20,
+		},
+		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
 	}
 }

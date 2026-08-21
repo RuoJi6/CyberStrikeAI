@@ -85,6 +85,27 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	if err != nil || record.RuntimeStatus != containerruntime.StatusRunning {
 		t.Fatalf("runtime was not durably started: %#v err=%v", record, err)
 	}
+	if _, err := lifecycle.Stop(context.Background(), conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PrepareConversationBoundaryRebuild(context.Background(), conversation.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend, err = resolver.ResolveExecutionBackend(ctx)
+	if err == nil || backend != nil || !strings.Contains(err.Error(), "boundary rebuild") {
+		t.Fatalf("pending rebuild did not fail closed: backend=%T err=%v", backend, err)
+	}
+	if err := db.CancelConversationBoundaryRebuild(context.Background(), conversation.ID, pending.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversation_container_runtimes SET runtime_generation = 2 WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	backend, err = resolver.ResolveExecutionBackend(ctx)
+	if err == nil || backend != nil || !strings.Contains(err.Error(), "generation mismatch") {
+		t.Fatalf("generation mismatch did not fail closed: backend=%T err=%v", backend, err)
+	}
 }
 
 func TestConversationExecutionBackendResolverFailsClosedWithoutBoundarySnapshot(t *testing.T) {

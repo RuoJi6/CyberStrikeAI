@@ -79,6 +79,31 @@ CREATE TABLE IF NOT EXISTS conversation_boundary_bindings (
 	FOREIGN KEY (snapshot_id) REFERENCES boundary_policy_snapshots(id) ON DELETE RESTRICT
 );`
 
+const createConversationBoundaryActivationsTable = `
+CREATE TABLE IF NOT EXISTS conversation_boundary_activations (
+	id TEXT PRIMARY KEY,
+	conversation_id TEXT NOT NULL,
+	snapshot_id TEXT NOT NULL,
+	runtime_generation INTEGER NOT NULL CHECK (runtime_generation >= 1),
+	activated_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+	FOREIGN KEY (snapshot_id) REFERENCES boundary_policy_snapshots(id) ON DELETE RESTRICT,
+	UNIQUE (conversation_id, runtime_generation)
+);`
+
+const createConversationBoundaryRebuildsTable = `
+CREATE TABLE IF NOT EXISTS conversation_boundary_rebuilds (
+	conversation_id TEXT PRIMARY KEY,
+	previous_snapshot_id TEXT NOT NULL,
+	pending_snapshot_id TEXT NOT NULL UNIQUE,
+	expected_runtime_generation INTEGER NOT NULL CHECK (expected_runtime_generation >= 2),
+	interrupted INTEGER NOT NULL DEFAULT 0 CHECK (interrupted IN (0, 1)),
+	requested_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+	FOREIGN KEY (previous_snapshot_id) REFERENCES boundary_policy_snapshots(id) ON DELETE RESTRICT,
+	FOREIGN KEY (pending_snapshot_id) REFERENCES boundary_policy_snapshots(id) ON DELETE RESTRICT
+);`
+
 type BoundaryPolicy struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
@@ -126,6 +151,24 @@ func (db *DB) initBoundaryPolicyTables() error {
 	if _, err := db.Exec(createConversationBoundaryBindingsTable); err != nil {
 		return err
 	}
+	if _, err := db.Exec(createConversationBoundaryActivationsTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(createConversationBoundaryRebuildsTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`
+		INSERT OR IGNORE INTO conversation_boundary_activations (
+			id, conversation_id, snapshot_id, runtime_generation, activated_at
+		)
+		SELECT b.snapshot_id, b.conversation_id, b.snapshot_id,
+			CASE WHEN COALESCE(r.runtime_generation, 0) > 0 THEN r.runtime_generation ELSE 1 END,
+			b.bound_at
+		FROM conversation_boundary_bindings b
+		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = b.conversation_id
+	`); err != nil {
+		return err
+	}
 	for _, statement := range []string{
 		`CREATE TRIGGER IF NOT EXISTS boundary_policy_snapshots_no_update
 		 BEFORE UPDATE ON boundary_policy_snapshots
@@ -140,6 +183,13 @@ func (db *DB) initBoundaryPolicyTables() error {
 		 BEFORE DELETE ON conversation_boundary_bindings
 		 WHEN EXISTS (SELECT 1 FROM conversations WHERE id = OLD.conversation_id)
 		 BEGIN SELECT RAISE(ABORT, 'live conversation boundary bindings are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS conversation_boundary_activations_no_update
+		 BEFORE UPDATE ON conversation_boundary_activations
+		 BEGIN SELECT RAISE(ABORT, 'conversation boundary activations are immutable'); END`,
+		`CREATE TRIGGER IF NOT EXISTS conversation_boundary_activations_no_live_delete
+		 BEFORE DELETE ON conversation_boundary_activations
+		 WHEN EXISTS (SELECT 1 FROM conversations WHERE id = OLD.conversation_id)
+		 BEGIN SELECT RAISE(ABORT, 'live conversation boundary activations are immutable'); END`,
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			return err
@@ -148,7 +198,10 @@ func (db *DB) initBoundaryPolicyTables() error {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_boundary_policies_owner ON boundary_policies(owner_user_id, updated_at)`); err != nil {
 		return err
 	}
-	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_boundary_policy_rules_policy ON boundary_policy_rules(policy_id, position, created_at)`)
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_boundary_policy_rules_policy ON boundary_policy_rules(policy_id, position, created_at)`); err != nil {
+		return err
+	}
+	_, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_boundary_activations_current ON conversation_boundary_activations(conversation_id, runtime_generation DESC)`)
 	return err
 }
 

@@ -53,6 +53,18 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, logg
 		_ = manager.Close()
 		return nil, nil, nil, nil, fmt.Errorf("bind boundary snapshots for durable container runtimes: %w", err)
 	}
+	rebuildRecoveryCtx, rebuildRecoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	interruptedBoundaryRebuilds, err := db.MarkPendingConversationBoundaryRebuildsInterrupted(rebuildRecoveryCtx)
+	rebuildRecoveryCancel()
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, nil, fmt.Errorf("inspect interrupted boundary rebuilds: %w", err)
+	}
+	if interruptedBoundaryRebuilds > 0 {
+		logger.Warn("检测到服务重启中断的边界快照重建请求；执行将失败关闭直到显式重试",
+			zap.Int64("count", interruptedBoundaryRebuilds))
+	}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = initializer.Recover(recoverCtx)
 	cancel()

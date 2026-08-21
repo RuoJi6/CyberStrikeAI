@@ -24,6 +24,7 @@ const boundaryPolicySnapshotSchemaVersion = 1
 var (
 	ErrConversationBoundarySnapshotNotFound = errors.New("conversation boundary snapshot not found")
 	ErrBoundarySnapshotIntegrity            = errors.New("boundary snapshot integrity check failed")
+	ErrConversationBoundaryRebuildPending   = errors.New("conversation boundary rebuild is already pending")
 )
 
 // BoundaryPolicySnapshotDocument is the canonical, immutable policy input
@@ -50,14 +51,15 @@ type BoundaryPolicySnapshotRule struct {
 }
 
 type ConversationBoundarySnapshot struct {
-	SnapshotID     string                         `json:"snapshotId"`
-	ConversationID string                         `json:"conversationId"`
-	PolicyID       string                         `json:"policyId"`
-	SHA256         string                         `json:"sha256"`
-	CanonicalJSON  string                         `json:"canonicalJson"`
-	Document       BoundaryPolicySnapshotDocument `json:"document"`
-	CreatedAt      time.Time                      `json:"createdAt"`
-	BoundAt        time.Time                      `json:"boundAt"`
+	SnapshotID        string                         `json:"snapshotId"`
+	ConversationID    string                         `json:"conversationId"`
+	PolicyID          string                         `json:"policyId"`
+	SHA256            string                         `json:"sha256"`
+	CanonicalJSON     string                         `json:"canonicalJson"`
+	Document          BoundaryPolicySnapshotDocument `json:"document"`
+	RuntimeGeneration int                            `json:"runtimeGeneration"`
+	CreatedAt         time.Time                      `json:"createdAt"`
+	BoundAt           time.Time                      `json:"boundAt"`
 }
 
 // SelectConversationBoundaryPolicy records the editable draft selected while
@@ -178,6 +180,24 @@ func (db *DB) EnsureConversationBoundarySnapshot(ctx context.Context, conversati
 	`, conversationID, snapshotID, formatSQLiteUTC(now)); err != nil {
 		return ConversationBoundarySnapshot{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
 	}
+	runtimeGeneration := 1
+	var storedRuntimeGeneration int
+	runtimeErr := tx.QueryRowContext(ctx, `
+		SELECT runtime_generation FROM conversation_container_runtimes WHERE conversation_id = ?
+	`, conversationID).Scan(&storedRuntimeGeneration)
+	if runtimeErr != nil && !errors.Is(runtimeErr, sql.ErrNoRows) {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("load initial boundary runtime generation: %w", runtimeErr)
+	}
+	if storedRuntimeGeneration > runtimeGeneration {
+		runtimeGeneration = storedRuntimeGeneration
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO conversation_boundary_activations (
+			id, conversation_id, snapshot_id, runtime_generation, activated_at
+		) VALUES (?, ?, ?, ?, ?)
+	`, snapshotID, conversationID, snapshotID, runtimeGeneration, formatSQLiteUTC(now)); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("activate initial conversation boundary snapshot: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_boundary_policy_selections WHERE conversation_id = ?`, conversationID); err != nil {
 		return ConversationBoundarySnapshot{}, fmt.Errorf("consume boundary policy selection: %w", err)
 	}
@@ -187,8 +207,148 @@ func (db *DB) EnsureConversationBoundarySnapshot(ctx context.Context, conversati
 	return ConversationBoundarySnapshot{
 		SnapshotID: snapshotID, ConversationID: conversationID, PolicyID: document.PolicyID,
 		SHA256: digest, CanonicalJSON: canonicalJSON, Document: document,
-		CreatedAt: now, BoundAt: now,
+		RuntimeGeneration: runtimeGeneration, CreatedAt: now, BoundAt: now,
 	}, nil
+}
+
+// PrepareConversationBoundaryRebuild freezes a new immutable policy snapshot
+// without making it active. The corresponding container rebuild is the only
+// operation allowed to activate it.
+func (db *DB) PrepareConversationBoundaryRebuild(ctx context.Context, conversationID, policyID string) (ConversationBoundarySnapshot, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	policyID = strings.TrimSpace(policyID)
+	if conversationID == "" {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("conversation id is required")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("begin boundary rebuild transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	result, err := tx.ExecContext(ctx, `UPDATE conversations SET id = id WHERE id = ? AND runtime_mode = ?`, conversationID, ConversationRuntimeModeContainer)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("lock boundary rebuild conversation: %w", err)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		if affectedErr != nil {
+			return ConversationBoundarySnapshot{}, affectedErr
+		}
+		return ConversationBoundarySnapshot{}, sql.ErrNoRows
+	}
+	active, err := getConversationBoundarySnapshot(ctx, tx, conversationID)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("load active boundary snapshot: %w", err)
+	}
+	var runtimeGeneration int
+	var lifecycleOperation, lifecycleState string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT runtime_generation, lifecycle_operation, lifecycle_state
+		FROM conversation_container_runtimes WHERE conversation_id = ?
+	`, conversationID).Scan(&runtimeGeneration, &lifecycleOperation, &lifecycleState); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("load boundary rebuild runtime: %w", err)
+	}
+	if runtimeGeneration < 1 {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("container runtime generation is invalid")
+	}
+	if active.RuntimeGeneration != runtimeGeneration {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("%w: boundary snapshot/runtime generation mismatch", ErrBoundarySnapshotIntegrity)
+	}
+	var pendingInterrupted int
+	pendingErr := tx.QueryRowContext(ctx, `
+		SELECT interrupted FROM conversation_boundary_rebuilds WHERE conversation_id = ?
+	`, conversationID).Scan(&pendingInterrupted)
+	if pendingErr != nil && !errors.Is(pendingErr, sql.ErrNoRows) {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("check pending boundary rebuild: %w", pendingErr)
+	}
+	if pendingErr == nil {
+		if pendingInterrupted == 0 || (lifecycleOperation == "rebuild" && lifecycleState == "in_progress") {
+			return ConversationBoundarySnapshot{}, ErrConversationBoundaryRebuildPending
+		}
+		// Only startup recovery can mark a request interrupted. Replacing it
+		// requires this new explicit rebuild request; execution stays failed closed
+		// until the replacement succeeds.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_boundary_rebuilds WHERE conversation_id = ?`, conversationID); err != nil {
+			return ConversationBoundarySnapshot{}, fmt.Errorf("replace interrupted boundary rebuild: %w", err)
+		}
+	}
+
+	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, err
+	}
+	canonicalJSON, digest, err := canonicalBoundarySnapshot(document)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, err
+	}
+	now := time.Now().UTC()
+	snapshotID := uuid.New().String()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO boundary_policy_snapshots (id, source_policy_id, canonical_json, sha256, created_at)
+		VALUES (?, ?, ?, ?, ?)
+	`, snapshotID, document.PolicyID, canonicalJSON, digest, formatSQLiteUTC(now)); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("insert pending boundary snapshot: %w", err)
+	}
+	expectedGeneration := runtimeGeneration + 1
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO conversation_boundary_rebuilds (
+			conversation_id, previous_snapshot_id, pending_snapshot_id,
+			expected_runtime_generation, requested_at
+		) VALUES (?, ?, ?, ?, ?)
+	`, conversationID, active.SnapshotID, snapshotID, expectedGeneration, formatSQLiteUTC(now)); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("stage boundary rebuild: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("commit pending boundary rebuild: %w", err)
+	}
+	return ConversationBoundarySnapshot{
+		SnapshotID: snapshotID, ConversationID: conversationID, PolicyID: document.PolicyID,
+		SHA256: digest, CanonicalJSON: canonicalJSON, Document: document,
+		RuntimeGeneration: expectedGeneration, CreatedAt: now,
+	}, nil
+}
+
+// CancelConversationBoundaryRebuild removes only the mutable pending request;
+// the immutable snapshot remains as an audit artifact and can never become
+// active accidentally.
+func (db *DB) CancelConversationBoundaryRebuild(ctx context.Context, conversationID, snapshotID string) error {
+	result, err := db.ExecContext(ctx, `
+		DELETE FROM conversation_boundary_rebuilds
+		WHERE conversation_id = ? AND pending_snapshot_id = ?
+	`, strings.TrimSpace(conversationID), strings.TrimSpace(snapshotID))
+	if err != nil {
+		return fmt.Errorf("cancel pending boundary rebuild: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 1 {
+		return fmt.Errorf("cancel pending boundary rebuild affected %d rows", affected)
+	}
+	return nil
+}
+
+func (db *DB) HasPendingConversationBoundaryRebuild(ctx context.Context, conversationID string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM conversation_boundary_rebuilds WHERE conversation_id = ?
+	`, strings.TrimSpace(conversationID)).Scan(&count); err != nil {
+		return false, fmt.Errorf("check pending boundary rebuild: %w", err)
+	}
+	return count != 0, nil
+}
+
+func (db *DB) MarkPendingConversationBoundaryRebuildsInterrupted(ctx context.Context) (int64, error) {
+	result, err := db.ExecContext(ctx, `UPDATE conversation_boundary_rebuilds SET interrupted = 1 WHERE interrupted = 0`)
+	if err != nil {
+		return 0, fmt.Errorf("mark pending boundary rebuilds interrupted: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (db *DB) GetConversationBoundarySnapshot(ctx context.Context, conversationID string) (ConversationBoundarySnapshot, error) {
@@ -238,13 +398,16 @@ func getConversationBoundarySnapshot(ctx context.Context, query boundarySnapshot
 	var snapshot ConversationBoundarySnapshot
 	var createdAt, boundAt string
 	err := query.QueryRowContext(ctx, `
-		SELECT s.id, b.conversation_id, s.source_policy_id, s.sha256, s.canonical_json, s.created_at, b.bound_at
-		FROM conversation_boundary_bindings b
-		JOIN boundary_policy_snapshots s ON s.id = b.snapshot_id
-		WHERE b.conversation_id = ?
+		SELECT s.id, a.conversation_id, s.source_policy_id, s.sha256, s.canonical_json,
+			s.created_at, a.activated_at, a.runtime_generation
+		FROM conversation_boundary_activations a
+		JOIN boundary_policy_snapshots s ON s.id = a.snapshot_id
+		WHERE a.conversation_id = ?
+		ORDER BY a.runtime_generation DESC
+		LIMIT 1
 	`, conversationID).Scan(
 		&snapshot.SnapshotID, &snapshot.ConversationID, &snapshot.PolicyID, &snapshot.SHA256,
-		&snapshot.CanonicalJSON, &createdAt, &boundAt,
+		&snapshot.CanonicalJSON, &createdAt, &boundAt, &snapshot.RuntimeGeneration,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ConversationBoundarySnapshot{}, ErrConversationBoundarySnapshotNotFound
@@ -266,6 +429,27 @@ func getConversationBoundarySnapshot(ctx context.Context, query boundarySnapshot
 		return ConversationBoundarySnapshot{}, fmt.Errorf("%w: invalid snapshot timestamp", ErrBoundarySnapshotIntegrity)
 	}
 	return snapshot, nil
+}
+
+func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyID string) (BoundaryPolicySnapshotDocument, error) {
+	document := BoundaryPolicySnapshotDocument{
+		SchemaVersion: boundaryPolicySnapshotSchemaVersion,
+		PolicyID:      strings.TrimSpace(policyID),
+		Rules:         []BoundaryPolicySnapshotRule{},
+	}
+	if document.PolicyID == "" {
+		return document, nil
+	}
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM boundary_policies WHERE id = ?`, document.PolicyID).Scan(&exists); err != nil {
+		return BoundaryPolicySnapshotDocument{}, fmt.Errorf("load selected boundary policy: %w", err)
+	}
+	rules, err := listBoundaryPolicyRulesForSnapshot(ctx, tx, document.PolicyID)
+	if err != nil {
+		return BoundaryPolicySnapshotDocument{}, err
+	}
+	document.Rules = rules
+	return document, nil
 }
 
 type boundarySnapshotRuleQuerier interface {

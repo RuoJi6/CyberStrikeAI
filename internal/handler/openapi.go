@@ -223,13 +223,17 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 				"ConversationBoundarySnapshot": map[string]interface{}{
 					"type":        "object",
-					"description": "对话首次容器启动前绑定的不可变边界快照。canonicalJson 与 document 表示同一内容，sha256 对 canonicalJson 的 UTF-8 字节计算。",
+					"description": "对话当前激活的不可变边界快照。canonicalJson 与 document 表示同一内容，sha256 对 canonicalJson 的 UTF-8 字节计算；runtimeGeneration 必须与当前运行时一致。",
 					"properties": map[string]interface{}{
 						"snapshotId":     map[string]interface{}{"type": "string"},
 						"conversationId": map[string]interface{}{"type": "string"},
 						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示默认拒绝空策略"},
 						"sha256":         map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
 						"canonicalJson":  map[string]interface{}{"type": "string"},
+						"runtimeGeneration": map[string]interface{}{
+							"type": "integer", "minimum": 1,
+							"description": "该快照激活时对应的容器运行时 generation",
+						},
 						"document": map[string]interface{}{
 							"type":     "object",
 							"required": []string{"schemaVersion", "policyId", "rules"},
@@ -242,7 +246,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"createdAt": map[string]interface{}{"type": "string", "format": "date-time"},
 						"boundAt":   map[string]interface{}{"type": "string", "format": "date-time"},
 					},
-					"required": []string{"snapshotId", "conversationId", "policyId", "sha256", "canonicalJson", "document", "createdAt", "boundAt"},
+					"required": []string{"snapshotId", "conversationId", "policyId", "sha256", "canonicalJson", "document", "runtimeGeneration", "createdAt", "boundAt"},
 				},
 				"ContainerInitialization": map[string]interface{}{
 					"type":        "object",
@@ -1835,7 +1839,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"post": conversationContainerLifecycleOpenAPIOperation("停止对话容器", "stopConversationContainer"),
 			},
 			"/api/conversations/{id}/container/rebuild": map[string]interface{}{
-				"post": conversationContainerLifecycleOpenAPIOperation("按不可变规格重建对话容器", "rebuildConversationContainer"),
+				"post": conversationContainerRebuildOpenAPIOperation(),
 			},
 			"/api/conversations/{id}/container/reconcile": map[string]interface{}{
 				"post": conversationContainerLifecycleOpenAPIOperation("对账控制面与容器引擎状态", "reconcileConversationContainer"),
@@ -7150,6 +7154,29 @@ func conversationContainerLifecycleOpenAPIOperation(summary, operationID string)
 			"504": map[string]interface{}{"description": "容器操作超时"},
 		},
 	}
+}
+
+func conversationContainerRebuildOpenAPIOperation() map[string]interface{} {
+	operation := conversationContainerLifecycleOpenAPIOperation("按不可变规格重建对话容器", "rebuildConversationContainer")
+	operation["description"] = "显式重建对话容器。不传 boundaryPolicyId 时仅做维护重建并沿用已激活的不可变快照；显式传入该字段（包括空字符串）时，先创建新的不可变快照，仅在容器重建成功后与新 runtime generation 原子激活。重建失败保留旧快照；并发或待处理重建返回 409。"
+	operation["requestBody"] = map[string]interface{}{
+		"required": false,
+		"content": map[string]interface{}{
+			"application/json": map[string]interface{}{
+				"schema": map[string]interface{}{
+					"type":                 "object",
+					"additionalProperties": false,
+					"properties": map[string]interface{}{
+						"boundaryPolicyId": map[string]interface{}{
+							"type":        "string",
+							"description": "新边界策略草案 ID；显式空字符串表示创建默认拒绝空快照。需要 boundary:read 权限和资源作用域。",
+						},
+					},
+				},
+			},
+		},
+	}
+	return operation
 }
 
 func conversationContainerDeleteOpenAPIOperation() map[string]interface{} {

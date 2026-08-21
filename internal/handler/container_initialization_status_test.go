@@ -148,6 +148,21 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 			t.Fatalf("%s request schema is missing boundaryPolicyId", route)
 		}
 	}
+	rebuildPost := paths["/api/conversations/{id}/container/rebuild"].(map[string]interface{})["post"].(map[string]interface{})
+	rebuildRequestBody, ok := rebuildPost["requestBody"].(map[string]interface{})
+	if !ok {
+		t.Fatal("container rebuild OpenAPI request body is missing")
+	}
+	rebuildContent := rebuildRequestBody["content"].(map[string]interface{})
+	rebuildJSON := rebuildContent["application/json"].(map[string]interface{})
+	rebuildSchema := rebuildJSON["schema"].(map[string]interface{})
+	rebuildProperties := rebuildSchema["properties"].(map[string]interface{})
+	if _, ok := rebuildProperties["boundaryPolicyId"]; !ok {
+		t.Fatal("container rebuild request schema is missing boundaryPolicyId")
+	}
+	if description, _ := rebuildPost["description"].(string); !strings.Contains(description, "重建成功") || !strings.Contains(description, "原子激活") {
+		t.Fatalf("container rebuild description does not document snapshot activation: %q", description)
+	}
 	for _, route := range []string{"/api/eino-agent", "/api/multi-agent"} {
 		post := paths[route].(map[string]interface{})["post"].(map[string]interface{})
 		responses := post["responses"].(map[string]interface{})

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
 )
 
@@ -129,15 +130,18 @@ func TestConversationBoundarySnapshotConcurrentEnsureIsIdempotent(t *testing.T) 
 			t.Errorf("non-idempotent result = %#v; first = %#v", result, first)
 		}
 	}
-	var snapshots, bindings int
+	var snapshots, bindings, activations int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM boundary_policy_snapshots`).Scan(&snapshots); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_boundary_bindings WHERE conversation_id = ?`, conversation.ID).Scan(&bindings); err != nil {
 		t.Fatal(err)
 	}
-	if snapshots != 1 || bindings != 1 {
-		t.Fatalf("snapshots/bindings = %d/%d", snapshots, bindings)
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_boundary_activations WHERE conversation_id = ?`, conversation.ID).Scan(&activations); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 1 || bindings != 1 || activations != 1 {
+		t.Fatalf("snapshots/bindings/activations = %d/%d/%d", snapshots, bindings, activations)
 	}
 }
 
@@ -217,6 +221,12 @@ func TestConversationBoundarySnapshotSQLiteImmutabilityAndCascade(t *testing.T) 
 	if _, err := db.Exec(`DELETE FROM conversation_boundary_bindings WHERE conversation_id = ?`, conversation.ID); err == nil {
 		t.Fatal("SQLite deleted a live immutable binding")
 	}
+	if _, err := db.Exec(`UPDATE conversation_boundary_activations SET runtime_generation = 2 WHERE conversation_id = ?`, conversation.ID); err == nil {
+		t.Fatal("SQLite updated an immutable activation")
+	}
+	if _, err := db.Exec(`DELETE FROM conversation_boundary_activations WHERE conversation_id = ?`, conversation.ID); err == nil {
+		t.Fatal("SQLite deleted a live immutable activation")
+	}
 	if err := db.DeleteConversation(conversation.ID); err != nil {
 		t.Fatalf("conversation cascade was blocked: %v", err)
 	}
@@ -250,6 +260,12 @@ func TestConversationBoundarySnapshotDetectsTamperedDigest(t *testing.T) {
 	`, conversation.ID, now); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.Exec(`
+		INSERT INTO conversation_boundary_activations (id, conversation_id, snapshot_id, runtime_generation, activated_at)
+		VALUES ('tampered', ?, 'tampered', 1, ?)
+	`, conversation.ID, now); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID); !errors.Is(err, ErrBoundarySnapshotIntegrity) {
 		t.Fatalf("tampered digest error = %v", err)
 	}
@@ -258,6 +274,228 @@ func TestConversationBoundarySnapshotDetectsTamperedDigest(t *testing.T) {
 		VALUES ('noncanonical', '', ?, ?, ?)
 	`, `{ "schemaVersion": 1, "policyId": "", "rules": [] }`, badDigest, now); err == nil {
 		t.Fatal("SQLite accepted non-canonical JSON")
+	}
+}
+
+func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy := createSnapshotTestPolicy(t, db)
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	ctx := context.Background()
+	initial, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-generation-1", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE boundary_policy_rules SET host = ? WHERE id = ?`, "rebuilt.example", "rule-a"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending.SnapshotID == initial.SnapshotID || pending.SHA256 == initial.SHA256 || pending.RuntimeGeneration != 2 {
+		t.Fatalf("pending snapshot = %#v; initial = %#v", pending, initial)
+	}
+	active, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.SnapshotID != initial.SnapshotID || active.RuntimeGeneration != 1 {
+		t.Fatalf("snapshot changed before rebuild: %#v, %v", active, err)
+	}
+	if _, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID); !errors.Is(err, ErrConversationBoundaryRebuildPending) {
+		t.Fatalf("concurrent prepare error = %v", err)
+	}
+	hasPending, err := db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID)
+	if err != nil || !hasPending {
+		t.Fatalf("pending state = %v, %v", hasPending, err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		t.Fatalf("maintenance rebuild stole pending snapshot: %v", err)
+	}
+	rebuildCtx := containerruntime.WithBoundaryRebuildSnapshot(ctx, pending.SnapshotID)
+	if _, err := db.BeginLifecycle(rebuildCtx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversation_boundary_rebuilds SET expected_runtime_generation = 3 WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime:             containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-generation-2", Status: containerruntime.StatusStopped},
+		IncrementGeneration: true,
+	}); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		t.Fatalf("generation mismatch completion error = %v", err)
+	}
+	rolledBack, err := db.GetContainerInitialization(ctx, conversation.ID)
+	if err != nil || rolledBack.RuntimeGeneration != 1 || rolledBack.LifecycleState != containerruntime.LifecycleInProgress {
+		t.Fatalf("non-atomic lifecycle rollback = %#v, %v", rolledBack, err)
+	}
+	active, err = db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.SnapshotID != initial.SnapshotID || active.RuntimeGeneration != 1 {
+		t.Fatalf("non-atomic snapshot rollback = %#v, %v", active, err)
+	}
+	if _, err := db.Exec(`UPDATE conversation_boundary_rebuilds SET expected_runtime_generation = 2 WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime:             containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-generation-2", Status: containerruntime.StatusStopped},
+		IncrementGeneration: true,
+	})
+	if err != nil || rebuilt.RuntimeGeneration != 2 {
+		t.Fatalf("complete rebuild = %#v, %v", rebuilt, err)
+	}
+	active, err = db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.SnapshotID != pending.SnapshotID || active.RuntimeGeneration != rebuilt.RuntimeGeneration {
+		t.Fatalf("active rebuilt snapshot = %#v, %v", active, err)
+	}
+	hasPending, err = db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID)
+	if err != nil || hasPending {
+		t.Fatalf("completed pending state = %v, %v", hasPending, err)
+	}
+	var activations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_boundary_activations WHERE conversation_id = ?`, conversation.ID).Scan(&activations); err != nil {
+		t.Fatal(err)
+	}
+	if activations != 2 {
+		t.Fatalf("activation history = %d", activations)
+	}
+
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	maintained, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime:             containerruntime.Runtime{ID: spec.ID, ProviderID: "provider-generation-3", Status: containerruntime.StatusStopped},
+		IncrementGeneration: true,
+	})
+	if err != nil || maintained.RuntimeGeneration != 3 {
+		t.Fatalf("maintenance rebuild = %#v, %v", maintained, err)
+	}
+	active, err = db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.SnapshotID != pending.SnapshotID || active.RuntimeGeneration != 3 {
+		t.Fatalf("maintenance snapshot = %#v, %v", active, err)
+	}
+}
+
+func TestConversationBoundaryRebuildCancellationAndStartupRecoveryKeepActiveSnapshot(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy := createSnapshotTestPolicy(t, db)
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	ctx := context.Background()
+	initial, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+	firstPending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CancelConversationBoundaryRebuild(ctx, conversation.ID, firstPending.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	secondPending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secondPending.SnapshotID == firstPending.SnapshotID {
+		t.Fatal("pending snapshot was reused")
+	}
+	count, err := db.MarkPendingConversationBoundaryRebuildsInterrupted(ctx)
+	if err != nil || count != 1 {
+		t.Fatalf("recovered pending rebuilds = %d, %v", count, err)
+	}
+	if pending, err := db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID); err != nil || !pending {
+		t.Fatalf("interrupted rebuild did not remain fail-closed: %v, %v", pending, err)
+	}
+	replacement, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, "")
+	if err != nil || replacement.SnapshotID == secondPending.SnapshotID {
+		t.Fatalf("replace interrupted rebuild = %#v, %v", replacement, err)
+	}
+	if err := db.CancelConversationBoundaryRebuild(ctx, conversation.ID, replacement.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || active.SnapshotID != initial.SnapshotID || active.RuntimeGeneration != 1 {
+		t.Fatalf("active snapshot after cancellation = %#v, %v", active, err)
+	}
+}
+
+func TestConversationBoundaryRebuildConcurrentPrepareCreatesOnePendingSnapshot(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy := createSnapshotTestPolicy(t, db)
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	ctx := context.Background()
+	if _, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "provider", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+
+	const workers = 12
+	start := make(chan struct{})
+	errorsCh := make(chan error, workers)
+	var wait sync.WaitGroup
+	for range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID)
+			errorsCh <- err
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsCh)
+	succeeded, pending := 0, 0
+	for err := range errorsCh {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrConversationBoundaryRebuildPending):
+			pending++
+		default:
+			t.Errorf("concurrent prepare error = %v", err)
+		}
+	}
+	if succeeded != 1 || pending != workers-1 {
+		t.Fatalf("concurrent prepare success/pending = %d/%d", succeeded, pending)
+	}
+	var snapshots, rebuilds int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM boundary_policy_snapshots`).Scan(&snapshots); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_boundary_rebuilds`).Scan(&rebuilds); err != nil {
+		t.Fatal(err)
+	}
+	if snapshots != 2 || rebuilds != 1 {
+		t.Fatalf("concurrent snapshots/rebuilds = %d/%d", snapshots, rebuilds)
 	}
 }
 
@@ -281,5 +519,45 @@ func TestEnsureContainerRuntimeBoundarySnapshotsOnlyMigratesDurableRuntimes(t *t
 	var selected string
 	if err := db.QueryRow(`SELECT policy_id FROM conversation_boundary_policy_selections WHERE conversation_id = ?`, unused.ID).Scan(&selected); err != nil || selected != policy.ID {
 		t.Fatalf("unused selection = %q, %v", selected, err)
+	}
+}
+
+func TestConversationBoundaryActivationMigrationUsesDurableRuntimeGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "boundary-activation-migration.db")
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := createSnapshotTestPolicy(t, db)
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	snapshot, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversation_container_runtimes SET runtime_generation = 4 WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER conversation_boundary_activations_no_live_delete`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM conversation_boundary_activations WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	active, err := reopened.GetConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil || active.SnapshotID != snapshot.SnapshotID || active.RuntimeGeneration != 4 {
+		t.Fatalf("migrated activation = %#v, %v", active, err)
 	}
 }

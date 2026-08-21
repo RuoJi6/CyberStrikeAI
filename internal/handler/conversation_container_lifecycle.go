@@ -1,13 +1,19 @@
 package handler
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"cyberstrike-ai/internal/audit"
+	"cyberstrike-ai/internal/database"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"github.com/gin-gonic/gin"
@@ -23,7 +29,104 @@ func (h *ConversationHandler) StopConversationContainer(c *gin.Context) {
 }
 
 func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
-	h.runConversationContainerLifecycle(c, "rebuild", "重建对话容器", h.containerLifecycleRebuild)
+	id, ok := h.authorizeConversationContainer(c)
+	if !ok {
+		return
+	}
+	if h.containerLifecycle == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "容器生命周期服务未配置"})
+		return
+	}
+	var request RebuildConversationContainerRequest
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		return
+	}
+	var extra interface{}
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请求参数无效"})
+		return
+	}
+
+	var staged *database.ConversationBoundarySnapshot
+	var previous database.ConversationBoundarySnapshot
+	if len(request.BoundaryPolicyID) != 0 {
+		session, hasSession := security.CurrentSession(c)
+		if !hasSession || !session.Permissions["boundary:read"] {
+			c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
+			return
+		}
+		if bytes.Equal(bytes.TrimSpace(request.BoundaryPolicyID), []byte("null")) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
+			return
+		}
+		var requestedPolicyID string
+		if err := json.Unmarshal(request.BoundaryPolicyID, &requestedPolicyID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
+			return
+		}
+		policyID := strings.TrimSpace(requestedPolicyID)
+		if policyID != "" && !h.conversationBoundaryPolicyAllowed(c, policyID) {
+			return
+		}
+		var err error
+		previous, err = h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
+		if err != nil {
+			h.writeBoundaryRebuildPreparationError(c, err)
+			return
+		}
+		prepared, err := h.db.PrepareConversationBoundaryRebuild(c.Request.Context(), id, policyID)
+		if err != nil {
+			h.writeBoundaryRebuildPreparationError(c, err)
+			return
+		}
+		staged = &prepared
+	}
+
+	rebuildCtx := c.Request.Context()
+	if staged != nil {
+		rebuildCtx = containerruntime.WithBoundaryRebuildSnapshot(rebuildCtx, staged.SnapshotID)
+	}
+	record, err := h.containerLifecycle.Rebuild(rebuildCtx, id)
+	if err != nil {
+		h.cancelStagedBoundaryRebuild(id, staged)
+		h.writeContainerLifecycleError(c, id, "rebuild", err)
+		return
+	}
+	if staged != nil {
+		active, activeErr := h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
+		if activeErr != nil || active.SnapshotID != staged.SnapshotID || active.RuntimeGeneration != record.RuntimeGeneration {
+			h.logger.Error("边界快照未随容器重建原子激活",
+				zap.String("conversationId", id), zap.String("snapshotId", staged.SnapshotID), zap.Error(activeErr))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "容器已重建，但边界快照激活失败；执行已失败关闭"})
+			return
+		}
+	}
+	if h.audit != nil {
+		detail := map[string]interface{}{
+			"runtime_status": record.RuntimeStatus, "lifecycle_state": record.LifecycleState,
+			"runtime_drift": record.RuntimeDrift, "runtime_generation": record.RuntimeGeneration,
+			"boundary_changed": staged != nil,
+		}
+		if staged != nil {
+			detail["previous_boundary_sha256"] = previous.SHA256
+			detail["boundary_snapshot_id"] = staged.SnapshotID
+			detail["boundary_sha256"] = staged.SHA256
+		}
+		h.audit.Record(c, audit.Entry{
+			Category: "container", Action: "rebuild", Result: "success",
+			ResourceType: "conversation", ResourceID: id, Message: "重建对话容器", Detail: detail,
+		})
+	}
+	c.JSON(http.StatusOK, record)
+}
+
+type RebuildConversationContainerRequest struct {
+	// nil means a maintenance rebuild using the active snapshot. An explicit
+	// empty JSON string creates and activates a new default-deny snapshot.
+	BoundaryPolicyID json.RawMessage `json:"boundaryPolicyId,omitempty"`
 }
 
 func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {
@@ -131,11 +234,28 @@ func (h *ConversationHandler) containerLifecycleStop(ctx context.Context, id str
 	return h.containerLifecycle.Stop(ctx, id)
 }
 
-func (h *ConversationHandler) containerLifecycleRebuild(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
-	if _, err := h.db.EnsureConversationBoundarySnapshot(ctx, id); err != nil {
-		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
+func (h *ConversationHandler) cancelStagedBoundaryRebuild(conversationID string, staged *database.ConversationBoundarySnapshot) {
+	if staged == nil {
+		return
 	}
-	return h.containerLifecycle.Rebuild(ctx, id)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.db.CancelConversationBoundaryRebuild(ctx, conversationID, staged.SnapshotID); err != nil {
+		h.logger.Error("取消失败的边界快照重建请求失败",
+			zap.String("conversationId", conversationID), zap.String("snapshotId", staged.SnapshotID), zap.Error(err))
+	}
+}
+
+func (h *ConversationHandler) writeBoundaryRebuildPreparationError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, database.ErrConversationBoundaryRebuildPending), errors.Is(err, containerruntime.ErrRuntimeStateConflict):
+		c.JSON(http.StatusConflict, gin.H{"error": "对话已有边界快照重建请求正在处理"})
+	case errors.Is(err, database.ErrConversationBoundarySnapshotNotFound), errors.Is(err, containerruntime.ErrNotFound), errors.Is(err, sql.ErrNoRows):
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话容器或边界快照不存在"})
+	default:
+		h.logger.Error("创建边界重建快照失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建边界重建快照失败"})
+	}
 }
 
 func (h *ConversationHandler) containerLifecycleReconcile(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {

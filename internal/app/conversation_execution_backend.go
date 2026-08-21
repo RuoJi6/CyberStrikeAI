@@ -59,7 +59,15 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	if r.container == nil || r.lifecycle == nil {
 		return nil, fmt.Errorf("container execution backend is unavailable for conversation %s", conversationID)
 	}
-	if _, err := r.db.GetConversationBoundarySnapshot(ctx, conversationID); err != nil {
+	pendingBoundaryRebuild, err := r.db.HasPendingConversationBoundaryRebuild(ctx, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("check boundary rebuild for conversation %s: %w", conversationID, err)
+	}
+	if pendingBoundaryRebuild {
+		return nil, fmt.Errorf("boundary rebuild for conversation %s is pending", conversationID)
+	}
+	snapshot, err := r.db.GetConversationBoundarySnapshot(ctx, conversationID)
+	if err != nil {
 		return nil, fmt.Errorf("load boundary snapshot for conversation %s: %w", conversationID, err)
 	}
 	record, err := r.db.GetContainerInitialization(ctx, conversationID)
@@ -69,6 +77,9 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	if record.Status != containerruntime.InitializationCreated ||
 		(record.ReadinessStatus != containerruntime.ReadinessReady && record.ReadinessStatus != containerruntime.ReadinessNotRequired) {
 		return nil, fmt.Errorf("container runtime for conversation %s is not ready", conversationID)
+	}
+	if snapshot.RuntimeGeneration != record.RuntimeGeneration {
+		return nil, fmt.Errorf("boundary snapshot/runtime generation mismatch for conversation %s", conversationID)
 	}
 	if record.RuntimeStatus == containerruntime.StatusStopped {
 		started, startErr := r.lifecycle.Start(ctx, conversationID)

@@ -200,8 +200,13 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatalf("conversation boundary path = %#v", conversationPath)
 	}
 	schemas := spec["components"].(map[string]interface{})["schemas"].(map[string]interface{})
-	if schemas["ConversationBoundarySnapshot"] == nil {
+	snapshotSchema, ok := schemas["ConversationBoundarySnapshot"].(map[string]interface{})
+	if !ok {
 		t.Fatal("ConversationBoundarySnapshot schema is missing")
+	}
+	snapshotProperties := snapshotSchema["properties"].(map[string]interface{})
+	if _, ok := snapshotProperties["runtimeGeneration"]; !ok {
+		t.Fatal("ConversationBoundarySnapshot runtimeGeneration is missing")
 	}
 }
 

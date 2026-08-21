@@ -38,6 +38,25 @@ type LifecycleFailure struct {
 	ReadinessFailed bool
 }
 
+type boundaryRebuildSnapshotContextKey struct{}
+
+// WithBoundaryRebuildSnapshot binds one prepared immutable snapshot to the
+// explicit rebuild request that is allowed to activate it.
+func WithBoundaryRebuildSnapshot(ctx context.Context, snapshotID string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, boundaryRebuildSnapshotContextKey{}, strings.TrimSpace(snapshotID))
+}
+
+func BoundaryRebuildSnapshotFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	value, _ := ctx.Value(boundaryRebuildSnapshotContextKey{}).(string)
+	return strings.TrimSpace(value)
+}
+
 // LifecycleStore is the durable compare-and-swap boundary for runtime
 // mutations. Implementations must reject a second operation while one is in
 // progress so multiple API processes cannot mutate the same container.

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -385,6 +386,10 @@ func (db *DB) BeginLifecycle(ctx context.Context, conversationID string, operati
 		return containerruntime.InitializationRecord{}, fmt.Errorf("%w: lifecycle operation is invalid", containerruntime.ErrInvalidSpecification)
 	}
 	now := formatSQLiteUTC(time.Now())
+	boundaryRebuildSnapshotID := ""
+	if operation == containerruntime.LifecycleOperationRebuild {
+		boundaryRebuildSnapshotID = containerruntime.BoundaryRebuildSnapshotFromContext(ctx)
+	}
 	result, err := db.ExecContext(ctx, `
 		UPDATE conversation_container_runtimes
 		SET lifecycle_operation = ?, lifecycle_state = ?, lifecycle_error = '',
@@ -393,11 +398,27 @@ func (db *DB) BeginLifecycle(ctx context.Context, conversationID string, operati
 			readiness_error = CASE WHEN ? = ? THEN '' ELSE readiness_error END,
 			updated_at = ?
 		WHERE conversation_id = ? AND initialization_status = ? AND lifecycle_state IN (?, ?)
+			AND (
+				? != ?
+				OR (
+					(? = '' AND NOT EXISTS (
+						SELECT 1 FROM conversation_boundary_rebuilds br
+						WHERE br.conversation_id = conversation_container_runtimes.conversation_id
+					))
+					OR (? != '' AND EXISTS (
+						SELECT 1 FROM conversation_boundary_rebuilds br
+						WHERE br.conversation_id = conversation_container_runtimes.conversation_id
+							AND br.pending_snapshot_id = ?
+					))
+				)
+			)
 	`, operation, containerruntime.LifecycleInProgress, now,
 		operation, containerruntime.LifecycleOperationRebuild, containerruntime.ReadinessNotRequired, containerruntime.ReadinessPending,
 		operation, containerruntime.LifecycleOperationRebuild,
 		now, strings.TrimSpace(conversationID),
-		containerruntime.InitializationCreated, containerruntime.LifecycleIdle, containerruntime.LifecycleFailed)
+		containerruntime.InitializationCreated, containerruntime.LifecycleIdle, containerruntime.LifecycleFailed,
+		operation, containerruntime.LifecycleOperationRebuild,
+		boundaryRebuildSnapshotID, boundaryRebuildSnapshotID, boundaryRebuildSnapshotID)
 	if err != nil {
 		return containerruntime.InitializationRecord{}, fmt.Errorf("begin container lifecycle %s: %w", operation, err)
 	}
@@ -427,7 +448,12 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 		readinessDigest = strings.TrimSpace(completion.Readiness.InventoryDigest)
 		readinessTools = completion.Readiness.ToolCount
 	}
-	result, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("begin container lifecycle completion: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
 		UPDATE conversation_container_runtimes
 		SET provider_id = ?, runtime_status = ?, last_error = ?,
 			lifecycle_state = ?, lifecycle_error = '', lifecycle_completed_at = ?,
@@ -454,6 +480,84 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 	}
 	if err := requireContainerRuntimeUpdate(result, "complete "+string(operation)); err != nil {
 		return containerruntime.InitializationRecord{}, err
+	}
+	if operation == containerruntime.LifecycleOperationRebuild {
+		var previousSnapshotID, pendingSnapshotID string
+		var expectedGeneration int
+		pendingErr := tx.QueryRowContext(ctx, `
+			SELECT previous_snapshot_id, pending_snapshot_id, expected_runtime_generation
+			FROM conversation_boundary_rebuilds
+			WHERE conversation_id = ?
+		`, strings.TrimSpace(conversationID)).Scan(&previousSnapshotID, &pendingSnapshotID, &expectedGeneration)
+		switch {
+		case errors.Is(pendingErr, sql.ErrNoRows):
+			// A maintenance rebuild without a boundaryPolicyId keeps the active
+			// immutable snapshot unchanged, while still recording that it applies
+			// to the newly created runtime generation.
+			var activeSnapshotID string
+			activeErr := tx.QueryRowContext(ctx, `
+				SELECT snapshot_id FROM conversation_boundary_activations
+				WHERE conversation_id = ? ORDER BY runtime_generation DESC LIMIT 1
+			`, strings.TrimSpace(conversationID)).Scan(&activeSnapshotID)
+			if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load active boundary snapshot for maintenance rebuild: %w", activeErr)
+			}
+			if activeErr == nil {
+				var runtimeGeneration int
+				if err := tx.QueryRowContext(ctx, `
+					SELECT runtime_generation FROM conversation_container_runtimes WHERE conversation_id = ?
+				`, strings.TrimSpace(conversationID)).Scan(&runtimeGeneration); err != nil {
+					return containerruntime.InitializationRecord{}, fmt.Errorf("load maintenance rebuild generation: %w", err)
+				}
+				activationID := fmt.Sprintf("%s:%d", activeSnapshotID, runtimeGeneration)
+				if _, err := tx.ExecContext(ctx, `
+					INSERT INTO conversation_boundary_activations (
+						id, conversation_id, snapshot_id, runtime_generation, activated_at
+					) VALUES (?, ?, ?, ?, ?)
+				`, activationID, strings.TrimSpace(conversationID), activeSnapshotID, runtimeGeneration, formatSQLiteUTC(time.Now().UTC())); err != nil {
+					return containerruntime.InitializationRecord{}, fmt.Errorf("carry boundary snapshot across maintenance rebuild: %w", err)
+				}
+			}
+		case pendingErr != nil:
+			return containerruntime.InitializationRecord{}, fmt.Errorf("load pending boundary rebuild: %w", pendingErr)
+		default:
+			var runtimeGeneration int
+			if err := tx.QueryRowContext(ctx, `
+				SELECT runtime_generation FROM conversation_container_runtimes WHERE conversation_id = ?
+			`, strings.TrimSpace(conversationID)).Scan(&runtimeGeneration); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load rebuilt runtime generation: %w", err)
+			}
+			if runtimeGeneration != expectedGeneration {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: boundary rebuild expected runtime generation %d, got %d", containerruntime.ErrRuntimeStateConflict, expectedGeneration, runtimeGeneration)
+			}
+			var activeSnapshotID string
+			if err := tx.QueryRowContext(ctx, `
+				SELECT snapshot_id FROM conversation_boundary_activations
+				WHERE conversation_id = ? ORDER BY runtime_generation DESC LIMIT 1
+			`, strings.TrimSpace(conversationID)).Scan(&activeSnapshotID); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load active boundary snapshot before rebuild: %w", err)
+			}
+			if activeSnapshotID != previousSnapshotID {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: active boundary snapshot changed during rebuild", containerruntime.ErrRuntimeStateConflict)
+			}
+			activatedAt := formatSQLiteUTC(time.Now().UTC())
+			if _, err := tx.ExecContext(ctx, `
+				INSERT INTO conversation_boundary_activations (
+					id, conversation_id, snapshot_id, runtime_generation, activated_at
+				) VALUES (?, ?, ?, ?, ?)
+			`, pendingSnapshotID, strings.TrimSpace(conversationID), pendingSnapshotID, runtimeGeneration, activatedAt); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("activate rebuilt boundary snapshot: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				DELETE FROM conversation_boundary_rebuilds
+				WHERE conversation_id = ? AND pending_snapshot_id = ?
+			`, strings.TrimSpace(conversationID), pendingSnapshotID); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("complete pending boundary rebuild: %w", err)
+			}
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return containerruntime.InitializationRecord{}, fmt.Errorf("commit container lifecycle %s: %w", operation, err)
 	}
 	return db.GetContainerInitialization(ctx, conversationID)
 }
