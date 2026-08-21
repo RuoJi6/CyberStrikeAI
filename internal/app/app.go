@@ -22,6 +22,7 @@ import (
 	"cyberstrike-ai/internal/c2"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/egress"
 	"cyberstrike-ai/internal/einoobserve"
 	"cyberstrike-ai/internal/handler"
 	"cyberstrike-ai/internal/hitl"
@@ -111,6 +112,25 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	db, err := database.NewDB(dbPath, log.Logger)
 	if err != nil {
 		return nil, fmt.Errorf("初始化数据库失败: %w", err)
+	}
+	credentialKeyFile := strings.TrimSpace(cfg.Container.EgressCredentialKeyFile)
+	if credentialKeyFile == "" {
+		baseConfigPath := strings.TrimSpace(configPath)
+		if baseConfigPath == "" {
+			baseConfigPath = "config.yaml"
+		}
+		credentialKeyFile = filepath.Join(filepath.Dir(baseConfigPath), "data", "egress-credentials.key")
+	} else if !filepath.IsAbs(credentialKeyFile) {
+		baseConfigPath := strings.TrimSpace(configPath)
+		if baseConfigPath == "" {
+			baseConfigPath = "config.yaml"
+		}
+		credentialKeyFile = filepath.Join(filepath.Dir(baseConfigPath), credentialKeyFile)
+	}
+	credentialCipher, err := egress.LoadOrCreateCredentialCipher(credentialKeyFile)
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("初始化出站代理凭据加密失败: %w", err)
 	}
 
 	// 认证管理器（数据库初始化后挂载 RBAC）
@@ -410,6 +430,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	assetHandler := handler.NewAssetHandler(db, log.Logger)
 	projectHandler := handler.NewProjectHandler(db, log.Logger)
 	boundaryPolicyHandler := handler.NewBoundaryPolicyHandler(db, log.Logger)
+	egressProxyHandler := handler.NewEgressProxyHandler(db, credentialCipher, log.Logger)
 	rbacHandler := handler.NewRBACHandler(db, log.Logger)
 	rbacHandler.SetAudit(auditSvc)
 	rbacHandler.SetAuthManager(authManager)
@@ -671,6 +692,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		assetHandler,
 		projectHandler,
 		boundaryPolicyHandler,
+		egressProxyHandler,
 		workflowHandler,
 		webshellHandler,
 		chatUploadsHandler,
@@ -1016,6 +1038,7 @@ func setupRoutes(
 	assetHandler *handler.AssetHandler,
 	projectHandler *handler.ProjectHandler,
 	boundaryPolicyHandler *handler.BoundaryPolicyHandler,
+	egressProxyHandler *handler.EgressProxyHandler,
 	workflowHandler *handler.WorkflowHandler,
 	webshellHandler *handler.WebShellHandler,
 	chatUploadsHandler *handler.ChatUploadsHandler,
@@ -1425,6 +1448,13 @@ func setupRoutes(
 
 		// 边界策略模拟只执行确定性本地判定，不解析 DNS 或发起网络请求。
 		protected.POST("/boundary-policies/:id/simulate", boundaryPolicyHandler.SimulatePolicy)
+
+		// 出站代理凭据仅在服务端加密保存；所有响应都是无凭据投影。
+		protected.GET("/egress-proxies", egressProxyHandler.List)
+		protected.POST("/egress-proxies", egressProxyHandler.Create)
+		protected.GET("/egress-proxies/:id", egressProxyHandler.Get)
+		protected.PUT("/egress-proxies/:id", egressProxyHandler.Update)
+		protected.DELETE("/egress-proxies/:id", egressProxyHandler.Delete)
 
 		// WebShell 管理（代理执行 + 连接配置存 SQLite）
 		protected.GET("/webshell/connections", webshellHandler.ListConnections)

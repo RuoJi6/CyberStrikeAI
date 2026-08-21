@@ -60,6 +60,44 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type":        "string",
 		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示默认拒绝空策略。",
 	}
+	egressProxySchema := map[string]interface{}{
+		"type":        "object",
+		"description": "安全的上游出站代理投影。响应永不包含用户名、密码、认证头或加密信封。",
+		"required":    []string{"id", "name", "protocol", "host", "port", "enabled", "credentialsConfigured", "createdAt", "updatedAt"},
+		"properties": map[string]interface{}{
+			"id":                    map[string]interface{}{"type": "string", "format": "uuid"},
+			"name":                  map[string]interface{}{"type": "string", "maxLength": 120},
+			"protocol":              map[string]interface{}{"type": "string", "enum": []string{"http", "https", "socks5"}},
+			"host":                  map[string]interface{}{"type": "string", "description": "规范化的主机名或 IP，不含协议、端口、路径或用户信息"},
+			"port":                  map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535},
+			"enabled":               map[string]interface{}{"type": "boolean"},
+			"credentialsConfigured": map[string]interface{}{"type": "boolean", "description": "仅表示服务端是否保存加密凭据，不泄露凭据类型或内容"},
+			"ownerUserId":           map[string]interface{}{"type": "string"},
+			"credentialUpdatedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+			"createdAt":             map[string]interface{}{"type": "string", "format": "date-time"},
+			"updatedAt":             map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	egressProxyWriteSchema := map[string]interface{}{
+		"type":     "object",
+		"required": []string{"name", "protocol", "host", "port"},
+		"properties": map[string]interface{}{
+			"name":     map[string]interface{}{"type": "string", "maxLength": 120},
+			"protocol": map[string]interface{}{"type": "string", "enum": []string{"http", "https", "socks5"}},
+			"host":     map[string]interface{}{"type": "string"},
+			"port":     map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535},
+			"enabled":  map[string]interface{}{"type": "boolean", "default": true},
+			"credentials": map[string]interface{}{
+				"type": "object", "nullable": true, "writeOnly": true,
+				"description": "省略时更新操作保留现有凭据；null 清除；对象替换。任何响应均不会返回此字段。",
+				"required":    []string{"username", "password"},
+				"properties": map[string]interface{}{
+					"username": map[string]interface{}{"type": "string", "maxLength": maxProxyCredentialBytes, "writeOnly": true},
+					"password": map[string]interface{}{"type": "string", "maxLength": maxProxyCredentialBytes, "writeOnly": true},
+				},
+			},
+		},
+	}
 
 	spec := map[string]interface{}{
 		"openapi": "3.0.0",
@@ -87,6 +125,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 			},
 			"schemas": map[string]interface{}{
+				"EgressProxy":      egressProxySchema,
+				"EgressProxyWrite": egressProxyWriteSchema,
 				"CreateConversationRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -1434,6 +1474,65 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"401": map[string]interface{}{"description": "未授权"},
 						"403": map[string]interface{}{"description": "权限或资源范围不足"},
 						"404": map[string]interface{}{"description": "边界策略不存在"},
+					},
+				},
+			},
+			"/api/egress-proxies": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"出站代理"},
+					"summary":     "列出可访问的上游代理",
+					"description": "按当前用户的 RBAC 范围返回安全投影；不返回任何凭据、认证头或加密信封。",
+					"operationId": "listEgressProxies",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "出站代理列表",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+								"type": "object", "required": []string{"items"},
+								"properties": map[string]interface{}{"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressProxy"}}},
+							}}},
+						},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+				"post": map[string]interface{}{
+					"tags":        []string{"出站代理"},
+					"summary":     "创建上游代理",
+					"description": "HTTP、HTTPS 或 SOCKS5 代理；凭据仅在服务端加密保存。",
+					"operationId": "createEgressProxy",
+					"requestBody": map[string]interface{}{
+						"required": true,
+						"content":  map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyWrite"}}},
+					},
+					"responses": map[string]interface{}{
+						"201": map[string]interface{}{"description": "已创建", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxy"}}}},
+						"400": map[string]interface{}{"description": "代理地址、协议或凭据无效"},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "权限不足"},
+					},
+				},
+			},
+			"/api/egress-proxies/{id}": map[string]interface{}{
+				"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+				"get": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "读取上游代理", "operationId": "getEgressProxy",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "安全代理投影", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxy"}}}},
+						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理不存在"},
+					},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "更新上游代理", "operationId": "updateEgressProxy",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxyWrite"}}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "已更新", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressProxy"}}}},
+						"400": map[string]interface{}{"description": "代理地址、协议或凭据无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理不存在"},
+					},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站代理"}, "summary": "删除上游代理", "operationId": "deleteEgressProxy",
+					"responses": map[string]interface{}{
+						"204": map[string]interface{}{"description": "已删除"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "权限或资源范围不足"}, "404": map[string]interface{}{"description": "代理不存在"},
 					},
 				},
 			},

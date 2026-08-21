@@ -125,6 +125,24 @@ func TestBoundarySimulationUsesReadPermissionDespitePOST(t *testing.T) {
 	}
 }
 
+func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
+	tests := map[string]string{
+		http.MethodGet:    "egress:read",
+		http.MethodPost:   "egress:write",
+		http.MethodPut:    "egress:write",
+		http.MethodDelete: "egress:delete",
+	}
+	for method, want := range tests {
+		path := "/api/egress-proxies"
+		if method == http.MethodPut || method == http.MethodDelete {
+			path += "/:id"
+		}
+		if got := permissionForRequest(method, path); got != want {
+			t.Fatalf("%s egress proxy permission = %q, want %q", method, got, want)
+		}
+	}
+}
+
 func TestMCPInvocationPermissionIsSeparateFromMCPAdministration(t *testing.T) {
 	if got := permissionForRequest(http.MethodPost, "/api/mcp"); got != "mcp:execute" {
 		t.Fatalf("MCP invocation permission = %q, want mcp:execute", got)

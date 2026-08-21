@@ -163,6 +163,8 @@ func permissionForRequest(method, fullPath string) string {
 	case path == "/boundary-policies/:id/simulate":
 		// Simulation is read-only even though it accepts a structured POST body.
 		return "boundary:read"
+	case strings.HasPrefix(path, "/egress-proxies"):
+		return crudPermission(method, "egress")
 	case strings.HasPrefix(path, "/webshell"):
 		return crudPermission(method, "webshell")
 	case strings.HasPrefix(path, "/c2"):
@@ -229,6 +231,8 @@ func resourceAllowed(c *gin.Context, db *database.DB) bool {
 		return db.UserCanAccessResource(session.UserID, session.Scope, "project", c.Param("id"))
 	case strings.HasPrefix(path, "/boundary-policies/:id"):
 		return db.UserCanAccessResource(session.UserID, session.Scope, "boundary_policy", c.Param("id"))
+	case strings.HasPrefix(path, "/egress-proxies/:id"):
+		return db.UserCanAccessResource(session.UserID, session.Scope, "egress_proxy", c.Param("id"))
 	case strings.HasPrefix(path, "/conversations/:id"):
 		return db.UserCanAccessResource(session.UserID, session.Scope, "conversation", c.Param("id"))
 	case strings.HasPrefix(path, "/messages/:id/process-details"):

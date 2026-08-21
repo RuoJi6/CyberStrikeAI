@@ -31,6 +31,7 @@ var rbacAssignableResourceTables = map[string]string{
 	"webshell":      "webshell_connections",
 	"batch_task":    "batch_task_queues",
 	"c2_listener":   "c2_listeners",
+	"egress_proxy":  "egress_proxies",
 }
 
 // RBACUser is a local platform account.
@@ -646,6 +647,8 @@ func (db *DB) userOwnsResource(userID, resourceType, resourceID string) bool {
 		table = "c2_listeners"
 	case "boundary_policy":
 		table = "boundary_policies"
+	case "egress_proxy":
+		table = "egress_proxies"
 	default:
 		return false
 	}
@@ -677,6 +680,8 @@ func (db *DB) SetResourceOwner(resourceType, resourceID, userID string) error {
 		table = "c2_listeners"
 	case "boundary_policy":
 		table = "boundary_policies"
+	case "egress_proxy":
+		table = "egress_proxies"
 	default:
 		return nil
 	}
@@ -703,6 +708,8 @@ func (db *DB) GetResourceOwner(resourceType, resourceID string) string {
 		table = "c2_listeners"
 	case "boundary_policy":
 		table = "boundary_policies"
+	case "egress_proxy":
+		table = "egress_proxies"
 	default:
 		return ""
 	}
@@ -774,10 +781,14 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 		query = `SELECT id, name, type || ' · ' || status FROM c2_listeners
 			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	case "egress_proxy":
+		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies
+			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
+			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	}
 
 	queryArgs := []interface{}{pattern, pattern}
-	if resourceType == "asset" {
+	if resourceType == "asset" || resourceType == "egress_proxy" {
 		queryArgs = append(queryArgs, pattern)
 	}
 	queryArgs = append(queryArgs, limit, offset)
@@ -823,10 +834,12 @@ func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, er
 		query = `SELECT COUNT(*) FROM batch_task_queues WHERE LOWER(COALESCE(NULLIF(title, ''), id)) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "c2_listener":
 		query = `SELECT COUNT(*) FROM c2_listeners WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
+	case "egress_proxy":
+		query = `SELECT COUNT(*) FROM egress_proxies WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	}
 	var total int
 	queryArgs := []interface{}{pattern, pattern}
-	if resourceType == "asset" {
+	if resourceType == "asset" || resourceType == "egress_proxy" {
 		queryArgs = append(queryArgs, pattern)
 	}
 	if err := db.QueryRow(query, queryArgs...).Scan(&total); err != nil {
@@ -917,6 +930,8 @@ func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) 
 		query = `SELECT id, COALESCE(NULLIF(title, ''), id), status FROM batch_task_queues WHERE id IN (` + placeholders + `)`
 	case "c2_listener":
 		query = `SELECT id, name, type || ' · ' || status FROM c2_listeners WHERE id IN (` + placeholders + `)`
+	case "egress_proxy":
+		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies WHERE id IN (` + placeholders + `)`
 	default:
 		return out, nil
 	}
@@ -1083,6 +1098,7 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 		{"vulnerability", "vulnerabilities"}, {"webshell", "webshell_connections"},
 		{"asset", "assets"},
 		{"batch_task", "batch_task_queues"}, {"c2_listener", "c2_listeners"},
+		{"egress_proxy", "egress_proxies"},
 	}
 	detected := make(map[string]string, len(uniqueIDs))
 	for _, resourceID := range uniqueIDs {

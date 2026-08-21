@@ -113,6 +113,18 @@ func TestContainerRuntimeConfigResolvesEgressSnapshotDirectoryRelativeToConfig(t
 	}
 }
 
+func TestContainerRuntimeConfigResolvesEgressCredentialKeyFileRelativeToConfig(t *testing.T) {
+	directory := t.TempDir()
+	config := ContainerRuntimeConfig{EgressCredentialKeyFile: "data/egress-credentials.key"}
+	if err := config.resolveEgressCredentialKeyFile(filepath.Join(directory, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(directory, "data", "egress-credentials.key")
+	if config.EgressCredentialKeyFile != expected || !filepath.IsAbs(config.EgressCredentialKeyFile) {
+		t.Fatalf("resolved credential key file = %q, want %q", config.EgressCredentialKeyFile, expected)
+	}
+}
+
 func testContainerToolInventory() containerruntime.ToolInventory {
 	return containerruntime.ToolInventory{
 		SchemaVersion: containerruntime.ToolInventorySchemaVersion,

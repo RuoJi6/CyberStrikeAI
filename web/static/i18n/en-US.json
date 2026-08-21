@@ -4571,7 +4571,8 @@
       "vulnerability": "Vulnerability",
       "webshell": "WebShell Connection",
       "batch_task": "Batch Task",
-      "c2_listener": "C2 Listener"
+      "c2_listener": "C2 Listener",
+      "egress_proxy": "Egress Proxy"
     },
     "scopes": {
       "all": {
@@ -4648,6 +4649,7 @@
       "chat": "Conversations",
       "config": "System Configuration",
       "dashboard": "Dashboard",
+	  "egress": "Egress Proxies",
       "files": "Files",
       "fofa": "FOFA",
       "group": "Conversation Groups",
@@ -4706,6 +4708,11 @@
         "write": "Operate C2 listeners, sessions, tasks, payloads, files, and profiles",
         "delete": "Delete C2 objects"
       },
+	  "egress": {
+		"read": "View egress proxies and safe routing summaries",
+		"write": "Create and update egress proxies and credentials",
+		"delete": "Delete egress proxies"
+	  },
       "mcp": {
         "read": "View MCP status and external MCP configuration",
         "write": "Manage external MCP servers and invoke the MCP endpoint"

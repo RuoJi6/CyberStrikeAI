@@ -4559,7 +4559,8 @@
       "vulnerability": "漏洞",
       "webshell": "WebShell 连接",
       "batch_task": "批量任务",
-      "c2_listener": "C2 监听器"
+      "c2_listener": "C2 监听器",
+      "egress_proxy": "出站代理"
     },
     "scopes": {
       "all": {
@@ -4636,6 +4637,7 @@
       "chat": "对话",
       "config": "系统配置",
       "dashboard": "仪表盘",
+	  "egress": "出站代理",
       "files": "文件",
       "fofa": "FOFA",
       "group": "对话分组",
@@ -4694,6 +4696,11 @@
         "write": "操作 C2 监听器、会话、任务、载荷、文件和配置",
         "delete": "删除 C2 对象"
       },
+	  "egress": {
+		"read": "查看出站代理及安全路由摘要",
+		"write": "创建、更新出站代理及其凭据",
+		"delete": "删除出站代理"
+	  },
       "mcp": {
         "read": "查看 MCP 状态和外部 MCP 配置",
         "write": "管理外部 MCP 服务并调用 MCP 端点"

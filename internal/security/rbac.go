@@ -85,6 +85,9 @@ var PermissionCatalog = map[string]string{
 	"monitor:write":        "Cancel monitor executions",
 	"monitor:delete":       "Delete monitor executions",
 	"boundary:read":        "View and simulate boundary policies",
+	"egress:read":          "View egress proxies and safe routing summaries",
+	"egress:write":         "Create and update egress proxies and credentials",
+	"egress:delete":        "Delete egress proxies",
 }
 
 func HashPassword(password string) (string, error) {

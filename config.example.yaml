@@ -141,6 +141,7 @@ container:
   egress_image_digest: "" # 启用时必填 sha256:... 不可变 digest
   egress_image_platform: linux/arm64
   egress_snapshot_dir: data/egress-snapshots # 控制面生成的不可变快照文件；仅网关以只读 bind mount 加载
+  egress_credential_key_file: data/egress-credentials.key # 自动生成的服务端 AES-256 密钥；必须持久化、权限 0600，禁止提交或共享
   initializer_workers: 2
   queue_capacity: 64
   create_timeout_seconds: 120
