@@ -1,7 +1,7 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 2 第 7 项已完成（第 8 项待开始：删除对话时提供“保留工作区”和“一并删除”两种明确选项）
+> 当前阶段：阶段 2 第 8 项已完成（第 9 项待开始：审计中记录真实执行位置、container ID 和 image digest）
 > 最后更新：2026-08-21
 > 工作分支：`codex/docker-agent-runtime`
 
@@ -266,7 +266,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 将超大工具输出落到该对话 `/workspace/.tool-output/`，数据库和模型上下文只保留有界摘要与文件引用。
 - [x] 将 Agent 输入、上传文件和命令输出路径规范化到 `/workspace`，防止路径穿越。
 - [x] 未启用持久化时，明确告知删除容器会删除文件；启用时创建每对话 named volume。
-- [ ] 删除对话时提供“保留工作区”和“一并删除”两种明确选项。
+- [x] 删除对话时提供“保留工作区”和“一并删除”两种明确选项。
 - [ ] 审计中记录真实执行位置、container ID 和 image digest。
 - [ ] 编写 host/container 后端契约测试，确保返回格式和取消语义一致。
 
@@ -432,7 +432,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 0 | 已完成 | 2026-08-20 | `8c2c6bc` | Go 全量通过；前端 115/115 | 源码/文档已同步；服务 active；`GET /` 200 | `#chat` 非空白、无 console 错误；交互进入 `#dashboard` | 执行面全部归属；CGO 候选构建失败已回滚，当前服务健康 |
 | 1 | 已完成 | 2026-08-20 | `58ff685`（第 1 项）；`45e8da3` + `1645256`（第 2 项）；`36ab2d3`（第 3 项）；`7c17fd5`（第 4 项）；`49f0256`（第 5 项）；`338e047`（第 6 项）；`b4024d6`（第 7 项）；`45ef059`（第 8 项）；`93ff9a7`（第 9 项）；`b44f018`（第 10 项）；`99b3e10`（第 11 项） | Go 全包、`go vet ./...`、前端 115/115 及容器/数据库完整 race 通过；fake runtime 覆盖创建、就绪、生命周期、孤儿资源和空闲停止；真实验收发现并修复非 root 镜像的 tmpfs 工作区不可写问题 | 最终 Zig CGO Linux ARM64 服务 SHA-256 `93a33f7f…17c547b`，active / HTTP 200 / `NRestarts=0`；阶段探针 SHA-256 `f2ef6d69…bdc77c2`；仅使用测试机已有 `cyberstrike/agent` ARM64 镜像并跳过远端 manifest，未下载安全工具；两容器 provider 不同、无默认路由、无 Docker Socket、运行时工作区隔离、停止 A 不影响 B、未持久化 tmpfs 恢复后按设计重置，删除后容器/网络/卷残留均为 0 | 通过 SSH 本地转发访问同一测试机 `?qa=20260820-stage1-item11#dashboard`：URL/标题正确，仪表盘非空白，console 日志为空，截图成功；自动化未填写敏感密码 | 阶段 1 全部验收通过；阶段 2 开始后才持久化 host/container 选择、将 Agent 执行路由到容器并实现可选 named volume；当前仍不声称 Agent 已在容器执行；不实现 Agent 浏览器 |
-| 2 | 进行中 | 第 7 项：2026-08-21 | `361ba97`（第 1 项）；`28d9ad2`（第 2 项）；`a292b52`（第 3 项）；`424e084` + `9926f2c` + `9535a57` + `0fe6fa6` + `629d06f`（第 4 项）；`43c8084` + `637cf14` + `067f513`（第 5 项）；`02d786d` + `0aace18`（第 6 项）；`6125b5c` + `369d35b`（第 7 项） | 第 1—6 项详细证据保留于 `0aace18` 版本。第 7 项：`go test ./... -count=1`、`go vet ./...`、`go mod tidy -diff`、前端 120/120 通过；runtime/container、database、handler 的 Workspace/Persistent/Orphan 等定向 race 通过；新增 runtime 记录删除后仍保留 workspace claim 的数据库回归和孤儿扫描集成回归；差异、凭据和二进制扫描通过 | 最终 Linux ARM64 服务 SHA-256 `fcb22f72e4c4c34db301a470fc59235f4655177d4b0606930abbfa33c141b39e`，源码包 SHA-256 `09acaafbce38503c03603a0143a160a483caedb63fd952802875dc4c056d06d6`；部署源码一致，服务 active / HTTP 200 / `NRestarts=0` / 关键日志 0。`host + workspacePersistent=true` 返回 400。持久化对话 `17f85396-a10a-4018-9197-fc16b8375bb5` 使用唯一 `cyberstrike-workspace-conversation-…` 挂载 `/workspace`，临时对话 `e8248f91-0548-4eee-ac36-7105fe703bed` 使用 tmpfs；二者均 `network=none`、只读 rootfs、用户 `10001:10001`。默认删除后持久化 API 报告 retained、临时 API 明确警告永久删除；跨 100 秒并强制启动期孤儿扫描后，重建容器仍读到 `ITEM7_PERSISTENT_RETAINED_369D35B`，临时 marker 不存在；最终显式删除测试 volume，容器/volume 均无残留 | 登录 `?qa=20260821-stage2-item7-369d35b#chat`；新对话容器面板在暗色主题下分别显示“删除容器会永久删除 /workspace”与“对话专属 Docker named volume”，已有持久化对话显示策略已锁定，本次重载后 console error/warning 为 0。截图 `stage2-item7-workspace-persistence-369d35b.jpg` SHA-256 `1f5153310922f7ed04ffe9f4eefa975759c86472db2e87ae7418451321b06542`；`stage2-item7-ephemeral-delete-warning-369d35b.jpg` SHA-256 `980a577c660b93a485c5005c743f5782b2b2119395af9a5fdaf1c7755aeb79b2` | 第 1—7 项验收通过。真实默认删除验收首次发现 lifecycle 记录删除后孤儿扫描器会误删声明为 retained 的 volume；`369d35b` 改为从持久化容器对话派生长期 workspace claim，并经周期观察、强制启动扫描和 marker 重建复验。第 8 项待开始；实施与修复提交均已推送远端 |
+| 2 | 进行中 | 第 8 项：2026-08-21 | `361ba97`（第 1 项）；`28d9ad2` + `45eb12a`（第 2 项及异步续跑补强）；`a292b52`（第 3 项）；`424e084` + `9926f2c` + `9535a57` + `0fe6fa6` + `629d06f`（第 4 项）；`43c8084` + `637cf14` + `067f513`（第 5 项）；`02d786d` + `0aace18`（第 6 项）；`6125b5c` + `369d35b`（第 7 项）；`9faf158` + `9add95c`（第 8 项） | 第 1—7 项详细证据保留于 `fa7e054` 版本。第 8 项及初始化补强：`go test ./... -count=1`、`go vet ./...`、`go mod tidy -diff`、前端 124/124 通过；handler 断线续跑/停止取消 race、工作区删除策略数据库和 API 回归通过；差异、凭据和二进制扫描通过 | 当前 Linux ARM64 服务 SHA-256 `6ecf738015f7cf7f37cfac53d61ba2b72ee1bf3cf62af7e39339b17629408031`；虚拟机重启后服务仍 active / running、HTTP 200、`NRestarts=0`。保留与一并删除 API 均返回成功，已删除对话查询为 404；保留用例 volume `cyberstrike-workspace-conversation-4d6bf25d-b316-4c5b-8166-07d4297df206` 在重启后仍存在，一并删除用例 volume 无残留。另完成初始化→就绪→原请求自动续跑、首个 initializing 事件后断线仍后台完成、初始化期间 Stop 后不继续原请求三组真实 SSE/Docker 验收 | 登录 `?qa=20260821-stage2-item8-9faf158#chat?conversation=2e21f671-5a6c-4b34-89e4-47e6054b0450`；真实删除弹窗明确显示“删除对话，保留工作区”和“删除对话和工作区”，桌面与 820px 窄屏均无截断，console error/warning 为 0。截图 `stage2-item8-delete-options-desktop.png` SHA-256 `1c4a144bf7fd581b22369e01635a925a1e57dcfa8c024191063bcfb6c50c3870`；`stage2-item8-delete-options-narrow.png` SHA-256 `17fb049e42e4d1a81ec11843bc32578f5ad4d1f17f94b24301ac87250497ea34` | 第 1—8 项验收通过。第 8 项默认兼容保留工作区，显式一并删除才销毁 named volume；最终删除按钮未在浏览器中点击，实际删除语义由 API/Docker 验收覆盖。第 9 项待开始；实施、补强与修复提交均已推送远端 |
 | 3 | 未开始 | - | - | - | - | - | - |
 | 4 | 未开始 | - | - | - | - | - | - |
 | 5 | 未开始 | - | - | - | - | - | - |
