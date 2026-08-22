@@ -199,6 +199,44 @@ type Runtime struct {
 	SpecDigest     string
 }
 
+// ResourceUsage is a bounded, credential-free snapshot of live Docker
+// accounting. It is intentionally limited to aggregate counters that are safe
+// to expose in the container management UI.
+type ResourceUsage struct {
+	Available        bool    `json:"available"`
+	CPUPercent       float64 `json:"cpuPercent,omitempty"`
+	MemoryUsageBytes uint64  `json:"memoryUsageBytes,omitempty"`
+	MemoryLimitBytes uint64  `json:"memoryLimitBytes,omitempty"`
+	PIDs             uint64  `json:"pids,omitempty"`
+	NetworkRXBytes   uint64  `json:"networkRxBytes,omitempty"`
+	NetworkTXBytes   uint64  `json:"networkTxBytes,omitempty"`
+	BlockReadBytes   uint64  `json:"blockReadBytes,omitempty"`
+	BlockWriteBytes  uint64  `json:"blockWriteBytes,omitempty"`
+}
+
+// RuntimeComponentObservation describes one engine component without
+// returning environment variables, mounts, labels, commands, or credentials.
+type RuntimeComponentObservation struct {
+	ProviderID  string        `json:"providerId"`
+	Status      Status        `json:"status"`
+	ImageDigest string        `json:"imageDigest"`
+	LastError   string        `json:"lastError,omitempty"`
+	Warnings    []string      `json:"warnings,omitempty"`
+	Resources   ResourceUsage `json:"resources"`
+}
+
+// RuntimeObservation is the live, read-only engine view used by management
+// pages. Inspect validates immutable identity, gateway topology, policy DNS,
+// images, and security controls before this projection is returned.
+type RuntimeObservation struct {
+	Agent            RuntimeComponentObservation  `json:"agent"`
+	Gateway          *RuntimeComponentObservation `json:"gateway,omitempty"`
+	PolicyDNSStatus  string                       `json:"policyDnsStatus"`
+	PolicyDNSAddress string                       `json:"policyDnsAddress,omitempty"`
+	WorkspaceStatus  string                       `json:"workspaceStatus"`
+	ObservedAt       time.Time                    `json:"observedAt"`
+}
+
 // RuntimeSpecDigest is the stable digest embedded in an immutable container
 // label and compared with the durable database specification during every
 // lifecycle operation.

@@ -550,6 +550,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			return containerInitializer.EnsureAsync(ctx, spec)
 		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
+		conversationHandler.SetContainerRuntimeObserver(containerManager)
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		if containerOrphan != nil {

@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260822-4">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260822-5">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -5124,11 +5124,9 @@
                             </div>
                         </div>
                         <div class="page-content container-management-content">
-                            <section class="container-management-surface" aria-labelledby="container-overview-focus-title">
-                                <span class="container-management-surface-icon" aria-hidden="true">◎</span>
-                                <div><h3 id="container-overview-focus-title" data-i18n="containerManagement.overviewFocusTitle">运行态总览</h3><p data-i18n="containerManagement.overviewFocusDescription">汇总容器、网关、工作区、策略快照和需要处理的异常。</p></div>
-                                <span class="container-management-phase" data-i18n="containerManagement.connectingData">管理数据接入中</span>
-                            </section>
+                            <div class="container-runtime-toolbar"><p id="container-overview-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            <section id="container-overview-summary" class="container-runtime-summary" aria-label="容器状态汇总"></section>
+                            <section class="container-runtime-section" aria-labelledby="container-overview-focus-title"><div class="container-runtime-section-heading"><div><h3 id="container-overview-focus-title" data-i18n="containerManagement.overviewFocusTitle">运行态总览</h3><p data-i18n="containerManagement.overviewFocusDescription">汇总容器、网关、工作区、策略快照和需要处理的异常。</p></div></div><div id="container-overview-runtime-list" class="container-runtime-compact-list"></div></section>
                         </div>
                     </div>
                 </div>
@@ -5139,7 +5137,8 @@
                             <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.conversationsTitle">对话容器</h2><p data-i18n="containerManagement.conversationsSubtitle">按对话查看容器生命周期、资源和最后错误。</p></div>
                         </div>
                         <div class="page-content container-management-content">
-                            <section class="container-management-surface" aria-labelledby="conversation-containers-focus-title"><span class="container-management-surface-icon" aria-hidden="true">▣</span><div><h3 id="conversation-containers-focus-title" data-i18n="containerManagement.conversationsFocusTitle">每对话隔离运行时</h3><p data-i18n="containerManagement.conversationsFocusDescription">定位容器状态、网关状态、工作区类型与关联安全快照。</p></div><span class="container-management-phase" data-i18n="containerManagement.connectingData">管理数据接入中</span></section>
+                            <div class="container-runtime-toolbar"><p id="conversation-containers-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            <div class="container-runtime-split"><section class="container-runtime-section" aria-labelledby="conversation-containers-focus-title"><div class="container-runtime-section-heading"><div><h3 id="conversation-containers-focus-title" data-i18n="containerManagement.conversationsFocusTitle">每对话隔离运行时</h3><p data-i18n="containerManagement.conversationsFocusDescription">定位容器状态、网关状态、工作区类型与关联安全快照。</p></div></div><div id="conversation-containers-list" class="container-runtime-list" role="listbox" aria-label="对话容器"></div></section><section id="conversation-container-detail" class="container-runtime-section container-runtime-detail" aria-live="polite"></section></div>
                         </div>
                     </div>
                 </div>
@@ -5150,7 +5149,8 @@
                             <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.runtimesTitle">运行环境</h2><p data-i18n="containerManagement.runtimesSubtitle">管理镜像、工具层、架构和运行资源基线。</p></div>
                         </div>
                         <div class="page-content container-management-content">
-                            <section class="container-management-surface" aria-labelledby="runtime-environments-focus-title"><span class="container-management-surface-icon" aria-hidden="true">◇</span><div><h3 id="runtime-environments-focus-title" data-i18n="containerManagement.runtimesFocusTitle">可验证运行环境</h3><p data-i18n="containerManagement.runtimesFocusDescription">展示镜像 digest、架构、工具准备状态与资源限制。</p></div><span class="container-management-phase" data-i18n="containerManagement.connectingData">管理数据接入中</span></section>
+                            <div class="container-runtime-toolbar"><p id="runtime-environments-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            <section class="container-runtime-section" aria-labelledby="runtime-environments-focus-title"><div class="container-runtime-section-heading"><div><h3 id="runtime-environments-focus-title" data-i18n="containerManagement.runtimesFocusTitle">可验证运行环境</h3><p data-i18n="containerManagement.runtimesFocusDescription">展示镜像 digest、架构、工具准备状态与资源限制。</p></div></div><div id="runtime-environments-list" class="container-environment-grid"></div></section>
                         </div>
                     </div>
                 </div>
@@ -7096,7 +7096,7 @@
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/container-management.js?v=20260822-1"></script>
+    <script src="/static/js/container-management.js?v=20260822-3"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

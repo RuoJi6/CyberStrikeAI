@@ -465,12 +465,73 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 					"required": []string{"snapshotId", "conversationId", "policyId", "sha256", "canonicalJson", "document", "runtimeGeneration", "createdAt", "boundAt"},
 				},
+				"ContainerResourceUsage": map[string]interface{}{
+					"type":        "object",
+					"description": "Docker 引擎返回的只读聚合资源计数，不包含命令、环境变量、挂载或凭据。",
+					"properties": map[string]interface{}{
+						"available":        map[string]interface{}{"type": "boolean"},
+						"cpuPercent":       map[string]interface{}{"type": "number", "format": "double", "minimum": 0},
+						"memoryUsageBytes": map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"memoryLimitBytes": map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"pids":             map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"networkRxBytes":   map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"networkTxBytes":   map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"blockReadBytes":   map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						"blockWriteBytes":  map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+					},
+					"required": []string{"available"},
+				},
+				"ContainerRuntimeComponentObservation": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"providerId":  map[string]interface{}{"type": "string"},
+						"status":      map[string]interface{}{"type": "string"},
+						"imageDigest": map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"lastError":   map[string]interface{}{"type": "string"},
+						"warnings":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+						"resources":   map[string]interface{}{"$ref": "#/components/schemas/ContainerResourceUsage"},
+					},
+					"required": []string{"providerId", "status", "imageDigest", "resources"},
+				},
+				"ContainerRuntimeObservation": map[string]interface{}{
+					"type":        "object",
+					"description": "仅在 observe=1 时返回。所有引擎对象都先校验所有权、不可变规格、镜像、网络拓扑与安全基线。",
+					"properties": map[string]interface{}{
+						"agent":            map[string]interface{}{"$ref": "#/components/schemas/ContainerRuntimeComponentObservation"},
+						"gateway":          map[string]interface{}{"$ref": "#/components/schemas/ContainerRuntimeComponentObservation"},
+						"policyDnsStatus":  map[string]interface{}{"type": "string"},
+						"policyDnsAddress": map[string]interface{}{"type": "string"},
+						"workspaceStatus":  map[string]interface{}{"type": "string"},
+						"observedAt":       map[string]interface{}{"type": "string", "format": "date-time"},
+					},
+					"required": []string{"agent", "policyDnsStatus", "workspaceStatus", "observedAt"},
+				},
+				"ContainerRuntimeDesired": map[string]interface{}{
+					"type":        "object",
+					"description": "从持久化运行时规格导出的无凭据安全投影；不返回 named volume 名称。",
+					"properties": map[string]interface{}{
+						"specDigest":             map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"imageDigest":            map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"imagePlatform":          map[string]interface{}{"type": "string"},
+						"gatewayImageDigest":     map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"boundarySnapshotSha256": map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+						"workspace": map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+							"persistent": map[string]interface{}{"type": "boolean"}, "mountPath": map[string]interface{}{"type": "string"}, "limitBytes": map[string]interface{}{"type": "integer", "format": "int64", "minimum": 0},
+						}},
+						"resources":        map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "integer"}},
+						"gatewayResources": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "integer"}},
+					},
+					"required": []string{"specDigest", "imageDigest", "imagePlatform", "workspace", "resources"},
+				},
 				"ContainerInitialization": map[string]interface{}{
 					"type":        "object",
 					"description": "对话容器后台创建与启动前就绪校验的持久状态。created 仅表示停止状态容器已创建；启用工具清单校验时还必须达到 readinessStatus=ready，才可供后续 Agent 执行路径使用。",
 					"properties": map[string]interface{}{
-						"conversationId": map[string]interface{}{"type": "string"},
-						"runtimeId":      map[string]interface{}{"type": "string"},
+						"conversationId":      map[string]interface{}{"type": "string"},
+						"conversationTitle":   map[string]interface{}{"type": "string"},
+						"runtimeMode":         map[string]interface{}{"type": "string", "enum": []string{"host", "container"}},
+						"workspacePersistent": map[string]interface{}{"type": "boolean"},
+						"runtimeId":           map[string]interface{}{"type": "string"},
 						"status": map[string]interface{}{
 							"type": "string",
 							"enum": []string{"not_requested", "queued", "creating", "created", "failed"},
@@ -506,6 +567,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"lifecycleStartedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
 						"lifecycleCompletedAt": map[string]interface{}{"type": "string", "format": "date-time"},
 						"runtimeDrift":         map[string]interface{}{"type": "string"},
+						"desired":              map[string]interface{}{"$ref": "#/components/schemas/ContainerRuntimeDesired"},
+						"observation":          map[string]interface{}{"$ref": "#/components/schemas/ContainerRuntimeObservation"},
+						"observationError": map[string]interface{}{
+							"type": "string", "enum": []string{"observer_unavailable", "provider_missing", "runtime_drift", "engine_unavailable", "observation_failed"},
+						},
 					},
 					"required": []string{"conversationId", "status"},
 				},
@@ -2275,13 +2341,18 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},
 					"summary":     "查看对话容器后台初始化状态",
-					"description": "返回持久化状态，不加载对话消息，也不等待 Docker 操作。未请求过初始化时返回 not_requested。",
+					"description": "默认仅返回持久化状态，不加载对话消息，也不等待 Docker 操作。未请求过初始化时返回 not_requested；observe=1 时额外返回实时引擎校验与资源投影。",
 					"operationId": "getConversationContainerInitialization",
 					"parameters": []map[string]interface{}{
 						{
 							"name": "id", "in": "path", "required": true,
 							"description": "对话ID",
 							"schema":      map[string]interface{}{"type": "string"},
+						},
+						{
+							"name": "observe", "in": "query", "required": false,
+							"description": "传 1 或 true 时在完成持久状态读取后额外执行一次只读 Docker 观测与资源统计。",
+							"schema":      map[string]interface{}{"type": "boolean", "default": false},
 						},
 					},
 					"responses": map[string]interface{}{

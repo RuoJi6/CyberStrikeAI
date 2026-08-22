@@ -38,7 +38,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
         titles.add(title[1]);
     }
     assert.equal(titles.size, 7);
-    assert.match(template, /container-management\.js\?v=20260822-1/);
+    assert.match(template, /container-management\.js\?v=20260822-3/);
 });
 
 test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => {
@@ -89,9 +89,36 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260822-4/);
+    assert.match(template, /style\.css\?v=20260822-5/);
     assert.match(template, /router\.js\?v=20260822-3/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
     assert.match(router, /popupItem\.setAttribute\('role', 'menuitem'\)/);
+});
+
+test('容器、网关、DNS、工作区、资源与 hash 管理视图已接入安全观测端点', () => {
+    for (const id of [
+        'container-overview-summary', 'container-overview-runtime-list', 'conversation-containers-list',
+        'conversation-container-detail', 'runtime-environments-list',
+    ]) {
+        assert.match(template, new RegExp(`id="${id}"`));
+    }
+    assert.match(management, /container-initialization\?observe=1/);
+    assert.match(management, /containerRuntimeMapConcurrent\(conversations, 6/);
+    assert.match(management, /policyDnsStatus/);
+    assert.match(management, /workspaceStatus/);
+    assert.match(management, /memoryUsageBytes/);
+    assert.match(management, /boundarySnapshotSha256/);
+    assert.match(management, /containerRuntimeLatestError/);
+    assert.match(management, /interpolation: \{ escapeValue: false \}/);
+    assert.doesNotMatch(management, /\.innerHTML\s*=/);
+    for (const locale of [zh, en]) {
+        for (const key of ['summaryContainers', 'agentContainer', 'egressGateway', 'policyDNS', 'workspace', 'latestError']) {
+            assert.equal(typeof locale.containerManagement[key], 'string');
+        }
+        assert.equal(typeof locale.containerManagement.status.running, 'string');
+        assert.equal(typeof locale.containerManagement.status.failed, 'string');
+    }
+    assert.match(styles, /\.container-runtime-status-grid\s*\{/);
+    assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-runtime-status-grid/);
 });

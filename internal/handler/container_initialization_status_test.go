@@ -68,6 +68,99 @@ func TestGetContainerInitializationIsLightweightAndRBACScoped(t *testing.T) {
 	}
 }
 
+type fakeContainerInitializationProvider struct {
+	record containerruntime.InitializationRecord
+}
+
+func (f fakeContainerInitializationProvider) Get(context.Context, string) (containerruntime.InitializationRecord, error) {
+	return f.record, nil
+}
+
+type fakeContainerRuntimeObserver struct {
+	observation containerruntime.RuntimeObservation
+	calls       int
+}
+
+func (f *fakeContainerRuntimeObserver) Observe(context.Context, containerruntime.RuntimeSpec) (containerruntime.RuntimeObservation, error) {
+	f.calls++
+	return f.observation, nil
+}
+
+func TestGetContainerInitializationObservationIsOptInAndSafe(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("observed container", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetResourceOwner("conversation", conversation.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerInitializationSpec(conversation.ID)
+	spec.Workspace.Persistent = true
+	spec.Workspace.VolumeName = "cyberstrike-workspace-secret-name"
+	spec.EgressGateway = &containerruntime.EgressGatewaySpec{
+		Image:            containerruntime.ImageReference{Repository: "gateway", Digest: "sha256:" + strings.Repeat("b", 64), Platform: "linux/arm64"},
+		Resources:        containerruntime.EgressGatewayResources{NanoCPUs: 1, MemoryBytes: 2, PIDs: 3, NoFileSoft: 4, NoFileHard: 5, TmpfsBytes: 6, LogMaxBytes: 7, LogMaxFiles: 8},
+		BoundarySnapshot: &containerruntime.EgressBoundarySnapshotSpec{ID: "snapshot-safe", SHA256: "sha256:" + strings.Repeat("c", 64)},
+	}
+	record := containerruntime.InitializationRecord{
+		ConversationID: conversation.ID, RuntimeID: spec.ID, Status: containerruntime.InitializationCreated,
+		RuntimeStatus: containerruntime.StatusRunning, ImageDigest: spec.Image.Digest, ImagePlatform: spec.Image.Platform,
+		ReadinessStatus: containerruntime.ReadinessReady, Spec: spec,
+	}
+	observer := &fakeContainerRuntimeObserver{observation: containerruntime.RuntimeObservation{
+		Agent: containerruntime.RuntimeComponentObservation{
+			ProviderID: "provider-agent", Status: containerruntime.StatusRunning, ImageDigest: spec.Image.Digest,
+			Resources: containerruntime.ResourceUsage{Available: true, MemoryUsageBytes: 1024, PIDs: 2},
+		},
+		Gateway: &containerruntime.RuntimeComponentObservation{
+			ProviderID: "provider-gateway", Status: containerruntime.StatusRunning, ImageDigest: spec.EgressGateway.Image.Digest,
+		},
+		PolicyDNSStatus: "ready", PolicyDNSAddress: "172.30.0.2", WorkspaceStatus: "ready",
+	}}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerInitializationProvider(fakeContainerInitializationProvider{record: record})
+	handler.SetContainerRuntimeObserver(observer)
+
+	request := func(query string) map[string]interface{} {
+		response := performConversationRequest(owner, http.MethodGet, "/api/conversations/"+conversation.ID+"/container-initialization"+query, nil, func(c *gin.Context) {
+			c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+			handler.GetContainerInitialization(c)
+		})
+		if response.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), spec.Workspace.VolumeName) {
+			t.Fatalf("workspace volume name leaked: %s", response.Body.String())
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		return payload
+	}
+	if payload := request(""); payload["observation"] != nil || observer.calls != 0 {
+		t.Fatalf("default status unexpectedly observed Docker: payload=%#v calls=%d", payload, observer.calls)
+	}
+	payload := request("?observe=1")
+	if observer.calls != 1 || payload["conversationTitle"] != conversation.Title || payload["runtimeMode"] != database.ConversationRuntimeModeContainer {
+		t.Fatalf("observed payload = %#v calls=%d", payload, observer.calls)
+	}
+	desired := payload["desired"].(map[string]interface{})
+	if desired["boundarySnapshotSha256"] != spec.EgressGateway.BoundarySnapshot.SHA256 || desired["specDigest"] != containerruntime.RuntimeSpecDigest(spec) {
+		t.Fatalf("desired status = %#v", desired)
+	}
+	observation := payload["observation"].(map[string]interface{})
+	if observation["policyDnsAddress"] != "172.30.0.2" || observation["workspaceStatus"] != "ready" {
+		t.Fatalf("observation = %#v", observation)
+	}
+}
+
 func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -86,6 +179,18 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if !ok || path["get"] == nil {
 		t.Fatalf("container initialization path = %#v", path)
 	}
+	get := path["get"].(map[string]interface{})
+	parameters := get["parameters"].([]interface{})
+	foundObserve := false
+	for _, raw := range parameters {
+		parameter := raw.(map[string]interface{})
+		if parameter["name"] == "observe" && parameter["in"] == "query" {
+			foundObserve = true
+		}
+	}
+	if !foundObserve {
+		t.Fatal("container initialization observe query is undocumented")
+	}
 	components := spec["components"].(map[string]interface{})
 	schemas := components["schemas"].(map[string]interface{})
 	initializationSchema, ok := schemas["ContainerInitialization"].(map[string]interface{})
@@ -96,7 +201,8 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	for _, field := range []string{
 		"readinessStatus", "readinessError", "inventoryDigest", "toolCount", "readinessStartedAt", "readinessCompletedAt",
 		"lifecycleOperation", "lifecycleState", "lifecycleError", "runtimeGeneration", "runtimeObservedAt",
-		"lifecycleStartedAt", "lifecycleCompletedAt", "runtimeDrift",
+		"lifecycleStartedAt", "lifecycleCompletedAt", "runtimeDrift", "conversationTitle", "runtimeMode",
+		"workspacePersistent", "desired", "observation", "observationError",
 	} {
 		if _, ok := properties[field]; !ok {
 			t.Fatalf("ContainerInitialization schema is missing %s", field)

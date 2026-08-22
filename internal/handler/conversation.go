@@ -35,6 +35,10 @@ type ConversationContainerInitializationProvider interface {
 	Get(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 }
 
+type ConversationContainerRuntimeObserver interface {
+	Observe(ctx context.Context, spec containerruntime.RuntimeSpec) (containerruntime.RuntimeObservation, error)
+}
+
 type ConversationContainerLifecycleController interface {
 	Start(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 	Stop(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
@@ -55,6 +59,7 @@ type ConversationHandler struct {
 	taskStopper              ConversationTaskStopper
 	taskState                ConversationTaskStateProvider
 	containerInitializations ConversationContainerInitializationProvider
+	containerObserver        ConversationContainerRuntimeObserver
 	containerLifecycle       ConversationContainerLifecycleController
 	retainedWorkspace        ConversationRetainedWorkspaceController
 }
@@ -77,6 +82,10 @@ func (h *ConversationHandler) SetTaskStateProvider(provider ConversationTaskStat
 
 func (h *ConversationHandler) SetContainerInitializationProvider(provider ConversationContainerInitializationProvider) {
 	h.containerInitializations = provider
+}
+
+func (h *ConversationHandler) SetContainerRuntimeObserver(observer ConversationContainerRuntimeObserver) {
+	h.containerObserver = observer
 }
 
 func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {
@@ -327,7 +336,8 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该对话"})
 		return
 	}
-	if _, err := h.db.GetConversationLite(id); err != nil {
+	conversation, err := h.db.GetConversationLite(id)
+	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
 		return
 	}
@@ -338,8 +348,11 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 	record, err := h.containerInitializations.Get(c.Request.Context(), id)
 	if errors.Is(err, containerruntime.ErrNotFound) {
 		c.JSON(http.StatusOK, gin.H{
-			"conversationId": id,
-			"status":         "not_requested",
+			"conversationId":      id,
+			"conversationTitle":   conversation.Title,
+			"runtimeMode":         conversation.RuntimeMode,
+			"workspacePersistent": conversation.WorkspacePersistent,
+			"status":              "not_requested",
 		})
 		return
 	}
@@ -348,7 +361,134 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取容器初始化状态失败"})
 		return
 	}
-	c.JSON(http.StatusOK, record)
+	view := conversationContainerInitializationView{
+		InitializationRecord: record,
+		ConversationTitle:    conversation.Title,
+		RuntimeMode:          conversation.RuntimeMode,
+		WorkspacePersistent:  conversation.WorkspacePersistent,
+		Desired:              desiredConversationContainerView(record.Spec),
+	}
+	observe := c.Query("observe") == "1" || strings.EqualFold(c.Query("observe"), "true")
+	if observe && record.Status == containerruntime.InitializationCreated {
+		if h.containerObserver == nil {
+			view.ObservationError = "observer_unavailable"
+		} else {
+			observation, observeErr := h.containerObserver.Observe(c.Request.Context(), record.Spec)
+			if observeErr != nil {
+				view.ObservationError = containerObservationErrorCode(observeErr)
+			} else {
+				view.Observation = &observation
+			}
+		}
+	}
+	c.JSON(http.StatusOK, view)
+}
+
+type conversationContainerInitializationView struct {
+	containerruntime.InitializationRecord
+	ConversationTitle   string                               `json:"conversationTitle"`
+	RuntimeMode         string                               `json:"runtimeMode"`
+	WorkspacePersistent bool                                 `json:"workspacePersistent"`
+	Desired             *conversationContainerDesiredView    `json:"desired,omitempty"`
+	Observation         *containerruntime.RuntimeObservation `json:"observation,omitempty"`
+	ObservationError    string                               `json:"observationError,omitempty"`
+}
+
+type conversationContainerDesiredView struct {
+	SpecDigest          string                                  `json:"specDigest"`
+	ImageDigest         string                                  `json:"imageDigest"`
+	ImagePlatform       string                                  `json:"imagePlatform"`
+	GatewayImageDigest  string                                  `json:"gatewayImageDigest,omitempty"`
+	BoundarySnapshotSHA string                                  `json:"boundarySnapshotSha256,omitempty"`
+	Workspace           conversationContainerWorkspaceView      `json:"workspace"`
+	Resources           conversationContainerResourceLimitsView `json:"resources"`
+	GatewayResources    *conversationGatewayResourceLimitsView  `json:"gatewayResources,omitempty"`
+}
+
+type conversationContainerWorkspaceView struct {
+	Persistent bool   `json:"persistent"`
+	MountPath  string `json:"mountPath"`
+	LimitBytes int64  `json:"limitBytes"`
+}
+
+type conversationContainerResourceLimitsView struct {
+	NanoCPUs          int64  `json:"nanoCpus"`
+	MemoryBytes       int64  `json:"memoryBytes"`
+	PIDs              int64  `json:"pids"`
+	NoFileSoft        uint64 `json:"noFileSoft"`
+	NoFileHard        uint64 `json:"noFileHard"`
+	WorkspaceBytes    int64  `json:"workspaceBytes"`
+	MaxConcurrentExec int    `json:"maxConcurrentExec"`
+	MaxQueuedExec     int    `json:"maxQueuedExec"`
+	LogMaxBytes       int64  `json:"logMaxBytes"`
+	LogMaxFiles       int    `json:"logMaxFiles"`
+}
+
+type conversationGatewayResourceLimitsView struct {
+	NanoCPUs    int64  `json:"nanoCpus"`
+	MemoryBytes int64  `json:"memoryBytes"`
+	PIDs        int64  `json:"pids"`
+	NoFileSoft  uint64 `json:"noFileSoft"`
+	NoFileHard  uint64 `json:"noFileHard"`
+	TmpfsBytes  int64  `json:"tmpfsBytes"`
+	LogMaxBytes int64  `json:"logMaxBytes"`
+	LogMaxFiles int    `json:"logMaxFiles"`
+}
+
+func conversationContainerResourceLimits(limits containerruntime.ResourceLimits) conversationContainerResourceLimitsView {
+	return conversationContainerResourceLimitsView{
+		NanoCPUs: limits.NanoCPUs, MemoryBytes: limits.MemoryBytes, PIDs: limits.PIDs,
+		NoFileSoft: limits.NoFileSoft, NoFileHard: limits.NoFileHard, WorkspaceBytes: limits.WorkspaceBytes,
+		MaxConcurrentExec: limits.MaxConcurrentExec, MaxQueuedExec: limits.MaxQueuedExec,
+		LogMaxBytes: limits.LogMaxBytes, LogMaxFiles: limits.LogMaxFiles,
+	}
+}
+
+func conversationGatewayResourceLimits(limits containerruntime.EgressGatewayResources) conversationGatewayResourceLimitsView {
+	return conversationGatewayResourceLimitsView{
+		NanoCPUs: limits.NanoCPUs, MemoryBytes: limits.MemoryBytes, PIDs: limits.PIDs,
+		NoFileSoft: limits.NoFileSoft, NoFileHard: limits.NoFileHard, TmpfsBytes: limits.TmpfsBytes,
+		LogMaxBytes: limits.LogMaxBytes, LogMaxFiles: limits.LogMaxFiles,
+	}
+}
+
+func desiredConversationContainerView(spec containerruntime.RuntimeSpec) *conversationContainerDesiredView {
+	if strings.TrimSpace(string(spec.ID)) == "" {
+		return nil
+	}
+	view := &conversationContainerDesiredView{
+		SpecDigest:    containerruntime.RuntimeSpecDigest(spec),
+		ImageDigest:   spec.Image.Digest,
+		ImagePlatform: spec.Image.Platform,
+		Workspace: conversationContainerWorkspaceView{
+			Persistent: spec.Workspace.Persistent,
+			MountPath:  spec.Workspace.MountPath,
+			LimitBytes: spec.Resources.WorkspaceBytes,
+		},
+		Resources: conversationContainerResourceLimits(spec.Resources),
+	}
+	if spec.EgressGateway != nil {
+		view.GatewayImageDigest = spec.EgressGateway.Image.Digest
+		resources := conversationGatewayResourceLimits(spec.EgressGateway.Resources)
+		view.GatewayResources = &resources
+		if spec.EgressGateway.BoundarySnapshot != nil {
+			view.BoundarySnapshotSHA = spec.EgressGateway.BoundarySnapshot.SHA256
+		}
+	}
+	return view
+}
+
+func containerObservationErrorCode(err error) string {
+	switch {
+	case errors.Is(err, containerruntime.ErrNotFound):
+		return "provider_missing"
+	case errors.Is(err, containerruntime.ErrRuntimeStateConflict), errors.Is(err, containerruntime.ErrRuntimeNotReady):
+		return "runtime_drift"
+	case errors.Is(err, containerruntime.ErrEngineUnavailable):
+		return "engine_unavailable"
+	default:
+		return "observation_failed"
+	}
 }
 
 // GetConversationPlanTasks returns the task list maintained by the agent's
