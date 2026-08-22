@@ -8,12 +8,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/netip"
+	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/egress"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 )
+
+const maxEgressAuditSafeInteger int64 = 1<<53 - 1
+
+var egressAuditCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
 
 const createConversationEgressAuditEventsTable = `
 CREATE TABLE IF NOT EXISTS egress_audit_events (
@@ -288,12 +296,10 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	if ctx == nil {
 		return false, errors.New("egress audit context is required")
 	}
-	record := target.Record
-	if strings.TrimSpace(record.ConversationID) == "" || strings.TrimSpace(record.ProviderID) == "" || event.Timestamp.IsZero() ||
-		event.Event != egress.ActivityEventName || (event.RequestType != egress.ActivityRequestDNS && event.RequestType != egress.ActivityRequestHTTP && event.RequestType != egress.ActivityRequestCONNECT) ||
-		(event.Decision != egress.ActivityDecisionAllowed && event.Decision != egress.ActivityDecisionBlocked) {
-		return false, errors.New("invalid egress network audit event")
+	if err := validateEgressNetworkAuditEvent(target, event); err != nil {
+		return false, err
 	}
+	record := target.Record
 	resolvedJSON, err := json.Marshal(event.ResolvedIPs)
 	if err != nil {
 		return false, fmt.Errorf("encode egress audit resolved addresses: %w", err)
@@ -321,7 +327,7 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 			outcome, latency_ms, bytes_up, bytes_down, message
 		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, eventKey, formatSQLiteUTC(now), formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType,
-		record.ConversationID, truncateEgressAuditText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
+		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
 		event.SnapshotID, event.SnapshotSHA256, event.Domain, string(resolvedJSON), event.ConnectedIP, event.Port,
 		event.Decision, event.RuleID, event.Reason, event.UpstreamRouteID, event.Method, event.Path, event.HTTPStatus,
 		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, "gateway network decision")
@@ -332,12 +338,128 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	return rows == 1, nil
 }
 
-func truncateEgressAuditText(value string, maximum int) string {
-	value = strings.TrimSpace(value)
-	if len(value) > maximum {
-		value = value[:maximum]
+func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egress.ActivityEvent) error {
+	invalid := func() error { return errors.New("invalid egress network audit event") }
+	record := target.Record
+	if !validEgressAuditText(record.ConversationID, 128, false) ||
+		!validEgressAuditText(record.ProviderID, 128, false) ||
+		record.RuntimeGeneration < 0 || int64(record.RuntimeGeneration) > maxEgressAuditSafeInteger ||
+		record.Spec.EgressGateway == nil || record.Spec.EgressGateway.BoundarySnapshot == nil ||
+		event.Event != egress.ActivityEventName || event.Timestamp.IsZero() || event.Timestamp.After(time.Now().UTC().Add(5*time.Minute)) ||
+		event.SnapshotID != record.Spec.EgressGateway.BoundarySnapshot.ID ||
+		event.SnapshotSHA256 != record.Spec.EgressGateway.BoundarySnapshot.SHA256 ||
+		!validEgressAuditText(event.SnapshotID, 128, false) || !validEgressAuditText(event.SnapshotSHA256, 128, false) ||
+		event.LatencyMS < 0 || event.LatencyMS > maxEgressAuditSafeInteger ||
+		event.BytesUp < 0 || event.BytesUp > maxEgressAuditSafeInteger ||
+		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || len(event.ResolvedIPs) > 64 ||
+		!validEgressAuditCode(event.Outcome, false) || !validEgressAuditCode(event.Reason, true) ||
+		!validEgressAuditText(event.RuleID, 256, true) || !validEgressAuditText(event.UpstreamRouteID, 128, true) {
+		return invalid()
 	}
-	return value
+	normalizedDomain, err := boundary.NormalizeHost(event.Domain)
+	if err != nil || normalizedDomain != event.Domain {
+		return invalid()
+	}
+	for _, raw := range event.ResolvedIPs {
+		if !validEgressAuditIP(raw) {
+			return invalid()
+		}
+	}
+	if event.ConnectedIP != "" && !validEgressAuditIP(event.ConnectedIP) {
+		return invalid()
+	}
+	expectedRouteID := ""
+	if record.Spec.EgressGateway.UpstreamRoute != nil {
+		expectedRouteID = record.Spec.EgressGateway.UpstreamRoute.ID
+	}
+	if event.UpstreamRouteID != expectedRouteID ||
+		(event.Decision != egress.ActivityDecisionAllowed && event.Decision != egress.ActivityDecisionBlocked) {
+		return invalid()
+	}
+	switch event.RequestType {
+	case egress.ActivityRequestDNS:
+		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" {
+			return invalid()
+		}
+	case egress.ActivityRequestHTTP:
+		if event.Port < 1 || event.Port > 65535 || !validEgressAuditMethod(event.Method) ||
+			!validEgressAuditPath(event.Path) || event.HTTPStatus < 0 || event.HTTPStatus > 999 {
+			return invalid()
+		}
+	case egress.ActivityRequestCONNECT:
+		if event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 {
+			return invalid()
+		}
+	default:
+		return invalid()
+	}
+	return nil
+}
+
+func validEgressAuditCode(value string, optional bool) bool {
+	if value == "" {
+		return optional
+	}
+	return egressAuditCodePattern.MatchString(value)
+}
+
+func validEgressAuditText(value string, maximum int, optional bool) bool {
+	if value == "" {
+		return optional
+	}
+	if len(value) > maximum || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validEgressAuditIP(raw string) bool {
+	address, err := netip.ParseAddr(raw)
+	return err == nil && address.IsValid() && address.Zone() == "" && address.Unmap().String() == raw
+}
+
+func validEgressAuditMethod(value string) bool {
+	if len(value) == 0 || len(value) > 32 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= 'A' && character <= 'Z') || character == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+func validEgressAuditPath(value string) bool {
+	return validEgressAuditText(value, 1024, false) && strings.HasPrefix(value, "/") && !strings.ContainsAny(value, "?#")
+}
+
+func sanitizeEgressAuditDisplayText(value string, maximum int) string {
+	var builder strings.Builder
+	for _, character := range strings.TrimSpace(value) {
+		if character < 0x20 || character == 0x7f {
+			builder.WriteByte(' ')
+			continue
+		}
+		builder.WriteRune(character)
+	}
+	value = strings.Join(strings.Fields(builder.String()), " ")
+	if len(value) <= maximum {
+		return value
+	}
+	var truncated strings.Builder
+	for _, character := range value {
+		if truncated.Len()+utf8.RuneLen(character) > maximum {
+			break
+		}
+		truncated.WriteRune(character)
+	}
+	return truncated.String()
 }
 
 func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]EgressAuditRuntimeTarget, error) {

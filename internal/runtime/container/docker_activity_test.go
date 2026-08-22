@@ -111,7 +111,10 @@ func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 		"snapshot drift": func(event *egress.ActivityEvent) { event.SnapshotID = "00000000-0000-0000-0000-000000000000" },
 		"route drift":    func(event *egress.ActivityEvent) { event.UpstreamRouteID = "other-route" },
 		"connect path":   func(event *egress.ActivityEvent) { event.Path = "/must-not-exist" },
-		"unsafe rule":    func(event *egress.ActivityEvent) { event.RuleID = "secret\nheader" },
+		"query-bearing HTTP path": func(event *egress.ActivityEvent) {
+			event.RequestType, event.Method, event.Path, event.HTTPStatus = egress.ActivityRequestHTTP, "GET", "/safe?token=private-token", 200
+		},
+		"unsafe rule": func(event *egress.ActivityEvent) { event.RuleID = "secret\nheader" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			candidate := valid
@@ -119,6 +122,25 @@ func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 			line, _ := json.Marshal(candidate)
 			if _, activity, err := parseGatewayActivityLine(line, spec); err == nil || !activity {
 				t.Fatalf("unsafe event accepted: %s activity=%v", line, activity)
+			}
+		})
+	}
+	for name, field := range map[string]string{
+		"authorization header": "authorization",
+		"request body":         "requestBody",
+		"response body":        "responseBody",
+		"cookie":               "cookie",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var payload map[string]interface{}
+			if err := json.Unmarshal(encoded, &payload); err != nil {
+				t.Fatal(err)
+			}
+			payload[field] = "private-secret-marker"
+			line, _ := json.Marshal(payload)
+			_, activity, err := parseGatewayActivityLine(line, spec)
+			if err == nil || !activity || strings.Contains(err.Error(), "private-secret-marker") {
+				t.Fatalf("unknown sensitive field accepted or echoed: activity=%v err=%v", activity, err)
 			}
 		})
 	}

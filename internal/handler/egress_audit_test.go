@@ -30,6 +30,9 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	if listRecorder.Code != http.StatusOK {
 		t.Fatalf("list status/body = %d %s", listRecorder.Code, listRecorder.Body.String())
 	}
+	if listRecorder.Header().Get("Cache-Control") != "no-store" || listRecorder.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Fatalf("list security headers = %#v", listRecorder.Header())
+	}
 	var payload struct {
 		Items      []database.EgressAuditEvent `json:"items"`
 		Total      int                         `json:"total"`
@@ -57,18 +60,21 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), eventID) {
 		t.Fatalf("get status/body = %d %s", getRecorder.Code, getRecorder.Body.String())
 	}
+	if getRecorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("get cache policy = %#v", getRecorder.Header())
+	}
 
 	jsonRecorder := httptest.NewRecorder()
 	jsonContext := egressAuditTestContext(jsonRecorder, http.MethodGet, "/api/egress-audit-events/export?format=json")
 	handler.Export(jsonContext)
-	if jsonRecorder.Code != http.StatusOK || !strings.Contains(jsonRecorder.Header().Get("Content-Disposition"), ".json") || !strings.Contains(jsonRecorder.Body.String(), eventID) {
+	if jsonRecorder.Code != http.StatusOK || !strings.Contains(jsonRecorder.Header().Get("Content-Disposition"), ".json") || !strings.Contains(jsonRecorder.Body.String(), eventID) || jsonRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("json export = %d %#v %s", jsonRecorder.Code, jsonRecorder.Header(), jsonRecorder.Body.String())
 	}
 
 	csvRecorder := httptest.NewRecorder()
 	csvContext := egressAuditTestContext(csvRecorder, http.MethodGet, "/api/egress-audit-events/export?format=csv")
 	handler.Export(csvContext)
-	if csvRecorder.Code != http.StatusOK || !strings.Contains(csvRecorder.Header().Get("Content-Type"), "text/csv") || !strings.Contains(csvRecorder.Body.String(), "'=formula title") || !strings.Contains(csvRecorder.Body.String(), eventID) {
+	if csvRecorder.Code != http.StatusOK || !strings.Contains(csvRecorder.Header().Get("Content-Type"), "text/csv") || !strings.Contains(csvRecorder.Body.String(), "'=formula title") || !strings.Contains(csvRecorder.Body.String(), "'=formula-rule") || !strings.Contains(csvRecorder.Body.String(), eventID) || csvRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("csv export = %d %#v %s", csvRecorder.Code, csvRecorder.Header(), csvRecorder.Body.String())
 	}
 }
@@ -104,6 +110,62 @@ func TestEgressAuditHandlerRejectsInvalidClosedFiltersAndPagination(t *testing.T
 	}
 }
 
+func TestSafeAuditCSVCellDefendsFormulaPrefixesAndControls(t *testing.T) {
+	for _, value := range []string{"=formula", "+formula", "-formula", "@formula", "  =formula", "\t=formula"} {
+		got := safeAuditCSVCell(value)
+		if !strings.HasPrefix(got, "'") {
+			t.Fatalf("formula-capable cell %q was not escaped: %q", value, got)
+		}
+		if strings.ContainsAny(got, "\x00\r\n\t") {
+			t.Fatalf("escaped cell retained control characters: %q", got)
+		}
+	}
+	if got := safeAuditCSVCell("safe value"); got != "safe value" {
+		t.Fatalf("safe cell changed = %q", got)
+	}
+}
+
+func TestOpenAPIEgressAuditProjectionIsClosedAndCredentialFree(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/openapi/spec", nil)
+	NewOpenAPIHandler(nil, zap.NewNop(), nil, nil).GetOpenAPISpec(context)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("openapi status/body = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var spec map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &spec); err != nil {
+		t.Fatal(err)
+	}
+	components := spec["components"].(map[string]interface{})
+	schemas := components["schemas"].(map[string]interface{})
+	auditSchema := schemas["EgressAuditEvent"].(map[string]interface{})
+	if auditSchema["additionalProperties"] != false {
+		t.Fatalf("audit schema is not closed: %#v", auditSchema)
+	}
+	properties := auditSchema["properties"].(map[string]interface{})
+	for _, required := range []string{"conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId"} {
+		if _, ok := properties[required]; !ok {
+			t.Fatalf("audit schema missing safe trace field %q", required)
+		}
+	}
+	for key := range properties {
+		lower := strings.ToLower(key)
+		for _, forbidden := range []string{"header", "body", "query", "cookie", "authorization", "credential", "secret"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("audit OpenAPI schema contains forbidden field %q", key)
+			}
+		}
+	}
+	encoded := strings.ToLower(recorder.Body.String())
+	for _, statement := range []string{"header", "body", "query", "authorization", "additionalproperties"} {
+		if !strings.Contains(encoded, statement) {
+			t.Fatalf("openapi is missing safety statement %q", statement)
+		}
+	}
+}
+
 func newEgressAuditHandlerFixture(t *testing.T) (*database.DB, string) {
 	t.Helper()
 	db, err := database.NewDB(filepath.Join(t.TempDir(), "egress-audit-handler.db"), zap.NewNop())
@@ -115,18 +177,22 @@ func newEgressAuditHandlerFixture(t *testing.T) (*database.DB, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	snapshot := &containerruntime.EgressBoundarySnapshotSpec{
+		ID: "11111111-1111-4111-8111-111111111111", SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
 	target := database.EgressAuditRuntimeTarget{
 		ConversationTitle: conversation.Title,
 		Record: containerruntime.InitializationRecord{
 			ConversationID: conversation.ID, ProviderID: "provider-handler", RuntimeGeneration: 2,
+			Spec: containerruntime.RuntimeSpec{ConversationID: conversation.ID, EgressGateway: &containerruntime.EgressGatewaySpec{BoundarySnapshot: snapshot}},
 		},
 	}
 	event := egress.ActivityEvent{
 		Event: egress.ActivityEventName, Timestamp: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC),
 		RequestType: egress.ActivityRequestHTTP, Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
-		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-example", Reason: "allow-visit",
+		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "=formula-rule", Reason: "allow-visit",
 		Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 8, BytesDown: 42,
-		SnapshotID: "11111111-1111-4111-8111-111111111111", SnapshotSHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		SnapshotID: snapshot.ID, SnapshotSHA256: snapshot.SHA256,
 	}
 	inserted, err := db.AppendEgressNetworkAuditEvent(context.Background(), target, event)
 	if err != nil || !inserted {

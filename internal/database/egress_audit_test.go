@@ -16,7 +16,7 @@ import (
 func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()
-	conversation, spec := createRunningEgressAuditRuntime(t, db, "persistent audit")
+	conversation, spec := createRunningEgressAuditRuntimeWithRoute(t, db, "persistent audit", true)
 	if _, err := db.Exec(`UPDATE conversations SET owner_user_id = ? WHERE id = ?`, "owner-a", conversation.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +29,7 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestHTTP,
 		Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
 		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-example", Reason: "allow-visit",
-		Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 12, BytesDown: 42,
+		UpstreamRouteID: spec.EgressGateway.UpstreamRoute.ID, Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 12, BytesDown: 42,
 		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
 	}
 	inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], event)
@@ -45,7 +45,7 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 	rateLimited.Decision = egress.ActivityDecisionBlocked
 	rateLimited.Reason = "rate_limit_exceeded"
 	rateLimited.Outcome = "rate_limited"
-	rateLimited.UpstreamRouteID = "route-a"
+	rateLimited.UpstreamRouteID = spec.EgressGateway.UpstreamRoute.ID
 	rateLimited.HTTPStatus = 429
 	inserted, err = db.AppendEgressNetworkAuditEvent(ctx, targets[0], rateLimited)
 	if err != nil || !inserted {
@@ -78,7 +78,7 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 		if item.ConversationID != conversation.ID || item.AgentID != "container-agent" || item.RuntimeGeneration != 1 {
 			t.Fatalf("audit identity = %#v", item)
 		}
-		if item.Outcome == "rate_limited" && (item.HTTPStatus != 429 || item.UpstreamRouteID != "route-a" || item.Decision != egress.ActivityDecisionBlocked) {
+		if item.Outcome == "rate_limited" && (item.HTTPStatus != 429 || item.UpstreamRouteID != conversation.ID || item.Decision != egress.ActivityDecisionBlocked) {
 			t.Fatalf("rate-limit/upstream audit = %#v", item)
 		}
 	}
@@ -188,7 +188,80 @@ func TestEgressAuditLifecycleFailuresDoNotPersistProviderErrors(t *testing.T) {
 	}
 }
 
+func TestEgressAuditRejectsUnsafeNetworkProjectionBeforePersistence(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "safe audit boundary")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("running targets = %#v, %v", targets, err)
+	}
+	valid := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestHTTP,
+		Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
+		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-example", Reason: "allow-visit",
+		Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 12, BytesDown: 42,
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	tests := map[string]func(*egress.ActivityEvent){
+		"query string":        func(event *egress.ActivityEvent) { event.Path = "/safe?authorization=secret-token" },
+		"fragment":            func(event *egress.ActivityEvent) { event.Path = "/safe#private-fragment" },
+		"noncanonical domain": func(event *egress.ActivityEvent) { event.Domain = "Allowed.Example" },
+		"control in rule":     func(event *egress.ActivityEvent) { event.RuleID = "rule\nAuthorization: secret-token" },
+		"snapshot drift": func(event *egress.ActivityEvent) {
+			event.SnapshotSHA256 = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		},
+		"unexpected route":     func(event *egress.ActivityEvent) { event.UpstreamRouteID = "credential-route" },
+		"noncanonical address": func(event *egress.ActivityEvent) { event.ConnectedIP = "::ffff:93.184.216.34" },
+		"too many addresses":   func(event *egress.ActivityEvent) { event.ResolvedIPs = make([]string, 65) },
+		"unsafe counter":       func(event *egress.ActivityEvent) { event.BytesDown = maxEgressAuditSafeInteger + 1 },
+		"future timestamp":     func(event *egress.ActivityEvent) { event.Timestamp = time.Now().UTC().Add(6 * time.Minute) },
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			candidate.ResolvedIPs = append([]string(nil), valid.ResolvedIPs...)
+			mutate(&candidate)
+			inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], candidate)
+			if err == nil || inserted || strings.Contains(strings.ToLower(err.Error()), "secret-token") {
+				t.Fatalf("unsafe event result = inserted %v, err %v", inserted, err)
+			}
+		})
+	}
+	filter := EgressAuditFilter{ConversationID: conversation.ID, Category: "network", Scope: RBACScopeAll, Limit: 20}
+	if total, err := db.CountEgressAuditEvents(ctx, filter); err != nil || total != 0 {
+		t.Fatalf("unsafe events persisted = %d, %v", total, err)
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(egress_audit_events)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var index, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue interface{}
+		if err := rows.Scan(&index, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		lower := strings.ToLower(name)
+		for _, forbidden := range []string{"header", "body", "query", "cookie", "authorization", "credential", "secret"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("audit schema contains forbidden column %q", name)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func createRunningEgressAuditRuntime(t *testing.T, db *DB, title string) (*Conversation, containerruntime.RuntimeSpec) {
+	return createRunningEgressAuditRuntimeWithRoute(t, db, title, false)
+}
+
+func createRunningEgressAuditRuntimeWithRoute(t *testing.T, db *DB, title string, withRoute bool) (*Conversation, containerruntime.RuntimeSpec) {
 	t.Helper()
 	ctx := context.Background()
 	conversation, err := db.CreateConversation(title, ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
@@ -200,6 +273,11 @@ func createRunningEgressAuditRuntime(t *testing.T, db *DB, title string) (*Conve
 	spec.EgressGateway = databaseGatewaySpec()
 	spec.EgressGateway.BoundarySnapshot = &containerruntime.EgressBoundarySnapshotSpec{
 		ID: "11111111-1111-4111-8111-111111111111", SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
+	if withRoute {
+		spec.EgressGateway.UpstreamRoute = &containerruntime.EgressUpstreamRouteSpec{
+			ID: conversation.ID, SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		}
 	}
 	if _, _, err := db.Queue(ctx, spec, false); err != nil {
 		t.Fatal(err)

@@ -16,6 +16,12 @@
     const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile']);
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
+    const AUDIT_EVENT_FIELDS = new Set([
+        'id', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
+        'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'resolvedIps',
+        'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
+        'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message',
+    ]);
     const URL_KEYS = Object.freeze({
         page: 'audit_page', pageSize: 'audit_page_size', query: 'audit_q',
         category: 'audit_category', type: 'audit_type', decision: 'audit_decision',
@@ -135,6 +141,7 @@
 
     function isSafeAuditEvent(event) {
         if (!event || typeof event !== 'object') return false;
+        if (Object.keys(event).some((key) => !AUDIT_EVENT_FIELDS.has(key))) return false;
         if (!['network', 'lifecycle'].includes(event.category)) return false;
         if (!TYPES.has(String(event.eventType || ''))) return false;
         if (event.category === 'network' && !NETWORK_TYPES.has(event.eventType)) return false;

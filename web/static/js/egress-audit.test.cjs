@@ -31,6 +31,9 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, decision: '<script>' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, conversationTitle: 'line\nheader' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, message: 'line\nheader' }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, authorization: 'Bearer private-token' }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, requestBody: 'private-body' }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, responseHeaders: { cookie: 'private-cookie' } }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, latencyMs: -1 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, port: 70000 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: new Array(65).fill('1.1.1.1') }), false);
@@ -54,7 +57,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260822-2/);
+    assert.match(template, /egress-audit\.js\?v=20260822-3/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
     assert.match(source, /root\.apiFetch/);

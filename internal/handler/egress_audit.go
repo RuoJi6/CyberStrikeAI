@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"cyberstrike-ai/internal/database"
@@ -26,6 +27,7 @@ func NewEgressAuditHandler(db *database.DB) *EgressAuditHandler {
 }
 
 func (h *EgressAuditHandler) List(c *gin.Context) {
+	setEgressAuditResponseHeaders(c)
 	filter, page, pageSize, ok := egressAuditFilterFromRequest(c)
 	if !ok {
 		return
@@ -58,6 +60,7 @@ func (h *EgressAuditHandler) List(c *gin.Context) {
 }
 
 func (h *EgressAuditHandler) Get(c *gin.Context) {
+	setEgressAuditResponseHeaders(c)
 	session, ok := security.CurrentSession(c)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
@@ -72,6 +75,7 @@ func (h *EgressAuditHandler) Get(c *gin.Context) {
 }
 
 func (h *EgressAuditHandler) Export(c *gin.Context) {
+	setEgressAuditResponseHeaders(c)
 	filter, _, _, ok := egressAuditFilterFromRequest(c)
 	if !ok {
 		return
@@ -88,7 +92,6 @@ func (h *EgressAuditHandler) Export(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法导出出站审计事件"})
 		return
 	}
-	c.Header("X-Content-Type-Options", "nosniff")
 	if format == "csv" {
 		writeEgressAuditCSV(c, items)
 		return
@@ -99,6 +102,12 @@ func (h *EgressAuditHandler) Export(c *gin.Context) {
 		"count":      len(items),
 		"events":     items,
 	})
+}
+
+func setEgressAuditResponseHeaders(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	c.Header("Pragma", "no-cache")
+	c.Header("X-Content-Type-Options", "nosniff")
 }
 
 func egressAuditFilterFromRequest(c *gin.Context) (database.EgressAuditFilter, int, int, bool) {
@@ -180,22 +189,32 @@ func writeEgressAuditCSV(c *gin.Context, items []database.EgressAuditEvent) {
 		"http_status", "outcome", "latency_ms", "bytes_up", "bytes_down", "lifecycle_operation", "lifecycle_state", "message",
 	})
 	for _, item := range items {
-		_ = writer.Write([]string{
+		row := []string{
 			item.ID, item.OccurredAt.UTC().Format(time.RFC3339Nano), item.RecordedAt.UTC().Format(time.RFC3339Nano),
-			item.Category, item.EventType, item.ConversationID, safeAuditCSVCell(item.ConversationTitle), item.ContainerID,
+			item.Category, item.EventType, item.ConversationID, item.ConversationTitle, item.ContainerID,
 			item.AgentID, strconv.Itoa(item.RuntimeGeneration), item.SnapshotID, item.SnapshotSHA256, item.Domain,
 			strings.Join(item.ResolvedIPs, " "), item.ConnectedIP, strconv.Itoa(item.Port), item.Decision, item.Result,
 			item.RuleID, item.Reason, item.UpstreamRouteID, item.Method, item.Path, strconv.Itoa(item.HTTPStatus), item.Outcome,
 			strconv.FormatInt(item.LatencyMS, 10), strconv.FormatInt(item.BytesUp, 10), strconv.FormatInt(item.BytesDown, 10),
-			item.LifecycleOperation, item.LifecycleState, safeAuditCSVCell(item.Message),
-		})
+			item.LifecycleOperation, item.LifecycleState, item.Message,
+		}
+		for index := range row {
+			row[index] = safeAuditCSVCell(row[index])
+		}
+		_ = writer.Write(row)
 	}
 	writer.Flush()
 }
 
 func safeAuditCSVCell(value string) string {
-	value = strings.ReplaceAll(value, "\x00", "")
-	if value != "" && strings.ContainsRune("=+-@", rune(value[0])) {
+	value = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, value)
+	trimmed := strings.TrimLeftFunc(value, unicode.IsSpace)
+	if trimmed != "" && strings.ContainsRune("=+-@", []rune(trimmed)[0]) {
 		return "'" + value
 	}
 	return value

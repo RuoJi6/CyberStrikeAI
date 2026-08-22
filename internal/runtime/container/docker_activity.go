@@ -164,8 +164,7 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP:
-		if event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) ||
-			len(event.Path) == 0 || len(event.Path) > 1024 || !strings.HasPrefix(event.Path, "/") ||
+		if event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
 			event.HTTPStatus < 0 || event.HTTPStatus > 999 {
 			return invalid()
 		}
@@ -233,4 +232,8 @@ func validActivityMethod(value string) bool {
 		}
 	}
 	return true
+}
+
+func validActivityPath(value string) bool {
+	return validActivityText(value, 1024, false) && strings.HasPrefix(value, "/") && !strings.ContainsAny(value, "?#")
 }
