@@ -1,7 +1,7 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 5 已完成；阶段 6 第 1—6 项已完成，下一项为第 7 项（持久出站审计、搜索与导出）
+> 当前阶段：阶段 5 已完成；阶段 6 第 1—7 项已完成，下一项为第 8 项（审计安全字段与敏感内容最小化）
 > 最后更新：2026-08-22
 > 工作分支：`codex/docker-agent-runtime`
 
@@ -347,7 +347,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 实现统一可搜索单选/多选组件，修复弹层、层级、宽度、键盘可访问性和空状态。
 - [x] 实现 10/20/50/100 每页、服务端分页、搜索、状态筛选和 URL 状态保留。
 - [x] 实现对话出站网络活动实时流，页面可立即看到新的域名请求、解析 IP、允许/阻断和命中规则。
-- [ ] 审计 DNS、HTTP、CONNECT、拒绝、限速、上游路由和生命周期事件，支持搜索与导出。
+- [x] 审计 DNS、HTTP、CONNECT、拒绝、限速、上游路由和生命周期事件，支持搜索与导出。
 - [ ] 日志记录 `conversation_id`、`container_id`、`agent_id`、快照 hash、目标、判定、命中规则和上游；敏感 header/body 默认不保存。
 - [ ] 对每个对话的审计事件增加前序 hash，可检测删除或篡改。
 - [ ] 实现确定性限速、并发上限、429 冷却、连续登录失败、WAF/CAPTCHA 信号和手动恢复。
@@ -511,3 +511,16 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - 精确运行时：上述 QA 运行时经维护重建从候选网关 `sha256:9de09159…5221e` 升级到精确网关 `sha256:496d6d2b…f32934`，generation 2→3，边界快照 SHA 完全不变。Agent 内真实 HTTP 请求返回 200，未知 DNS 查询失败关闭；订阅流收到 1 条允许 HTTP 和 4 条阻断 DNS（解析器同时查询原名与 `.localdomain`），Docker 容器镜像与期望精确摘要一致。
 - 内置浏览器：使用已登录会话直连 `?qa=20260822-stage6-item6-exact-ac26c63&activity_conversation=c7474670-3249-4d02-88c7-0bb4d37f3745&activity_domain=stage6-exact-blocked&activity_type=dns&activity_decision=blocked&activity_agent=container-agent&activity_tool=unknown&activity_route=direct#network-activity`。六个过滤条件完整恢复，精确页显示“已接收 5 条，当前显示 4 条”、允许 1/阻断 4，四行目标与真实 DNS 事件一致，刷新后没有重放重复；候选阶段另完成暂停后待显示 2、恢复并入、连接重建、页面/表格滚动和零横向溢出验收。运行环境页针对用户报告的无法下滑问题再次以真实滚轮验证 `scrollTop 0→760`，滚动容器 `clientHeight=663`、`scrollHeight=1605`、`overflow-y:auto`。最终精确页 console warning/error 为 `[]`，未使用其他浏览器降级。
 - 范围说明：第 6 项提供即时、非持久的运行时可观测性，不将其冒充审计账本；第 7 项再实现 DNS/HTTP/CONNECT、拒绝、限速、上游路由和生命周期事件的持久化、搜索与导出。
+
+### 阶段 6 第 7 项验收（2026-08-22）
+
+- 源码提交：`2bd258b376383a3033764c4fdcb281a75b22c409`。新增 `egress_audit_events` 持久表、索引和生命周期触发器；后台采集器对所有运行中网关执行有界历史重放并继续跟随 Docker 日志，以稳定事件键在数据库层去重。创建、创建失败、启动、停止、维护重建、删除以及 DNS/HTTP/CONNECT 网络决策均可在服务重启和页面刷新后继续检索。
+- API 与权限：新增 `/api/egress-audit-events`、`/api/egress-audit-events/:id` 和 `/api/egress-audit-events/export`，统一纳入 `audit:read` 和对话所有者范围。支持 10/20/50/100 每页、全文、类别、事件类型、判定和时间范围筛选；JSON/CSV 导出最多 5000 条并防止 CSV 公式注入。匿名访问为 401、非法筛选为 400，列表和详情只返回封闭枚举及有界安全字段。
+- 安全与范围：网络活动通过安全投影验证字段类型、长度、控制字符、数值和封闭枚举；生命周期失败只保存通用失败原因，不持久化 provider 凭据或原始底层错误。已为 `rate_limited`、`rate_limit_exceeded`、上游路由 ID 和 HTTP 429 的持久化、展示与回归测试建立契约；确定性限速和实际信号生成仍由阶段 6 第 10 项实现，不在本项虚构已生效的实时限速。第 8 项将继续完成正式的审计字段矩阵与敏感内容最小化验收。
+- 提交前测试：`go test ./... -count=1`、`go vet ./...`、database/egressaudit/runtime-container/handler/security 定向 race、`go mod tidy -diff`、中英文 JSON 校验、凭据扫描、`git diff --check` 和前端 153/153 全部通过。macOS race 链接器输出既有 `LC_DYSYMTAB` 警告但退出码为 0，不影响测试结论。
+- 候选部署与回滚：首次误用 `CGO_ENABLED=0` 的候选包在真实 SQLite 初始化时准确失败；事务部署脚本完整恢复旧二进制、数据库、Web 和源码，旧服务恢复为 `active` 且 `NRestarts=0`。随后改用 Zig/CGO 重新构建，并从头完成服务、API、真实生命周期和浏览器验收，证明部署回滚链路可用。
+- 候选 API 与真实事件：真实对话 `c7474670-3249-4d02-88c7-0bb4d37f3745` 完成启动与空闲停止，生命周期事件包含快照、容器和成功结果。网关历史重放得到 5 条网络事件，其中允许 HTTP 1 条、阻断 DNS 4 条，全部带对话、容器、Agent、快照和目标安全摘要；服务重启后网络事件仍为 5 条，证明重放去重稳定。详情、所有筛选、JSON/CSV 导出、未授权和非法参数均通过，禁止字段命中为 0。
+- 候选内置浏览器：桌面 1375×918 下总计 74 条、网络 5 条、生命周期 69 条、阻断 4 条、失败 3 条，20 行列表和 7 列表头正确；切换每页 10 条得到 8 页，网络类别得到精确 5 行，HTTP + 允许组合得到精确 1 行。390×844 下表头隐藏并改为卡片网格，页面宽度保持 390，无横向溢出；真实滚动从顶部到达 `1511.5/1511.5` 并看到分页。候选 console warning/error 为 `[]`。
+- 精确构建与部署：从干净提交以 Zig/CGO 构建 Linux ARM64 服务，SHA-256 为 `e994e4139793098684923491d7ee6bc817a840933e318135827c72845771fad8`；Web 归档、源码归档、首页模板、CSS、审计脚本和中文资源 SHA-256 分别为 `9087d067e1db053e10b280aa2bac5d046c52b63a8ad8c402aebf1029a174fdaa`、`b14afe7690a156adadb5d97e6c185ff93325f3ae5614eddb964d250baf7bba5e`、`a7e7c8c4c6c59dc2ae9a6b17275823f487a4c6cfa6579c46c7fac8da07743e3f`、`c197b41343fc192a15ca0e1522eededfee255819edade2f4f508ac4580faee8c`、`65a2016aad45aee7c2ebfb2728bacb37599a3c82ccfcb7da93d3c5da307602b4`、`6d788aa7ded7fe95053d72003b35a8f9d88ff050d6cf6d8bce2b9216a03c4314`；build info 为 `vcs.revision=2bd258b376383a3033764c4fdcb281a75b22c409`、`vcs.modified=false`。精确部署备份位于 `backups/stage6-item7-exact-pre-20260822-224845`，服务 `active/running`、`NRestarts=0`、首页 200，活动目录 AppleDouble 文件数为 0，启动日志无 panic/fatal/采集器启动失败。
+- 精确 API：精确部署后总计 140 条、生命周期 135 条、网络 5 条、阻断 4 条、失败 5 条；服务重启会按设计通过运行时协调写入新的唯一生命周期事件，因此生命周期总数增长，而网络事件稳定保持 5 条。网络导出仍精确包含 DNS/HTTP、允许/阻断两类判定，敏感字段检查为 false。
+- 精确内置浏览器：使用虚拟机直连地址和测试管理员登录。桌面 1375×918 下活动页为“出站审计”，类别为网络、每页 10 条，页面加载 5 行、7 列，汇总为总计 5 / 网络 5 / 生命周期 0 / 阻断 4 / 失败 0，分页为第 1/1 页且文档横向溢出为 0。390×844 下表头隐藏、事件行为单列卡片，页面滚动容器 `clientHeight=772`、`scrollHeight=4480`、`overflow-y:auto`，真实滚动达到 `3708/3708` 后分页位于可视区，文档和页面横向溢出均为 0。登录前轮询产生的一条历史 401 已通过登录态新标签隔离；干净精确标签再次读取同一 5 条数据且 console warning/error 为 `[]`，未使用其他浏览器降级。
