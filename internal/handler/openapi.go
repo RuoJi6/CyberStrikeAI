@@ -2114,6 +2114,28 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/conversations/{id}/egress-activity/stream": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"容器运行时"},
+					"summary":     "订阅对话出站网络活动",
+					"description": "验证对话资源权限和精确容器网关身份后，以 SSE 增量返回安全的 DNS、HTTP 与 CONNECT 活动；不包含凭据、请求头、正文或查询参数。",
+					"operationId": "streamConversationEgressActivity",
+					"parameters": []map[string]interface{}{
+						{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}},
+						{"name": "tail", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 100, "minimum": 1, "maximum": 500}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "ready、activity 与 stream_error 事件组成的实时流",
+							"content":     map[string]interface{}{"text/event-stream": map[string]interface{}{"schema": map[string]interface{}{"type": "string"}}},
+						},
+						"400": map[string]interface{}{"description": "tail 参数无效"},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权访问该对话"},
+						"409": map[string]interface{}{"description": "容器或网关尚未就绪"},
+					},
+				},
+			},
 			"/api/conversations/{id}": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},

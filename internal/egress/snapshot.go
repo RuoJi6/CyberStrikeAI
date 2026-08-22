@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
@@ -310,6 +311,23 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		report.AuthProfilesID = options.AuthProfiles.ID
 		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
 	}
+	var outputMu sync.Mutex
+	decorateActivitySink := func(existing ActivitySink) ActivitySink {
+		if output == nil {
+			return existing
+		}
+		return func(event ActivityEvent) {
+			event.SnapshotID = report.SnapshotID
+			event.SnapshotSHA256 = report.SHA256
+			event.UpstreamRouteID = report.UpstreamRouteID
+			outputMu.Lock()
+			_ = json.NewEncoder(output).Encode(event)
+			outputMu.Unlock()
+			emitActivity(existing, event)
+		}
+	}
+	options.Proxy.ActivitySink = decorateActivitySink(options.Proxy.ActivitySink)
+	options.DNS.ActivitySink = decorateActivitySink(options.DNS.ActivitySink)
 	proxy, err := NewProxy(policy, options.Proxy)
 	if err != nil {
 		return err
@@ -340,7 +358,10 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	report.Event = "boundary_snapshot_loaded"
 	if output != nil {
-		if err := json.NewEncoder(output).Encode(report); err != nil {
+		outputMu.Lock()
+		err := json.NewEncoder(output).Encode(report)
+		outputMu.Unlock()
+		if err != nil {
 			closeGatewayListeners(listener, dnsPacket, dnsTCP)
 			return fmt.Errorf("report loaded boundary snapshot: %w", err)
 		}

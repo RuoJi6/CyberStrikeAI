@@ -147,6 +147,9 @@ function initRouter() {
 function switchPage(pageId) {
     const targetPage = document.getElementById(`page-${pageId}`);
     if (!targetPage) return;
+    if (currentPage === 'network-activity' && pageId !== 'network-activity' && typeof window.stopNetworkActivityPage === 'function') {
+        window.stopNetworkActivityPage();
+    }
     if (pageId !== 'chat') {
         setChatConversationRestorePending('', false);
         if (currentPage === 'chat' && typeof window.abandonChatConversationForPageNavigation === 'function') {

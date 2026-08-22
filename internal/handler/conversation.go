@@ -40,6 +40,10 @@ type ConversationContainerRuntimeObserver interface {
 	Observe(ctx context.Context, spec containerruntime.RuntimeSpec) (containerruntime.RuntimeObservation, error)
 }
 
+type ConversationEgressActivityStreamer interface {
+	StreamEgressActivity(context.Context, containerruntime.RuntimeSpec, containerruntime.ActivityStreamOptions, containerruntime.RuntimeActivitySink) error
+}
+
 type ConversationContainerLifecycleController interface {
 	Start(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 	Stop(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
@@ -61,6 +65,7 @@ type ConversationHandler struct {
 	taskState                ConversationTaskStateProvider
 	containerInitializations ConversationContainerInitializationProvider
 	containerObserver        ConversationContainerRuntimeObserver
+	egressActivityStreamer   ConversationEgressActivityStreamer
 	containerLifecycle       ConversationContainerLifecycleController
 	retainedWorkspace        ConversationRetainedWorkspaceController
 }
@@ -87,6 +92,10 @@ func (h *ConversationHandler) SetContainerInitializationProvider(provider Conver
 
 func (h *ConversationHandler) SetContainerRuntimeObserver(observer ConversationContainerRuntimeObserver) {
 	h.containerObserver = observer
+}
+
+func (h *ConversationHandler) SetEgressActivityStreamer(streamer ConversationEgressActivityStreamer) {
+	h.egressActivityStreamer = streamer
 }
 
 func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {

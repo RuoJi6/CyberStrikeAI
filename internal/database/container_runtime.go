@@ -761,6 +761,18 @@ func validateLifecycleSpecReplacement(
 		expected.EgressGateway = &gateway
 		changed = true
 	}
+	if current.EgressGateway != nil && current.EgressGateway.BoundarySnapshot != nil && replacement.EgressGateway != nil &&
+		sameEgressBoundarySnapshot(current.EgressGateway.BoundarySnapshot, replacement.EgressGateway.BoundarySnapshot) &&
+		(current.EgressGateway.Image != replacement.EgressGateway.Image || current.EgressGateway.Resources != replacement.EgressGateway.Resources) {
+		// An explicit maintenance rebuild may roll out a newer trusted gateway
+		// binary or resource envelope. Start from the durable gateway so the
+		// immutable snapshot, route, and auth references cannot drift here.
+		gateway := *current.EgressGateway
+		gateway.Image = replacement.EgressGateway.Image
+		gateway.Resources = replacement.EgressGateway.Resources
+		expected.EgressGateway = &gateway
+		changed = true
+	}
 	if replacement.EgressGateway != nil && replacement.EgressGateway.BoundarySnapshot != nil {
 		var currentSnapshot *containerruntime.EgressBoundarySnapshotSpec
 		if current.EgressGateway != nil {
@@ -813,7 +825,7 @@ func validateLifecycleSpecReplacement(
 		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
 	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, pinned egress gateway, authorized boundary snapshot, and gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, refresh the pinned egress gateway, bind an authorized boundary snapshot, and update gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {

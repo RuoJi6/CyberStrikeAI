@@ -31,6 +31,7 @@ type DNSOptions struct {
 	Now           func() time.Time
 	AnswerTTL     uint32
 	LookupTimeout time.Duration
+	ActivitySink  ActivitySink
 }
 
 // PolicyDNS resolves only names that are usable by an active rule in the
@@ -42,6 +43,7 @@ type PolicyDNS struct {
 	now           func() time.Time
 	answerTTL     uint32
 	lookupTimeout time.Duration
+	activitySink  ActivitySink
 }
 
 func NewPolicyDNS(policy *boundary.Policy, options DNSOptions) (*PolicyDNS, error) {
@@ -67,7 +69,7 @@ func NewPolicyDNS(policy *boundary.Policy, options DNSOptions) (*PolicyDNS, erro
 	if timeout == 0 {
 		timeout = defaultDNSLookupTimeout
 	}
-	return &PolicyDNS{policy: policy, lookupNetIP: lookup, now: now, answerTTL: ttl, lookupTimeout: timeout}, nil
+	return &PolicyDNS{policy: policy, lookupNetIP: lookup, now: now, answerTTL: ttl, lookupTimeout: timeout, activitySink: options.ActivitySink}, nil
 }
 
 func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, error) {
@@ -87,18 +89,33 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 		return buildDNSResponse(header, nil, dnsmessage.RCodeFormatError, nil, d.answerTTL)
 	}
 	question := questions[0]
+	startedAt := d.now().UTC()
+	event := ActivityEvent{Timestamp: startedAt, RequestType: ActivityRequestDNS, Domain: strings.TrimSuffix(question.Name.String(), "."), Decision: ActivityDecisionBlocked, Outcome: "rejected"}
+	defer func() {
+		event.LatencyMS = activityLatencyMS(startedAt, d.now().UTC())
+		emitActivity(d.activitySink, event)
+	}()
 	if header.OpCode != 0 {
+		event.Outcome = "unsupported_opcode"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
 	if question.Class != dnsmessage.ClassINET {
+		event.Outcome = "unsupported_class"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeRefused, nil, d.answerTTL)
 	}
 	host := question.Name.String()
 	initial, err := d.policy.EvaluateDNS(host, nil, d.now().UTC())
+	if initial.Host != "" {
+		event.Domain = initial.Host
+	}
+	event.RuleID = initial.RuleID
+	event.Reason = initial.Reason
 	if err != nil || !initial.Allowed {
+		event.Outcome = "policy_denied"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
 	}
 	if question.Type != dnsmessage.TypeA && question.Type != dnsmessage.TypeAAAA {
+		event.Outcome = "unsupported_query_type"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
 
@@ -106,16 +123,26 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 	defer cancel()
 	resolved, err := d.lookupNetIP(lookupCtx, "ip", initial.Host)
 	if err != nil {
+		event.Decision = ActivityDecisionAllowed
+		event.Outcome = "lookup_failed"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeServerFailure, nil, d.answerTTL)
 	}
 	addresses, err := canonicalDNSAddresses(resolved)
 	if err != nil {
+		event.Decision = ActivityDecisionAllowed
+		event.Outcome = "invalid_answer"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeServerFailure, nil, d.answerTTL)
 	}
+	event.ResolvedIPs = activityIPStrings(addresses)
 	final, err := d.policy.EvaluateDNS(initial.Host, addresses, d.now().UTC())
+	event.RuleID = final.RuleID
+	event.Reason = final.Reason
 	if err != nil || !final.Allowed || final.RuleID != initial.RuleID || final.Effect != initial.Effect {
+		event.Outcome = "policy_denied_after_resolution"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
 	}
+	event.Decision = ActivityDecisionAllowed
+	event.Outcome = "resolved"
 	return buildDNSResponse(header, &question, dnsmessage.RCodeSuccess, addresses, d.answerTTL)
 }
 

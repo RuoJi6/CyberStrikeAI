@@ -31,11 +31,11 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260822-9">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260822-11">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <script src="/static/js/router.js?v=20260822-3"></script>
+    <script src="/static/js/router.js?v=20260822-4"></script>
 </head>
 <body>
     <div id="login-overlay" class="login-overlay" style="display: none;">
@@ -5204,7 +5204,43 @@
                             <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.activityTitle">网络活动</h2><p data-i18n="containerManagement.activitySubtitle">实时观察域名请求、解析地址、允许或阻断结果。</p></div>
                         </div>
                         <div class="page-content container-management-content">
-                            <section class="container-management-surface" aria-labelledby="network-activity-focus-title"><span class="container-management-surface-icon" aria-hidden="true">⌁</span><div><h3 id="network-activity-focus-title" data-i18n="containerManagement.activityFocusTitle">实时决策流</h3><p data-i18n="containerManagement.activityFocusDescription">让新 DNS、HTTP 和 CONNECT 决策在对话执行时立即可见。</p></div><span class="container-management-phase" data-i18n="containerManagement.connectingData">管理数据接入中</span></section>
+                            <section class="network-activity-control" aria-labelledby="network-activity-focus-title">
+                                <div class="network-activity-control-heading">
+                                    <div><h3 id="network-activity-focus-title" data-i18n="containerManagement.activityFocusTitle">实时决策流</h3><p data-i18n="containerManagement.activityFocusDescription">让新 DNS、HTTP 和 CONNECT 决策在对话执行时立即可见。</p></div>
+                                    <span id="network-activity-connection" class="network-activity-connection is-idle" role="status" aria-live="polite"><span aria-hidden="true"></span><b data-i18n="containerManagement.activityStatusIdle">尚未连接</b></span>
+                                </div>
+                                <div class="network-activity-toolbar">
+                                    <div class="network-activity-conversation-field">
+                                        <label for="network-activity-conversation" data-i18n="containerManagement.activityConversation">对话</label>
+                                        <select id="network-activity-conversation" data-unified-select="single" data-unified-search="true" aria-describedby="network-activity-conversation-help"><option value="" data-i18n="containerManagement.activitySelectConversation">选择一个已创建的对话容器</option></select>
+                                        <small id="network-activity-conversation-help" data-i18n="containerManagement.activityConversationHelp">仅显示已创建且具有独立出站网关的容器。</small>
+                                    </div>
+                                    <div class="network-activity-actions">
+                                        <button id="network-activity-refresh" class="btn-secondary" type="button" data-i18n="containerManagement.activityRefreshConversations">刷新对话</button>
+                                        <button id="network-activity-pause" class="btn-secondary" type="button" disabled data-i18n="containerManagement.activityPause">暂停显示</button>
+                                        <button id="network-activity-follow" class="btn-secondary is-active" type="button" aria-pressed="true" data-i18n="containerManagement.activityFollow">跟随最新</button>
+                                        <button id="network-activity-clear" class="btn-secondary" type="button" data-i18n="containerManagement.activityClear">清空</button>
+                                    </div>
+                                </div>
+                                <div class="network-activity-filters" aria-label="网络活动筛选">
+                                    <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.activityDomain">域名</span><input id="network-activity-domain" type="search" maxlength="253" autocomplete="off" data-i18n="containerManagement.activityDomainPlaceholder" data-i18n-attr="placeholder" placeholder="筛选域名或解析 IP…"></label>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-type" data-i18n="containerManagement.activityRequestType">请求类型</label><select id="network-activity-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="connect">CONNECT</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-decision" data-i18n="containerManagement.activityDecision">策略判定</label><select id="network-activity-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-agent" data-i18n="containerManagement.activityAgent">Agent</label><select id="network-activity-agent" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="container-agent" data-i18n="containerManagement.activityContainerAgent">容器 Agent</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-tool" data-i18n="containerManagement.activityToolFilter">工具</label><select id="network-activity-tool" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="unknown" data-i18n="containerManagement.activityToolUnknown">工具未知</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-route" data-i18n="containerManagement.activityRouteFilter">代理出口</label><select id="network-activity-route" data-unified-select="single" data-unified-search="true"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="direct" data-i18n="containerManagement.activityDirectRoute">直接出口</option></select></div>
+                                </div>
+                            </section>
+                            <section class="network-activity-stream" aria-labelledby="network-activity-stream-title">
+                                <div class="network-activity-stream-heading"><div><h3 id="network-activity-stream-title" data-i18n="containerManagement.activityStreamTitle">活动明细</h3><p id="network-activity-summary" role="status" aria-live="polite" data-i18n="containerManagement.activityEmptySummary">尚未收到网络活动</p></div><div id="network-activity-counts" class="network-activity-counts" aria-label="活动计数"></div></div>
+                                <div id="network-activity-table-wrap" class="network-activity-table-wrap">
+                                    <table class="network-activity-table">
+                                        <thead><tr><th data-i18n="containerManagement.activityTime">时间</th><th data-i18n="containerManagement.activityRequest">请求</th><th data-i18n="containerManagement.activityTarget">目标</th><th data-i18n="containerManagement.activityResolution">解析 / 连接</th><th data-i18n="containerManagement.activityDecision">策略判定</th><th data-i18n="containerManagement.activityContext">上下文</th><th data-i18n="containerManagement.activityResult">结果</th></tr></thead>
+                                        <tbody id="network-activity-rows"></tbody>
+                                    </table>
+                                    <div id="network-activity-empty" class="network-activity-empty"><span aria-hidden="true">⌁</span><strong data-i18n="containerManagement.activityEmpty">选择一个运行中的对话容器以查看实时网络活动</strong><p data-i18n="containerManagement.activityEmptyHint">历史尾部与新事件将通过增量流到达，无需刷新页面。</p></div>
+                                </div>
+                            </section>
                         </div>
                     </div>
                 </div>
@@ -7118,7 +7154,8 @@
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/container-management.js?v=20260822-5"></script>
+    <script src="/static/js/network-activity.js?v=20260822-3"></script>
+    <script src="/static/js/container-management.js?v=20260822-6"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

@@ -139,6 +139,12 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 		ID: pendingAuthProfilesID, SHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}}
 	gateway := lifecycleGatewaySpec()
+	gateway.BoundarySnapshot = &container.EgressBoundarySnapshotSpec{
+		ID: "11111111-1111-4111-8111-111111111111", SHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	gateway.UpstreamRoute = &container.EgressUpstreamRouteSpec{
+		ID: conversationID, SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+	}
 	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
 		EgressGateway: &gateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
 	})
@@ -158,11 +164,23 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 		t.Fatalf("activated snapshot = %#v, %v", activated, err)
 	}
 
+	upgradedGateway := gateway
+	upgradedGateway.Image.Digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	upgradedGateway.Resources.MemoryBytes = 192 << 20
+	upgradedGateway.UpstreamRoute = &container.EgressUpstreamRouteSpec{
+		ID: "route-config-drift", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+	controller, err = container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &upgradedGateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	maintained, err := controller.Rebuild(context.Background(), conversationID)
 	if err != nil {
 		t.Fatalf("maintenance rebuild: %v", err)
 	}
-	if len(provider.snapshotIDs) != 1 || len(authProvider.snapshotIDs) != 2 || authProvider.snapshotIDs[1] != "" || maintained.Spec.EgressGateway.BoundarySnapshot == nil || *maintained.Spec.EgressGateway.BoundarySnapshot != *rebuilt.Spec.EgressGateway.BoundarySnapshot || maintained.Spec.EgressGateway.AuthProfiles == nil || maintained.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID {
+	if len(provider.snapshotIDs) != 1 || len(authProvider.snapshotIDs) != 2 || authProvider.snapshotIDs[1] != "" || maintained.Spec.EgressGateway.BoundarySnapshot == nil || *maintained.Spec.EgressGateway.BoundarySnapshot != *rebuilt.Spec.EgressGateway.BoundarySnapshot || maintained.Spec.EgressGateway.AuthProfiles == nil || maintained.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID || maintained.Spec.EgressGateway.UpstreamRoute == nil || maintained.Spec.EgressGateway.UpstreamRoute.ID != conversationID || maintained.Spec.EgressGateway.Image.Digest != upgradedGateway.Image.Digest || maintained.Spec.EgressGateway.Resources.MemoryBytes != upgradedGateway.Resources.MemoryBytes {
 		t.Fatalf("maintenance rebuild replaced immutable snapshot: snapshot calls %#v, auth calls %#v, record %#v", provider.snapshotIDs, authProvider.snapshotIDs, maintained)
 	}
 

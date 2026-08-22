@@ -551,6 +551,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
 		conversationHandler.SetContainerRuntimeObserver(containerManager)
+		conversationHandler.SetEgressActivityStreamer(containerManager)
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		if containerOrphan != nil {
@@ -1216,6 +1217,7 @@ func setupRoutes(
 		protected.PUT("/conversations/:id/egress", conversationHandler.UpdateConversationEgress)
 		protected.DELETE("/conversations/:id/egress", conversationHandler.ClearConversationEgress)
 		protected.GET("/conversations/:id/container-initialization", conversationHandler.GetContainerInitialization)
+		protected.GET("/conversations/:id/egress-activity/stream", conversationHandler.StreamConversationEgressActivity)
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)
 		protected.POST("/conversations/:id/container/rebuild", conversationHandler.RebuildConversationContainer)

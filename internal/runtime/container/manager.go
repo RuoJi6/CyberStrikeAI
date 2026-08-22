@@ -8,6 +8,8 @@ import (
 	"errors"
 	"io"
 	"time"
+
+	"cyberstrike-ai/internal/egress"
 )
 
 // RuntimeID is the CyberStrikeAI-owned identifier for a conversation runtime.
@@ -296,6 +298,21 @@ type ExecOutputSink func(stream ExecStream, chunk []byte) error
 // execution surfaces.
 type RuntimeExecutor interface {
 	Exec(ctx context.Context, spec RuntimeSpec, request ExecRequest, sink ExecOutputSink) (ExecResult, error)
+}
+
+// ActivityStreamOptions bounds the historical gateway-log tail delivered
+// before following new events.
+type ActivityStreamOptions struct {
+	Tail int
+}
+
+type RuntimeActivitySink func(egress.ActivityEvent) error
+
+// RuntimeActivityStreamer is separate from RuntimeManager because a live log
+// subscription is a read-only, long-lived capability that lifecycle fakes and
+// unrelated collaborators should not acquire accidentally.
+type RuntimeActivityStreamer interface {
+	StreamEgressActivity(context.Context, RuntimeSpec, ActivityStreamOptions, RuntimeActivitySink) error
 }
 
 // ToolOutputWriteRequest contains a complete oversized tool output stream. The

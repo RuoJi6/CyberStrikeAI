@@ -603,6 +603,8 @@ function initContainerManagementPage(pageId) {
     if (CONTAINER_RUNTIME_DATA_PAGES.has(pageId)) {
         bindContainerRuntimeControls();
         if (!containerManagementState.loading) refreshContainerManagementData();
+    } else if (pageId === 'network-activity' && typeof window.initNetworkActivityPage === 'function') {
+        window.initNetworkActivityPage();
     }
 }
 

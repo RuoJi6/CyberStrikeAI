@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
@@ -37,6 +38,7 @@ type ProxyOptions struct {
 	Now                func() time.Time
 	ClientHelloTimeout time.Duration
 	MaxClientHello     int
+	ActivitySink       ActivitySink
 }
 
 // Proxy is the policy-enforcing HTTP forward proxy and HTTPS CONNECT tunnel.
@@ -51,6 +53,7 @@ type Proxy struct {
 	now                func() time.Time
 	clientHelloTimeout time.Duration
 	maxClientHello     int
+	activitySink       ActivitySink
 }
 
 func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
@@ -98,7 +101,7 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	}
 	proxy := &Proxy{
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
-		clientHelloTimeout: helloTimeout, maxClientHello: maxHello,
+		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink,
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -159,16 +162,34 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "absolute HTTP proxy target required", http.StatusBadRequest)
 		return
 	}
-	decision, err := p.policy.Evaluate(request.URL.String(), request.Method, nil, p.now().UTC())
+	startedAt := p.now().UTC()
+	decision, err := p.policy.Evaluate(request.URL.String(), request.Method, nil, startedAt)
 	if err != nil || decision.Target.Scheme != "http" {
 		http.Error(writer, "invalid HTTP proxy target", http.StatusBadRequest)
 		return
 	}
+	event := ActivityEvent{
+		Timestamp: startedAt, RequestType: ActivityRequestHTTP,
+		Domain: decision.Target.Host, Port: decision.Target.Port,
+		Decision: ActivityDecisionBlocked, RuleID: decision.RuleID, Reason: decision.Reason,
+		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected",
+	}
+	if request.ContentLength > 0 {
+		event.BytesUp = request.ContentLength
+	}
+	dialObservation := &activityDialObservation{}
+	defer func() {
+		event.ResolvedIPs, event.ConnectedIP = dialObservation.snapshot()
+		event.LatencyMS = activityLatencyMS(startedAt, p.now().UTC())
+		emitActivity(p.activitySink, event)
+	}()
 	if !sameForwardAuthority(request.Host, decision.Target) {
+		event.Outcome = "authority_mismatch"
 		http.Error(writer, "HTTP Host does not match proxy target", http.StatusBadRequest)
 		return
 	}
 	if isDNSOverHTTP(request, decision.Target.Path) {
+		event.Outcome = "encrypted_dns_denied"
 		http.Error(writer, "DNS over HTTP is not permitted", http.StatusForbidden)
 		return
 	}
@@ -176,14 +197,18 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	if decision.Effect == boundary.EffectAuthOnly {
 		profile, ok := p.authProfiles[decision.AuthProfileID]
 		if !decision.Allowed || !ok {
+			event.Outcome = "auth_profile_unavailable"
 			http.Error(writer, "egress authentication profile unavailable", http.StatusForbidden)
 			return
 		}
 		authProfile = &profile
 	} else if !proxyDecisionAllowed(decision) {
+		event.Outcome = "policy_denied"
 		http.Error(writer, "egress policy denied request", http.StatusForbidden)
 		return
 	}
+	event.Decision = ActivityDecisionAllowed
+	event.Outcome = "upstream_failed"
 
 	outbound := request.Clone(request.Context())
 	outbound.RequestURI = ""
@@ -196,7 +221,7 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	outbound.Host = canonicalAuthority
 	outbound = outbound.WithContext(context.WithValue(outbound.Context(), proxyDialContextKey{}, proxyDialAuthorization{
 		rawURL: outbound.URL.String(), method: outbound.Method, target: decision.Target,
-		ruleID: decision.RuleID, effect: decision.Effect, authProfileID: decision.AuthProfileID,
+		ruleID: decision.RuleID, effect: decision.Effect, authProfileID: decision.AuthProfileID, observation: dialObservation,
 	}))
 	outbound.Header = request.Header.Clone()
 	removeHopByHopHeaders(outbound.Header)
@@ -214,68 +239,113 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	defer response.Body.Close()
+	event.HTTPStatus = response.StatusCode
+	event.Outcome = "completed"
 	responseHeaders := response.Header.Clone()
 	removeHopByHopHeaders(responseHeaders)
 	copyHeaders(writer.Header(), responseHeaders)
 	writer.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(writer, response.Body)
+	written, copyErr := io.Copy(writer, response.Body)
+	event.BytesDown = written
+	if copyErr != nil {
+		event.Outcome = "response_interrupted"
+	}
 }
 
 func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) {
+	startedAt := p.now().UTC()
 	targetURL, targetAuthority, targetHost, targetPort, err := normalizeConnectTarget(request)
 	if err != nil {
 		http.Error(writer, "invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
-	decision, err := p.policy.Evaluate(targetURL, http.MethodConnect, nil, p.now().UTC())
-	if err != nil || !proxyDecisionAllowed(decision) {
+	decision, err := p.policy.Evaluate(targetURL, http.MethodConnect, nil, startedAt)
+	if err != nil {
 		http.Error(writer, "egress policy denied CONNECT", http.StatusForbidden)
 		return
 	}
+	event := ActivityEvent{
+		Timestamp: startedAt, RequestType: ActivityRequestCONNECT,
+		Domain: targetHost, Port: targetPort, Decision: ActivityDecisionBlocked,
+		RuleID: decision.RuleID, Reason: decision.Reason, Outcome: "policy_denied",
+	}
+	dialObservation := &activityDialObservation{}
+	defer func() {
+		event.ResolvedIPs, event.ConnectedIP = dialObservation.snapshot()
+		event.LatencyMS = activityLatencyMS(startedAt, p.now().UTC())
+		emitActivity(p.activitySink, event)
+	}()
+	if !proxyDecisionAllowed(decision) {
+		http.Error(writer, "egress policy denied CONNECT", http.StatusForbidden)
+		return
+	}
+	event.Decision = ActivityDecisionAllowed
+	event.Outcome = "tunnel_unavailable"
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {
+		event.Outcome = "hijack_unavailable"
 		http.Error(writer, "CONNECT tunneling unavailable", http.StatusInternalServerError)
 		return
 	}
 	client, buffered, err := hijacker.Hijack()
 	if err != nil {
+		event.Outcome = "hijack_failed"
 		return
 	}
 	defer client.Close()
 	if _, err := buffered.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		event.Outcome = "client_write_failed"
 		return
 	}
 	if err := buffered.Flush(); err != nil {
+		event.Outcome = "client_write_failed"
 		return
 	}
 	if err := client.SetReadDeadline(time.Now().Add(p.clientHelloTimeout)); err != nil {
+		event.Outcome = "client_deadline_failed"
 		return
 	}
 	clientHello, serverName, err := readClientHelloSNI(buffered.Reader, p.maxClientHello)
 	if err != nil || serverName != targetHost {
+		event.Outcome = "sni_mismatch"
 		return
 	}
 	if err := client.SetReadDeadline(time.Time{}); err != nil {
+		event.Outcome = "client_deadline_failed"
 		return
 	}
 	sniURL := (&url.URL{Scheme: "https", Host: targetAuthority, Path: "/"}).String()
 	sniDecision, err := p.policy.Evaluate(sniURL, http.MethodConnect, nil, p.now().UTC())
 	if err != nil || !proxyDecisionAllowed(sniDecision) || sniDecision.Target.Host != serverName || sniDecision.Target.Port != targetPort {
+		event.Decision = ActivityDecisionBlocked
+		event.Outcome = "sni_policy_denied"
+		if err == nil {
+			event.RuleID = sniDecision.RuleID
+			event.Reason = sniDecision.Reason
+		}
 		return
 	}
+	event.RuleID = sniDecision.RuleID
+	event.Reason = sniDecision.Reason
 
 	upstream, err := p.dialAuthorized(request.Context(), proxyDialAuthorization{
 		rawURL: sniURL, method: http.MethodConnect, target: sniDecision.Target,
-		ruleID: sniDecision.RuleID, effect: sniDecision.Effect,
+		ruleID: sniDecision.RuleID, effect: sniDecision.Effect, observation: dialObservation,
 	}, targetHost, targetPort)
 	if err != nil {
+		event.Outcome = "upstream_failed"
 		return
 	}
 	defer upstream.Close()
 	if err := writeAll(upstream, clientHello); err != nil {
+		event.Outcome = "upstream_write_failed"
 		return
 	}
-	tunnelConnections(client, buffered.Reader, upstream)
+	event.BytesUp = int64(len(clientHello))
+	uploaded, downloaded := tunnelConnections(client, buffered.Reader, upstream)
+	event.BytesUp += uploaded
+	event.BytesDown = downloaded
+	event.Outcome = "tunnel_closed"
 }
 
 type proxyDialContextKey struct{}
@@ -287,6 +357,40 @@ type proxyDialAuthorization struct {
 	ruleID        string
 	effect        boundary.Effect
 	authProfileID string
+	observation   *activityDialObservation
+}
+
+type activityDialObservation struct {
+	mu          sync.Mutex
+	resolvedIPs []string
+	connectedIP string
+}
+
+func (o *activityDialObservation) recordResolution(addresses []netip.Addr) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	o.resolvedIPs = activityIPStrings(addresses)
+	o.mu.Unlock()
+}
+
+func (o *activityDialObservation) recordConnection(address netip.Addr) {
+	if o == nil || !address.IsValid() {
+		return
+	}
+	o.mu.Lock()
+	o.connectedIP = address.Unmap().String()
+	o.mu.Unlock()
+}
+
+func (o *activityDialObservation) snapshot() ([]string, string) {
+	if o == nil {
+		return nil, ""
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]string(nil), o.resolvedIPs...), o.connectedIP
 }
 
 func (p *Proxy) dialHTTPContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -334,6 +438,7 @@ func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAutho
 			addresses = append(addresses, address)
 		}
 	}
+	authorization.observation.recordResolution(addresses)
 	decision, err := p.policy.Evaluate(authorization.rawURL, authorization.method, addresses, p.now().UTC())
 	if err != nil || !decision.Allowed || decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || decision.AuthProfileID != authorization.authProfileID ||
 		(decision.Effect == boundary.EffectAuthOnly && p.authProfiles[decision.AuthProfileID].ID == "") ||
@@ -347,6 +452,7 @@ func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAutho
 		}
 		connection, dialErr := p.dialContext(ctx, "tcp", net.JoinHostPort(address.String(), strconv.Itoa(port)))
 		if dialErr == nil {
+			authorization.observation.recordConnection(address)
 			return connection, nil
 		}
 		lastErr = dialErr
@@ -458,18 +564,30 @@ func writeAll(writer io.Writer, content []byte) error {
 	return nil
 }
 
-func tunnelConnections(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) {
-	done := make(chan struct{}, 2)
+func tunnelConnections(client net.Conn, clientReader *bufio.Reader, upstream net.Conn) (uploaded, downloaded int64) {
+	type copyResult struct {
+		direction string
+		bytes     int64
+	}
+	done := make(chan copyResult, 2)
 	go func() {
-		_, _ = io.Copy(upstream, clientReader)
-		done <- struct{}{}
+		count, _ := io.Copy(upstream, clientReader)
+		done <- copyResult{direction: "up", bytes: count}
 	}()
 	go func() {
-		_, _ = io.Copy(client, upstream)
-		done <- struct{}{}
+		count, _ := io.Copy(client, upstream)
+		done <- copyResult{direction: "down", bytes: count}
 	}()
-	<-done
+	first := <-done
 	_ = client.Close()
 	_ = upstream.Close()
-	<-done
+	second := <-done
+	for _, result := range []copyResult{first, second} {
+		if result.direction == "up" {
+			uploaded = result.bytes
+		} else {
+			downloaded = result.bytes
+		}
+	}
+	return uploaded, downloaded
 }

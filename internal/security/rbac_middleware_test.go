@@ -154,6 +154,12 @@ func TestContainerRuntimeListUsesConversationReadPermission(t *testing.T) {
 	}
 }
 
+func TestConversationEgressActivityUsesConversationReadPermission(t *testing.T) {
+	if got := permissionForRequest(http.MethodGet, "/api/conversations/:id/egress-activity/stream"); got != "chat:read" {
+		t.Fatalf("egress activity stream permission = %q, want chat:read", got)
+	}
+}
+
 func TestEgressDefaultRoutesUseSelectionPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		method string

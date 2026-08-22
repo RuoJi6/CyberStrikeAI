@@ -101,9 +101,10 @@ type LifecycleController struct {
 }
 
 type LifecycleControllerOptions struct {
-	// EgressGateway is trusted deployment policy used only to upgrade a durable
-	// pre-gateway runtime during an explicit rebuild. New runtime records already
-	// contain the same immutable specification.
+	// EgressGateway is trusted deployment policy used to upgrade a durable
+	// pre-gateway runtime, or refresh the pinned gateway image and resources,
+	// during an explicit rebuild. The active immutable boundary/route bindings
+	// remain attached to the conversation.
 	EgressGateway *EgressGatewaySpec
 	// BoundarySnapshots is optional for legacy/unit-test controllers. Production
 	// supplies it so explicit rebuilds can bind the current immutable snapshot.
@@ -451,6 +452,17 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 		return spec, nil
 	}
 	if strings.TrimSpace(requestedSnapshotID) == "" && spec.EgressGateway.BoundarySnapshot != nil {
+		// A maintenance rebuild is the explicit rollout boundary for a newer
+		// pinned gateway image or safer resource limits. Preserve the immutable
+		// policy/route/auth bindings from the durable conversation spec.
+		if c.egressGateway != nil {
+			current := *spec.EgressGateway
+			gateway := *c.egressGateway
+			gateway.BoundarySnapshot = current.BoundarySnapshot
+			gateway.UpstreamRoute = current.UpstreamRoute
+			gateway.AuthProfiles = current.AuthProfiles
+			spec.EgressGateway = &gateway
+		}
 		if c.authProfiles != nil {
 			authProfiles, err := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, "")
 			if err != nil {
