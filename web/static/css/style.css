@@ -3942,6 +3942,18 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
     white-space: nowrap;
 }
 
+.container-management-phase.is-ready {
+    border-color: color-mix(in srgb, #16a34a 32%, var(--border-color));
+    background: color-mix(in srgb, #16a34a 10%, transparent);
+    color: color-mix(in srgb, #16a34a 82%, var(--text-primary));
+}
+
+.container-management-phase.is-error {
+    border-color: color-mix(in srgb, #ef4444 36%, var(--border-color));
+    background: color-mix(in srgb, #ef4444 10%, transparent);
+    color: #dc2626;
+}
+
 .container-runtime-toolbar {
     display: flex;
     align-items: flex-end;

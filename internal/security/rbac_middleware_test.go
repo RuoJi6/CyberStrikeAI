@@ -163,6 +163,7 @@ func TestConversationEgressActivityUsesConversationReadPermission(t *testing.T) 
 func TestPersistentEgressAuditRoutesUseAuditReadPermission(t *testing.T) {
 	for _, path := range []string{
 		"/api/egress-audit-events",
+		"/api/egress-audit-events/integrity",
 		"/api/egress-audit-events/export",
 		"/api/egress-audit-events/:id",
 	} {

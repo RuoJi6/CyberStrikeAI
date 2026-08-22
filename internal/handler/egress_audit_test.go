@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -34,18 +35,22 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 		t.Fatalf("list security headers = %#v", listRecorder.Header())
 	}
 	var payload struct {
-		Items      []database.EgressAuditEvent `json:"items"`
-		Total      int                         `json:"total"`
-		Page       int                         `json:"page"`
-		PageSize   int                         `json:"pageSize"`
-		TotalPages int                         `json:"totalPages"`
-		Summary    database.EgressAuditSummary `json:"summary"`
+		Items      []database.EgressAuditEvent   `json:"items"`
+		Total      int                           `json:"total"`
+		Page       int                           `json:"page"`
+		PageSize   int                           `json:"pageSize"`
+		TotalPages int                           `json:"totalPages"`
+		Summary    database.EgressAuditSummary   `json:"summary"`
+		Integrity  database.EgressAuditIntegrity `json:"integrity"`
 	}
 	if err := json.Unmarshal(listRecorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Total != 1 || payload.Page != 1 || payload.PageSize != 10 || payload.TotalPages != 1 || len(payload.Items) != 1 || payload.Items[0].ID != eventID || payload.Summary.Network != 1 {
+	if payload.Total != 1 || payload.Page != 1 || payload.PageSize != 10 || payload.TotalPages != 1 || len(payload.Items) != 1 || payload.Items[0].ID != eventID || payload.Summary.Network != 1 || payload.Integrity.Status != "verified" || payload.Integrity.Events != 1 {
 		t.Fatalf("list payload = %#v", payload)
+	}
+	if payload.Items[0].ChainSequence != 1 || len(payload.Items[0].PreviousHash) != 64 || len(payload.Items[0].EventHash) != 64 {
+		t.Fatalf("list chain projection = %#v", payload.Items[0])
 	}
 	for _, forbidden := range []string{"authorization", "cookie", "requestBody", "responseBody", "secret-token"} {
 		if strings.Contains(strings.ToLower(listRecorder.Body.String()), strings.ToLower(forbidden)) {
@@ -76,6 +81,50 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	handler.Export(csvContext)
 	if csvRecorder.Code != http.StatusOK || !strings.Contains(csvRecorder.Header().Get("Content-Type"), "text/csv") || !strings.Contains(csvRecorder.Body.String(), "'=formula title") || !strings.Contains(csvRecorder.Body.String(), "'=formula-rule") || !strings.Contains(csvRecorder.Body.String(), eventID) || csvRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("csv export = %d %#v %s", csvRecorder.Code, csvRecorder.Header(), csvRecorder.Body.String())
+	}
+	records, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
+	if err != nil || len(records) != 2 || len(records[0]) != 34 || records[0][1] != "chain_sequence" || records[0][2] != "previous_hash" || records[0][3] != "event_hash" {
+		t.Fatalf("csv chain columns = %#v, %v", records, err)
+	}
+
+	integrityRecorder := httptest.NewRecorder()
+	integrityContext := egressAuditTestContext(integrityRecorder, http.MethodGet, "/api/egress-audit-events/integrity")
+	handler.Integrity(integrityContext)
+	if integrityRecorder.Code != http.StatusOK || !strings.Contains(integrityRecorder.Body.String(), `"status":"verified"`) || integrityRecorder.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("integrity = %d %#v %s", integrityRecorder.Code, integrityRecorder.Header(), integrityRecorder.Body.String())
+	}
+}
+
+func TestEgressAuditHandlerFailsClosedWhenChainIsTampered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, eventID := newEgressAuditHandlerFixture(t)
+	if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE egress_audit_events SET message = 'tampered provider detail' WHERE id = ?`, eventID); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewEgressAuditHandler(db)
+	for name, invoke := range map[string]func(*gin.Context){
+		"list":      handler.List,
+		"integrity": handler.Integrity,
+		"export":    handler.Export,
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := egressAuditTestContext(recorder, http.MethodGet, "/api/egress-audit-events")
+			invoke(request)
+			if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "完整性校验失败") || strings.Contains(recorder.Body.String(), "tampered provider detail") {
+				t.Fatalf("tampered %s = %d %s", name, recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	recorder := httptest.NewRecorder()
+	request := egressAuditTestContext(recorder, http.MethodGet, "/api/egress-audit-events/"+eventID)
+	request.Params = gin.Params{{Key: "id", Value: eventID}}
+	handler.Get(request)
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "完整性校验失败") {
+		t.Fatalf("tampered detail = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -145,10 +194,18 @@ func TestOpenAPIEgressAuditProjectionIsClosedAndCredentialFree(t *testing.T) {
 		t.Fatalf("audit schema is not closed: %#v", auditSchema)
 	}
 	properties := auditSchema["properties"].(map[string]interface{})
-	for _, required := range []string{"conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId"} {
+	for _, required := range []string{"chainSequence", "previousHash", "eventHash", "conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId"} {
 		if _, ok := properties[required]; !ok {
 			t.Fatalf("audit schema missing safe trace field %q", required)
 		}
+	}
+	integritySchema := schemas["EgressAuditIntegrity"].(map[string]interface{})
+	if integritySchema["additionalProperties"] != false {
+		t.Fatalf("integrity schema is not closed: %#v", integritySchema)
+	}
+	paths := spec["paths"].(map[string]interface{})
+	if _, ok := paths["/api/egress-audit-events/integrity"]; !ok {
+		t.Fatal("egress audit integrity path is missing")
 	}
 	for key := range properties {
 		lower := strings.ToLower(key)

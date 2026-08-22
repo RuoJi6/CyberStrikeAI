@@ -15,12 +15,14 @@ const en = JSON.parse(fs.readFileSync(path.join(root, 'web/static/i18n/en-US.jso
 
 test('egress audit validates the closed safe projection without requiring omitted IP arrays', () => {
     const network = {
-        id: 'ea-1', occurredAt: '2026-08-22T12:00:00Z', category: 'network', eventType: 'http',
+        id: 'ea-1', chainSequence: 1, previousHash: '0'.repeat(64), eventHash: 'a'.repeat(64),
+        occurredAt: '2026-08-22T12:00:00Z', category: 'network', eventType: 'http',
         conversationId: 'conversation-a', conversationTitle: 'audit target', domain: 'allowed.example',
         decision: 'allowed', path: '/safe', resolvedIps: ['93.184.216.34'],
     };
     const lifecycle = {
-        id: 'ea-2', occurredAt: '2026-08-22T12:00:01Z', category: 'lifecycle', eventType: 'stop',
+        id: 'ea-2', chainSequence: 2, previousHash: 'a'.repeat(64), eventHash: 'b'.repeat(64),
+        occurredAt: '2026-08-22T12:00:01Z', category: 'lifecycle', eventType: 'stop',
         conversationId: 'conversation-a', conversationTitle: 'audit target', result: 'success',
     };
     assert.equal(audit.isSafeAuditEvent(network), true);
@@ -34,9 +36,20 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, authorization: 'Bearer private-token' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, requestBody: 'private-body' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, responseHeaders: { cookie: 'private-cookie' } }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, chainSequence: 0 }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, previousHash: 'not-a-hash' }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, eventHash: 'A'.repeat(64) }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, latencyMs: -1 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, port: 70000 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: new Array(65).fill('1.1.1.1') }), false);
+});
+
+test('egress audit validates a closed integrity proof', () => {
+    const proof = { status: 'verified', conversations: 2, events: 7, verifiedAt: '2026-08-23T00:00:00Z' };
+    assert.equal(audit.isSafeIntegrity(proof), true);
+    assert.equal(audit.isSafeIntegrity({ ...proof, status: 'unknown' }), false);
+    assert.equal(audit.isSafeIntegrity({ ...proof, events: -1 }), false);
+    assert.equal(audit.isSafeIntegrity({ ...proof, extra: 'unsafe' }), false);
 });
 
 test('egress audit URL state accepts only closed filters and supported page sizes', () => {
@@ -53,11 +66,11 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
         'egress-audit-search', 'egress-audit-category', 'egress-audit-type', 'egress-audit-decision',
         'egress-audit-page-size', 'egress-audit-refresh', 'egress-audit-export-json',
         'egress-audit-export-csv', 'egress-audit-summary', 'egress-audit-rows',
-        'egress-audit-prev', 'egress-audit-next', 'egress-audit-pagination-meta',
+        'egress-audit-prev', 'egress-audit-next', 'egress-audit-pagination-meta', 'egress-audit-integrity',
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260822-3/);
+    assert.match(template, /egress-audit\.js\?v=20260823-1/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
     assert.match(source, /root\.apiFetch/);
@@ -65,6 +78,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     assert.match(source, /URL_KEYS = Object\.freeze/);
     assert.match(source, /setTimeout\(applyFilters, 300\)/);
     assert.match(source, /textContent/);
+    assert.match(source, /isSafeIntegrity\(payload\.integrity\)/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
     assert.match(management, /pageId === 'egress-audit'[\s\S]*?initEgressAuditPage\(\)/);
     assert.match(router, /currentPage === 'egress-audit'[\s\S]*?stopEgressAuditPage\(\)/);
@@ -77,6 +91,7 @@ test('egress audit translations and responsive table/card layout are complete', 
         'auditExportJSON', 'auditExportCSV', 'auditResults', 'auditLoading', 'auditLoaded', 'auditLoadFailed',
         'auditTrace', 'auditEmpty', 'auditTotal', 'auditNetwork', 'auditLifecycle', 'auditBlocked',
         'auditFailures', 'auditPageMeta', 'auditPageMetaEmpty',
+        'auditIntegrityChecking', 'auditIntegrityVerified', 'auditIntegrityFailed',
     ];
     for (const locale of [zh, en]) {
         for (const key of keys) assert.equal(typeof locale.containerManagement[key], 'string', key);
@@ -88,7 +103,9 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-table-wrap\s*\{[\s\S]*?overflow-x: auto/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-audit-table tr\s*\{[\s\S]*?display: grid/);
     assert.match(styles, /\.egress-audit-table td::before[\s\S]*?content: attr\(data-label\)/);
-    assert.match(template, /style\.css\?v=20260822-13/);
+    assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
+    assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
+    assert.match(template, /style\.css\?v=20260823-1/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260822-7/);
 });

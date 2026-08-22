@@ -265,9 +265,12 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type":                 "object",
 		"additionalProperties": false,
 		"description":          "持久出站审计的封闭安全投影。明确不包含请求/响应 header、body、query、Cookie、Authorization、凭据、环境变量或原始 provider 错误。",
-		"required":             []string{"id", "recordedAt", "occurredAt", "category", "eventType", "conversationId", "conversationTitle", "runtimeGeneration", "latencyMs"},
+		"required":             []string{"id", "chainSequence", "previousHash", "eventHash", "recordedAt", "occurredAt", "category", "eventType", "conversationId", "conversationTitle", "runtimeGeneration", "latencyMs"},
 		"properties": map[string]interface{}{
 			"id":                 map[string]interface{}{"type": "string", "maxLength": 128},
+			"chainSequence":      map[string]interface{}{"type": "integer", "minimum": 1, "maximum": int64(1<<53 - 1)},
+			"previousHash":       map[string]interface{}{"type": "string", "pattern": "^[0-9a-f]{64}$"},
+			"eventHash":          map[string]interface{}{"type": "string", "pattern": "^[0-9a-f]{64}$"},
 			"recordedAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"occurredAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"category":           map[string]interface{}{"type": "string", "enum": []string{"network", "lifecycle"}},
@@ -300,6 +303,17 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"message":            map[string]interface{}{"type": "string", "maxLength": 1024},
 		},
 	}
+	egressAuditIntegritySchema := map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"status", "conversations", "events", "verifiedAt"},
+		"properties": map[string]interface{}{
+			"status":        map[string]interface{}{"type": "string", "enum": []string{"verified"}},
+			"conversations": map[string]interface{}{"type": "integer", "minimum": 0},
+			"events":        map[string]interface{}{"type": "integer", "minimum": 0},
+			"verifiedAt":    map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
 	egressAuditSummarySchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -313,12 +327,13 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	egressAuditListSchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"items", "total", "page", "pageSize", "totalPages", "summary"},
+		"required":             []string{"items", "total", "page", "pageSize", "totalPages", "summary", "integrity"},
 		"properties": map[string]interface{}{
 			"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditEvent"}},
 			"total": map[string]interface{}{"type": "integer", "minimum": 0}, "page": map[string]interface{}{"type": "integer", "minimum": 1},
 			"pageSize": map[string]interface{}{"type": "integer", "enum": []int{10, 20, 50, 100}}, "totalPages": map[string]interface{}{"type": "integer", "minimum": 0},
-			"summary": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditSummary"},
+			"summary":   map[string]interface{}{"$ref": "#/components/schemas/EgressAuditSummary"},
+			"integrity": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditIntegrity"},
 		},
 	}
 
@@ -362,6 +377,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"ConversationEgressWrite":             conversationEgressWriteSchema,
 				"EgressDefaultView":                   egressDefaultViewSchema,
 				"EgressAuditEvent":                    egressAuditEventSchema,
+				"EgressAuditIntegrity":                egressAuditIntegritySchema,
 				"EgressAuditSummary":                  egressAuditSummarySchema,
 				"EgressAuditList":                     egressAuditListSchema,
 				"CreateConversationRequest": map[string]interface{}{
@@ -2218,6 +2234,19 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{"description": "持久审计事件分页结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditList"}}}},
 						"400": map[string]interface{}{"description": "筛选或分页参数无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"},
+					},
+				},
+			},
+			"/api/egress-audit-events/integrity": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "校验对话级审计 hash 链", "operationId": "verifyEgressAuditIntegrity",
+					"description": "按访问范围重算每条事件 hash，并核对前序 hash、连续序号、事件数量和独立链头；检测修改、删除或重排时返回 409。",
+					"parameters":  []map[string]interface{}{{"name": "conversation_id", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 128}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "完整性校验通过", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+							"type": "object", "additionalProperties": false, "required": []string{"integrity"}, "properties": map[string]interface{}{"integrity": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditIntegrity"}},
+						}}}},
+						"400": map[string]interface{}{"description": "参数无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"}, "409": map[string]interface{}{"description": "检测到审计链修改、删除或重排"},
 					},
 				},
 			},

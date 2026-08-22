@@ -17,7 +17,7 @@
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
     const AUDIT_EVENT_FIELDS = new Set([
-        'id', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
+        'id', 'chainSequence', 'previousHash', 'eventHash', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
         'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'resolvedIps',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
         'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message',
@@ -30,7 +30,7 @@
         active: false, bound: false, loading: false, generation: 0, searchTimer: null,
         page: 1, pageSize: 20, query: '', category: 'all', type: 'all', decision: 'all',
         total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
-        error: '',
+        integrity: null, error: '',
     };
 
     function t(key, fallback, values) {
@@ -147,6 +147,8 @@
         if (event.category === 'network' && !NETWORK_TYPES.has(event.eventType)) return false;
         if (event.category === 'lifecycle' && !LIFECYCLE_TYPES.has(event.eventType)) return false;
         if (!safeString(event.id, 128) || !safeString(event.conversationId, 128)) return false;
+        if (!Number.isSafeInteger(Number(event.chainSequence)) || Number(event.chainSequence) < 1) return false;
+        if (!/^[0-9a-f]{64}$/.test(String(event.previousHash || '')) || !/^[0-9a-f]{64}$/.test(String(event.eventHash || ''))) return false;
         if (Number.isNaN(Date.parse(event.occurredAt))) return false;
         const safeFields = [
             [event.conversationTitle, 512], [event.containerId, 128], [event.agentId, 128],
@@ -167,6 +169,14 @@
         if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
         if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
         return true;
+    }
+
+    function isSafeIntegrity(integrity) {
+        if (!integrity || typeof integrity !== 'object' || integrity.status !== 'verified') return false;
+        if (Object.keys(integrity).some((key) => !['status', 'conversations', 'events', 'verifiedAt'].includes(key))) return false;
+        if (!Number.isSafeInteger(Number(integrity.conversations)) || Number(integrity.conversations) < 0) return false;
+        if (!Number.isSafeInteger(Number(integrity.events)) || Number(integrity.events) < 0) return false;
+        return !Number.isNaN(Date.parse(integrity.verifiedAt));
     }
 
     function shortHash(value) {
@@ -226,7 +236,7 @@
         const verdict = event.decision || event.result;
         const rule = event.ruleId || (event.reason ? t(`activityValues.${event.reason}`, event.reason) : '') || event.lifecycleState;
         const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
-        const traceSecondary = [shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
+        const traceSecondary = [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
         const outcome = outcomeLabel(event);
         const resultDetail = event.category === 'network'
             ? `${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
@@ -283,6 +293,16 @@
         }
         const refresh = element('egress-audit-refresh');
         if (refresh) refresh.disabled = state.loading;
+        const integrity = element('egress-audit-integrity');
+        if (integrity) {
+            integrity.textContent = state.loading
+                ? t('auditIntegrityChecking', '正在校验审计链…')
+                : (state.integrity
+                    ? t('auditIntegrityVerified', '链已验证 · {{events}} 条', { events: state.integrity.events })
+                    : t('auditIntegrityFailed', '审计链校验失败'));
+            integrity.classList.toggle('is-ready', Boolean(state.integrity) && !state.loading);
+            integrity.classList.toggle('is-error', !state.integrity && !state.loading);
+        }
     }
 
     async function refresh() {
@@ -294,11 +314,13 @@
         try {
             const payload = await requestJSON(`/api/egress-audit-events?${queryParams(true).toString()}`);
             if (!state.active || generation !== state.generation) return;
+            if (!isSafeIntegrity(payload.integrity)) throw new Error(t('auditIntegrityFailed', '审计链校验失败'));
             const items = Array.isArray(payload.items) ? payload.items.filter(isSafeAuditEvent) : [];
             state.items = items;
             state.total = Math.max(0, Number(payload.total || 0));
             state.totalPages = Math.max(0, Number(payload.totalPages || 0));
             state.summary = payload.summary || { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
+            state.integrity = payload.integrity;
             if (state.totalPages > 0 && state.page > state.totalPages) {
                 state.page = state.totalPages;
                 writeURLState();
@@ -311,6 +333,7 @@
             state.total = 0;
             state.totalPages = 0;
             state.summary = { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
+            state.integrity = null;
             state.error = error && error.message ? error.message : t('auditLoadFailed', '加载出站审计失败');
         } finally {
             if (generation === state.generation) {
@@ -419,7 +442,7 @@
     }
 
     return {
-        init, stop, refresh, isSafeAuditEvent,
+        init, stop, refresh, isSafeAuditEvent, isSafeIntegrity,
         readURLStateForTest: function (search) {
             readURLState(search || '');
             return { page: state.page, pageSize: state.pageSize, query: state.query, category: state.category, type: state.type, decision: state.decision };

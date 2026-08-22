@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 	"go.uber.org/zap"
 )
 
@@ -24,6 +24,18 @@ const (
 	// 定时执行 PASSIVE checkpoint，平滑推进 WAL 回收。
 	sqlitePassiveCheckpointInterval = 300 * time.Second
 )
+
+const cyberStrikeSQLiteDriverName = "sqlite3_cyberstrike"
+
+var registerCyberStrikeSQLiteDriver sync.Once
+
+func ensureCyberStrikeSQLiteDriver() {
+	registerCyberStrikeSQLiteDriver.Do(func() {
+		sql.Register(cyberStrikeSQLiteDriverName, &sqlite3.SQLiteDriver{ConnectHook: func(connection *sqlite3.SQLiteConn) error {
+			return connection.RegisterFunc("cyberstrike_egress_audit_hash", egressAuditHashValues, true)
+		}})
+	})
+}
 
 // configureDBPool 设置 SQLite 连接池参数，提升并发稳定性
 func configureDBPool(db *sql.DB) {
@@ -122,7 +134,8 @@ func (db *DB) runPassiveCheckpoint(trigger string) {
 
 // NewDB 创建数据库连接
 func NewDB(dbPath string, logger *zap.Logger) (*DB, error) {
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_foreign_keys=1&_busy_timeout=5000&_synchronous=NORMAL")
+	ensureCyberStrikeSQLiteDriver()
+	db, err := sql.Open(cyberStrikeSQLiteDriverName, dbPath+"?_journal_mode=WAL&_foreign_keys=1&_busy_timeout=5000&_synchronous=NORMAL")
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库失败: %w", err)
 	}
