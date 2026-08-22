@@ -25,7 +25,7 @@ test('仅首条消息携带创建时执行位置', () => {
     assert.match(chat, /workspacePersistenceEnabledFromConversation\(conversation\)/);
     assert.match(chat, /applyConversationRuntimeMode\(conversationId, conversation\)/);
     assert.match(chat, /button\.disabled = !!locked/);
-    assert.match(chat, /syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\);[\s\S]{0,100}setChatRuntimeModeLocked\(false\)/);
+    assert.match(chat, /syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\);[\s\S]{0,320}resetNewConversationContainerControls[\s\S]{0,160}setChatRuntimeModeLocked\(false\)/);
 });
 
 test('中英文文案明确区分执行位置与 Agent 编排', () => {

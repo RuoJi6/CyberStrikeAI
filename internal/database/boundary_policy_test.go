@@ -225,3 +225,50 @@ func TestBoundaryPolicyLookupAndOwnScopeAccess(t *testing.T) {
 		t.Fatalf("missing policy error = %v", err)
 	}
 }
+
+func TestListBoundaryPoliciesHonorsOwnerAssignmentsAndStableOrder(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-list.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	user, err := db.CreateRBACUser("boundary-list-user", "Boundary list user", "hash", true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owned, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "Owned", OwnerUserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "Assigned", OwnerUserID: "other-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "Foreign", OwnerUserID: "other-user"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(user.ID, "boundary_policy", assigned.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	visible, err := db.ListBoundaryPolicies(ctx, user.ID, RBACScopeOwn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 2 {
+		t.Fatalf("visible policies = %#v", visible)
+	}
+	visibleIDs := map[string]bool{visible[0].ID: true, visible[1].ID: true}
+	if !visibleIDs[owned.ID] || !visibleIDs[assigned.ID] || visibleIDs[foreign.ID] {
+		t.Fatalf("visible policy ids = %#v", visibleIDs)
+	}
+	all, err := db.ListBoundaryPolicies(ctx, "admin", RBACScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("all policies = %#v", all)
+	}
+}

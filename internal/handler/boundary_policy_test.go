@@ -58,8 +58,58 @@ func boundarySimulationRouter(db *database.DB, session security.Session) *gin.En
 		c.Next()
 	})
 	router.Use(security.RBACMiddleware(db))
-	router.POST("/api/boundary-policies/:id/simulate", NewBoundaryPolicyHandler(db, zap.NewNop()).SimulatePolicy)
+	handler := NewBoundaryPolicyHandler(db, zap.NewNop())
+	router.GET("/api/boundary-policies", handler.List)
+	router.POST("/api/boundary-policies/:id/simulate", handler.SimulatePolicy)
 	return router
+}
+
+func TestBoundaryPolicyListIsScopedAndUsesSafeProjection(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	foreign, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{
+		Name: "foreign", Description: "not visible", OwnerUserID: "owner-2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	perform := func(session security.Session) *httptest.ResponseRecorder {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodGet, "/api/boundary-policies", nil)
+		boundarySimulationRouter(db, session).ServeHTTP(recorder, request)
+		return recorder
+	}
+	missing := perform(security.Session{UserID: "owner-1", Scope: database.RBACScopeOwn, Permissions: map[string]bool{}})
+	if missing.Code != http.StatusForbidden {
+		t.Fatalf("missing permission status = %d: %s", missing.Code, missing.Body.String())
+	}
+	owner := perform(security.Session{
+		UserID: "owner-1", Scope: database.RBACScopeOwn,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+	if owner.Code != http.StatusOK {
+		t.Fatalf("owner status = %d: %s", owner.Code, owner.Body.String())
+	}
+	var ownerBody struct {
+		Items []map[string]interface{} `json:"items"`
+	}
+	if err := json.Unmarshal(owner.Body.Bytes(), &ownerBody); err != nil {
+		t.Fatal(err)
+	}
+	if len(ownerBody.Items) != 1 || ownerBody.Items[0]["id"] != policy.ID {
+		t.Fatalf("owner items = %#v", ownerBody.Items)
+	}
+	for _, forbiddenField := range []string{"ownerUserId", "owner_user_id", "rules"} {
+		if _, ok := ownerBody.Items[0][forbiddenField]; ok {
+			t.Fatalf("safe summary leaked %s: %#v", forbiddenField, ownerBody.Items[0])
+		}
+	}
+	admin := perform(security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), foreign.ID) {
+		t.Fatalf("admin status/body = %d: %s", admin.Code, admin.Body.String())
+	}
 }
 
 func performBoundarySimulation(router *gin.Engine, policyID string, body interface{}) *httptest.ResponseRecorder {
@@ -191,6 +241,10 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := spec["paths"].(map[string]interface{})
+	listPath, ok := paths["/api/boundary-policies"].(map[string]interface{})
+	if !ok || listPath["get"] == nil {
+		t.Fatalf("boundary list path = %#v", listPath)
+	}
 	path, ok := paths["/api/boundary-policies/{id}/simulate"].(map[string]interface{})
 	if !ok || path["post"] == nil {
 		t.Fatalf("boundary simulation path = %#v", path)
@@ -200,6 +254,9 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatalf("conversation boundary path = %#v", conversationPath)
 	}
 	schemas := spec["components"].(map[string]interface{})["schemas"].(map[string]interface{})
+	if _, ok := schemas["BoundaryPolicySummary"].(map[string]interface{}); !ok {
+		t.Fatal("BoundaryPolicySummary schema is missing")
+	}
 	snapshotSchema, ok := schemas["ConversationBoundarySnapshot"].(map[string]interface{})
 	if !ok {
 		t.Fatal("ConversationBoundarySnapshot schema is missing")

@@ -120,6 +120,9 @@ func TestRBACResourcePickerRequiresWritePermission(t *testing.T) {
 }
 
 func TestBoundarySimulationUsesReadPermissionDespitePOST(t *testing.T) {
+	if got := permissionForRequest(http.MethodGet, "/api/boundary-policies"); got != "boundary:read" {
+		t.Fatalf("boundary list permission = %q, want boundary:read", got)
+	}
 	if got := permissionForRequest(http.MethodPost, "/api/boundary-policies/:id/simulate"); got != "boundary:read" {
 		t.Fatalf("boundary simulation permission = %q, want boundary:read", got)
 	}

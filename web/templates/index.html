@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260822-2">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260822-4">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1218,7 +1218,7 @@
                                                 <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                                             </svg>
                                         </button>
-                                        <div id="runtime-mode-panel" class="agent-mode-panel runtime-mode-panel" style="display: none;" role="listbox" aria-labelledby="runtime-mode-panel-title">
+                                        <div id="runtime-mode-panel" class="agent-mode-panel runtime-mode-panel" style="display: none;" role="dialog" aria-labelledby="runtime-mode-panel-title">
                                             <div class="role-selection-panel-header agent-mode-panel-header">
                                                 <h3 id="runtime-mode-panel-title" class="role-selection-panel-title" data-i18n="chat.runtimeModePanelTitle">执行位置</h3>
                                                 <button type="button" class="role-selection-panel-close" onclick="closeRuntimeModePanel()" data-i18n="common.close" data-i18n-attr="title" title="关闭">
@@ -1227,7 +1227,7 @@
                                                     </svg>
                                                 </button>
                                             </div>
-                                            <div class="agent-mode-options runtime-mode-options">
+                                            <div class="agent-mode-options runtime-mode-options" role="listbox" aria-label="执行位置" data-i18n="chat.runtimeModePanelTitle" data-i18n-attr="aria-label" data-i18n-skip-text="true">
                                                 <button type="button" class="role-selection-item-main runtime-mode-option selected" data-value="host" role="option" aria-selected="true" onclick="selectRuntimeMode('host')">
                                                     <div class="role-selection-item-icon-main" aria-hidden="true">🖥️</div>
                                                     <div class="role-selection-item-content-main">
@@ -1255,6 +1255,37 @@
                                                     <span class="workspace-persistence-switch" aria-hidden="true"></span>
                                                 </label>
                                             </div>
+                                            <section id="container-conversation-options" class="container-conversation-options" hidden aria-labelledby="container-conversation-options-title">
+                                                <div class="container-conversation-options-heading">
+                                                    <div>
+                                                        <h4 id="container-conversation-options-title" data-i18n="chat.containerSecurityOptionsTitle">容器安全与出口</h4>
+                                                        <p data-i18n="chat.containerSecurityOptionsHint">这些选择仅用于新对话，并在首次启动容器后锁定。</p>
+                                                    </div>
+                                                    <span id="container-conversation-options-status" class="container-conversation-options-status" data-i18n="chat.containerOptionsLoading" aria-live="polite">正在加载…</span>
+                                                </div>
+                                                <label class="container-conversation-field" for="boundary-policy-select">
+                                                    <span class="container-conversation-field-label" data-i18n="chat.boundaryPolicyLabel">边界策略</span>
+                                                    <select id="boundary-policy-select" onchange="syncConversationBoundarySelection()">
+                                                        <option value="" data-i18n="chat.boundaryPolicyDefaultDeny">默认拒绝（空策略）</option>
+                                                    </select>
+                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultDenyHint">不选择草案时生成默认拒绝快照；容器无法访问任何目标。</span>
+                                                </label>
+                                                <label class="container-conversation-field" for="conversation-egress-mode-select">
+                                                    <span class="container-conversation-field-label" data-i18n="chat.egressModeLabel">上游出口</span>
+                                                    <select id="conversation-egress-mode-select" onchange="syncConversationEgressMode()">
+                                                        <option value="" data-i18n="chat.egressModeInherit">继承项目或用户默认值</option>
+                                                        <option value="none" data-i18n="chat.egressModeNone">不使用上游代理</option>
+                                                        <option value="proxy" data-i18n="chat.egressModeProxy" disabled>指定单代理</option>
+                                                        <option value="group" data-i18n="chat.egressModeGroup" disabled>指定代理组</option>
+                                                    </select>
+                                                    <span id="conversation-egress-preview" class="container-conversation-field-hint" data-i18n="chat.egressPreviewLoading">正在读取当前继承结果…</span>
+                                                </label>
+                                                <label id="conversation-egress-target-field" class="container-conversation-field" for="conversation-egress-target-select" hidden>
+                                                    <span id="conversation-egress-target-label" class="container-conversation-field-label" data-i18n="chat.egressProxyLabel">选择代理</span>
+                                                    <select id="conversation-egress-target-select" onchange="syncConversationEgressTarget()"></select>
+                                                    <span id="conversation-egress-target-hint" class="container-conversation-field-hint" data-i18n="chat.egressTargetHint">仅显示当前账号可访问且已脱敏的资源。</span>
+                                                </label>
+                                            </section>
                                         </div>
                                     </div>
                                     <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">
@@ -7041,7 +7072,7 @@
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
     <script src="/static/js/monitor.js?v=20260821-1"></script>
-    <script src="/static/js/chat.js?v=20260821-2"></script>
+    <script src="/static/js/chat.js?v=20260822-1"></script>
     <script src="/static/js/chat-plan-progress.js?v=20260815-1"></script>
     <script src="/static/js/hitl.js?v=20260819-1"></script>
     <script src="/static/js/settings.js?v=20260717-1"></script>
@@ -7055,6 +7086,7 @@
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260822-1"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>

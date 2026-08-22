@@ -1470,7 +1470,8 @@ func setupRoutes(
 		protected.POST("/projects/:id/facts/deprecate", projectHandler.DeprecateFact)
 		protected.POST("/projects/:id/facts/restore", projectHandler.RestoreFact)
 
-		// 边界策略模拟只执行确定性本地判定，不解析 DNS 或发起网络请求。
+		// 边界策略列表受 RBAC 资源范围约束；模拟只执行确定性本地判定，不解析 DNS 或发起网络请求。
+		protected.GET("/boundary-policies", boundaryPolicyHandler.List)
 		protected.POST("/boundary-policies/:id/simulate", boundaryPolicyHandler.SimulatePolicy)
 
 		// 出站代理凭据仅在服务端加密保存；所有响应都是无凭据投影。

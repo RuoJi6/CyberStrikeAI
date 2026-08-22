@@ -275,6 +275,48 @@ func (db *DB) GetBoundaryPolicy(ctx context.Context, policyID string) (BoundaryP
 	return policy, nil
 }
 
+// ListBoundaryPolicies returns only policies visible in the caller's RBAC
+// resource scope. The handler exposes a smaller summary projection to clients.
+func (db *DB) ListBoundaryPolicies(ctx context.Context, userID, scope string) ([]BoundaryPolicy, error) {
+	query := `
+		SELECT id, name, description, owner_user_id, created_at, updated_at
+		FROM boundary_policies`
+	args := make([]interface{}, 0, 2)
+	if scope != RBACScopeAll {
+		query += ` WHERE owner_user_id = ? OR id IN (
+			SELECT resource_id FROM rbac_resource_assignments
+			WHERE user_id = ? AND resource_type = 'boundary_policy'
+		)`
+		args = append(args, strings.TrimSpace(userID), strings.TrimSpace(userID))
+	}
+	query += ` ORDER BY updated_at DESC, name COLLATE NOCASE, id`
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list boundary policies: %w", err)
+	}
+	defer rows.Close()
+
+	policies := make([]BoundaryPolicy, 0)
+	for rows.Next() {
+		var policy BoundaryPolicy
+		var owner sql.NullString
+		var createdAt, updatedAt string
+		if err := rows.Scan(
+			&policy.ID, &policy.Name, &policy.Description, &owner, &createdAt, &updatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan boundary policy: %w", err)
+		}
+		policy.OwnerUserID = strings.TrimSpace(owner.String)
+		policy.CreatedAt = parseDBTime(createdAt)
+		policy.UpdatedAt = parseDBTime(updatedAt)
+		policies = append(policies, policy)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list boundary policies: %w", err)
+	}
+	return policies, nil
+}
+
 func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyRule) (BoundaryPolicyRule, error) {
 	rule.PolicyID = strings.TrimSpace(rule.PolicyID)
 	if rule.PolicyID == "" {

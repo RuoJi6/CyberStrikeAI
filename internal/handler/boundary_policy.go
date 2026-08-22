@@ -24,8 +24,43 @@ type BoundaryPolicyHandler struct {
 	logger *zap.Logger
 }
 
+type boundaryPolicySummary struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
 func NewBoundaryPolicyHandler(db *database.DB, logger *zap.Logger) *BoundaryPolicyHandler {
 	return &BoundaryPolicyHandler{db: db, logger: logger}
+}
+
+// List GET /api/boundary-policies returns the safe policy summaries available
+// to the authenticated user. Rules and owner identifiers are intentionally not
+// included in the conversation-creation picker response.
+func (h *BoundaryPolicyHandler) List(c *gin.Context) {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	if !session.Permissions["boundary:read"] {
+		c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
+		return
+	}
+	policies, err := h.db.ListBoundaryPolicies(c.Request.Context(), session.UserID, session.ScopeFor("boundary:read"))
+	if err != nil {
+		h.logger.Error("列出边界策略失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界策略"})
+		return
+	}
+	items := make([]boundaryPolicySummary, 0, len(policies))
+	for _, policy := range policies {
+		items = append(items, boundaryPolicySummary{
+			ID: policy.ID, Name: policy.Name, Description: policy.Description, UpdatedAt: policy.UpdatedAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 // GetConversationSnapshot GET /api/conversations/:id/boundary returns the

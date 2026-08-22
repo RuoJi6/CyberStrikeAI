@@ -31,6 +31,7 @@ var rbacAssignableResourceTables = map[string]string{
 	"webshell":            "webshell_connections",
 	"batch_task":          "batch_task_queues",
 	"c2_listener":         "c2_listeners",
+	"boundary_policy":     "boundary_policies",
 	"egress_proxy":        "egress_proxies",
 	"egress_proxy_group":  "egress_proxy_groups",
 	"egress_auth_profile": "egress_auth_profiles",
@@ -789,6 +790,10 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 		query = `SELECT id, name, type || ' · ' || status FROM c2_listeners
 			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY created_at DESC LIMIT ? OFFSET ?`
+	case "boundary_policy":
+		query = `SELECT id, name, description FROM boundary_policies
+			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
+			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	case "egress_proxy":
 		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies
 			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
@@ -846,6 +851,8 @@ func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, er
 		query = `SELECT COUNT(*) FROM batch_task_queues WHERE LOWER(COALESCE(NULLIF(title, ''), id)) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "c2_listener":
 		query = `SELECT COUNT(*) FROM c2_listeners WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
+	case "boundary_policy":
+		query = `SELECT COUNT(*) FROM boundary_policies WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "egress_proxy":
 		query = `SELECT COUNT(*) FROM egress_proxies WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(host) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "egress_proxy_group":
@@ -944,6 +951,8 @@ func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) 
 		query = `SELECT id, COALESCE(NULLIF(title, ''), id), status FROM batch_task_queues WHERE id IN (` + placeholders + `)`
 	case "c2_listener":
 		query = `SELECT id, name, type || ' · ' || status FROM c2_listeners WHERE id IN (` + placeholders + `)`
+	case "boundary_policy":
+		query = `SELECT id, name, description FROM boundary_policies WHERE id IN (` + placeholders + `)`
 	case "egress_proxy":
 		query = `SELECT id, name, protocol || ' · ' || host || ':' || port FROM egress_proxies WHERE id IN (` + placeholders + `)`
 	case "egress_proxy_group":
@@ -1114,6 +1123,7 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 		{"vulnerability", "vulnerabilities"}, {"webshell", "webshell_connections"},
 		{"asset", "assets"},
 		{"batch_task", "batch_task_queues"}, {"c2_listener", "c2_listeners"},
+		{"boundary_policy", "boundary_policies"},
 		{"egress_proxy", "egress_proxies"}, {"egress_proxy_group", "egress_proxy_groups"},
 	}
 	detected := make(map[string]string, len(uniqueIDs))

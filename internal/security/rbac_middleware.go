@@ -170,6 +170,8 @@ func permissionForRequest(method, fullPath string) string {
 	case path == "/boundary-policies/:id/simulate":
 		// Simulation is read-only even though it accepts a structured POST body.
 		return "boundary:read"
+	case strings.HasPrefix(path, "/boundary-policies"):
+		return crudPermission(method, "boundary")
 	case strings.HasPrefix(path, "/egress-proxies"), strings.HasPrefix(path, "/egress-proxy-groups"), strings.HasPrefix(path, "/egress-auth-profiles"):
 		return crudPermission(method, "egress")
 	case strings.HasPrefix(path, "/egress-defaults"):

@@ -61,6 +61,17 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type":        "string",
 		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示默认拒绝空策略。",
 	}
+	boundaryPolicySummarySchema := map[string]interface{}{
+		"type":        "object",
+		"description": "新建容器对话可选择的安全边界策略摘要；不包含规则正文或所有者标识。",
+		"required":    []string{"id", "name", "description", "updatedAt"},
+		"properties": map[string]interface{}{
+			"id":          map[string]interface{}{"type": "string"},
+			"name":        map[string]interface{}{"type": "string"},
+			"description": map[string]interface{}{"type": "string"},
+			"updatedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
 	conversationEgressModeRequestSchema := map[string]interface{}{
 		"type":        "string",
 		"enum":        []string{"none", "proxy", "group"},
@@ -277,6 +288,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 			},
 			"schemas": map[string]interface{}{
+				"BoundaryPolicySummary":               boundaryPolicySummarySchema,
 				"EgressProxy":                         egressProxySchema,
 				"EgressProxyWrite":                    egressProxyWriteSchema,
 				"EgressAuthProfile":                   egressAuthProfileSchema,
@@ -1584,6 +1596,26 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"401": map[string]interface{}{
 							"description": "未授权",
 						},
+					},
+				},
+			},
+			"/api/boundary-policies": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"边界策略"},
+					"summary":     "列出可用于新建对话的边界策略",
+					"description": "按调用者 boundary:read 的 RBAC 资源范围返回安全摘要。",
+					"operationId": "listBoundaryPolicies",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "可访问的策略摘要",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+								"type": "object", "required": []string{"items"}, "properties": map[string]interface{}{
+									"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicySummary"}},
+								},
+							}}},
+						},
+						"401": map[string]interface{}{"description": "未登录"},
+						"403": map[string]interface{}{"description": "缺少 boundary:read 权限"},
 					},
 				},
 			},
