@@ -3812,17 +3812,24 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 
 /* Stage 6: 容器管理按管理域拆分为独立页面，避免单页长滚动。 */
 .container-management-page {
-    min-height: 100%;
+    /* This page is the only vertical scroll owner.  Keeping the generic
+       .page-content scroller active creates a nested scroll trap once the
+       runtime card grid grows beyond the viewport. */
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
     overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     scrollbar-gutter: stable;
+    -webkit-overflow-scrolling: touch;
     background:
         radial-gradient(circle at 88% 2%, color-mix(in srgb, var(--primary-color) 9%, transparent) 0, transparent 32%),
         var(--bg-primary);
 }
 
 .container-management-shell {
+    flex: 0 0 auto;
     width: min(1180px, 100%);
     margin: 0 auto;
     padding: 30px 34px 44px;
@@ -3877,6 +3884,9 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 }
 
 .container-management-content {
+    flex: none;
+    min-height: auto;
+    overflow: visible;
     padding: 28px 0 0;
 }
 

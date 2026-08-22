@@ -84,14 +84,17 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
         for (const key of contentKeys) assert.equal(typeof locale.containerManagement[key], 'string');
     }
     assert.match(styles, /\.container-management-page\s*\{/);
-    assert.match(styles, /\.container-management-page\s*\{[\s\S]*?overflow-y: auto/);
+    assert.match(styles, /\.container-management-page\s*\{[\s\S]*?min-height: 0;[\s\S]*?overflow-y: auto/);
+    assert.match(styles, /\.container-management-shell\s*\{[\s\S]*?flex: 0 0 auto/);
+    assert.match(styles, /\.container-management-content\s*\{[\s\S]*?overflow: visible/);
+    assert.doesNotMatch(styles, /\.container-management-page\s*\{[\s\S]*?min-height: 100%/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-management-surface\s*\{/);
     assert.match(styles, /body:has\(\.container-management-page\.active\) \.main-sidebar:not\(\.collapsed\)/);
     assert.match(router, /function syncContainerManagementSidebar\(pageId\)/);
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260822-11/);
+    assert.match(template, /style\.css\?v=20260822-12/);
     assert.match(template, /router\.js\?v=20260822-4/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
