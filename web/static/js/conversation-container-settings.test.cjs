@@ -25,10 +25,12 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
     assert.match(template, /id="conversation-egress-target-select"/);
     assert.match(template, /id="conversation-egress-preview"[^>]*aria-live|id="container-conversation-options-status"[^>]*aria-live/);
     assert.match(styles, /\.runtime-mode-panel \{[\s\S]*?overflow-y: auto/);
+    assert.match(styles, /\.runtime-mode-panel > \.runtime-mode-options,[\s\S]*?\.runtime-mode-panel > \.workspace-persistence-option,[\s\S]*?flex: 0 0 auto/);
     assert.match(styles, /@media \(max-width: 768px\)[\s\S]*?\.runtime-mode-wrapper \.runtime-mode-panel \{[\s\S]*?position: fixed/);
     assert.match(styles, /\.runtime-mode-wrapper \.runtime-mode-panel \{[\s\S]*?inset: auto 8px 76px 8px/);
-    assert.match(styles, /\.container-conversation-field select:focus-visible/);
-    assert.match(styles, /html\[data-theme="dark"\] \.container-conversation-field select/);
+    assert.equal((template.match(/data-unified-select="single"/g) || []).length, 3);
+    assert.match(styles, /\.unified-select-trigger:focus-visible/);
+    assert.match(styles, /html\[data-theme="dark"\] \.unified-select-trigger/);
 });
 
 test('settings client loads only safe control-plane projections', () => {
@@ -92,7 +94,8 @@ test('container creation copy is bilingual and cache-busted', () => {
     assert.match(zh.chat.boundaryPolicyDefaultDenyHint, /默认拒绝/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260822-5/);
+    assert.match(template, /style\.css\?v=20260822-7/);
     assert.match(template, /chat\.js\?v=20260822-1/);
-    assert.match(template, /conversation-container-settings\.js\?v=20260822-1/);
+    assert.match(template, /unified-select\.js\?v=20260822-3/);
+    assert.match(template, /conversation-container-settings\.js\?v=20260822-2/);
 });

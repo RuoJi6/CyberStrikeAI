@@ -29361,6 +29361,18 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
     overscroll-behavior: contain;
 }
 
+/*
+ * The panel scrolls as one unit. Keep each direct content section at its
+ * natural height so a constrained viewport cannot shrink the options wrapper
+ * while its cards continue to overflow into the following workspace block.
+ */
+.runtime-mode-panel > .role-selection-panel-header,
+.runtime-mode-panel > .runtime-mode-options,
+.runtime-mode-panel > .workspace-persistence-option,
+.runtime-mode-panel > .container-conversation-options {
+    flex: 0 0 auto;
+}
+
 .runtime-mode-option.role-selection-item-main {
     text-align: left;
     justify-content: flex-start;
@@ -29567,6 +29579,224 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
 .container-conversation-field select:disabled {
     cursor: default;
     opacity: 0.68;
+}
+
+/* Unified searchable single/multi select. Menus are portalled to body and
+   positioned against the visual viewport so nested panels cannot clip them. */
+select.unified-select-native {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    min-height: 0 !important;
+    margin: -1px !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    clip: rect(0 0 0 0) !important;
+    clip-path: inset(50%) !important;
+    border: 0 !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    white-space: nowrap !important;
+}
+
+.unified-select {
+    position: relative;
+    width: 100%;
+    min-width: 0;
+}
+
+.unified-select-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    color: #0f172a;
+    background: #ffffff;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.35;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.unified-select-trigger:hover:not(:disabled) {
+    border-color: #94a3b8;
+}
+
+.unified-select-trigger:focus-visible,
+.unified-select.open .unified-select-trigger {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
+}
+
+.unified-select.is-disabled .unified-select-trigger {
+    cursor: default;
+    opacity: 0.68;
+}
+
+.unified-select-value {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.unified-select-caret {
+    width: 8px;
+    height: 8px;
+    flex: 0 0 8px;
+    margin: -3px 2px 2px 0;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    color: #64748b;
+    transform: rotate(45deg);
+    transition: transform 0.15s ease;
+}
+
+.unified-select.open .unified-select-caret {
+    margin-top: 3px;
+    transform: rotate(225deg);
+}
+
+.unified-select-menu {
+    position: fixed;
+    z-index: 6200;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 6px;
+    overflow: hidden;
+    border: 1px solid #cbd5e1;
+    border-radius: 11px;
+    color: #0f172a;
+    background: #ffffff;
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.20), 0 4px 12px rgba(15, 23, 42, 0.10);
+}
+
+.unified-select-menu[hidden] {
+    display: none;
+}
+
+.unified-select-search-wrap {
+    flex: 0 0 auto;
+    padding: 2px 2px 6px;
+}
+
+.unified-select-search {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    padding: 7px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    color: #0f172a;
+    background: #f8fafc;
+    font: inherit;
+    font-size: 12px;
+}
+
+.unified-select-search:focus-visible {
+    outline: 2px solid rgba(37, 99, 235, 0.32);
+    outline-offset: 1px;
+    border-color: #2563eb;
+}
+
+.unified-select-options {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 0;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.unified-select-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    width: 100%;
+    min-width: 0;
+    min-height: 36px;
+    padding: 9px 10px;
+    border: 0;
+    border-radius: 7px;
+    color: inherit;
+    background: transparent;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1.4;
+    text-align: left;
+    cursor: pointer;
+}
+
+.unified-select-option:hover:not(:disabled),
+.unified-select-option.is-active:not(:disabled) {
+    background: #f1f5f9;
+}
+
+.unified-select-option.is-selected {
+    color: #1d4ed8;
+    background: #eff6ff;
+    font-weight: 600;
+}
+
+.unified-select-option:disabled {
+    color: #94a3b8;
+    cursor: default;
+}
+
+.unified-select-check {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    margin-top: 1px;
+    border: 1px solid #cbd5e1;
+    border-radius: 50%;
+    color: transparent;
+    font-size: 10px;
+    line-height: 1;
+}
+
+.unified-select-options[aria-multiselectable="true"] .unified-select-check {
+    border-radius: 4px;
+}
+
+.unified-select-option.is-selected .unified-select-check {
+    border-color: #2563eb;
+    color: #ffffff;
+    background: #2563eb;
+}
+
+.unified-select-option-label {
+    min-width: 0;
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+
+.unified-select-empty {
+    padding: 22px 12px;
+    color: #64748b;
+    font-size: 12px;
+    line-height: 1.5;
+    text-align: center;
+}
+
+.unified-select-empty[hidden] {
+    display: none;
 }
 
 .container-conversation-field-hint {
@@ -38286,6 +38516,37 @@ html[data-theme="dark"] .container-conversation-field select {
     color: #e2e8f0;
     background: #111827;
     border-color: #334155;
+}
+
+html[data-theme="dark"] .unified-select-trigger,
+html[data-theme="dark"] .unified-select-menu {
+    color: #e2e8f0;
+    background: #111827;
+    border-color: #334155;
+}
+
+html[data-theme="dark"] .unified-select-menu {
+    box-shadow: 0 20px 52px rgba(0, 0, 0, 0.52), 0 0 0 1px rgba(148, 163, 184, 0.06);
+}
+
+html[data-theme="dark"] .unified-select-search {
+    color: #e2e8f0;
+    background: #0f172a;
+    border-color: #334155;
+}
+
+html[data-theme="dark"] .unified-select-option:hover:not(:disabled),
+html[data-theme="dark"] .unified-select-option.is-active:not(:disabled) {
+    background: #172033;
+}
+
+html[data-theme="dark"] .unified-select-option.is-selected {
+    color: #93c5fd;
+    background: rgba(37, 99, 235, 0.22);
+}
+
+html[data-theme="dark"] .unified-select-empty {
+    color: #94a3b8;
 }
 
 html[data-theme="dark"] .workspace-persistence-toggle {

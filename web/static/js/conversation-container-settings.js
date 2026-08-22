@@ -31,6 +31,12 @@
         return document.getElementById(id);
     }
 
+    function refreshEnhancedSelect(select) {
+        if (select && window.CyberStrikeSelect && typeof window.CyberStrikeSelect.refresh === 'function') {
+            window.CyberStrikeSelect.refresh(select);
+        }
+    }
+
     function createOption(value, text, disabled) {
         const option = document.createElement('option');
         option.value = value;
@@ -50,6 +56,7 @@
         } else {
             select.selectedIndex = 0;
         }
+        refreshEnhancedSelect(select);
         return select.value;
     }
 
@@ -104,6 +111,7 @@
         if ((select.value === 'proxy' && !proxiesAvailable) || (select.value === 'group' && !groupsAvailable)) {
             select.value = '';
         }
+        refreshEnhancedSelect(select);
         syncConversationEgressMode();
     }
 
@@ -173,6 +181,7 @@
         if (mode !== 'proxy' && mode !== 'group') {
             targetField.hidden = true;
             targetSelect.replaceChildren();
+            refreshEnhancedSelect(targetSelect);
             updateEgressPreview();
             return;
         }
@@ -273,7 +282,10 @@
         if (container) container.classList.toggle('locked', !!locked);
         ['boundary-policy-select', 'conversation-egress-mode-select', 'conversation-egress-target-select'].forEach(function (id) {
             const control = selectElement(id);
-            if (control) control.disabled = !!locked;
+            if (control) {
+                control.disabled = !!locked;
+                refreshEnhancedSelect(control);
+            }
         });
     }
 
@@ -282,6 +294,8 @@
         const mode = selectElement('conversation-egress-mode-select');
         if (boundary) boundary.value = '';
         if (mode) mode.value = '';
+        refreshEnhancedSelect(boundary);
+        refreshEnhancedSelect(mode);
         syncConversationBoundarySelection();
         syncConversationEgressMode();
     }

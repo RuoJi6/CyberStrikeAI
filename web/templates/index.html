@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260822-5">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260822-7">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1263,28 +1263,28 @@
                                                     </div>
                                                     <span id="container-conversation-options-status" class="container-conversation-options-status" data-i18n="chat.containerOptionsLoading" aria-live="polite">正在加载…</span>
                                                 </div>
-                                                <label class="container-conversation-field" for="boundary-policy-select">
-                                                    <span class="container-conversation-field-label" data-i18n="chat.boundaryPolicyLabel">边界策略</span>
-                                                    <select id="boundary-policy-select" onchange="syncConversationBoundarySelection()">
+                                                <div class="container-conversation-field">
+                                                    <label class="container-conversation-field-label" for="boundary-policy-select" data-i18n="chat.boundaryPolicyLabel">边界策略</label>
+                                                    <select id="boundary-policy-select" data-unified-select="single" onchange="syncConversationBoundarySelection()">
                                                         <option value="" data-i18n="chat.boundaryPolicyDefaultDeny">默认拒绝（空策略）</option>
                                                     </select>
                                                     <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultDenyHint">不选择草案时生成默认拒绝快照；容器无法访问任何目标。</span>
-                                                </label>
-                                                <label class="container-conversation-field" for="conversation-egress-mode-select">
-                                                    <span class="container-conversation-field-label" data-i18n="chat.egressModeLabel">上游出口</span>
-                                                    <select id="conversation-egress-mode-select" onchange="syncConversationEgressMode()">
+                                                </div>
+                                                <div class="container-conversation-field">
+                                                    <label class="container-conversation-field-label" for="conversation-egress-mode-select" data-i18n="chat.egressModeLabel">上游出口</label>
+                                                    <select id="conversation-egress-mode-select" data-unified-select="single" onchange="syncConversationEgressMode()">
                                                         <option value="" data-i18n="chat.egressModeInherit">继承项目或用户默认值</option>
                                                         <option value="none" data-i18n="chat.egressModeNone">不使用上游代理</option>
                                                         <option value="proxy" data-i18n="chat.egressModeProxy" disabled>指定单代理</option>
                                                         <option value="group" data-i18n="chat.egressModeGroup" disabled>指定代理组</option>
                                                     </select>
                                                     <span id="conversation-egress-preview" class="container-conversation-field-hint" data-i18n="chat.egressPreviewLoading">正在读取当前继承结果…</span>
-                                                </label>
-                                                <label id="conversation-egress-target-field" class="container-conversation-field" for="conversation-egress-target-select" hidden>
-                                                    <span id="conversation-egress-target-label" class="container-conversation-field-label" data-i18n="chat.egressProxyLabel">选择代理</span>
-                                                    <select id="conversation-egress-target-select" onchange="syncConversationEgressTarget()"></select>
+                                                </div>
+                                                <div id="conversation-egress-target-field" class="container-conversation-field" hidden>
+                                                    <label id="conversation-egress-target-label" class="container-conversation-field-label" for="conversation-egress-target-select" data-i18n="chat.egressProxyLabel">选择代理</label>
+                                                    <select id="conversation-egress-target-select" data-unified-select="single" onchange="syncConversationEgressTarget()"></select>
                                                     <span id="conversation-egress-target-hint" class="container-conversation-field-hint" data-i18n="chat.egressTargetHint">仅显示当前账号可访问且已脱敏的资源。</span>
-                                                </label>
+                                                </div>
                                             </section>
                                         </div>
                                     </div>
@@ -7062,6 +7062,7 @@
     <script src="/static/vendor/i18next.min.js"></script>
     <script src="/static/js/i18n.js"></script>
     <script src="/static/js/theme.js"></script>
+    <script src="/static/js/unified-select.js?v=20260822-3"></script>
     <script src="/static/js/builtin-tools.js"></script>
     <script src="/static/js/auth.js?v=20260813-1"></script>
     <script src="/static/js/modal.js?v=20260821-1"></script>
@@ -7086,7 +7087,7 @@
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260822-1"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260822-2"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>
