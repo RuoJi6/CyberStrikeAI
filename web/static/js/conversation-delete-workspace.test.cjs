@@ -18,7 +18,7 @@ test('删除对话弹窗为持久工作区提供两个明确选项', () => {
     assert.match(styles, /\.modal-overlay\.projects-modal-overlay\s*\{[\s\S]{0,240}position:\s*fixed;[\s\S]{0,240}align-items:\s*center;[\s\S]{0,120}justify-content:\s*center;/);
     assert.match(styles, /\.modal-overlay\.projects-modal-overlay\.conversation-delete-workspace-modal\s*\{[\s\S]{0,280}width:\s*100vw\s*!important;[\s\S]{0,180}height:\s*100dvh;/);
     assert.match(styles, /\.conversation-delete-workspace-dialog\s*\{[\s\S]{0,320}position:\s*fixed;[\s\S]{0,160}top:\s*50vh;[\s\S]{0,120}left:\s*50vw;[\s\S]{0,180}translate\(-50%,\s*-50%\);/);
-    assert.match(template, /style\.css\?v=20260822-12/);
+    assert.match(template, /style\.css\?v=20260822-13/);
     assert.match(template, /modal\.js\?v=20260821-1/);
     assert.match(template, /id="conversation-delete-retain-btn"[^>]+onclick="resolveConversationDeleteWorkspaceChoice\('retain'\)"/);
     assert.match(template, /id="conversation-delete-workspace-btn"[^>]+onclick="resolveConversationDeleteWorkspaceChoice\('delete'\)"/);

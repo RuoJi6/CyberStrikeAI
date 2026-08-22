@@ -160,6 +160,21 @@ func TestConversationEgressActivityUsesConversationReadPermission(t *testing.T) 
 	}
 }
 
+func TestPersistentEgressAuditRoutesUseAuditReadPermission(t *testing.T) {
+	for _, path := range []string{
+		"/api/egress-audit-events",
+		"/api/egress-audit-events/export",
+		"/api/egress-audit-events/:id",
+	} {
+		if got := permissionForRequest(http.MethodGet, path); got != "audit:read" {
+			t.Fatalf("%s permission = %q, want audit:read", path, got)
+		}
+	}
+	if got := permissionForRequest(http.MethodPost, "/api/egress-audit-events"); got != "audit:read" {
+		t.Fatalf("non-GET persistent audit permission = %q, want audit:read", got)
+	}
+}
+
 func TestEgressDefaultRoutesUseSelectionPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		method string

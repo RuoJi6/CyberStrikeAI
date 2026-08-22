@@ -139,6 +139,8 @@ func permissionForRequest(method, fullPath string) string {
 		return "terminal:execute"
 	case strings.HasPrefix(path, "/audit"):
 		return crudPermission(method, "audit")
+	case strings.HasPrefix(path, "/egress-audit-events"):
+		return "audit:read"
 	case path == "/mcp":
 		return "mcp:execute"
 	case strings.HasPrefix(path, "/external-mcp"):

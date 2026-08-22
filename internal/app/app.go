@@ -23,6 +23,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/egressaudit"
 	"cyberstrike-ai/internal/einoobserve"
 	"cyberstrike-ai/internal/handler"
 	"cyberstrike-ai/internal/hitl"
@@ -45,45 +46,48 @@ import (
 
 // App 应用
 type App struct {
-	config                  *config.Config
-	logger                  *logger.Logger
-	router                  *gin.Engine
-	mcpServer               *mcp.Server
-	externalMCPMgr          *mcp.ExternalMCPManager
-	agent                   *agent.Agent
-	executor                *security.Executor
-	db                      *database.DB
-	knowledgeDB             *database.DB // 知识库数据库连接（如果使用独立数据库）
-	auth                    *security.AuthManager
-	knowledgeManager        *knowledge.Manager        // 知识库管理器（用于动态初始化）
-	knowledgeRetriever      *knowledge.Retriever      // 知识库检索器（用于动态初始化）
-	knowledgeIndexer        *knowledge.Indexer        // 知识库索引器（用于动态初始化）
-	knowledgeHandler        *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
-	agentHandler            *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
-	robotHandler            *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
-	robotMu                 sync.Mutex                // 保护机器人长连接的 cancel
-	dingCancel              context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
-	larkCancel              context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
-	wechatCancel            context.CancelFunc        // 微信 iLink 长轮询取消函数
-	telegramCancel          context.CancelFunc        // Telegram 长轮询取消函数
-	slackCancel             context.CancelFunc        // Slack Socket Mode 取消函数
-	discordCancel           context.CancelFunc        // Discord Gateway 取消函数
-	qqCancel                context.CancelFunc        // QQ WebSocket 取消函数
-	alertCancel             context.CancelFunc        // 漏洞提醒持久化投递 worker
-	c2Manager               *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
-	c2Watchdog              *c2.SessionWatchdog       // C2 会话看门狗
-	c2WatchdogCancel        context.CancelFunc        // 看门狗取消函数
-	c2Handler               *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
-	auditSvc                *audit.Service
-	containerInitializer    *containerruntime.Initializer
-	containerManager        *containerruntime.DockerManager
-	containerLifecycle      *containerruntime.LifecycleController
-	containerOrphan         *containerruntime.OrphanScanner
-	containerOrphanCancel   context.CancelFunc
-	containerOrphanDone     chan struct{}
-	containerIdleStop       *containerruntime.IdleStopScheduler
-	containerIdleStopCancel context.CancelFunc
-	containerIdleStopDone   chan struct{}
+	config                     *config.Config
+	logger                     *logger.Logger
+	router                     *gin.Engine
+	mcpServer                  *mcp.Server
+	externalMCPMgr             *mcp.ExternalMCPManager
+	agent                      *agent.Agent
+	executor                   *security.Executor
+	db                         *database.DB
+	knowledgeDB                *database.DB // 知识库数据库连接（如果使用独立数据库）
+	auth                       *security.AuthManager
+	knowledgeManager           *knowledge.Manager        // 知识库管理器（用于动态初始化）
+	knowledgeRetriever         *knowledge.Retriever      // 知识库检索器（用于动态初始化）
+	knowledgeIndexer           *knowledge.Indexer        // 知识库索引器（用于动态初始化）
+	knowledgeHandler           *handler.KnowledgeHandler // 知识库处理器（用于动态初始化）
+	agentHandler               *handler.AgentHandler     // Agent处理器（用于更新知识库管理器）
+	robotHandler               *handler.RobotHandler     // 机器人处理器（钉钉/飞书/企业微信等）
+	robotMu                    sync.Mutex                // 保护机器人长连接的 cancel
+	dingCancel                 context.CancelFunc        // 钉钉 Stream 取消函数，用于配置变更时重启
+	larkCancel                 context.CancelFunc        // 飞书长连接取消函数，用于配置变更时重启
+	wechatCancel               context.CancelFunc        // 微信 iLink 长轮询取消函数
+	telegramCancel             context.CancelFunc        // Telegram 长轮询取消函数
+	slackCancel                context.CancelFunc        // Slack Socket Mode 取消函数
+	discordCancel              context.CancelFunc        // Discord Gateway 取消函数
+	qqCancel                   context.CancelFunc        // QQ WebSocket 取消函数
+	alertCancel                context.CancelFunc        // 漏洞提醒持久化投递 worker
+	c2Manager                  *c2.Manager               // C2 管理器（未启用 C2 时为 nil）
+	c2Watchdog                 *c2.SessionWatchdog       // C2 会话看门狗
+	c2WatchdogCancel           context.CancelFunc        // 看门狗取消函数
+	c2Handler                  *handler.C2Handler        // C2 REST（与 Manager 生命周期同步）
+	auditSvc                   *audit.Service
+	containerInitializer       *containerruntime.Initializer
+	containerManager           *containerruntime.DockerManager
+	containerLifecycle         *containerruntime.LifecycleController
+	containerOrphan            *containerruntime.OrphanScanner
+	containerOrphanCancel      context.CancelFunc
+	containerOrphanDone        chan struct{}
+	containerIdleStop          *containerruntime.IdleStopScheduler
+	containerIdleStopCancel    context.CancelFunc
+	containerIdleStopDone      chan struct{}
+	containerEgressAudit       *egressaudit.Collector
+	containerEgressAuditCancel context.CancelFunc
+	containerEgressAuditDone   chan struct{}
 }
 
 // New 创建新应用
@@ -481,6 +485,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	conversationHandler.SetTaskStateProvider(agentHandler)
 	conversationHandler.SetContainerInitializationProvider(db)
 	auditHandler := handler.NewAuditHandler(db, auditSvc, log.Logger)
+	egressAuditHandler := handler.NewEgressAuditHandler(db)
 	robotHandler := handler.NewRobotHandler(cfg, db, agentHandler, log.Logger)
 	robotHandler.SetAudit(auditSvc)
 	db.SetVulnerabilityCreatedHook(robotHandler.NotifyNewVulnerability)
@@ -554,6 +559,23 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		conversationHandler.SetEgressActivityStreamer(containerManager)
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
+		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger)
+		if auditErr != nil {
+			log.Logger.Error("对话出站持久审计采集器启动失败", zap.Error(auditErr))
+		} else {
+			auditCtx, auditCancel := context.WithCancel(context.Background())
+			app.containerEgressAudit = egressAuditCollector
+			app.containerEgressAuditCancel = auditCancel
+			app.containerEgressAuditDone = make(chan struct{})
+			go func() {
+				defer close(app.containerEgressAuditDone)
+				_ = egressAuditCollector.RunPeriodic(auditCtx, 2*time.Second, func(err error) {
+					if err != nil {
+						log.Logger.Warn("对话出站持久审计采集器对账失败", zap.Error(err))
+					}
+				})
+			}()
+		}
 		if containerOrphan != nil {
 			orphanCtx, orphanCancel := context.WithCancel(context.Background())
 			app.containerOrphanCancel = orphanCancel
@@ -721,6 +743,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		terminalHandler,
 		app.c2Handler,
 		auditHandler,
+		egressAuditHandler,
 		auditSvc,
 		rbacHandler,
 		mcpServer,
@@ -896,6 +919,19 @@ func (a *App) Shutdown() {
 	a.robotMu.Unlock()
 
 	a.shutdownC2()
+	if a.containerEgressAuditCancel != nil {
+		a.containerEgressAuditCancel()
+		a.containerEgressAuditCancel = nil
+	}
+	if a.containerEgressAuditDone != nil {
+		select {
+		case <-a.containerEgressAuditDone:
+		case <-time.After(5 * time.Second):
+			a.logger.Logger.Warn("等待对话出站持久审计采集器停止超时")
+		}
+		a.containerEgressAuditDone = nil
+	}
+	a.containerEgressAudit = nil
 	if a.containerIdleStopCancel != nil {
 		a.containerIdleStopCancel()
 		a.containerIdleStopCancel = nil
@@ -1069,6 +1105,7 @@ func setupRoutes(
 	terminalHandler *handler.TerminalHandler,
 	c2Handler *handler.C2Handler,
 	auditHandler *handler.AuditHandler,
+	egressAuditHandler *handler.EgressAuditHandler,
 	auditSvc *audit.Service,
 	rbacHandler *handler.RBACHandler,
 	mcpServer *mcp.Server,
@@ -1278,6 +1315,9 @@ func setupRoutes(
 		protected.GET("/audit/logs", auditHandler.ListLogs)
 		protected.GET("/audit/logs/export", auditHandler.ExportLogs)
 		protected.GET("/audit/logs/:id", auditHandler.GetLog)
+		protected.GET("/egress-audit-events", egressAuditHandler.List)
+		protected.GET("/egress-audit-events/export", egressAuditHandler.Export)
+		protected.GET("/egress-audit-events/:id", egressAuditHandler.Get)
 
 		// 外部MCP管理
 		protected.GET("/external-mcp", externalMCPHandler.GetExternalMCPs)

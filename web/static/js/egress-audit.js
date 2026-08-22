@@ -1,0 +1,421 @@
+(function (root, factory) {
+    'use strict';
+    const api = factory(root || {});
+    if (typeof module === 'object' && module.exports) module.exports = api;
+    if (root) {
+        root.initEgressAuditPage = api.init;
+        root.stopEgressAuditPage = api.stop;
+        root.refreshEgressAuditPage = api.refresh;
+    }
+}(typeof window !== 'undefined' ? window : globalThis, function (root) {
+    'use strict';
+
+    const PAGE_SIZES = new Set([10, 20, 50, 100]);
+    const CATEGORIES = new Set(['all', 'network', 'lifecycle']);
+    const NETWORK_TYPES = new Set(['dns', 'http', 'connect']);
+    const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile']);
+    const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
+    const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
+    const URL_KEYS = Object.freeze({
+        page: 'audit_page', pageSize: 'audit_page_size', query: 'audit_q',
+        category: 'audit_category', type: 'audit_type', decision: 'audit_decision',
+    });
+    const state = {
+        active: false, bound: false, loading: false, generation: 0, searchTimer: null,
+        page: 1, pageSize: 20, query: '', category: 'all', type: 'all', decision: 'all',
+        total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
+        error: '',
+    };
+
+    function t(key, fallback, values) {
+        const fullKey = `containerManagement.${key}`;
+        const replacements = values || {};
+        let value = typeof root.t === 'function'
+            ? root.t(fullKey, { ...replacements, interpolation: { escapeValue: false } })
+            : fallback;
+        if (!value || value === fullKey) value = fallback;
+        return Object.entries(replacements).reduce((result, entry) => (
+            String(result).replaceAll(`{{${entry[0]}}}`, String(entry[1]))
+        ), String(value));
+    }
+
+    function element(id) {
+        return root.document && root.document.getElementById ? root.document.getElementById(id) : null;
+    }
+
+    function create(tag, className, text) {
+        const node = root.document.createElement(tag);
+        if (className) node.className = className;
+        if (text !== undefined && text !== null) node.textContent = String(text);
+        return node;
+    }
+
+    function closedValue(raw, allowed, fallback) {
+        const value = String(raw || fallback).toLowerCase();
+        return allowed.has(value) ? value : fallback;
+    }
+
+    function readURLState(searchOverride) {
+        if ((searchOverride === undefined && !root.location) || typeof URLSearchParams === 'undefined') return;
+        const params = new URLSearchParams(searchOverride === undefined ? (root.location.search || '') : searchOverride);
+        const page = Number.parseInt(params.get(URL_KEYS.page), 10);
+        const pageSize = Number.parseInt(params.get(URL_KEYS.pageSize), 10);
+        state.page = Number.isInteger(page) && page > 0 ? page : 1;
+        state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
+        state.query = Array.from(String(params.get(URL_KEYS.query) || '')).slice(0, 200).join('');
+        state.category = closedValue(params.get(URL_KEYS.category), CATEGORIES, 'all');
+        state.type = closedValue(params.get(URL_KEYS.type), TYPES, 'all');
+        state.decision = closedValue(params.get(URL_KEYS.decision), DECISIONS, 'all');
+    }
+
+    function writeURLState() {
+        if (!root.location || !root.history || typeof URL === 'undefined') return;
+        const url = new URL(root.location.href);
+        const setOrDelete = function (key, value, fallback) {
+            if (!value || value === fallback) url.searchParams.delete(key);
+            else url.searchParams.set(key, String(value));
+        };
+        setOrDelete(URL_KEYS.page, state.page, 1);
+        setOrDelete(URL_KEYS.pageSize, state.pageSize, 20);
+        setOrDelete(URL_KEYS.query, state.query, '');
+        setOrDelete(URL_KEYS.category, state.category, 'all');
+        setOrDelete(URL_KEYS.type, state.type, 'all');
+        setOrDelete(URL_KEYS.decision, state.decision, 'all');
+        root.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`);
+    }
+
+    function syncControls() {
+        const values = {
+            'egress-audit-search': state.query,
+            'egress-audit-category': state.category,
+            'egress-audit-type': state.type,
+            'egress-audit-decision': state.decision,
+            'egress-audit-page-size': String(state.pageSize),
+        };
+        Object.entries(values).forEach(([id, value]) => {
+            const control = element(id);
+            if (!control) return;
+            control.value = value;
+            if (control.tagName === 'SELECT' && root.CyberStrikeSelect) {
+                root.CyberStrikeSelect.enhance(control);
+                root.CyberStrikeSelect.refresh(control);
+            }
+        });
+    }
+
+    function queryParams(includePage) {
+        const params = new URLSearchParams();
+        if (includePage) {
+            params.set('page', String(state.page));
+            params.set('page_size', String(state.pageSize));
+        }
+        if (state.query) params.set('q', state.query);
+        if (state.category !== 'all') params.set('category', state.category);
+        if (state.type !== 'all') params.set('event_type', state.type);
+        if (state.decision !== 'all') params.set('decision', state.decision);
+        return params;
+    }
+
+    async function requestJSON(url) {
+        const response = typeof root.apiFetch === 'function' ? await root.apiFetch(url) : await root.fetch(url);
+        const payload = await response.json().catch(function () { return {}; });
+        if (!response.ok) throw new Error(payload.error || t('auditLoadFailed', '加载出站审计失败'));
+        return payload;
+    }
+
+    function safeString(value, maximum) {
+        const text = String(value || '');
+        if (text.length > maximum) return null;
+        for (const character of text) {
+            const code = character.codePointAt(0);
+            if (code < 0x20 || code === 0x7f) return null;
+        }
+        return text;
+    }
+
+    function isSafeAuditEvent(event) {
+        if (!event || typeof event !== 'object') return false;
+        if (!['network', 'lifecycle'].includes(event.category)) return false;
+        if (!TYPES.has(String(event.eventType || ''))) return false;
+        if (event.category === 'network' && !NETWORK_TYPES.has(event.eventType)) return false;
+        if (event.category === 'lifecycle' && !LIFECYCLE_TYPES.has(event.eventType)) return false;
+        if (!safeString(event.id, 128) || !safeString(event.conversationId, 128)) return false;
+        if (Number.isNaN(Date.parse(event.occurredAt))) return false;
+        const safeFields = [
+            [event.conversationTitle, 512], [event.containerId, 128], [event.agentId, 128],
+            [event.snapshotId, 128], [event.snapshotSha256, 128], [event.domain, 253],
+            [event.connectedIp, 64], [event.ruleId, 256], [event.reason, 128],
+            [event.upstreamRouteId, 128], [event.method, 32], [event.path, 1024],
+            [event.outcome, 128], [event.lifecycleOperation, 128], [event.lifecycleState, 128], [event.message, 1024],
+        ];
+        if (safeFields.some(([value, maximum]) => safeString(value, maximum) === null)) return false;
+        if (event.category === 'network' && !safeString(event.domain, 253)) return false;
+        if (event.category === 'network' && event.eventType === 'http' && !safeString(event.path, 1024)) return false;
+        const resolvedIps = event.resolvedIps === undefined ? [] : event.resolvedIps;
+        if (!Array.isArray(resolvedIps) || resolvedIps.length > 64 || resolvedIps.some((value) => !safeString(value, 64))) return false;
+        for (const [value, maximum] of [[event.runtimeGeneration, Number.MAX_SAFE_INTEGER], [event.port, 65535], [event.httpStatus, 999], [event.latencyMs, Number.MAX_SAFE_INTEGER], [event.bytesUp, Number.MAX_SAFE_INTEGER], [event.bytesDown, Number.MAX_SAFE_INTEGER]]) {
+            const numeric = Number(value || 0);
+            if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) return false;
+        }
+        if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
+        if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
+        return true;
+    }
+
+    function shortHash(value) {
+        const text = String(value || '');
+        return text.length > 24 ? `${text.slice(0, 14)}…${text.slice(-8)}` : (text || '—');
+    }
+
+    function formatDate(value) {
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
+    }
+
+    function eventTypeLabel(value) {
+        const labels = {
+            dns: 'DNS', http: 'HTTP', connect: 'CONNECT',
+            create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
+            rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
+        };
+        return labels[value] || String(value || '').toUpperCase();
+    }
+
+    function verdictLabel(value) {
+        const labels = {
+            allowed: t('activityAllowed', '允许'), blocked: t('activityBlocked', '阻断'),
+            success: t('auditSuccess', '成功'), failure: t('auditFailure', '失败'),
+        };
+        return labels[value] || value;
+    }
+
+    function lifecycleMessage(event) {
+        if (event.result === 'failure') return t('auditLifecycleFailed', '容器生命周期操作失败');
+        if (event.eventType === 'create') return t('auditRuntimeCreated', '容器运行时已创建');
+        if (event.eventType === 'delete') return t('auditRuntimeDeleted', '容器运行时已删除');
+        if (event.eventType === 'reconcile') return t('auditRuntimeReconciled', '容器运行时已对账');
+        return t('auditLifecycleCompleted', '容器生命周期操作已完成');
+    }
+
+    function outcomeLabel(event) {
+        if (event.category === 'lifecycle') return lifecycleMessage(event);
+        return t(`activityValues.${event.outcome}`, event.outcome || event.decision);
+    }
+
+    function cell(label, primary, secondary, className) {
+        const td = create('td', className || '');
+        td.dataset.label = label;
+        td.append(create('strong', '', primary || '—'));
+        if (secondary) td.append(create('span', '', secondary));
+        return td;
+    }
+
+    function eventRow(event) {
+        const row = create('tr', `is-${event.category}`);
+        const target = event.category === 'network'
+            ? `${event.domain || '—'}${event.port ? `:${event.port}` : ''}`
+            : eventTypeLabel(event.lifecycleOperation || event.eventType);
+        const resolution = event.connectedIp || (event.resolvedIps || []).join(', ');
+        const verdict = event.decision || event.result;
+        const rule = event.ruleId || (event.reason ? t(`activityValues.${event.reason}`, event.reason) : '') || event.lifecycleState;
+        const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
+        const traceSecondary = [shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
+        const outcome = outcomeLabel(event);
+        const resultDetail = event.category === 'network'
+            ? `${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
+            : t(`status.${event.lifecycleState}`, event.lifecycleState);
+        row.append(
+            cell(t('activityTime', '时间'), formatDate(event.occurredAt), '', 'is-time'),
+            cell(t('auditEventType', '事件'), eventTypeLabel(event.eventType), event.category === 'network' ? t('auditCategoryNetwork', '网络') : t('auditCategoryLifecycle', '生命周期'), 'is-event'),
+            cell(t('activityConversation', '对话'), event.conversationTitle || event.conversationId, event.conversationId, 'is-conversation'),
+            cell(t('activityTarget', '目标'), target, resolution, 'is-target'),
+            cell(t('activityDecision', '策略判定'), verdictLabel(verdict), rule, `is-decision is-${verdict}`),
+            cell(t('auditTrace', '追溯'), tracePrimary, traceSecondary, 'is-trace'),
+            cell(t('activityResult', '结果'), outcome, resultDetail, 'is-result'),
+        );
+        return row;
+    }
+
+    function summaryCard(label, value, tone) {
+        const card = create('article', `egress-audit-summary-card is-${tone || 'neutral'}`);
+        card.append(create('span', '', label), create('strong', '', Number(value || 0)));
+        return card;
+    }
+
+    function render() {
+        const summary = element('egress-audit-summary');
+        if (summary) {
+            summary.replaceChildren(
+                summaryCard(t('auditTotal', '总事件'), state.summary.total),
+                summaryCard(t('auditNetwork', '网络'), state.summary.network),
+                summaryCard(t('auditLifecycle', '生命周期'), state.summary.lifecycle),
+                summaryCard(t('auditBlocked', '阻断'), state.summary.blocked, state.summary.blocked ? 'danger' : 'neutral'),
+                summaryCard(t('auditFailures', '失败'), state.summary.failures, state.summary.failures ? 'danger' : 'success'),
+            );
+        }
+        const body = element('egress-audit-rows');
+        const empty = element('egress-audit-empty');
+        const table = body && body.closest ? body.closest('table') : null;
+        if (body) body.replaceChildren(...state.items.map(eventRow));
+        if (table) table.hidden = state.items.length === 0;
+        if (empty) empty.hidden = state.items.length > 0;
+        const meta = element('egress-audit-pagination-meta');
+        if (meta) meta.textContent = state.total
+            ? t('auditPageMeta', '第 {{page}} / {{pages}} 页 · 共 {{total}} 条', { page: state.page, pages: state.totalPages, total: state.total })
+            : t('auditPageMetaEmpty', '共 0 条');
+        const previous = element('egress-audit-prev');
+        const next = element('egress-audit-next');
+        if (previous) previous.disabled = state.loading || state.page <= 1;
+        if (next) next.disabled = state.loading || state.totalPages === 0 || state.page >= state.totalPages;
+        const load = element('egress-audit-load-state');
+        if (load) {
+            load.textContent = state.loading
+                ? t('auditLoading', '正在加载审计事件…')
+                : (state.error || t('auditLoaded', '已加载 {{count}} 条当前页事件', { count: state.items.length }));
+            load.classList.toggle('is-error', Boolean(state.error));
+        }
+        const refresh = element('egress-audit-refresh');
+        if (refresh) refresh.disabled = state.loading;
+    }
+
+    async function refresh() {
+        if (!state.active || state.loading) return;
+        state.loading = true;
+        state.error = '';
+        const generation = ++state.generation;
+        render();
+        try {
+            const payload = await requestJSON(`/api/egress-audit-events?${queryParams(true).toString()}`);
+            if (!state.active || generation !== state.generation) return;
+            const items = Array.isArray(payload.items) ? payload.items.filter(isSafeAuditEvent) : [];
+            state.items = items;
+            state.total = Math.max(0, Number(payload.total || 0));
+            state.totalPages = Math.max(0, Number(payload.totalPages || 0));
+            state.summary = payload.summary || { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
+            if (state.totalPages > 0 && state.page > state.totalPages) {
+                state.page = state.totalPages;
+                writeURLState();
+                state.loading = false;
+                return refresh();
+            }
+        } catch (error) {
+            if (!state.active || generation !== state.generation) return;
+            state.items = [];
+            state.total = 0;
+            state.totalPages = 0;
+            state.summary = { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
+            state.error = error && error.message ? error.message : t('auditLoadFailed', '加载出站审计失败');
+        } finally {
+            if (generation === state.generation) {
+                state.loading = false;
+                render();
+            }
+        }
+    }
+
+    async function exportEvents(format) {
+        const button = element(`egress-audit-export-${format}`);
+        if (button) button.disabled = true;
+        try {
+            const params = queryParams(false);
+            params.set('format', format);
+            const response = typeof root.apiFetch === 'function'
+                ? await root.apiFetch(`/api/egress-audit-events/export?${params.toString()}`)
+                : await root.fetch(`/api/egress-audit-events/export?${params.toString()}`);
+            if (!response.ok) throw new Error(t('auditExportFailed', '导出失败'));
+            const blob = await response.blob();
+            const disposition = response.headers.get('Content-Disposition') || '';
+            const match = disposition.match(/filename="([^"]+)"/);
+            const name = match ? match[1] : `egress-audit.${format}`;
+            const url = root.URL.createObjectURL(blob);
+            const anchor = root.document.createElement('a');
+            anchor.href = url;
+            anchor.download = name;
+            anchor.hidden = true;
+            root.document.body.append(anchor);
+            anchor.click();
+            anchor.remove();
+            root.URL.revokeObjectURL(url);
+        } catch (error) {
+            const load = element('egress-audit-load-state');
+            if (load) {
+                load.textContent = error && error.message ? error.message : t('auditExportFailed', '导出失败');
+                load.classList.add('is-error');
+            }
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function applyFilters() {
+        state.query = Array.from(element('egress-audit-search')?.value || '').slice(0, 200).join('');
+        state.category = closedValue(element('egress-audit-category')?.value, CATEGORIES, 'all');
+        state.type = closedValue(element('egress-audit-type')?.value, TYPES, 'all');
+        state.decision = closedValue(element('egress-audit-decision')?.value, DECISIONS, 'all');
+        const pageSize = Number.parseInt(element('egress-audit-page-size')?.value, 10);
+        state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
+        state.page = 1;
+        writeURLState();
+        refresh();
+    }
+
+    function bind() {
+        if (state.bound) return;
+        state.bound = true;
+        const search = element('egress-audit-search');
+        if (search) search.addEventListener('input', function () {
+            if (state.searchTimer) root.clearTimeout(state.searchTimer);
+            state.searchTimer = root.setTimeout(applyFilters, 300);
+        });
+        ['egress-audit-category', 'egress-audit-type', 'egress-audit-decision', 'egress-audit-page-size'].forEach((id) => {
+            const control = element(id);
+            if (control) control.addEventListener('change', applyFilters);
+        });
+        element('egress-audit-refresh')?.addEventListener('click', refresh);
+        element('egress-audit-prev')?.addEventListener('click', function () {
+            if (state.page <= 1) return;
+            state.page -= 1;
+            writeURLState();
+            refresh();
+        });
+        element('egress-audit-next')?.addEventListener('click', function () {
+            if (state.totalPages === 0 || state.page >= state.totalPages) return;
+            state.page += 1;
+            writeURLState();
+            refresh();
+        });
+        element('egress-audit-export-json')?.addEventListener('click', function () { exportEvents('json'); });
+        element('egress-audit-export-csv')?.addEventListener('click', function () { exportEvents('csv'); });
+        if (root.document && typeof root.document.addEventListener === 'function') {
+            root.document.addEventListener('languagechange', function () { if (state.active) render(); });
+        }
+    }
+
+    function init() {
+        if (!root.document || !element('page-egress-audit')) return;
+        state.active = true;
+        readURLState();
+        bind();
+        syncControls();
+        writeURLState();
+        refresh();
+    }
+
+    function stop() {
+        state.active = false;
+        state.generation += 1;
+        state.loading = false;
+        if (state.searchTimer) {
+            root.clearTimeout(state.searchTimer);
+            state.searchTimer = null;
+        }
+    }
+
+    return {
+        init, stop, refresh, isSafeAuditEvent,
+        readURLStateForTest: function (search) {
+            readURLState(search || '');
+            return { page: state.page, pageSize: state.pageSize, query: state.query, category: state.category, type: state.type, decision: state.decision };
+        },
+    };
+}));

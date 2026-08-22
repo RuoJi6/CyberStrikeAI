@@ -304,6 +304,10 @@ type RuntimeExecutor interface {
 // before following new events.
 type ActivityStreamOptions struct {
 	Tail int
+	// All replays the gateway's complete bounded Docker log before following.
+	// It is reserved for the trusted persistent audit collector; HTTP callers
+	// remain limited to Tail <= 500.
+	All bool
 }
 
 type RuntimeActivitySink func(egress.ActivityEvent) error

@@ -93,6 +93,9 @@ func (db *DB) initContainerRuntimeTables() error {
 	if _, err := db.Exec(createRetainedContainerWorkspacesTable); err != nil {
 		return err
 	}
+	if err := db.initEgressAuditTables(); err != nil {
+		return err
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_conversation_container_runtimes_status ON conversation_container_runtimes(initialization_status, updated_at)`); err != nil {
 		return err
 	}

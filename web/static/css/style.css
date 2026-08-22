@@ -4674,6 +4674,165 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .network-activity-empty strong { color: var(--text-primary); font-size: 0.86rem; }
 .network-activity-empty p { max-width: 520px; margin: 0; font-size: 0.76rem; line-height: 1.55; }
 
+.egress-audit-intro { margin-bottom: 16px; }
+
+.egress-audit-controls,
+.egress-audit-results {
+    display: block;
+    min-width: 0;
+    margin-bottom: 16px;
+}
+
+.egress-audit-filter-grid {
+    display: grid;
+    grid-template-columns: minmax(250px, 1.6fr) repeat(4, minmax(126px, 0.72fr));
+    align-items: end;
+    gap: 12px;
+}
+
+.egress-audit-field {
+    display: grid;
+    min-width: 0;
+    gap: 6px;
+}
+
+.egress-audit-field > span {
+    color: var(--text-secondary);
+    font-size: 0.72rem;
+    font-weight: 680;
+}
+
+.egress-audit-field input,
+.egress-audit-field select {
+    width: 100%;
+    min-width: 0;
+    min-height: 40px;
+    padding: 8px 11px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.78rem;
+}
+
+.egress-audit-field .unified-select,
+.egress-audit-field .unified-select-trigger { width: 100%; }
+
+.egress-audit-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-color);
+}
+
+.egress-audit-summary {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.egress-audit-summary-card {
+    display: grid;
+    min-width: 0;
+    min-height: 92px;
+    align-content: space-between;
+    gap: 10px;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-secondary);
+}
+
+.egress-audit-summary-card span { color: var(--text-secondary); font-size: 0.72rem; font-weight: 650; }
+.egress-audit-summary-card strong { color: var(--text-primary); font-size: 1.45rem; line-height: 1; }
+.egress-audit-summary-card.is-danger { border-color: color-mix(in srgb, #ef4444 38%, var(--border-color)); background: color-mix(in srgb, #ef4444 5%, var(--bg-secondary)); }
+.egress-audit-summary-card.is-danger strong { color: #dc2626; }
+.egress-audit-summary-card.is-success { border-color: color-mix(in srgb, #22c55e 32%, var(--border-color)); }
+
+.egress-audit-results-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 18px;
+    margin-bottom: 16px;
+}
+
+.egress-audit-results-heading h3 { margin: 0; color: var(--text-primary); font-size: 1rem; }
+.egress-audit-results-heading p { margin: 6px 0 0; color: var(--text-secondary); font-size: 0.76rem; }
+.egress-audit-results-heading p.is-error { color: #dc2626; }
+.egress-audit-pagination-meta { flex: 0 0 auto; color: var(--text-secondary); font-size: 0.74rem; }
+
+.egress-audit-table-wrap {
+    min-width: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-primary);
+}
+
+.egress-audit-table {
+    width: 100%;
+    min-width: 1080px;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.egress-audit-table th {
+    padding: 11px 12px;
+    background: color-mix(in srgb, var(--bg-secondary) 96%, transparent);
+    color: var(--text-secondary);
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.035em;
+}
+
+.egress-audit-table th:nth-child(1) { width: 150px; }
+.egress-audit-table th:nth-child(2) { width: 112px; }
+.egress-audit-table th:nth-child(3) { width: 190px; }
+.egress-audit-table th:nth-child(4) { width: 190px; }
+.egress-audit-table th:nth-child(5) { width: 150px; }
+.egress-audit-table th:nth-child(6) { width: 180px; }
+.egress-audit-table th:nth-child(7) { width: 170px; }
+
+.egress-audit-table td {
+    min-width: 0;
+    padding: 13px 12px;
+    border-top: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.egress-audit-table tbody tr:first-child td { border-top: 0; }
+.egress-audit-table tbody tr:hover { background: color-mix(in srgb, var(--primary-color) 4%, transparent); }
+.egress-audit-table tbody tr.is-network { box-shadow: inset 3px 0 0 var(--primary-color); }
+.egress-audit-table tbody tr.is-lifecycle { box-shadow: inset 3px 0 0 #64748b; }
+.egress-audit-table td strong,
+.egress-audit-table td span { display: block; overflow: hidden; text-overflow: ellipsis; }
+.egress-audit-table td strong { color: var(--text-primary); font-size: 0.76rem; line-height: 1.45; white-space: nowrap; }
+.egress-audit-table td span { margin-top: 4px; color: var(--text-secondary); font-size: 0.68rem; line-height: 1.45; white-space: nowrap; }
+.egress-audit-table td.is-target strong,
+.egress-audit-table td.is-target span,
+.egress-audit-table td.is-decision span,
+.egress-audit-table td.is-trace span,
+.egress-audit-table td.is-result strong { overflow-wrap: anywhere; white-space: normal; }
+.egress-audit-table td.is-decision.is-allowed strong,
+.egress-audit-table td.is-decision.is-success strong { color: #15803d; }
+.egress-audit-table td.is-decision.is-blocked strong,
+.egress-audit-table td.is-decision.is-failure strong { color: #dc2626; }
+
+.egress-audit-pagination {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 16px;
+}
+
 html[data-theme="dark"] .container-management-page {
     background:
         radial-gradient(circle at 88% 2%, color-mix(in srgb, var(--primary-color) 13%, transparent) 0, transparent 32%),
@@ -4695,6 +4854,11 @@ html[data-theme="dark"] .network-activity-table td.is-decision.is-allowed strong
 html[data-theme="dark"] .network-activity-connection.is-error,
 html[data-theme="dark"] .network-activity-counts .is-danger,
 html[data-theme="dark"] .network-activity-table td.is-decision.is-blocked strong { color: #fca5a5; }
+html[data-theme="dark"] .egress-audit-summary-card.is-danger strong,
+html[data-theme="dark"] .egress-audit-table td.is-decision.is-blocked strong,
+html[data-theme="dark"] .egress-audit-table td.is-decision.is-failure strong { color: #fca5a5; }
+html[data-theme="dark"] .egress-audit-table td.is-decision.is-allowed strong,
+html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { color: #86efac; }
 
 @media (max-width: 980px) {
     .container-runtime-toolbar { flex-wrap: wrap; }
@@ -4706,6 +4870,9 @@ html[data-theme="dark"] .network-activity-table td.is-decision.is-blocked strong
     .network-activity-toolbar { align-items: stretch; flex-direction: column; }
     .network-activity-conversation-field { width: 100%; }
     .network-activity-actions { justify-content: flex-start; }
+    .egress-audit-filter-grid { grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(130px, 0.8fr)); }
+    .egress-audit-field.is-search { grid-column: 1 / -1; }
+    .egress-audit-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (max-width: 760px) {
@@ -4780,6 +4947,23 @@ html[data-theme="dark"] .network-activity-table td.is-decision.is-blocked strong
     .network-activity-table td.is-target,
     .network-activity-table td.is-resolution,
     .network-activity-table td.is-context { grid-column: 1 / -1; }
+    .egress-audit-controls,
+    .egress-audit-results { padding: 16px; border-radius: 15px; }
+    .egress-audit-filter-grid { grid-template-columns: 1fr 1fr; }
+    .egress-audit-summary { grid-template-columns: 1fr 1fr; }
+    .egress-audit-results-heading { align-items: flex-start; flex-direction: column; }
+    .egress-audit-table-wrap { overflow: visible; border: 0; background: transparent; }
+    .egress-audit-table { display: block; min-width: 0; }
+    .egress-audit-table thead { display: none; }
+    .egress-audit-table tbody { display: grid; gap: 10px; }
+    .egress-audit-table tr { display: grid; grid-template-columns: 1fr 1fr; overflow: hidden; border: 1px solid var(--border-color); border-radius: 13px; background: var(--bg-primary); }
+    .egress-audit-table td { display: block; padding: 11px 12px; }
+    .egress-audit-table td::before { display: block; margin-bottom: 5px; color: var(--text-tertiary, var(--text-secondary)); content: attr(data-label); font-size: 0.62rem; font-weight: 700; text-transform: uppercase; }
+    .egress-audit-table td:nth-child(-n+2) { border-top: 0; }
+    .egress-audit-table td.is-conversation,
+    .egress-audit-table td.is-target,
+    .egress-audit-table td.is-trace,
+    .egress-audit-table td.is-result { grid-column: 1 / -1; }
 }
 
 @media (max-width: 480px) {
@@ -4798,6 +4982,18 @@ html[data-theme="dark"] .network-activity-table td.is-decision.is-blocked strong
     .network-activity-table td.is-target,
     .network-activity-table td.is-resolution,
     .network-activity-table td.is-context { grid-column: auto; }
+    .egress-audit-filter-grid,
+    .egress-audit-summary { grid-template-columns: 1fr; }
+    .egress-audit-field.is-search { grid-column: auto; }
+    .egress-audit-actions { display: grid; grid-template-columns: 1fr; }
+    .egress-audit-actions .btn-secondary { width: 100%; }
+    .egress-audit-table tr { grid-template-columns: 1fr; }
+    .egress-audit-table td:nth-child(2) { border-top: 1px solid var(--border-color); }
+    .egress-audit-table td.is-conversation,
+    .egress-audit-table td.is-target,
+    .egress-audit-table td.is-trace,
+    .egress-audit-table td.is-result { grid-column: auto; }
+    .egress-audit-pagination { display: grid; grid-template-columns: 1fr 1fr; }
 }
 
 .message {

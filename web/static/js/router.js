@@ -150,6 +150,9 @@ function switchPage(pageId) {
     if (currentPage === 'network-activity' && pageId !== 'network-activity' && typeof window.stopNetworkActivityPage === 'function') {
         window.stopNetworkActivityPage();
     }
+    if (currentPage === 'egress-audit' && pageId !== 'egress-audit' && typeof window.stopEgressAuditPage === 'function') {
+        window.stopEgressAuditPage();
+    }
     if (pageId !== 'chat') {
         setChatConversationRestorePending('', false);
         if (currentPage === 'chat' && typeof window.abandonChatConversationForPageNavigation === 'function') {

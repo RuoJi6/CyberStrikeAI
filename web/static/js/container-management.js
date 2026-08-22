@@ -605,6 +605,8 @@ function initContainerManagementPage(pageId) {
         if (!containerManagementState.loading) refreshContainerManagementData();
     } else if (pageId === 'network-activity' && typeof window.initNetworkActivityPage === 'function') {
         window.initNetworkActivityPage();
+    } else if (pageId === 'egress-audit' && typeof window.initEgressAuditPage === 'function') {
+        window.initEgressAuditPage();
     }
 }
 

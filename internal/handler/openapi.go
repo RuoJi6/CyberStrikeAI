@@ -2136,6 +2136,42 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/egress-audit-events": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "搜索持久出站与生命周期审计事件",
+					"description": "按审计权限和对话资源范围返回不含请求头、正文、查询参数或凭据的持久安全投影。",
+					"operationId": "listEgressAuditEvents",
+					"parameters": []map[string]interface{}{
+						{"name": "page", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 1, "minimum": 1}},
+						{"name": "page_size", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 20, "enum": []int{10, 20, 50, 100}}},
+						{"name": "conversation_id", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 128}},
+						{"name": "q", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 200}},
+						{"name": "category", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "network", "lifecycle"}}},
+						{"name": "event_type", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "dns", "http", "connect", "create", "start", "stop", "rebuild", "delete", "reconcile"}}},
+						{"name": "decision", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "allowed", "blocked", "success", "failure"}}},
+						{"name": "since", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
+						{"name": "until", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "持久审计事件分页结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"type": "object"}}}},
+						"400": map[string]interface{}{"description": "筛选或分页参数无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"},
+					},
+				},
+			},
+			"/api/egress-audit-events/export": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "导出持久出站审计事件", "operationId": "exportEgressAuditEvents",
+					"parameters": []map[string]interface{}{{"name": "format", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "json", "enum": []string{"json", "csv"}}}},
+					"responses":  map[string]interface{}{"200": map[string]interface{}{"description": "最多 5000 条 JSON 或 CSV 审计事件"}, "400": map[string]interface{}{"description": "导出格式或筛选无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"}},
+				},
+			},
+			"/api/egress-audit-events/{id}": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "查看一条持久出站审计事件", "operationId": "getEgressAuditEvent",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":  map[string]interface{}{"200": map[string]interface{}{"description": "安全审计事件"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"}, "404": map[string]interface{}{"description": "事件不存在或不可访问"}},
+				},
+			},
 			"/api/conversations/{id}": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},

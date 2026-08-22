@@ -50,12 +50,18 @@ func (m *DockerManager) StreamEgressActivity(ctx context.Context, spec RuntimeSp
 	if spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil {
 		return fmt.Errorf("%w: runtime has no policy egress gateway", ErrInvalidSpecification)
 	}
-	tail := options.Tail
-	if tail == 0 {
-		tail = defaultActivityTail
-	}
-	if tail < 1 || tail > maxActivityTail {
-		return invalidSpec("activity stream tail must be between 1 and 500")
+	tailValue := "all"
+	if !options.All {
+		tail := options.Tail
+		if tail == 0 {
+			tail = defaultActivityTail
+		}
+		if tail < 1 || tail > maxActivityTail {
+			return invalidSpec("activity stream tail must be between 1 and 500")
+		}
+		tailValue = strconv.Itoa(tail)
+	} else if options.Tail != 0 {
+		return invalidSpec("activity stream all and tail are mutually exclusive")
 	}
 	observation, err := m.Observe(ctx, spec)
 	if err != nil {
@@ -69,7 +75,7 @@ func (m *DockerManager) StreamEgressActivity(ctx context.Context, spec RuntimeSp
 		return fmt.Errorf("%w: engine log streaming is unavailable", ErrEngineUnavailable)
 	}
 	logs, err := logsAPI.ContainerLogs(ctx, observation.Gateway.ProviderID, mobyclient.ContainerLogsOptions{
-		ShowStdout: true, ShowStderr: false, Follow: true, Tail: strconv.Itoa(tail),
+		ShowStdout: true, ShowStderr: false, Follow: true, Tail: tailValue,
 	})
 	if err != nil {
 		return fmt.Errorf("stream verified egress gateway logs: %w", err)

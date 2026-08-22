@@ -69,6 +69,19 @@ func TestDockerManagerStreamsOnlyValidatedExactSnapshotActivity(t *testing.T) {
 	if api.logsContainerID != "provider-gateway-1" || !api.logsOptions.ShowStdout || api.logsOptions.ShowStderr || !api.logsOptions.Follow || api.logsOptions.Tail != "37" {
 		t.Fatalf("logs request = %q %#v", api.logsContainerID, api.logsOptions)
 	}
+	received = nil
+	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{All: true}, func(event egress.ActivityEvent) error {
+		received = append(received, event)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(received) != 1 || api.logsOptions.Tail != "all" || !api.logsOptions.Follow {
+		t.Fatalf("complete bounded log replay = %#v, options = %#v", received, api.logsOptions)
+	}
+	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{All: true, Tail: 1}, func(egress.ActivityEvent) error { return nil }); err == nil {
+		t.Fatal("combined all/tail stream options were accepted")
+	}
 }
 
 func writeActivityLogFrame(target *bytes.Buffer, payload []byte) {
@@ -81,10 +94,13 @@ func writeActivityLogFrame(target *bytes.Buffer, payload []byte) {
 
 func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 	spec, _, _ := snapshotGatewayFixture(t)
+	spec.EgressGateway.UpstreamRoute = &EgressUpstreamRouteSpec{
+		ID: spec.ConversationID, SHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
 	valid := egress.ActivityEvent{
 		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestCONNECT,
-		Domain: "allowed.example", Port: 443, Decision: egress.ActivityDecisionAllowed, RuleID: "visit-1",
-		Reason: "allow-visit", Outcome: "tunnel_closed", SnapshotID: spec.EgressGateway.BoundarySnapshot.ID,
+		Domain: "allowed.example", Port: 443, Decision: egress.ActivityDecisionBlocked, RuleID: "visit-1",
+		Reason: "rate_limit_exceeded", Outcome: "rate_limited", UpstreamRouteID: spec.ConversationID, SnapshotID: spec.EgressGateway.BoundarySnapshot.ID,
 		SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
 	}
 	encoded, _ := json.Marshal(valid)
@@ -93,6 +109,7 @@ func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*egress.ActivityEvent){
 		"snapshot drift": func(event *egress.ActivityEvent) { event.SnapshotID = "00000000-0000-0000-0000-000000000000" },
+		"route drift":    func(event *egress.ActivityEvent) { event.UpstreamRouteID = "other-route" },
 		"connect path":   func(event *egress.ActivityEvent) { event.Path = "/must-not-exist" },
 		"unsafe rule":    func(event *egress.ActivityEvent) { event.RuleID = "secret\nheader" },
 	} {
