@@ -120,6 +120,8 @@ func permissionForRequest(method, fullPath string) string {
 		return crudPermission(method, "tasks")
 	case path == "/conversations/:id/egress" && method == http.MethodDelete:
 		return "chat:write"
+	case path == "/container-runtimes":
+		return "chat:read"
 	case strings.HasPrefix(path, "/conversations"), strings.HasPrefix(path, "/messages"), strings.HasPrefix(path, "/process-details"):
 		return crudPermission(method, "chat")
 	case strings.HasPrefix(path, "/groups"):

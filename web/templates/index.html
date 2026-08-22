@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260822-7">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260822-9">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -5124,9 +5124,16 @@
                             </div>
                         </div>
                         <div class="page-content container-management-content">
-                            <div class="container-runtime-toolbar"><p id="container-overview-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            <div class="container-runtime-toolbar">
+                                <div class="container-runtime-filter-bar">
+                                    <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.searchLabel">搜索对话容器</span><input id="container-overview-search" type="search" maxlength="200" autocomplete="off" data-container-runtime-search data-i18n="containerManagement.searchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索标题或对话 ID…"></label>
+                                    <div class="container-runtime-filter-field"><label for="container-overview-status" data-i18n="containerManagement.statusFilter">状态</label><select id="container-overview-status" data-container-runtime-status data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="not_requested" data-i18n="containerManagement.filterNotRequested">未初始化</option><option value="pending" data-i18n="containerManagement.filterPending">处理中</option><option value="running" data-i18n="containerManagement.filterRunning">运行中</option><option value="stopped" data-i18n="containerManagement.filterStopped">已停止</option><option value="failed" data-i18n="containerManagement.filterFailed">失败</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="container-overview-page-size" data-i18n="containerManagement.rowsPerPage">每页</label><select id="container-overview-page-size" data-container-runtime-page-size data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></div>
+                                </div>
+                                <div class="container-runtime-toolbar-status"><p id="container-overview-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            </div>
                             <section id="container-overview-summary" class="container-runtime-summary" aria-label="容器状态汇总"></section>
-                            <section class="container-runtime-section" aria-labelledby="container-overview-focus-title"><div class="container-runtime-section-heading"><div><h3 id="container-overview-focus-title" data-i18n="containerManagement.overviewFocusTitle">运行态总览</h3><p data-i18n="containerManagement.overviewFocusDescription">汇总容器、网关、工作区、策略快照和需要处理的异常。</p></div></div><div id="container-overview-runtime-list" class="container-runtime-compact-list"></div></section>
+                            <section class="container-runtime-section" aria-labelledby="container-overview-focus-title"><div class="container-runtime-section-heading"><div><h3 id="container-overview-focus-title" data-i18n="containerManagement.overviewFocusTitle">运行态总览</h3><p data-i18n="containerManagement.overviewFocusDescription">汇总容器、网关、工作区、策略快照和需要处理的异常。</p></div></div><div id="container-overview-runtime-list" class="container-runtime-compact-list"></div><div id="container-overview-pagination" class="container-runtime-pagination"></div></section>
                         </div>
                     </div>
                 </div>
@@ -5137,8 +5144,15 @@
                             <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.conversationsTitle">对话容器</h2><p data-i18n="containerManagement.conversationsSubtitle">按对话查看容器生命周期、资源和最后错误。</p></div>
                         </div>
                         <div class="page-content container-management-content">
-                            <div class="container-runtime-toolbar"><p id="conversation-containers-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
-                            <div class="container-runtime-split"><section class="container-runtime-section" aria-labelledby="conversation-containers-focus-title"><div class="container-runtime-section-heading"><div><h3 id="conversation-containers-focus-title" data-i18n="containerManagement.conversationsFocusTitle">每对话隔离运行时</h3><p data-i18n="containerManagement.conversationsFocusDescription">定位容器状态、网关状态、工作区类型与关联安全快照。</p></div></div><div id="conversation-containers-list" class="container-runtime-list" role="listbox" aria-label="对话容器"></div></section><section id="conversation-container-detail" class="container-runtime-section container-runtime-detail" aria-live="polite"></section></div>
+                            <div class="container-runtime-toolbar">
+                                <div class="container-runtime-filter-bar">
+                                    <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.searchLabel">搜索对话容器</span><input id="conversation-containers-search" type="search" maxlength="200" autocomplete="off" data-container-runtime-search data-i18n="containerManagement.searchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索标题或对话 ID…"></label>
+                                    <div class="container-runtime-filter-field"><label for="conversation-containers-status" data-i18n="containerManagement.statusFilter">状态</label><select id="conversation-containers-status" data-container-runtime-status data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="not_requested" data-i18n="containerManagement.filterNotRequested">未初始化</option><option value="pending" data-i18n="containerManagement.filterPending">处理中</option><option value="running" data-i18n="containerManagement.filterRunning">运行中</option><option value="stopped" data-i18n="containerManagement.filterStopped">已停止</option><option value="failed" data-i18n="containerManagement.filterFailed">失败</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="conversation-containers-page-size" data-i18n="containerManagement.rowsPerPage">每页</label><select id="conversation-containers-page-size" data-container-runtime-page-size data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></div>
+                                </div>
+                                <div class="container-runtime-toolbar-status"><p id="conversation-containers-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            </div>
+                            <div class="container-runtime-split"><section class="container-runtime-section" aria-labelledby="conversation-containers-focus-title"><div class="container-runtime-section-heading"><div><h3 id="conversation-containers-focus-title" data-i18n="containerManagement.conversationsFocusTitle">每对话隔离运行时</h3><p data-i18n="containerManagement.conversationsFocusDescription">定位容器状态、网关状态、工作区类型与关联安全快照。</p></div></div><div id="conversation-containers-list" class="container-runtime-list" role="listbox" aria-label="对话容器"></div><div id="conversation-containers-pagination" class="container-runtime-pagination"></div></section><section id="conversation-container-detail" class="container-runtime-section container-runtime-detail" aria-live="polite"></section></div>
                         </div>
                     </div>
                 </div>
@@ -5149,8 +5163,15 @@
                             <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.runtimesTitle">运行环境</h2><p data-i18n="containerManagement.runtimesSubtitle">管理镜像、工具层、架构和运行资源基线。</p></div>
                         </div>
                         <div class="page-content container-management-content">
-                            <div class="container-runtime-toolbar"><p id="runtime-environments-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
-                            <section class="container-runtime-section" aria-labelledby="runtime-environments-focus-title"><div class="container-runtime-section-heading"><div><h3 id="runtime-environments-focus-title" data-i18n="containerManagement.runtimesFocusTitle">可验证运行环境</h3><p data-i18n="containerManagement.runtimesFocusDescription">展示镜像 digest、架构、工具准备状态与资源限制。</p></div></div><div id="runtime-environments-list" class="container-environment-grid"></div></section>
+                            <div class="container-runtime-toolbar">
+                                <div class="container-runtime-filter-bar">
+                                    <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.searchLabel">搜索对话容器</span><input id="runtime-environments-search" type="search" maxlength="200" autocomplete="off" data-container-runtime-search data-i18n="containerManagement.searchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索标题或对话 ID…"></label>
+                                    <div class="container-runtime-filter-field"><label for="runtime-environments-status" data-i18n="containerManagement.statusFilter">状态</label><select id="runtime-environments-status" data-container-runtime-status data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="not_requested" data-i18n="containerManagement.filterNotRequested">未初始化</option><option value="pending" data-i18n="containerManagement.filterPending">处理中</option><option value="running" data-i18n="containerManagement.filterRunning">运行中</option><option value="stopped" data-i18n="containerManagement.filterStopped">已停止</option><option value="failed" data-i18n="containerManagement.filterFailed">失败</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="runtime-environments-page-size" data-i18n="containerManagement.rowsPerPage">每页</label><select id="runtime-environments-page-size" data-container-runtime-page-size data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></div>
+                                </div>
+                                <div class="container-runtime-toolbar-status"><p id="runtime-environments-load-state" class="container-runtime-load-state" role="status" aria-live="polite"></p><button class="btn-secondary container-runtime-refresh" type="button" onclick="refreshContainerManagementData()" data-i18n="containerManagement.refresh">刷新状态</button></div>
+                            </div>
+                            <section class="container-runtime-section" aria-labelledby="runtime-environments-focus-title"><div class="container-runtime-section-heading"><div><h3 id="runtime-environments-focus-title" data-i18n="containerManagement.runtimesFocusTitle">可验证运行环境</h3><p data-i18n="containerManagement.runtimesFocusDescription">展示镜像 digest、架构、工具准备状态与资源限制。</p></div></div><div id="runtime-environments-list" class="container-environment-grid"></div><div id="runtime-environments-pagination" class="container-runtime-pagination"></div></section>
                         </div>
                     </div>
                 </div>
@@ -7097,7 +7118,7 @@
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/container-management.js?v=20260822-3"></script>
+    <script src="/static/js/container-management.js?v=20260822-5"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

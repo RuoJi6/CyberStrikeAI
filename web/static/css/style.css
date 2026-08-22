@@ -3813,6 +3813,10 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 /* Stage 6: 容器管理按管理域拆分为独立页面，避免单页长滚动。 */
 .container-management-page {
     min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
     background:
         radial-gradient(circle at 88% 2%, color-mix(in srgb, var(--primary-color) 9%, transparent) 0, transparent 32%),
         var(--bg-primary);
@@ -3930,11 +3934,67 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 
 .container-runtime-toolbar {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     justify-content: space-between;
     gap: 16px;
     min-height: 38px;
     margin-bottom: 18px;
+}
+
+.container-runtime-filter-bar {
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) minmax(150px, 180px) minmax(110px, 130px);
+    align-items: end;
+    gap: 12px;
+    width: min(100%, 700px);
+}
+
+.container-runtime-search {
+    display: block;
+    min-width: 0;
+}
+
+.container-runtime-search input {
+    width: 100%;
+    min-height: 38px;
+    padding: 8px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    outline: none;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font: inherit;
+    font-size: 0.82rem;
+}
+
+.container-runtime-search input:focus {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary-color) 12%, transparent);
+}
+
+.container-runtime-filter-field {
+    display: grid;
+    min-width: 0;
+    gap: 5px;
+}
+
+.container-runtime-filter-field > label {
+    color: var(--text-secondary);
+    font-size: 0.7rem;
+    font-weight: 650;
+}
+
+.container-runtime-filter-field .unified-select,
+.container-runtime-filter-field .unified-select-trigger {
+    width: 100%;
+}
+
+.container-runtime-toolbar-status {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
 }
 
 .container-runtime-load-state {
@@ -4289,6 +4349,31 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 
 .container-runtime-empty p { margin: 0; font-size: 0.82rem; }
 
+.container-runtime-pagination {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-color);
+}
+
+.container-runtime-page-button {
+    min-height: 34px;
+    padding: 6px 11px;
+    font-size: 0.76rem;
+}
+
+.container-runtime-page-summary {
+    overflow: hidden;
+    color: var(--text-secondary);
+    font-size: 0.76rem;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .container-environment-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4326,6 +4411,9 @@ html[data-theme="dark"] .container-runtime-badge.is-danger { color: #fca5a5; }
 html[data-theme="dark"] .container-runtime-error { color: #fca5a5; }
 
 @media (max-width: 980px) {
+    .container-runtime-toolbar { flex-wrap: wrap; }
+    .container-runtime-filter-bar { width: 100%; }
+    .container-runtime-toolbar-status { width: 100%; }
     .container-runtime-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .container-runtime-split { grid-template-columns: 1fr; }
     .container-runtime-list { max-height: 360px; }
@@ -4371,6 +4459,9 @@ html[data-theme="dark"] .container-runtime-error { color: #fca5a5; }
     }
 
     .container-runtime-toolbar { align-items: flex-start; }
+    .container-runtime-filter-bar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+    .container-runtime-search { grid-column: 1 / -1; }
+    .container-runtime-toolbar-status { align-items: center; justify-content: space-between; }
     .container-runtime-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .container-runtime-summary-card { min-height: 90px; padding: 14px; }
     .container-runtime-section { padding: 16px; border-radius: 15px; }
@@ -4381,6 +4472,15 @@ html[data-theme="dark"] .container-runtime-error { color: #fca5a5; }
     .container-runtime-metadata,
     .container-environment-grid { grid-template-columns: 1fr; }
     .container-runtime-detail-heading { align-items: flex-start; }
+}
+
+@media (max-width: 480px) {
+    .container-runtime-filter-bar { grid-template-columns: 1fr; }
+    .container-runtime-search { grid-column: auto; }
+    .container-runtime-toolbar-status { align-items: stretch; flex-direction: column; }
+    .container-runtime-refresh { width: 100%; }
+    .container-runtime-pagination { grid-template-columns: 1fr 1fr; }
+    .container-runtime-page-summary { grid-column: 1 / -1; grid-row: 1; white-space: normal; }
 }
 
 .message {

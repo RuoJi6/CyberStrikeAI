@@ -38,7 +38,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
         titles.add(title[1]);
     }
     assert.equal(titles.size, 7);
-    assert.match(template, /container-management\.js\?v=20260822-3/);
+    assert.match(template, /container-management\.js\?v=20260822-5/);
 });
 
 test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => {
@@ -83,20 +83,21 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
         for (const key of contentKeys) assert.equal(typeof locale.containerManagement[key], 'string');
     }
     assert.match(styles, /\.container-management-page\s*\{/);
+    assert.match(styles, /\.container-management-page\s*\{[\s\S]*?overflow-y: auto/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-management-surface\s*\{/);
     assert.match(styles, /body:has\(\.container-management-page\.active\) \.main-sidebar:not\(\.collapsed\)/);
     assert.match(router, /function syncContainerManagementSidebar\(pageId\)/);
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260822-7/);
+    assert.match(template, /style\.css\?v=20260822-9/);
     assert.match(template, /router\.js\?v=20260822-3/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
     assert.match(router, /popupItem\.setAttribute\('role', 'menuitem'\)/);
 });
 
-test('容器、网关、DNS、工作区、资源与 hash 管理视图已接入安全观测端点', () => {
+test('容器管理视图使用安全观测端点和服务端分页筛选', () => {
     for (const id of [
         'container-overview-summary', 'container-overview-runtime-list', 'conversation-containers-list',
         'conversation-container-detail', 'runtime-environments-list',
@@ -104,7 +105,23 @@ test('容器、网关、DNS、工作区、资源与 hash 管理视图已接入�
         assert.match(template, new RegExp(`id="${id}"`));
     }
     assert.match(management, /container-initialization\?observe=1/);
-    assert.match(management, /containerRuntimeMapConcurrent\(conversations, 6/);
+    assert.match(management, /\/api\/container-runtimes\?\$\{params\.toString\(\)\}/);
+    assert.doesNotMatch(management, /\/api\/conversations\?limit=1000/);
+    assert.doesNotMatch(management, /containerRuntimeMapConcurrent/);
+    assert.match(management, /CONTAINER_RUNTIME_PAGE_SIZES = Object\.freeze\(\[10, 20, 50, 100\]\)/);
+    assert.match(management, /document\.addEventListener\('languagechange',[\s\S]*?containerRuntimeLoadedMessage\(\)/);
+    for (const key of ['container_page', 'container_page_size', 'container_search', 'container_status']) {
+        assert.match(management, new RegExp(key));
+    }
+    for (const id of ['container-overview', 'conversation-containers', 'runtime-environments']) {
+        assert.match(template, new RegExp(`id="${id}-search"[^>]+data-container-runtime-search`));
+        assert.match(template, new RegExp(`id="${id}-status"[^>]+data-container-runtime-status`));
+        assert.match(template, new RegExp(`id="${id}-page-size"[^>]+data-container-runtime-page-size`));
+        assert.match(template, new RegExp(`id="${id}-pagination"`));
+    }
+    for (const size of [10, 20, 50, 100]) {
+        assert.ok((template.match(new RegExp(`<option value="${size}"`, 'g')) || []).length >= 3);
+    }
     assert.match(management, /policyDnsStatus/);
     assert.match(management, /workspaceStatus/);
     assert.match(management, /memoryUsageBytes/);
@@ -113,12 +130,19 @@ test('容器、网关、DNS、工作区、资源与 hash 管理视图已接入�
     assert.match(management, /interpolation: \{ escapeValue: false \}/);
     assert.doesNotMatch(management, /\.innerHTML\s*=/);
     for (const locale of [zh, en]) {
-        for (const key of ['summaryContainers', 'agentContainer', 'egressGateway', 'policyDNS', 'workspace', 'latestError']) {
+        for (const key of [
+            'summaryContainers', 'agentContainer', 'egressGateway', 'policyDNS', 'workspace', 'latestError',
+            'loadedRange', 'emptyFiltered', 'searchPlaceholder', 'statusFilter', 'rowsPerPage',
+            'filterAll', 'filterNotRequested', 'filterPending', 'filterRunning', 'filterStopped',
+            'filterFailed', 'paginationSummary', 'paginationPrevious', 'paginationNext',
+        ]) {
             assert.equal(typeof locale.containerManagement[key], 'string');
         }
         assert.equal(typeof locale.containerManagement.status.running, 'string');
         assert.equal(typeof locale.containerManagement.status.failed, 'string');
     }
     assert.match(styles, /\.container-runtime-status-grid\s*\{/);
+    assert.match(styles, /\.container-runtime-filter-bar\s*\{/);
+    assert.match(styles, /\.container-runtime-pagination\s*\{/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-runtime-status-grid/);
 });

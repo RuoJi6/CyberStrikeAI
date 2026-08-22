@@ -14,11 +14,54 @@ const CONTAINER_RUNTIME_DATA_PAGES = new Set([
     'runtime-environments',
 ]);
 
+const CONTAINER_RUNTIME_PAGE_SIZES = Object.freeze([10, 20, 50, 100]);
+const CONTAINER_RUNTIME_FILTER_STATUSES = Object.freeze([
+    'all',
+    'not_requested',
+    'pending',
+    'running',
+    'stopped',
+    'failed',
+]);
+const CONTAINER_RUNTIME_URL_PARAMS = Object.freeze({
+    page: 'container_page',
+    pageSize: 'container_page_size',
+    search: 'container_search',
+    status: 'container_status',
+});
+
+function readContainerRuntimeURLState() {
+    const fallback = { page: 1, pageSize: 20, search: '', status: 'all' };
+    if (!window.location || typeof URLSearchParams === 'undefined') return fallback;
+    const params = new URLSearchParams(window.location.search || '');
+    const page = Number.parseInt(params.get(CONTAINER_RUNTIME_URL_PARAMS.page), 10);
+    const pageSize = Number.parseInt(params.get(CONTAINER_RUNTIME_URL_PARAMS.pageSize), 10);
+    const status = String(params.get(CONTAINER_RUNTIME_URL_PARAMS.status) || 'all').toLowerCase();
+    return {
+        page: Number.isInteger(page) && page > 0 ? page : fallback.page,
+        pageSize: CONTAINER_RUNTIME_PAGE_SIZES.includes(pageSize) ? pageSize : fallback.pageSize,
+        search: Array.from(String(params.get(CONTAINER_RUNTIME_URL_PARAMS.search) || '')).slice(0, 200).join(''),
+        status: CONTAINER_RUNTIME_FILTER_STATUSES.includes(status) ? status : fallback.status,
+    };
+}
+
+const initialContainerRuntimeURLState = readContainerRuntimeURLState();
+
 const containerManagementState = {
     rows: [],
+    summary: { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 },
     selectedConversationId: '',
     requestGeneration: 0,
     loading: false,
+    page: initialContainerRuntimeURLState.page,
+    pageSize: initialContainerRuntimeURLState.pageSize,
+    search: initialContainerRuntimeURLState.search,
+    status: initialContainerRuntimeURLState.status,
+    total: 0,
+    totalPages: 0,
+    controlsBound: false,
+    searchTimer: null,
+    loadError: '',
 };
 
 function containerManagementT(key, fallback, values = {}) {
@@ -100,20 +143,6 @@ async function containerRuntimeRequestJSON(url) {
     return payload || {};
 }
 
-async function containerRuntimeMapConcurrent(items, limit, mapper) {
-    const results = new Array(items.length);
-    let nextIndex = 0;
-    async function worker() {
-        while (nextIndex < items.length) {
-            const index = nextIndex;
-            nextIndex += 1;
-            results[index] = await mapper(items[index], index);
-        }
-    }
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-    return results;
-}
-
 function setContainerRuntimeLoadState(message, error = false) {
     ['container-overview-load-state', 'conversation-containers-load-state', 'runtime-environments-load-state'].forEach((id) => {
         const element = document.getElementById(id);
@@ -123,6 +152,18 @@ function setContainerRuntimeLoadState(message, error = false) {
     });
     document.querySelectorAll('.container-runtime-refresh').forEach((button) => {
         button.disabled = containerManagementState.loading;
+    });
+}
+
+function containerRuntimeLoadedMessage() {
+    const start = containerManagementState.total === 0 ? 0 : ((containerManagementState.page - 1) * containerManagementState.pageSize) + 1;
+    const end = containerManagementState.rows.length
+        ? Math.min(containerManagementState.total, start + containerManagementState.rows.length - 1)
+        : 0;
+    return containerManagementT('loadedRange', '显示 {{start}}–{{end}}，共 {{total}} 个对话容器', {
+        start,
+        end,
+        total: containerManagementState.total,
     });
 }
 
@@ -151,13 +192,13 @@ function renderContainerRuntimeSummary() {
     const root = document.getElementById('container-overview-summary');
     if (!root) return;
     root.replaceChildren();
-    const rows = containerManagementState.rows;
-    const running = rows.filter((record) => containerRuntimePrimaryStatus(record) === 'running').length;
-    const gateways = rows.filter((record) => record.desired?.gatewayImageDigest).length;
-    const persistent = rows.filter((record) => record.workspacePersistent || record.desired?.workspace?.persistent).length;
-    const attention = rows.filter(containerRuntimeHasAttention).length;
+    const summary = containerManagementState.summary;
+    const running = Number(summary.running || 0);
+    const gateways = Number(summary.gateways || 0);
+    const persistent = Number(summary.persistent || 0);
+    const attention = Number(summary.attention || 0);
     root.append(
-        containerRuntimeSummaryCard(containerManagementT('summaryContainers', '对话容器'), rows.length),
+        containerRuntimeSummaryCard(containerManagementT('summaryContainers', '对话容器'), Number(summary.total || 0)),
         containerRuntimeSummaryCard(containerManagementT('summaryRunning', '运行中'), running, running ? 'success' : 'neutral'),
         containerRuntimeSummaryCard(containerManagementT('summaryGateways', '独立网关'), gateways),
         containerRuntimeSummaryCard(containerManagementT('summaryPersistent', '持久工作区'), persistent),
@@ -171,13 +212,20 @@ function containerRuntimeEmpty(value) {
     return empty;
 }
 
+function containerRuntimeEmptyMessage() {
+    if (containerManagementState.search || containerManagementState.status !== 'all') {
+        return containerManagementT('emptyFiltered', '没有符合当前筛选条件的对话容器');
+    }
+    return containerManagementT('empty', '暂无容器对话');
+}
+
 function renderContainerRuntimeCompactList() {
     const root = document.getElementById('container-overview-runtime-list');
     if (!root) return;
     root.replaceChildren();
-    const rows = containerManagementState.rows.slice(0, 8);
+    const rows = containerManagementState.rows;
     if (!rows.length) {
-        root.append(containerRuntimeEmpty(containerManagementT('empty', '暂无容器对话')));
+        root.append(containerRuntimeEmpty(containerRuntimeEmptyMessage()));
         return;
     }
     rows.forEach((record) => {
@@ -204,7 +252,7 @@ function renderConversationContainerList() {
     if (!root) return;
     root.replaceChildren();
     if (!containerManagementState.rows.length) {
-        root.append(containerRuntimeEmpty(containerManagementT('empty', '暂无容器对话')));
+        root.append(containerRuntimeEmpty(containerRuntimeEmptyMessage()));
         return;
     }
     containerManagementState.rows.forEach((record) => {
@@ -333,7 +381,7 @@ function renderRuntimeEnvironments() {
     if (!root) return;
     root.replaceChildren();
     if (!containerManagementState.rows.length) {
-        root.append(containerRuntimeEmpty(containerManagementT('empty', '暂无容器对话')));
+        root.append(containerRuntimeEmpty(containerRuntimeEmptyMessage()));
         return;
     }
     containerManagementState.rows.forEach((record) => {
@@ -357,12 +405,116 @@ function renderRuntimeEnvironments() {
     });
 }
 
+function writeContainerRuntimeURLState() {
+    if (!window.location || !window.history || typeof window.history.replaceState !== 'function' || typeof URLSearchParams === 'undefined') return;
+    const params = new URLSearchParams(window.location.search || '');
+    params.set(CONTAINER_RUNTIME_URL_PARAMS.page, String(containerManagementState.page));
+    params.set(CONTAINER_RUNTIME_URL_PARAMS.pageSize, String(containerManagementState.pageSize));
+    params.set(CONTAINER_RUNTIME_URL_PARAMS.status, containerManagementState.status);
+    if (containerManagementState.search) params.set(CONTAINER_RUNTIME_URL_PARAMS.search, containerManagementState.search);
+    else params.delete(CONTAINER_RUNTIME_URL_PARAMS.search);
+    const search = params.toString();
+    window.history.replaceState(window.history.state, '', `${window.location.pathname || ''}${search ? `?${search}` : ''}${window.location.hash || ''}`);
+}
+
+function syncContainerRuntimeControls() {
+    document.querySelectorAll('[data-container-runtime-search]').forEach((input) => {
+        if (input.value !== containerManagementState.search) input.value = containerManagementState.search;
+    });
+    document.querySelectorAll('[data-container-runtime-status]').forEach((select) => {
+        if (select.value !== containerManagementState.status) select.value = containerManagementState.status;
+        if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(select);
+    });
+    document.querySelectorAll('[data-container-runtime-page-size]').forEach((select) => {
+        const value = String(containerManagementState.pageSize);
+        if (select.value !== value) select.value = value;
+        if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(select);
+    });
+}
+
+function renderContainerRuntimePagination() {
+    const totalPages = Math.max(1, Number(containerManagementState.totalPages || 0));
+    const currentPage = Math.min(Math.max(1, containerManagementState.page), totalPages);
+    const summary = containerManagementT('paginationSummary', '第 {{page}} / {{totalPages}} 页，共 {{total}} 条', {
+        page: currentPage,
+        totalPages,
+        total: containerManagementState.total,
+    });
+    ['container-overview-pagination', 'conversation-containers-pagination', 'runtime-environments-pagination'].forEach((id) => {
+        const root = document.getElementById(id);
+        if (!root) return;
+        root.replaceChildren();
+        const previous = containerRuntimeElement('button', 'btn-secondary container-runtime-page-button', containerManagementT('paginationPrevious', '上一页'));
+        previous.type = 'button';
+        previous.disabled = containerManagementState.loading || currentPage <= 1 || containerManagementState.total === 0;
+        previous.addEventListener('click', () => setContainerRuntimePage(currentPage - 1));
+        const label = containerRuntimeElement('span', 'container-runtime-page-summary', summary);
+        label.setAttribute('aria-live', 'polite');
+        const next = containerRuntimeElement('button', 'btn-secondary container-runtime-page-button', containerManagementT('paginationNext', '下一页'));
+        next.type = 'button';
+        next.disabled = containerManagementState.loading || currentPage >= totalPages || containerManagementState.total === 0;
+        next.addEventListener('click', () => setContainerRuntimePage(currentPage + 1));
+        root.append(previous, label, next);
+    });
+}
+
+function bindContainerRuntimeControls() {
+    if (containerManagementState.controlsBound) return;
+    containerManagementState.controlsBound = true;
+    document.querySelectorAll('[data-container-runtime-search]').forEach((input) => {
+        input.addEventListener('input', (event) => {
+            const value = Array.from(String(event.target.value || '')).slice(0, 200).join('');
+            containerManagementState.search = value;
+            containerManagementState.page = 1;
+            syncContainerRuntimeControls();
+            writeContainerRuntimeURLState();
+            if (containerManagementState.searchTimer) clearTimeout(containerManagementState.searchTimer);
+            containerManagementState.searchTimer = setTimeout(() => {
+                containerManagementState.searchTimer = null;
+                refreshContainerManagementData();
+            }, 300);
+        });
+    });
+    document.querySelectorAll('[data-container-runtime-status]').forEach((select) => {
+        select.addEventListener('change', (event) => {
+            const value = String(event.target.value || 'all').toLowerCase();
+            containerManagementState.status = CONTAINER_RUNTIME_FILTER_STATUSES.includes(value) ? value : 'all';
+            containerManagementState.page = 1;
+            syncContainerRuntimeControls();
+            writeContainerRuntimeURLState();
+            refreshContainerManagementData();
+        });
+    });
+    document.querySelectorAll('[data-container-runtime-page-size]').forEach((select) => {
+        select.addEventListener('change', (event) => {
+            const value = Number.parseInt(event.target.value, 10);
+            containerManagementState.pageSize = CONTAINER_RUNTIME_PAGE_SIZES.includes(value) ? value : 20;
+            containerManagementState.page = 1;
+            syncContainerRuntimeControls();
+            writeContainerRuntimeURLState();
+            refreshContainerManagementData();
+        });
+    });
+    syncContainerRuntimeControls();
+}
+
+function setContainerRuntimePage(page) {
+    const totalPages = Math.max(1, Number(containerManagementState.totalPages || 0));
+    const nextPage = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), totalPages);
+    if (nextPage === containerManagementState.page && containerManagementState.rows.length) return;
+    containerManagementState.page = nextPage;
+    writeContainerRuntimeURLState();
+    refreshContainerManagementData();
+}
+
 function renderContainerManagementData() {
+    syncContainerRuntimeControls();
     renderContainerRuntimeSummary();
     renderContainerRuntimeCompactList();
     renderConversationContainerList();
     renderConversationContainerDetail();
     renderRuntimeEnvironments();
+    renderContainerRuntimePagination();
 }
 
 async function observeSelectedContainerRuntime(generation, conversationId) {
@@ -389,36 +541,50 @@ async function refreshContainerManagementData() {
     const generation = containerManagementState.requestGeneration + 1;
     containerManagementState.requestGeneration = generation;
     containerManagementState.loading = true;
+    containerManagementState.loadError = '';
     setContainerRuntimeLoadState(containerManagementT('loading', '正在加载容器状态…'));
+    renderContainerRuntimePagination();
     try {
-        const list = await containerRuntimeRequestJSON('/api/conversations?limit=1000');
-        const conversations = (Array.isArray(list) ? list : (list.conversations || list.items || []))
-            .filter((conversation) => conversation && conversation.runtimeMode === 'container');
-        const rows = await containerRuntimeMapConcurrent(conversations, 6, async (conversation) => {
-            try {
-                const status = await containerRuntimeRequestJSON(`/api/conversations/${encodeURIComponent(conversation.id)}/container-initialization`);
-                return { ...conversation, ...status, conversationId: conversation.id, conversationTitle: status.conversationTitle || conversation.title };
-            } catch (error) {
-                return { ...conversation, conversationId: conversation.id, conversationTitle: conversation.title, status: 'unavailable', observationError: error && error.message ? error.message : 'load_failed' };
-            }
+        const params = new URLSearchParams({
+            page: String(containerManagementState.page),
+            page_size: String(containerManagementState.pageSize),
+            status: containerManagementState.status,
         });
+        if (containerManagementState.search) params.set('search', containerManagementState.search);
+        const payload = await containerRuntimeRequestJSON(`/api/container-runtimes?${params.toString()}`);
         if (generation !== containerManagementState.requestGeneration) return;
+        const totalPages = Math.max(0, Number(payload.totalPages || 0));
+        if (totalPages > 0 && containerManagementState.page > totalPages) {
+            containerManagementState.page = totalPages;
+            writeContainerRuntimeURLState();
+            await refreshContainerManagementData();
+            return;
+        }
+        const rows = Array.isArray(payload.items) ? payload.items : [];
         containerManagementState.rows = rows;
+        containerManagementState.summary = payload.summary || { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 };
+        containerManagementState.total = Math.max(0, Number(payload.total || 0));
+        containerManagementState.totalPages = totalPages;
         if (!rows.some((record) => record.conversationId === containerManagementState.selectedConversationId)) {
             containerManagementState.selectedConversationId = rows.find((record) => record.status === 'created')?.conversationId || rows[0]?.conversationId || '';
         }
         renderContainerManagementData();
-        setContainerRuntimeLoadState(containerManagementT('loadedCount', '已加载 {{count}} 个对话容器', { count: rows.length }));
+        setContainerRuntimeLoadState(containerRuntimeLoadedMessage());
         await observeSelectedContainerRuntime(generation, containerManagementState.selectedConversationId);
     } catch (error) {
         if (generation !== containerManagementState.requestGeneration) return;
         containerManagementState.rows = [];
+        containerManagementState.summary = { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 };
+        containerManagementState.total = 0;
+        containerManagementState.totalPages = 0;
+        containerManagementState.loadError = error && error.message ? error.message : containerManagementT('loadFailed', '加载容器管理数据失败');
         renderContainerManagementData();
-        setContainerRuntimeLoadState(error && error.message ? error.message : containerManagementT('loadFailed', '加载容器管理数据失败'), true);
+        setContainerRuntimeLoadState(containerManagementState.loadError, true);
     } finally {
         if (generation === containerManagementState.requestGeneration) {
             containerManagementState.loading = false;
             document.querySelectorAll('.container-runtime-refresh').forEach((button) => { button.disabled = false; });
+            renderContainerRuntimePagination();
         }
     }
 }
@@ -434,7 +600,10 @@ function initContainerManagementPage(pageId) {
     page.setAttribute('aria-current', 'page');
     page.dataset.initialized = 'true';
     window.currentContainerManagementPage = pageId;
-    if (CONTAINER_RUNTIME_DATA_PAGES.has(pageId) && !containerManagementState.loading) refreshContainerManagementData();
+    if (CONTAINER_RUNTIME_DATA_PAGES.has(pageId)) {
+        bindContainerRuntimeControls();
+        if (!containerManagementState.loading) refreshContainerManagementData();
+    }
 }
 
 window.CONTAINER_MANAGEMENT_PAGES = CONTAINER_MANAGEMENT_PAGES;
@@ -442,3 +611,17 @@ window.isContainerManagementPage = isContainerManagementPage;
 window.initContainerManagementPage = initContainerManagementPage;
 window.refreshContainerManagementData = refreshContainerManagementData;
 window.selectContainerRuntimeConversation = selectContainerRuntimeConversation;
+window.setContainerRuntimePage = setContainerRuntimePage;
+
+if (typeof document.addEventListener === 'function') {
+    document.addEventListener('languagechange', () => {
+        renderContainerManagementData();
+        if (containerManagementState.loading) {
+            setContainerRuntimeLoadState(containerManagementT('loading', '正在加载容器状态…'));
+        } else if (containerManagementState.loadError) {
+            setContainerRuntimeLoadState(containerManagementState.loadError, true);
+        } else {
+            setContainerRuntimeLoadState(containerRuntimeLoadedMessage());
+        }
+    });
+}

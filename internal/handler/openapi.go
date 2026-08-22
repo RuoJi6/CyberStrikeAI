@@ -2083,6 +2083,37 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/container-runtimes": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"容器运行时"},
+					"summary":     "分页列出对话容器",
+					"description": "按当前用户可访问范围分页返回容器对话的持久化安全投影；不会触发 Docker 实时观测。",
+					"operationId": "listContainerRuntimes",
+					"parameters": []map[string]interface{}{
+						{"name": "page", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 1, "minimum": 1}},
+						{"name": "page_size", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 20, "enum": []int{10, 20, 50, 100}}},
+						{"name": "search", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 200}},
+						{"name": "status", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "not_requested", "pending", "running", "stopped", "failed"}}},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{
+							"description": "分页容器运行时安全投影",
+							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+								"type": "object", "required": []string{"items", "page", "pageSize", "total", "totalPages", "summary"},
+								"properties": map[string]interface{}{
+									"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+									"page":  map[string]interface{}{"type": "integer"}, "pageSize": map[string]interface{}{"type": "integer"},
+									"total": map[string]interface{}{"type": "integer"}, "totalPages": map[string]interface{}{"type": "integer"},
+									"search": map[string]interface{}{"type": "string"}, "status": map[string]interface{}{"type": "string"},
+									"summary": map[string]interface{}{"type": "object"},
+								},
+							}}},
+						},
+						"400": map[string]interface{}{"description": "分页或筛选参数无效"},
+						"401": map[string]interface{}{"description": "未授权"},
+					},
+				},
+			},
 			"/api/conversations/{id}": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理"},

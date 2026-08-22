@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
@@ -298,6 +299,124 @@ func (h *ConversationHandler) ListConversations(c *gin.Context) {
 		"limit":         limit,
 		"offset":        offset,
 	})
+}
+
+// ListContainerRuntimes returns one RBAC-scoped, server-paginated projection
+// for the container management UI. It deliberately omits live Docker
+// observation; the selected-row detail endpoint remains the only opt-in
+// observation path.
+func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
+	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if err != nil || page < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "page 必须是正整数"})
+		return
+	}
+	pageSize, err := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if err != nil || (pageSize != 10 && pageSize != 20 && pageSize != 50 && pageSize != 100) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "page_size 仅支持 10、20、50 或 100"})
+		return
+	}
+	search := strings.TrimSpace(c.Query("search"))
+	if utf8.RuneCountInString(search) > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "search 最多 200 个字符"})
+		return
+	}
+	status, ok := database.NormalizeContainerRuntimeListStatus(c.Query("status"))
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status 不受支持"})
+		return
+	}
+	if h.containerInitializations == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "容器初始化状态服务未配置"})
+		return
+	}
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未授权访问"})
+		return
+	}
+	query := database.ContainerRuntimeListQuery{
+		Limit: pageSize, Offset: (page - 1) * pageSize, Search: search, Status: status,
+		UserID: session.UserID, Scope: session.Scope,
+	}
+	conversations, err := h.db.ListContainerConversationsForAccess(c.Request.Context(), query)
+	if err != nil {
+		h.logger.Error("获取容器运行时列表失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取容器运行时列表失败"})
+		return
+	}
+	summary, err := h.db.SummarizeContainerConversationsForAccess(c.Request.Context(), query)
+	if err != nil {
+		h.logger.Error("统计容器运行时列表失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "统计容器运行时列表失败"})
+		return
+	}
+	items := make([]containerRuntimeListItemView, 0, len(conversations))
+	for _, conversation := range conversations {
+		item := containerRuntimeListItemView{
+			ConversationID: conversation.ID, ConversationTitle: conversation.Title,
+			RuntimeMode: conversation.RuntimeMode, WorkspacePersistent: conversation.WorkspacePersistent,
+			Status: "not_requested", UpdatedAt: conversation.UpdatedAt,
+		}
+		record, getErr := h.containerInitializations.Get(c.Request.Context(), conversation.ID)
+		if getErr == nil {
+			item.apply(record)
+		} else if !errors.Is(getErr, containerruntime.ErrNotFound) {
+			item.Status = "unavailable"
+			item.ObservationError = "status_unavailable"
+		}
+		items = append(items, item)
+	}
+	totalPages := 0
+	if summary.Total > 0 {
+		totalPages = (summary.Total + pageSize - 1) / pageSize
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"items": items, "page": page, "pageSize": pageSize,
+		"total": summary.Total, "totalPages": totalPages,
+		"search": search, "status": status, "summary": summary,
+	})
+}
+
+type containerRuntimeListItemView struct {
+	ConversationID      string                              `json:"conversationId"`
+	ConversationTitle   string                              `json:"conversationTitle"`
+	RuntimeMode         string                              `json:"runtimeMode"`
+	WorkspacePersistent bool                                `json:"workspacePersistent"`
+	Status              string                              `json:"status"`
+	RuntimeStatus       containerruntime.Status             `json:"runtimeStatus,omitempty"`
+	ImageDigest         string                              `json:"imageDigest,omitempty"`
+	ImagePlatform       string                              `json:"imagePlatform,omitempty"`
+	LastError           string                              `json:"lastError,omitempty"`
+	ReadinessStatus     containerruntime.ReadinessStatus    `json:"readinessStatus,omitempty"`
+	ReadinessError      string                              `json:"readinessError,omitempty"`
+	ToolCount           int                                 `json:"toolCount,omitempty"`
+	LifecycleOperation  containerruntime.LifecycleOperation `json:"lifecycleOperation,omitempty"`
+	LifecycleState      containerruntime.LifecycleState     `json:"lifecycleState,omitempty"`
+	LifecycleError      string                              `json:"lifecycleError,omitempty"`
+	RuntimeGeneration   int                                 `json:"runtimeGeneration,omitempty"`
+	RuntimeDrift        string                              `json:"runtimeDrift,omitempty"`
+	UpdatedAt           time.Time                           `json:"updatedAt"`
+	Desired             *conversationContainerDesiredView   `json:"desired,omitempty"`
+	ObservationError    string                              `json:"observationError,omitempty"`
+}
+
+func (item *containerRuntimeListItemView) apply(record containerruntime.InitializationRecord) {
+	item.Status = string(record.Status)
+	item.RuntimeStatus = record.RuntimeStatus
+	item.ImageDigest = record.ImageDigest
+	item.ImagePlatform = record.ImagePlatform
+	item.LastError = record.LastError
+	item.ReadinessStatus = record.ReadinessStatus
+	item.ReadinessError = record.ReadinessError
+	item.ToolCount = record.ToolCount
+	item.LifecycleOperation = record.LifecycleOperation
+	item.LifecycleState = record.LifecycleState
+	item.LifecycleError = record.LifecycleError
+	item.RuntimeGeneration = record.RuntimeGeneration
+	item.RuntimeDrift = record.RuntimeDrift
+	item.UpdatedAt = record.UpdatedAt
+	item.Desired = desiredConversationContainerView(record.Spec)
 }
 
 // GetConversation 获取对话

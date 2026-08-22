@@ -1209,6 +1209,7 @@ func setupRoutes(
 		// 对话历史
 		protected.POST("/conversations", conversationHandler.CreateConversation)
 		protected.GET("/conversations", conversationHandler.ListConversations)
+		protected.GET("/container-runtimes", conversationHandler.ListContainerRuntimes)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
 		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
 		protected.GET("/conversations/:id/egress", conversationHandler.GetConversationEgress)
