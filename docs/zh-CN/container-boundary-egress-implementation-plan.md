@@ -1,8 +1,8 @@
 # Agent 容器、边界规则与出站代理实施计划
 
 > 状态：执行中  
-> 当前阶段：阶段 5 已完成；阶段 6 第 1—7 项已完成，下一项为第 8 项（审计安全字段与敏感内容最小化）
-> 最后更新：2026-08-22
+> 当前阶段：阶段 5 已完成；阶段 6 第 1—8 项已完成，下一项为第 9 项（对话级审计前序 hash 与篡改检测）
+> 最后更新：2026-08-23
 > 工作分支：`codex/docker-agent-runtime`
 
 本文档是 Agent 容器化的唯一执行清单。以后每完成一个阶段，必须先通过本地测试和测试机验收，再将该阶段勾选为完成，然后进入下一阶段。
@@ -348,7 +348,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 实现 10/20/50/100 每页、服务端分页、搜索、状态筛选和 URL 状态保留。
 - [x] 实现对话出站网络活动实时流，页面可立即看到新的域名请求、解析 IP、允许/阻断和命中规则。
 - [x] 审计 DNS、HTTP、CONNECT、拒绝、限速、上游路由和生命周期事件，支持搜索与导出。
-- [ ] 日志记录 `conversation_id`、`container_id`、`agent_id`、快照 hash、目标、判定、命中规则和上游；敏感 header/body 默认不保存。
+- [x] 日志记录 `conversation_id`、`container_id`、`agent_id`、快照 hash、目标、判定、命中规则和上游；敏感 header/body 默认不保存。
 - [ ] 对每个对话的审计事件增加前序 hash，可检测删除或篡改。
 - [ ] 实现确定性限速、并发上限、429 冷却、连续登录失败、WAF/CAPTCHA 信号和手动恢复。
 - [ ] 完成桌面和窄屏 UI 浏览器验收，无刷新卡死、空对话、错误页头或下拉框遮挡。
@@ -524,3 +524,15 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - 精确构建与部署：从干净提交以 Zig/CGO 构建 Linux ARM64 服务，SHA-256 为 `e994e4139793098684923491d7ee6bc817a840933e318135827c72845771fad8`；Web 归档、源码归档、首页模板、CSS、审计脚本和中文资源 SHA-256 分别为 `9087d067e1db053e10b280aa2bac5d046c52b63a8ad8c402aebf1029a174fdaa`、`b14afe7690a156adadb5d97e6c185ff93325f3ae5614eddb964d250baf7bba5e`、`a7e7c8c4c6c59dc2ae9a6b17275823f487a4c6cfa6579c46c7fac8da07743e3f`、`c197b41343fc192a15ca0e1522eededfee255819edade2f4f508ac4580faee8c`、`65a2016aad45aee7c2ebfb2728bacb37599a3c82ccfcb7da93d3c5da307602b4`、`6d788aa7ded7fe95053d72003b35a8f9d88ff050d6cf6d8bce2b9216a03c4314`；build info 为 `vcs.revision=2bd258b376383a3033764c4fdcb281a75b22c409`、`vcs.modified=false`。精确部署备份位于 `backups/stage6-item7-exact-pre-20260822-224845`，服务 `active/running`、`NRestarts=0`、首页 200，活动目录 AppleDouble 文件数为 0，启动日志无 panic/fatal/采集器启动失败。
 - 精确 API：精确部署后总计 140 条、生命周期 135 条、网络 5 条、阻断 4 条、失败 5 条；服务重启会按设计通过运行时协调写入新的唯一生命周期事件，因此生命周期总数增长，而网络事件稳定保持 5 条。网络导出仍精确包含 DNS/HTTP、允许/阻断两类判定，敏感字段检查为 false。
 - 精确内置浏览器：使用虚拟机直连地址和测试管理员登录。桌面 1375×918 下活动页为“出站审计”，类别为网络、每页 10 条，页面加载 5 行、7 列，汇总为总计 5 / 网络 5 / 生命周期 0 / 阻断 4 / 失败 0，分页为第 1/1 页且文档横向溢出为 0。390×844 下表头隐藏、事件行为单列卡片，页面滚动容器 `clientHeight=772`、`scrollHeight=4480`、`overflow-y:auto`，真实滚动达到 `3708/3708` 后分页位于可视区，文档和页面横向溢出均为 0。登录前轮询产生的一条历史 401 已通过登录态新标签隔离；干净精确标签再次读取同一 5 条数据且 console warning/error 为 `[]`，未使用其他浏览器降级。
+
+### 阶段 6 第 8 项验收（2026-08-23）
+
+- 源码提交：`39689f0060ef700284d6052138cc1af69c90700f`。数据库写入前新增第二道安全验证，网络事件必须与受信运行时的对话、容器、generation、边界快照和上游绑定一致；域名、IP、端口、method、path、状态、计数器、封闭代码字段及时间戳均需通过规范化和有界校验。HTTP path 明确拒绝 query/fragment，网关日志解码继续以 `DisallowUnknownFields` 拒绝 `authorization`、cookie、header、request/response body 等额外字段。
+- 安全投影与导出：审计列表、详情和导出统一返回 `Cache-Control: no-store`、`Pragma: no-cache` 和 `X-Content-Type-Options: nosniff`。OpenAPI 的 `EgressAuditEvent` 为 `additionalProperties=false` 的 31 字段封闭模型，敏感 header/body/query/cookie/authorization/credential/password/secret 字段数为 0；前端同样使用精确 31 字段白名单拒绝未知字段。CSV 对全部单元格清理控制字符并防止前导空白后的公式注入，标题截断改为 UTF-8 安全处理。
+- 提交前测试：`go test ./... -count=1`、`go vet ./...`、database/runtime-container/handler 定向 race、`go mod tidy -diff`、`node --check web/static/js/egress-audit.js`、前端 153/153、凭据与敏感字段检查以及 `git diff --check` 全部通过。macOS race 链接器仍仅输出既有 `LC_DYSYMTAB` 警告且退出码为 0。候选源码在完成本地、真实 ARM64 服务/API 和内置浏览器验收后才提交。
+- 候选部署：Zig/CGO Linux ARM64 候选二进制 SHA-256 为 `e79cdd5a152d503697bee8d1118eca8251ebb19f19c84e6cb19543760a54d963`，build info 为 `vcs.revision=3c7021936da0871767fd3b37eabe96b8ac2f4866`、`vcs.modified=true`；Web、源码归档、首页和审计脚本 SHA-256 分别为 `0464a0994cb580165aef6a13cd1a5c73737558bef47baac0fb2c67f501e633ad`、`c893d1e1b85364a2cab42a686ba25c5cb9bf883c7885942bac20e7d69175936b`、`f9f478d10946a90f607ef0158f779c913fe6cccca2842b0462c633d56a4964cc`、`571d9ca6ec6e47e6429785e905842908a5cf7c3610ba93b1b059f096103136bd`。候选备份位于 `backups/stage6-item8-candidate-pre-20260822-232505`，服务 `active/running`、`NRestarts=0`、首页 200 且日志错误计数为 0。
+- 候选 API 与浏览器：网络列表精确为 5 条、阻断 4 条，核心追溯字段完整，path 含 query/fragment 为 0，禁止键为 0；详情、JSON/CSV 导出、匿名 401 和 31 字段 OpenAPI 均通过。桌面端刷新前后保持 5 行、7 列和汇总 5/5/0/4/0，无横向溢出；390×844 下页面内部滚动容器真实到达 `3708/3708`，分页可见且宽度保持 390，console error 为 `[]`。
+- 精确构建与部署：从干净提交构建的 Linux ARM64 + CGO 二进制 SHA-256 为 `b3f2f173453fb9c8027a739ac5ae54a2279f14ef68c4992c95902f1db80e7950`，build info 为 `vcs.revision=39689f0060ef700284d6052138cc1af69c90700f`、`vcs.modified=false`。Web 归档、源码归档、首页、审计脚本和部署脚本 SHA-256 分别为 `07248bad5d87a8016f6d2e091d02afef8ae65a0086097eef0525b62491fd879c`、`65d06d2f7d65b8b025224e27906a8e7963c0b5a6b876279642e0d9b087006e73`、`f9f478d10946a90f607ef0158f779c913fe6cccca2842b0462c633d56a4964cc`、`571d9ca6ec6e47e6429785e905842908a5cf7c3610ba93b1b059f096103136bd`、`4cd9b1c8733b4cd8f7ba019524e648c5c25362285522f55e14a4c059a3d2a48c`。第一次未通过 sudo 调用在停止服务前即被权限策略拒绝，没有发生文件切换；随后以无 TTY `sudo -S` 事务部署成功，备份位于 `backups/stage6-item8-exact-pre-20260822-233907`。
+- 精确服务与 API：运行进程和磁盘二进制哈希均精确匹配 `b3f2f173…e7950`，首页和审计脚本线上哈希一致，活动 Web/源码 AppleDouble 文件数为 0；服务 `active/running`、`NRestarts=0`、首页 200，部署及浏览器验收后的 fatal/panic/审计错误计数均为 0。网络列表仍为 5 条、阻断 4 条；所有事件核心追溯字段完整，允许事件携带命中规则，默认拒绝事件明确为 `default-deny`，直连场景不虚构上游。JSON/CSV 网络导出均为 5 条，CSV 为 31 列，详情与导出禁止键和值命中均为 0；全局审计总数 206 条，其中网络稳定为 5 条，生命周期消息只包含通用成功/失败描述。匿名访问为 401。
+- 精确内置浏览器：服务重启后按本轮授权重新登录虚拟机直连地址。桌面 1375×918 下网络类别、每页 10 条、5 行、7 列、汇总 5/5/0/4/0 和第 1/1 页均正确，文档宽度为 1375/1375。390×844 下表头隐藏、表格转为卡片布局，5 行完整保留，活动页滚动容器为 `clientHeight=772`、`scrollHeight=4480`，真实滚动达到 `3708/3708` 后分页位于可视区，文档宽度为 390/390。预登录历史 401 通过登录态新标签隔离，干净精确标签 console error 为 `[]`，未使用其他浏览器降级；临时视口已恢复。
+- 范围说明：本项完成审计安全字段矩阵和敏感内容最小化，不实现前序 hash；下一步进入第 9 项，为每个对话的审计事件增加可验证的前序 hash，并覆盖删除、修改和重排检测。
