@@ -13,6 +13,7 @@
     const MAX_EVENTS = 500;
     const MAX_PAUSED_EVENTS = 500;
     const MAX_SEEN_EVENTS = 1000;
+    const READY_STABILITY_MS = 150;
     const URL_PARAMS = Object.freeze({
         conversation: 'activity_conversation',
         domain: 'activity_domain',
@@ -190,9 +191,15 @@
         return detail ? `${labels[status] || labels.idle} · ${activityText(detail, detail)}` : (labels[status] || labels.idle);
     }
 
+    function connectionStatusNeedsUpdate(currentStatus, currentDetail, nextStatus, nextDetail) {
+        return String(currentStatus || '') !== String(nextStatus || '') || String(currentDetail || '') !== String(nextDetail || '');
+    }
+
     function setConnectionStatus(status, detail) {
+        const nextDetail = String(detail || '');
+        if (!connectionStatusNeedsUpdate(state.connectionStatus, state.connectionDetail, status, nextDetail)) return;
         state.connectionStatus = status;
-        state.connectionDetail = String(detail || '');
+        state.connectionDetail = nextDetail;
         const badge = element('network-activity-connection');
         if (!badge) return;
         badge.className = `network-activity-connection is-${status}`;
@@ -433,7 +440,12 @@
         return error;
     }
 
-    async function connectStream() {
+    function shouldShowConnecting(retrying, currentStatus) {
+        return !retrying || !['waiting', 'error'].includes(String(currentStatus || ''));
+    }
+
+    async function connectStream(options) {
+        const retrying = Boolean(options && options.retrying);
         cancelStream();
         if (!state.active || !state.selectedConversationId) {
             setConnectionStatus('idle');
@@ -442,8 +454,23 @@
         const generation = state.generation;
         const controller = new AbortController();
         state.controller = controller;
-        setConnectionStatus('connecting');
+        if (shouldShowConnecting(retrying, state.connectionStatus)) setConnectionStatus('connecting');
         let terminalCode = '';
+        let readyTimer = null;
+        const cancelReadyAnnouncement = function () {
+            if (!readyTimer) return;
+            root.clearTimeout(readyTimer);
+            readyTimer = null;
+        };
+        const scheduleReadyAnnouncement = function () {
+            cancelReadyAnnouncement();
+            readyTimer = root.setTimeout(function () {
+                readyTimer = null;
+                if (state.active && generation === state.generation && state.controller === controller) {
+                    setConnectionStatus(state.paused ? 'paused' : 'live');
+                }
+            }, READY_STABILITY_MS);
+        };
         try {
             const url = `/api/conversations/${encodeURIComponent(state.selectedConversationId)}/egress-activity/stream?tail=100`;
             const response = await root.apiFetch(url, { method: 'GET', headers: { Accept: 'text/event-stream' }, signal: controller.signal });
@@ -464,9 +491,16 @@
                 parsed.events.forEach(function (frame) {
                     let payload = null;
                     try { payload = JSON.parse(frame.data); } catch (_) { return; }
-                    if (frame.event === 'ready') setConnectionStatus(state.paused ? 'paused' : 'live');
-                    if (frame.event === 'activity') addActivity(payload);
-                    if (frame.event === 'stream_error') terminalCode = String(payload && payload.code || 'stream_closed');
+                    if (frame.event === 'ready') scheduleReadyAnnouncement();
+                    if (frame.event === 'activity') {
+                        cancelReadyAnnouncement();
+                        setConnectionStatus(state.paused ? 'paused' : 'live');
+                        addActivity(payload);
+                    }
+                    if (frame.event === 'stream_error') {
+                        cancelReadyAnnouncement();
+                        terminalCode = String(payload && payload.code || 'stream_closed');
+                    }
                 });
             }
             if (!controller.signal.aborted) throw responseError(503, terminalCode || 'stream_closed');
@@ -481,6 +515,7 @@
             setConnectionStatus(waiting ? 'waiting' : 'error', error && error.code || 'unavailable');
             scheduleReconnect(generation);
         } finally {
+            cancelReadyAnnouncement();
             if (state.controller === controller) state.controller = null;
         }
     }
@@ -491,7 +526,7 @@
         const delay = Math.min(15000, 1000 * (2 ** Math.min(4, state.reconnectAttempt - 1)));
         state.reconnectTimer = root.setTimeout(function () {
             state.reconnectTimer = null;
-            if (state.active && generation === state.generation) connectStream();
+            if (state.active && generation === state.generation) connectStream({ retrying: true });
         }, delay);
     }
 
@@ -660,6 +695,9 @@
         parseSSEText,
         isSafeActivityEvent,
         activityEventKey,
+        shouldShowConnectingForTest: shouldShowConnecting,
+        connectionStatusNeedsUpdateForTest: connectionStatusNeedsUpdate,
+        readyStabilityMsForTest: READY_STABILITY_MS,
         filteredEventsForTest: function (events, filters) {
             const previous = { events: state.events, domain: state.domain, requestType: state.requestType, decision: state.decision, agent: state.agent, tool: state.tool, route: state.route };
             state.events = events;

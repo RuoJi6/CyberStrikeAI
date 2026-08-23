@@ -18,7 +18,8 @@ test('egress audit validates the closed safe projection without requiring omitte
         id: 'ea-1', chainSequence: 1, previousHash: '0'.repeat(64), eventHash: 'a'.repeat(64),
         occurredAt: '2026-08-22T12:00:00Z', category: 'network', eventType: 'http',
         conversationId: 'conversation-a', conversationTitle: 'audit target', domain: 'allowed.example',
-        decision: 'allowed', path: '/safe', resolvedIps: ['93.184.216.34'],
+        decision: 'allowed', method: 'GET', path: '/safe', resolvedIps: ['93.184.216.34'],
+        bytesUp: 1536, bytesDown: 4096,
     };
     const lifecycle = {
         id: 'ea-2', chainSequence: 2, previousHash: 'a'.repeat(64), eventHash: 'b'.repeat(64),
@@ -49,6 +50,8 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, latencyMs: -1 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, port: 70000 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: new Array(65).fill('1.1.1.1') }), false);
+    assert.deepEqual(audit.packetSummaryForTest(network), { primary: 'GET /safe', secondary: '↑1.5 KiB · ↓4.0 KiB' });
+    assert.deepEqual(audit.packetSummaryForTest(lifecycle), { primary: '—', secondary: '' });
 });
 
 test('egress audit validates a closed integrity proof', () => {
@@ -78,7 +81,8 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260823-2/);
+    assert.match(template, /egress-audit\.js\?v=20260824-1/);
+    assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
     assert.match(source, /root\.apiFetch/);
@@ -100,6 +104,7 @@ test('egress audit translations and responsive table/card layout are complete', 
         'auditTrace', 'auditEmpty', 'auditTotal', 'auditNetwork', 'auditLifecycle', 'auditBlocked',
         'auditFailures', 'auditPageMeta', 'auditPageMetaEmpty',
         'auditIntegrityChecking', 'auditIntegrityVerified', 'auditIntegrityFailed',
+		'auditPacket',
 		'auditHealth', 'auditHealthCooldownStarted', 'auditHealthCooldownExpired', 'auditHealthPaused', 'auditHealthRecovered',
     ];
     for (const locale of [zh, en]) {
@@ -114,7 +119,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-table td::before[\s\S]*?content: attr\(data-label\)/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260823-7/);
+    assert.match(template, /style\.css\?v=20260824-1/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260823-6/);
 });

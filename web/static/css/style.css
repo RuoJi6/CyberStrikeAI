@@ -4832,7 +4832,7 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 
 .egress-audit-table {
     width: 100%;
-    min-width: 1080px;
+    min-width: 1240px;
     border-collapse: collapse;
     table-layout: fixed;
 }
@@ -4848,13 +4848,14 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
     letter-spacing: 0.035em;
 }
 
-.egress-audit-table th:nth-child(1) { width: 150px; }
-.egress-audit-table th:nth-child(2) { width: 112px; }
-.egress-audit-table th:nth-child(3) { width: 190px; }
-.egress-audit-table th:nth-child(4) { width: 190px; }
-.egress-audit-table th:nth-child(5) { width: 150px; }
-.egress-audit-table th:nth-child(6) { width: 180px; }
+.egress-audit-table th:nth-child(1) { width: 145px; }
+.egress-audit-table th:nth-child(2) { width: 100px; }
+.egress-audit-table th:nth-child(3) { width: 175px; }
+.egress-audit-table th:nth-child(4) { width: 170px; }
+.egress-audit-table th:nth-child(5) { width: 180px; }
+.egress-audit-table th:nth-child(6) { width: 140px; }
 .egress-audit-table th:nth-child(7) { width: 170px; }
+.egress-audit-table th:nth-child(8) { width: 160px; }
 
 .egress-audit-table td {
     min-width: 0;
@@ -4873,6 +4874,8 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .egress-audit-table td span { margin-top: 4px; color: var(--text-secondary); font-size: 0.68rem; line-height: 1.45; white-space: nowrap; }
 .egress-audit-table td.is-target strong,
 .egress-audit-table td.is-target span,
+.egress-audit-table td.is-packet strong,
+.egress-audit-table td.is-packet span,
 .egress-audit-table td.is-decision span,
 .egress-audit-table td.is-trace span,
 .egress-audit-table td.is-result strong { overflow-wrap: anywhere; white-space: normal; }
@@ -5237,6 +5240,7 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .egress-audit-table td:nth-child(-n+2) { border-top: 0; }
     .egress-audit-table td.is-conversation,
     .egress-audit-table td.is-target,
+    .egress-audit-table td.is-packet,
     .egress-audit-table td.is-trace,
     .egress-audit-table td.is-result { grid-column: 1 / -1; }
     .container-policy-control { align-items: stretch; flex-direction: column; }
@@ -5304,6 +5308,7 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .egress-audit-table td:nth-child(2) { border-top: 1px solid var(--border-color); }
     .egress-audit-table td.is-conversation,
     .egress-audit-table td.is-target,
+    .egress-audit-table td.is-packet,
     .egress-audit-table td.is-trace,
     .egress-audit-table td.is-result { grid-column: auto; }
     .egress-audit-pagination { display: grid; grid-template-columns: 1fr 1fr; }

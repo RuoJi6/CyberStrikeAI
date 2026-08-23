@@ -189,6 +189,31 @@
         return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString();
     }
 
+    function formatBytes(value) {
+        const bytes = Number(value || 0);
+        if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+        const units = ['B', 'KiB', 'MiB', 'GiB'];
+        const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+        const amount = bytes / (1024 ** index);
+        return `${amount >= 10 || index === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[index]}`;
+    }
+
+    function packetSummary(event) {
+        if (!event || event.category !== 'network') return { primary: '—', secondary: '' };
+        let primary = eventTypeLabel(event.eventType);
+        if (event.eventType === 'http' || event.eventType === 'https') {
+            primary = [event.method || eventTypeLabel(event.eventType), event.path || '/'].filter(Boolean).join(' ');
+        } else if (event.eventType === 'connect') {
+            primary = `CONNECT ${event.domain || '—'}${event.port ? `:${event.port}` : ''}`;
+        } else if (event.eventType === 'dns') {
+            primary = `DNS ${event.domain || '—'}`;
+        }
+        return {
+            primary,
+            secondary: `↑${formatBytes(event.bytesUp)} · ↓${formatBytes(event.bytesDown)}`,
+        };
+    }
+
     function eventTypeLabel(value) {
         const labels = {
             dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT',
@@ -251,6 +276,7 @@
         const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
         const traceSecondary = [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
         const outcome = outcomeLabel(event);
+        const packet = packetSummary(event);
         const resultDetail = event.category === 'network'
             ? `${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
             : t(`status.${event.lifecycleState}`, event.lifecycleState);
@@ -259,6 +285,7 @@
             cell(t('auditEventType', '事件'), eventTypeLabel(event.eventType), event.category === 'network' ? t('auditCategoryNetwork', '网络') : t('auditCategoryLifecycle', '生命周期'), 'is-event'),
             cell(t('activityConversation', '对话'), event.conversationTitle || event.conversationId, event.conversationId, 'is-conversation'),
             cell(t('activityTarget', '目标'), target, resolution, 'is-target'),
+            cell(t('auditPacket', '报文摘要'), packet.primary, packet.secondary, 'is-packet'),
             cell(t('activityDecision', '策略判定'), verdictLabel(verdict), rule, `is-decision is-${verdict}`),
             cell(t('auditTrace', '追溯'), tracePrimary, traceSecondary, 'is-trace'),
             cell(t('activityResult', '结果'), outcome, resultDetail, 'is-result'),
@@ -456,6 +483,7 @@
 
     return {
         init, stop, refresh, isSafeAuditEvent, isSafeIntegrity,
+        packetSummaryForTest: packetSummary,
         readURLStateForTest: function (search) {
             readURLState(search || '');
             return { page: state.page, pageSize: state.pageSize, query: state.query, category: state.category, type: state.type, decision: state.decision };

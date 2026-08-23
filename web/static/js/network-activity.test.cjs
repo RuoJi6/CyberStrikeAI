@@ -47,6 +47,19 @@ test('replayed Docker tail events have a stable client deduplication key', () =>
     assert.notEqual(activity.activityEventKey(event), activity.activityEventKey({ ...event, bytesDown: 560 }));
 });
 
+test('background gateway retries preserve a stable waiting or error badge', () => {
+    assert.equal(activity.shouldShowConnectingForTest(false, 'waiting'), true);
+    assert.equal(activity.shouldShowConnectingForTest(true, 'connecting'), true);
+    assert.equal(activity.shouldShowConnectingForTest(true, 'waiting'), false);
+    assert.equal(activity.shouldShowConnectingForTest(true, 'error'), false);
+    assert.equal(activity.connectionStatusNeedsUpdateForTest('waiting', 'not_ready', 'waiting', 'not_ready'), false);
+    assert.equal(activity.connectionStatusNeedsUpdateForTest('waiting', 'not_ready', 'live', ''), true);
+    assert.match(source, /connectStream\(\{ retrying: true \}\)/);
+    assert.ok(activity.readyStabilityMsForTest >= 100);
+    assert.match(source, /if \(frame\.event === 'ready'\) scheduleReadyAnnouncement\(\)/);
+    assert.match(source, /if \(frame\.event === 'stream_error'\) \{[\s\S]*?cancelReadyAnnouncement\(\)/);
+});
+
 test('network activity page is a real incremental authenticated stream UI', () => {
     for (const id of [
         'network-activity-conversation', 'network-activity-connection', 'network-activity-domain',
@@ -54,7 +67,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
         'network-activity-tool', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-    assert.match(template, /network-activity\.js\?v=20260822-3/);
+    assert.match(template, /network-activity\.js\?v=20260824-1/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);
