@@ -1,0 +1,24 @@
+{
+  "tools": [
+    {"name":"sh","path":"/bin/sh","version":"strix-1.3.0","category":"runtime"},
+    {"name":"bash","path":"/bin/bash","version":"strix-1.3.0","category":"runtime"},
+    {"name":"curl","path":"/usr/bin/curl","version":"strix-1.3.0","category":"network"},
+    {"name":"git","path":"/usr/bin/git","version":"strix-1.3.0","category":"source"},
+    {"name":"jq","path":"/usr/bin/jq","version":"strix-1.3.0","category":"data"},
+    {"name":"rg","path":"/usr/bin/rg","version":"strix-1.3.0","category":"source"},
+    {"name":"python3","path":"/app/.venv/bin/python3","version":"strix-1.3.0","category":"runtime"},
+    {"name":"nmap","path":"/usr/bin/nmap","version":"strix-1.3.0","category":"network"},
+    {"name":"nuclei","path":"/usr/bin/nuclei","version":"strix-1.3.0","category":"security"},
+    {"name":"ffuf","path":"/usr/bin/ffuf","version":"strix-1.3.0","category":"security"},
+    {"name":"sqlmap","path":"/usr/bin/sqlmap","version":"strix-1.3.0","category":"security"},
+    {"name":"httpx","path":"/home/pentester/go/bin/httpx","version":"strix-1.3.0","category":"security"},
+    {"name":"katana","path":"/home/pentester/go/bin/katana","version":"strix-1.3.0","category":"security"},
+    {"name":"gospider","path":"/home/pentester/go/bin/gospider","version":"strix-1.3.0","category":"security"},
+    {"name":"interactsh-client","path":"/home/pentester/go/bin/interactsh-client","version":"strix-1.3.0","category":"security"},
+    {"name":"trufflehog","path":"/home/pentester/.local/bin/trufflehog","version":"strix-1.3.0","category":"security"},
+    {"name":"gitleaks","path":"/usr/local/bin/gitleaks","version":"strix-1.3.0","category":"security"},
+    {"name":"trivy","path":"/usr/local/bin/trivy","version":"strix-1.3.0","category":"security"},
+    {"name":"semgrep","path":"/home/pentester/.local/bin/semgrep","version":"strix-1.3.0","category":"security"},
+    {"name":"bandit","path":"/home/pentester/.local/bin/bandit","version":"strix-1.3.0","category":"security"}
+  ]
+}
