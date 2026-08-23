@@ -243,3 +243,13 @@ ls -lh data/
 ```
 
 有了这些信息，定位速度通常会快很多。
+
+## 对话容器与出站边界
+
+| 现象 | 处理 |
+| --- | --- |
+| 初始化失败 | 检查 Agent/网关 digest、inventory digest、Docker 状态、资源限制和受信快照目录；不要改为 host 执行继续原请求。 |
+| `boundary snapshot/runtime generation mismatch` | 保留数据库和 Docker 现场，停止请求并检查删除/重建是否被中断；不得手工跳过。新版在删除运行时时预留下一 generation。 |
+| Agent 收到 403 | 这是边界规则的明确禁止反馈。核对 `X-CyberStrikeAI-Blocked`、命中规则和出站审计；不要通过移除代理变量绕过。 |
+| 直接 IP/自定义 DNS/DoH/TCP 无法访问 | 这是 internal 网络的失败关闭行为。只有经网关规范化并命中允许规则的 HTTP/HTTPS 请求才能外连。 |
+| 镜像继承了不可用的 healthcheck | 运行时应显式覆盖为 `NONE`，并使用 CyberStrikeAI readiness 校验，不依赖上游镜像的宿主环境健康检查。 |

@@ -2174,9 +2174,69 @@ function toggleRuntimeModePanel() {
     }
 }
 
-function selectRuntimeMode(mode) {
+function currentContainerRolloutProjectId() {
+    if (typeof resolveChatProjectSelection === 'function') {
+        return String(resolveChatProjectSelection() || '').trim();
+    }
+    if (typeof getActiveProjectId === 'function') {
+        return String(getActiveProjectId() || '').trim();
+    }
+    return '';
+}
+
+async function fetchContainerRuntimeRollout() {
+    const projectId = currentContainerRolloutProjectId();
+    const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+    const response = await apiFetch(`/api/container-runtime-rollout${query}`);
+    if (!response.ok) {
+        let message = '';
+        try {
+            const payload = await response.json();
+            message = payload && payload.error ? String(payload.error) : '';
+        } catch (e) { /* ignore malformed error payloads */ }
+        throw new Error(message || `HTTP ${response.status}`);
+    }
+    return response.json();
+}
+
+async function selectRuntimeMode(mode) {
     if (currentConversationId) return;
     const normalized = normalizeConversationRuntimeModeForUI(mode);
+    if (normalized === CHAT_RUNTIME_MODE_CONTAINER) {
+        const option = document.querySelector('.runtime-mode-option[data-value="container"]');
+        if (option) {
+            option.disabled = true;
+            option.setAttribute('aria-busy', 'true');
+        }
+        try {
+            const rollout = await fetchContainerRuntimeRollout();
+            if (!rollout || rollout.allowed !== true) {
+                syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+                syncWorkspacePersistenceFromValue(false);
+                const key = rollout && rollout.enabled === false
+                    ? 'chat.containerRuntimeDisabled'
+                    : 'chat.containerRuntimeRolloutDenied';
+                const fallback = rollout && rollout.enabled === false
+                    ? '容器执行当前未启用，请使用本机执行。'
+                    : '当前用户或项目尚未开放容器执行，请使用本机执行。';
+                showChatToast(typeof window.t === 'function' ? window.t(key) : fallback, 'error');
+                closeRuntimeModePanel();
+                return;
+            }
+        } catch (error) {
+            syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);
+            syncWorkspacePersistenceFromValue(false);
+            const fallback = '暂时无法确认容器执行权限，请使用本机执行并稍后重试。';
+            showChatToast(typeof window.t === 'function' ? window.t('chat.containerRuntimeRolloutUnavailable') : fallback, 'error');
+            closeRuntimeModePanel();
+            return;
+        } finally {
+            if (option) {
+                option.disabled = false;
+                option.removeAttribute('aria-busy');
+            }
+        }
+    }
     syncRuntimeModeFromValue(normalized);
     if (normalized !== CHAT_RUNTIME_MODE_CONTAINER) syncWorkspacePersistenceFromValue(false);
     if (normalized === CHAT_RUNTIME_MODE_CONTAINER) {

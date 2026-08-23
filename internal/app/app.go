@@ -480,6 +480,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 
 	// 创建OpenAPI处理器
 	conversationHandler := handler.NewConversationHandler(db, log.Logger)
+	conversationHandler.SetContainerRolloutAuthorizer(func(userID, projectID string) (bool, bool) {
+		return cfg.Container.Enabled, cfg.Container.AllowsRollout(userID, projectID)
+	})
 	conversationHandler.SetAudit(auditSvc)
 	conversationHandler.SetTaskStopper(agentHandler)
 	conversationHandler.SetTaskStateProvider(agentHandler)
@@ -1253,6 +1256,7 @@ func setupRoutes(
 		protected.POST("/conversations", conversationHandler.CreateConversation)
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/container-runtimes", conversationHandler.ListContainerRuntimes)
+		protected.GET("/container-runtime-rollout", conversationHandler.GetContainerRuntimeRollout)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
 		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
 		protected.GET("/conversations/:id/egress", conversationHandler.GetConversationEgress)

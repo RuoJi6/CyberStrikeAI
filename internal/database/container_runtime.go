@@ -187,9 +187,13 @@ func (db *DB) Queue(ctx context.Context, spec containerruntime.RuntimeSpec, retr
 	result, err := db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO conversation_container_runtimes (
 			conversation_id, runtime_id, initialization_status, attempt,
-			image_digest, image_platform, spec_json, readiness_status, requested_at, updated_at
-		) VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?)
-	`, spec.ConversationID, spec.ID, containerruntime.InitializationQueued, spec.Image.Digest, spec.Image.Platform, string(encoded), readinessStatus, now, now)
+			image_digest, image_platform, spec_json, readiness_status,
+			runtime_generation, requested_at, updated_at
+		) VALUES (?, ?, ?, 0, ?, ?, ?, ?, COALESCE((
+			SELECT MAX(runtime_generation) FROM conversation_boundary_activations
+			WHERE conversation_id = ?
+		), 0), ?, ?)
+	`, spec.ConversationID, spec.ID, containerruntime.InitializationQueued, spec.Image.Digest, spec.Image.Platform, string(encoded), readinessStatus, spec.ConversationID, now, now)
 	if err != nil {
 		return containerruntime.InitializationRecord{}, false, fmt.Errorf("queue container initialization: %w", err)
 	}
@@ -234,7 +238,7 @@ func (db *DB) Queue(ctx context.Context, spec containerruntime.RuntimeSpec, retr
 		SET initialization_status = ?, provider_id = '', runtime_status = '', last_error = '',
 			readiness_status = ?, readiness_error = '', inventory_digest = '', tool_count = 0,
 			lifecycle_operation = ?, lifecycle_state = ?, lifecycle_error = '',
-			runtime_generation = 0, runtime_observed_at = NULL, lifecycle_started_at = NULL,
+			runtime_observed_at = NULL, lifecycle_started_at = NULL,
 			lifecycle_completed_at = NULL, runtime_drift = '',
 			requested_at = ?, started_at = NULL, completed_at = NULL,
 			readiness_started_at = NULL, readiness_completed_at = NULL, updated_at = ?
@@ -325,7 +329,8 @@ func (db *DB) Complete(ctx context.Context, conversationID string, runtime conta
 		UPDATE conversation_container_runtimes
 		SET initialization_status = ?, provider_id = ?, runtime_status = ?, last_error = '',
 			lifecycle_operation = ?, lifecycle_state = ?, lifecycle_error = '',
-			runtime_generation = 1, runtime_observed_at = ?, lifecycle_started_at = NULL,
+			runtime_generation = CASE WHEN runtime_generation > 0 THEN runtime_generation ELSE 1 END,
+			runtime_observed_at = ?, lifecycle_started_at = NULL,
 			lifecycle_completed_at = ?, runtime_drift = '', completed_at = ?, updated_at = ?
 		WHERE conversation_id = ? AND runtime_id = ? AND initialization_status = ?
 	`, containerruntime.InitializationCreated, runtime.ProviderID, runtime.Status,
@@ -894,15 +899,67 @@ func (db *DB) DeleteLifecycle(ctx context.Context, conversationID string, operat
 	if operation != containerruntime.LifecycleOperationDelete {
 		return fmt.Errorf("%w: delete lifecycle requires the delete operation", containerruntime.ErrInvalidSpecification)
 	}
-	result, err := db.ExecContext(ctx, `
+	conversationID = strings.TrimSpace(conversationID)
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete container lifecycle: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var runtimeGeneration int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT runtime_generation FROM conversation_container_runtimes
+		WHERE conversation_id = ? AND initialization_status = ?
+			AND lifecycle_operation = ? AND lifecycle_state = ?
+	`, conversationID, containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress).Scan(&runtimeGeneration); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: delete container lifecycle record is not in progress", containerruntime.ErrRuntimeStateConflict)
+		}
+		return fmt.Errorf("load delete container lifecycle generation: %w", err)
+	}
+
+	var activeSnapshotID string
+	var activeGeneration int
+	activationErr := tx.QueryRowContext(ctx, `
+		SELECT snapshot_id, runtime_generation
+		FROM conversation_boundary_activations
+		WHERE conversation_id = ?
+		ORDER BY runtime_generation DESC
+		LIMIT 1
+	`, conversationID).Scan(&activeSnapshotID, &activeGeneration)
+	if activationErr != nil && !errors.Is(activationErr, sql.ErrNoRows) {
+		return fmt.Errorf("load active boundary snapshot before container delete: %w", activationErr)
+	}
+	if activationErr == nil {
+		if activeGeneration != runtimeGeneration {
+			return fmt.Errorf("%w: boundary snapshot/runtime generation mismatch before container delete", containerruntime.ErrRuntimeStateConflict)
+		}
+		nextGeneration := runtimeGeneration + 1
+		activationID := fmt.Sprintf("%s:%d", activeSnapshotID, nextGeneration)
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO conversation_boundary_activations (
+				id, conversation_id, snapshot_id, runtime_generation, activated_at
+			) VALUES (?, ?, ?, ?, ?)
+		`, activationID, conversationID, activeSnapshotID, nextGeneration, formatSQLiteUTC(time.Now().UTC())); err != nil {
+			return fmt.Errorf("reserve boundary snapshot for replacement runtime: %w", err)
+		}
+	}
+
+	result, err := tx.ExecContext(ctx, `
 		DELETE FROM conversation_container_runtimes
 		WHERE conversation_id = ? AND initialization_status = ?
 			AND lifecycle_operation = ? AND lifecycle_state = ?
-	`, strings.TrimSpace(conversationID), containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress)
+	`, conversationID, containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress)
 	if err != nil {
 		return fmt.Errorf("delete container lifecycle record: %w", err)
 	}
-	return requireContainerRuntimeUpdate(result, "delete")
+	if err := requireContainerRuntimeUpdate(result, "delete"); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete container lifecycle: %w", err)
+	}
+	return nil
 }
 
 func (db *DB) RecoverLifecycle(ctx context.Context) ([]containerruntime.InitializationRecord, error) {

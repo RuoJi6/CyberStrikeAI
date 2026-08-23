@@ -38,6 +38,34 @@ func TestContainerRuntimeConfigDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestContainerRuntimeConfigRolloutAllowlist(t *testing.T) {
+	config := ContainerRuntimeConfig{Enabled: true}
+	if !config.AllowsRollout("user-a", "project-a") {
+		t.Fatal("empty rollout lists must preserve enabled-for-all behavior")
+	}
+	config.RolloutUserIDs = []string{"user-a"}
+	config.RolloutProjectIDs = []string{"project-a"}
+	if !config.AllowsRollout("user-a", "") {
+		t.Fatal("allowed user was rejected")
+	}
+	if !config.AllowsRollout("user-b", "project-a") {
+		t.Fatal("allowed project was rejected")
+	}
+	if config.AllowsRollout("user-b", "project-b") {
+		t.Fatal("non-allowlisted user and project were accepted")
+	}
+	config.Enabled = false
+	if config.AllowsRollout("user-a", "project-a") {
+		t.Fatal("disabled runtime accepted an allowlisted subject")
+	}
+	if err := validateContainerRolloutIDs("rollout_user_ids", []string{"user-a", " user-a "}); err == nil {
+		t.Fatal("duplicate rollout user IDs were accepted")
+	}
+	if err := validateContainerRolloutIDs("rollout_project_ids", []string{"project-a", ""}); err == nil {
+		t.Fatal("empty rollout project ID was accepted")
+	}
+}
+
 func TestContainerRuntimeConfigFailsClosedWhenEnabled(t *testing.T) {
 	tests := []struct {
 		name   string

@@ -247,3 +247,12 @@ SQLite 热备份时最好先停止服务，或至少复制 `*.db`、`*.db-wal`�
 - HTTP 到 HTTPS 跳转：`internal/app/main_server_http_redirect.go`
 - 配置结构和默认值：`internal/config/config.go`
 - 配置应用逻辑：`internal/handler/config.go`
+
+## ARM64 对话容器发布
+
+当前验收范围仅为 `linux/arm64`。在受控 ARM64 部署机上从已审查提交构建 Agent 与出站网关镜像，不使用 GitHub 托管或 AMD64 构建。
+
+1. 按 [容器镜像供应链](container-image-supply-chain.md) 生成并离线验证 SBOM、工具 inventory、镜像 digest、来源标签和校验和。
+2. 在 `container` 配置中只填入验收通过的 Agent/网关 digest 和 inventory digest。
+3. 先以 `rollout_user_ids` / `rollout_project_ids` 小范围启用，确认对话、容器、工作区、边界快照和审计全链路。
+4. 回退时设置 `container.enabled: false` 并清空灰度名单。已有 host 对话不受影响，容器对话不会静默回退到宿主机执行。

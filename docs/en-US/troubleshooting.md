@@ -117,3 +117,13 @@ Server logs:
 Browser console:
 API response:
 ```
+
+## Conversation Containers and Egress Boundaries
+
+| Symptom | Action |
+| --- | --- |
+| Initialization fails | Verify Agent/gateway digests, inventory digest, Docker state, resource limits, and the trusted snapshot directory. Never continue the original request on the host. |
+| `boundary snapshot/runtime generation mismatch` | Preserve the database and Docker state, stop the request, and inspect an interrupted delete/rebuild. Do not bypass the guard. Current releases reserve the next generation when a runtime is deleted. |
+| Agent receives HTTP 403 | This is explicit boundary denial. Check `X-CyberStrikeAI-Blocked`, the matched rule, and egress audit. Do not remove proxy variables to bypass it. |
+| Direct IP, custom DNS, DoH, or raw TCP fails | This is the internal network's fail-closed behavior. Only HTTP/HTTPS requests normalized and allowed by the gateway can leave the container. |
+| An inherited image healthcheck is unusable | The runtime must override it with `NONE` and rely on CyberStrikeAI readiness checks rather than an upstream host-specific healthcheck. |

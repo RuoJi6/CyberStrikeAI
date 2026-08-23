@@ -87,6 +87,62 @@ func TestContainerInitializationReadinessLifecycleRetryAndRecovery(t *testing.T)
 	}
 }
 
+func TestContainerDeleteReservesBoundaryGenerationForReplacementRuntime(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("replace deleted container", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialSnapshot, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || initialSnapshot.RuntimeGeneration != 1 {
+		t.Fatalf("initial boundary snapshot = %#v, %v", initialSnapshot, err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	queued, enqueued, err := db.Queue(ctx, spec, false)
+	if err != nil || !enqueued || queued.RuntimeGeneration != 1 {
+		t.Fatalf("initial queue = %#v, %v, %v", queued, enqueued, err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("initial claim = %v, %v", claimed, err)
+	}
+	created, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-first", Status: containerruntime.StatusStopped,
+	})
+	if err != nil || created.RuntimeGeneration != 1 {
+		t.Fatalf("initial complete = %#v, %v", created, err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationDelete); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationDelete); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetContainerInitialization(ctx, conversation.ID); !errors.Is(err, containerruntime.ErrNotFound) {
+		t.Fatalf("deleted runtime remains: %v", err)
+	}
+	reservedSnapshot, err := db.GetConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil || reservedSnapshot.SnapshotID != initialSnapshot.SnapshotID || reservedSnapshot.RuntimeGeneration != 2 {
+		t.Fatalf("reserved boundary snapshot = %#v, %v", reservedSnapshot, err)
+	}
+
+	queued, enqueued, err = db.Queue(ctx, spec, false)
+	if err != nil || !enqueued || queued.RuntimeGeneration != 2 {
+		t.Fatalf("replacement queue = %#v, %v, %v", queued, enqueued, err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("replacement claim = %v, %v", claimed, err)
+	}
+	created, err = db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-second", Status: containerruntime.StatusStopped,
+	})
+	if err != nil || created.RuntimeGeneration != reservedSnapshot.RuntimeGeneration {
+		t.Fatalf("replacement complete = %#v, %v", created, err)
+	}
+}
+
 func TestContainerRuntimeTableMigratesPreReadinessSchema(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pre-readiness.db")
 	raw, err := sql.Open("sqlite3", path)

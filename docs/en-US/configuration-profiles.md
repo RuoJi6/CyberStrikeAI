@@ -156,3 +156,27 @@ Guidance:
 - high-risk MCP tools stay out of allowlist;
 - stdio MCP gets its own working directory;
 - HTTP MCP must authenticate.
+
+## ARM64 Conversation-Container Rollout
+
+Use an allowlist before broad enablement; conversations outside the rollout continue to default to host mode.
+
+```yaml
+container:
+  enabled: true
+  rollout_user_ids: [admin]
+  rollout_project_ids: []
+  owner_id: cyberstrike-production-01
+  image_repository: cyberstrike/agent
+  image_digest: sha256:<agent-arm64-digest>
+  image_platform: linux/arm64
+  egress_image_repository: cyberstrike/egress
+  egress_image_digest: sha256:<egress-arm64-digest>
+  egress_image_platform: linux/arm64
+  tool_inventory_path: container/tool-inventory-linux-arm64.json
+  tool_inventory_digest: sha256:<inventory-digest>
+```
+
+- User and project allowlists use OR semantics; both empty means all authenticated users.
+- A failed or unavailable rollout check keeps the UI in host mode.
+- Publish the Agent image, gateway image, and inventory as one digest-pinned set. The current deployment and acceptance scope is `linux/arm64` only.

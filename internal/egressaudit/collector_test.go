@@ -2,6 +2,7 @@ package egressaudit
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -14,9 +15,10 @@ import (
 )
 
 type collectorTestStore struct {
-	mu      sync.Mutex
-	targets []database.EgressAuditRuntimeTarget
-	events  []egress.ActivityEvent
+	mu                   sync.Mutex
+	targets              []database.EgressAuditRuntimeTarget
+	events               []egress.ActivityEvent
+	failNetworkRemaining int
 }
 
 func (s *collectorTestStore) ApplyEgressHealthEvent(_ context.Context, _ database.EgressAuditRuntimeTarget, event egress.ActivityEvent) (bool, error) {
@@ -35,8 +37,42 @@ func (s *collectorTestStore) ListRunningEgressAuditRuntimeTargets(context.Contex
 func (s *collectorTestStore) AppendEgressNetworkAuditEvent(_ context.Context, _ database.EgressAuditRuntimeTarget, event egress.ActivityEvent) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.failNetworkRemaining > 0 {
+		s.failNetworkRemaining--
+		return false, errors.New("synthetic audit sink backpressure")
+	}
 	s.events = append(s.events, event)
 	return true, nil
+}
+
+func TestCollectorAuditSinkBackpressureReconnectsWithoutDroppingReplay(t *testing.T) {
+	target := collectorTargetFixture()
+	store := &collectorTestStore{targets: []database.EgressAuditRuntimeTarget{target}, failNetworkRemaining: 1}
+	streamer := &collectorTestStreamer{started: make(chan struct{}, 2), stopped: make(chan struct{}, 2)}
+	collector, err := NewCollector(store, streamer, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := collector.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitCollectorSignal(t, streamer.started, "first stream start")
+	waitCollectorCondition(t, func() bool { return collector.ActiveStreams() == 0 }, "failed stream removal")
+	if store.eventCount() != 0 {
+		t.Fatalf("failed sink unexpectedly persisted %d events", store.eventCount())
+	}
+
+	if err := collector.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitCollectorSignal(t, streamer.started, "replayed stream start")
+	waitCollectorCondition(t, func() bool { return store.eventCount() == 1 }, "replayed event persistence")
+	if collector.ActiveStreams() != 1 {
+		t.Fatalf("active streams after replay = %d", collector.ActiveStreams())
+	}
 }
 
 func (s *collectorTestStore) setTargets(targets []database.EgressAuditRuntimeTarget) {

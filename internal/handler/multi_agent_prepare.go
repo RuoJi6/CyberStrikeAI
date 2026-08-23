@@ -68,6 +68,10 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
 			return nil, fmt.Errorf("新对话 workspacePersistent 只能用于 container")
 		}
+		if runtimeMode == database.ConversationRuntimeModeContainer && h.config != nil &&
+			!h.config.Container.AllowsRollout(session.UserID, projectID) {
+			return nil, fmt.Errorf("当前用户或项目尚未开放容器执行，请使用本机执行")
+		}
 		boundaryPolicyID := strings.TrimSpace(req.BoundaryPolicyID)
 		if boundaryPolicyID != "" {
 			if runtimeMode != database.ConversationRuntimeModeContainer {

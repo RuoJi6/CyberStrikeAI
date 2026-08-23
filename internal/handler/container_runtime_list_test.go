@@ -120,4 +120,7 @@ func TestContainerRuntimeListOpenAPIContract(t *testing.T) {
 	if got := fmt.Sprint(enums["status"]); got != "[all not_requested pending running stopped failed]" {
 		t.Fatalf("status enum = %s", got)
 	}
+	if _, ok := document.Paths["/api/container-runtime-rollout"]; !ok {
+		t.Fatal("container rollout OpenAPI path is missing")
+	}
 }

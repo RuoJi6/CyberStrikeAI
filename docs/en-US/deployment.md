@@ -111,3 +111,12 @@ After startup:
 - HTTP to HTTPS redirect: `internal/app/main_server_http_redirect.go`
 - Config structs: `internal/config/config.go`
 - Config apply: `internal/handler/config.go`
+
+## ARM64 Conversation-Container Release
+
+The current acceptance scope is `linux/arm64` only. Build the Agent and egress-gateway images from the reviewed commit on the controlled ARM64 deployment host; do not use GitHub-hosted or AMD64 builds for this release.
+
+1. Follow [Container Image Supply Chain](container-image-supply-chain.md) to generate and verify the SBOM, tool inventory, image digests, provenance labels, and checksums offline.
+2. Configure only the accepted Agent/gateway digests and inventory digest under `container`.
+3. Start with `rollout_user_ids` / `rollout_project_ids`, then validate conversations, containers, workspaces, boundary snapshots, and audit end to end.
+4. To roll back, set `container.enabled: false` and clear both rollout allowlists. Existing host conversations are unaffected, and container conversations never silently fall back to host execution.

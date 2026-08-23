@@ -146,3 +146,11 @@ HITL 决策日志独立管理：
 - 监控 reconcile：`internal/monitor/reconcile.go`
 - 监控接口：`internal/handler/monitor.go`
 - HITL 日志：`internal/handler/hitl_logs.go`
+
+## 对话容器出站审计
+
+容器出站事件与平台操作审计是两条独立数据链。出站记录应至少包含对话、容器、运行时 generation、边界快照 ID/SHA-256、规范化目标、命中规则、允许/拒绝结果和上游绑定；不保存 query、请求/响应正文、Authorization、Cookie 或凭据。
+
+- generation 与当前激活快照不一致时，工具执行必须失败关闭，不得降级为无边界访问。
+- 审计收集器对存储失败使用有界重放；不能为了降低延迟而丢弃已接收事件。
+- 拒绝 HTTP/HTTPS 时，Agent 应收到 HTTP 403、`X-CyberStrikeAI-Blocked: true` 和清楚的中英文禁止访问说明；TCP/DNS 等无法返回 HTTP 正文的通道保持网络级失败关闭，并在出站审计中记录拒绝原因。

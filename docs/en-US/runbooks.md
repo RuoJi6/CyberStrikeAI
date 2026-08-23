@@ -186,3 +186,14 @@ Fix:
 - add to `tool_search_always_visible_tools`;
 - prompt when to use it;
 - inspect process details and monitor records.
+
+## Runbook 7: Conversation-Container Failure and Rollback
+
+1. Inspect runtime status, readiness, generation, and observed drift before deleting any volume.
+2. For a gateway fault, stop the conversation and explicitly rebuild it. Snapshot SHA-256 and runtime generation must remain aligned.
+3. After Docker or CyberStrikeAI restarts, reconcile and continue only from `stopped/ready` or `running/ready`.
+4. Choose workspace retention explicitly. Conversation deletion requires `workspace_action=retain` or `workspace_action=delete` for a persistent workspace.
+5. Never bypass `boundary snapshot/runtime generation mismatch`; preserve the database and Docker state and investigate an interrupted legacy delete/recreate path.
+6. For emergency rollback, set `container.enabled: false` and clear rollout allowlists. Existing host conversations are unaffected; container conversations do not silently fall back to host execution.
+
+Acceptance: service is active, API state matches Docker, ephemeral QA resources have no container/network/volume residue, and persistent workspace retention matches the user's choice.

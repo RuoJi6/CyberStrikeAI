@@ -30304,6 +30304,11 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
     justify-content: flex-start;
 }
 
+.runtime-mode-option[aria-busy="true"] {
+    cursor: wait;
+    opacity: 0.62;
+}
+
 .runtime-mode-option .role-selection-item-content-main,
 .runtime-mode-option .role-selection-item-name-main,
 .runtime-mode-option .role-selection-item-description-main {

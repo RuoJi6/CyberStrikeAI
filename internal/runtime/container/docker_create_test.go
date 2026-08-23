@@ -95,9 +95,31 @@ func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyc
 	}
 	f.createOptsByName[options.Name] = options
 	if f.createResults != nil {
-		return f.createResults[options.Name], f.createErrs[options.Name]
+		result, err := f.createResults[options.Name], f.createErrs[options.Name]
+		if err == nil {
+			f.applyCreatedHealthcheck(result.ID, options.Config)
+		}
+		return result, err
+	}
+	if f.createErr == nil {
+		f.applyCreatedHealthcheck(f.createResult.ID, options.Config)
 	}
 	return f.createResult, f.createErr
+}
+
+func (f *fakeDockerCreationAPI) applyCreatedHealthcheck(id string, config *mobycontainer.Config) {
+	if id == "" || config == nil {
+		return
+	}
+	if f.containerResult.Container.ID == id && f.containerResult.Container.Config != nil {
+		f.containerResult.Container.Config.Healthcheck = config.Healthcheck
+	}
+	for key, result := range f.containerResults {
+		if result.Container.ID == id && result.Container.Config != nil {
+			result.Container.Config.Healthcheck = config.Healthcheck
+			f.containerResults[key] = result
+		}
+	}
 }
 
 func (f *fakeDockerCreationAPI) ContainerInspect(ctx context.Context, id string, options mobyclient.ContainerInspectOptions) (mobyclient.ContainerInspectResult, error) {
@@ -430,6 +452,9 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	}
 	if !matchesRuntimeKeepalive(api.createOpts.Config, spec) {
 		t.Fatalf("fixed keepalive process was not configured: %#v", api.createOpts.Config)
+	}
+	if !equalHealthcheck(api.createOpts.Config.Healthcheck, runtimeHealthcheck) {
+		t.Fatalf("inherited image healthcheck was not disabled: %#v", api.createOpts.Config.Healthcheck)
 	}
 	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || len(api.createOpts.HostConfig.CapAdd) != 0 {
 		t.Fatalf("privilege baseline = %#v", api.createOpts.HostConfig)

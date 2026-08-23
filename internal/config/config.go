@@ -1055,6 +1055,8 @@ type AgentConfig struct {
 // is immutable and resource values are control-plane policy, not request data.
 type ContainerRuntimeConfig struct {
 	Enabled                 bool                           `yaml:"enabled" json:"enabled"`
+	RolloutUserIDs          []string                       `yaml:"rollout_user_ids,omitempty" json:"rollout_user_ids,omitempty"`
+	RolloutProjectIDs       []string                       `yaml:"rollout_project_ids,omitempty" json:"rollout_project_ids,omitempty"`
 	OwnerID                 string                         `yaml:"owner_id,omitempty" json:"owner_id,omitempty"`
 	ImageRepository         string                         `yaml:"image_repository,omitempty" json:"image_repository,omitempty"`
 	ImageDigest             string                         `yaml:"image_digest,omitempty" json:"image_digest,omitempty"`
@@ -1213,6 +1215,12 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	if strings.TrimSpace(c.OwnerID) == "" {
 		return fmt.Errorf("container.owner_id is required when the container runtime is enabled")
 	}
+	if err := validateContainerRolloutIDs("rollout_user_ids", c.RolloutUserIDs); err != nil {
+		return err
+	}
+	if err := validateContainerRolloutIDs("rollout_project_ids", c.RolloutProjectIDs); err != nil {
+		return err
+	}
 	if strings.TrimSpace(c.ImageRepository) == "" || strings.TrimSpace(c.ImageDigest) == "" || strings.TrimSpace(c.ImagePlatform) == "" {
 		return fmt.Errorf("container image_repository, image_digest and image_platform are required when enabled")
 	}
@@ -1273,6 +1281,47 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return fmt.Errorf("container runtime policy is invalid: %w", err)
+	}
+	return nil
+}
+
+// AllowsRollout keeps host mode as the default while permitting an operator to
+// expose container mode to a small set of users and/or projects. Empty lists
+// preserve the existing enabled-for-all behavior; when either list is set, a
+// user or project match is required.
+func (c ContainerRuntimeConfig) AllowsRollout(userID, projectID string) bool {
+	if !c.Enabled {
+		return false
+	}
+	if len(c.RolloutUserIDs) == 0 && len(c.RolloutProjectIDs) == 0 {
+		return true
+	}
+	userID = strings.TrimSpace(userID)
+	projectID = strings.TrimSpace(projectID)
+	for _, allowed := range c.RolloutUserIDs {
+		if userID != "" && userID == strings.TrimSpace(allowed) {
+			return true
+		}
+	}
+	for _, allowed := range c.RolloutProjectIDs {
+		if projectID != "" && projectID == strings.TrimSpace(allowed) {
+			return true
+		}
+	}
+	return false
+}
+
+func validateContainerRolloutIDs(field string, values []string) error {
+	seen := make(map[string]struct{}, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return fmt.Errorf("container.%s must not contain empty values", field)
+		}
+		if _, exists := seen[value]; exists {
+			return fmt.Errorf("container.%s must not contain duplicate values", field)
+		}
+		seen[value] = struct{}{}
 	}
 	return nil
 }

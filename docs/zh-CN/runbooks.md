@@ -221,3 +221,14 @@ knowledge:
 - 加入 `tool_search_always_visible_tools`。
 - 在提示词中明确什么时候使用。
 - 检查过程详情和监控记录。
+
+## Runbook 7：对话容器故障与回退
+
+1. 先在“运行环境”查看 `runtimeStatus` / `readinessStatus` / `runtimeGeneration` 与观测偏差，不要直接删除 volume。
+2. 网关异常时先停止对话，再显式重建。重建必须保持快照 SHA-256 与 generation 一致。
+3. Docker 或 CyberStrikeAI 重启后执行 reconcile；只有观测到 `stopped/ready` 或 `running/ready` 才继续请求。
+4. 删除容器时明确选择：保留工作区，或删除容器与 named volume。删除对话必须使用显式 `workspace_action` 决策。
+5. 出现 `boundary snapshot/runtime generation mismatch` 时不得绕过门控；保留数据库和 Docker 现场，检查是否有旧版本删除/重建中断。
+6. 需紧急回退时将 `container.enabled` 设为 `false`，并清空灰度名单；既有 host 对话不受影响，容器对话不会自动回退 host。
+
+验收：服务 active，实际 Docker 资源与 API 一致，临时对话无容器/网络/volume 残留，持久工作区的保留/删除结果与用户选择一致。

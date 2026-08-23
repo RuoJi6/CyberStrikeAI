@@ -73,6 +73,7 @@ type ConversationHandler struct {
 	egressHealthController   ConversationEgressHealthController
 	containerLifecycle       ConversationContainerLifecycleController
 	retainedWorkspace        ConversationRetainedWorkspaceController
+	containerRollout         func(userID, projectID string) (enabled, allowed bool)
 }
 
 // SetAudit wires platform audit logging.
@@ -113,6 +114,10 @@ func (h *ConversationHandler) SetContainerLifecycleController(controller Convers
 
 func (h *ConversationHandler) SetRetainedWorkspaceController(controller ConversationRetainedWorkspaceController) {
 	h.retainedWorkspace = controller
+}
+
+func (h *ConversationHandler) SetContainerRolloutAuthorizer(authorizer func(userID, projectID string) (enabled, allowed bool)) {
+	h.containerRollout = authorizer
 }
 
 // NewConversationHandler 创建新的对话处理器
@@ -192,6 +197,10 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
 		return
 	}
+	if runtimeMode == database.ConversationRuntimeModeContainer && !h.containerRolloutAllowed(session.UserID, meta.ProjectID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "当前用户或项目尚未开放容器执行，请使用本机执行"})
+		return
+	}
 	conv, err := h.db.CreateConversation(title, meta)
 	if err != nil {
 		h.logger.Error("创建对话失败", zap.Error(err))
@@ -207,6 +216,51 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, conv)
+}
+
+func (h *ConversationHandler) containerRolloutAllowed(userID, projectID string) bool {
+	if h == nil || h.containerRollout == nil {
+		return true
+	}
+	_, allowed := h.containerRollout(strings.TrimSpace(userID), strings.TrimSpace(projectID))
+	return allowed
+}
+
+func (h *ConversationHandler) GetContainerRuntimeRollout(c *gin.Context) {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	projectID := strings.TrimSpace(c.Query("project_id"))
+	if projectID != "" {
+		if _, err := h.db.GetProject(projectID); err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "目标项目不存在"})
+			return
+		}
+		if !session.Permissions["project:read"] ||
+			!h.db.UserCanAccessResource(session.UserID, session.ScopeFor("project:read"), "project", projectID) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "无权访问目标项目"})
+			return
+		}
+	}
+	enabled, allowed := false, false
+	if h != nil && h.containerRollout != nil {
+		enabled, allowed = h.containerRollout(session.UserID, projectID)
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"enabled": enabled,
+		"allowed": allowed,
+		"reason": func() string {
+			if !enabled {
+				return "container_runtime_disabled"
+			}
+			if !allowed {
+				return "rollout_not_allowed"
+			}
+			return "allowed"
+		}(),
+	})
 }
 
 func (h *ConversationHandler) conversationBoundaryPolicyAllowed(c *gin.Context, policyID string) bool {

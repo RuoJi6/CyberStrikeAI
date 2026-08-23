@@ -133,6 +133,8 @@ agent:
 # 对话容器运行时（默认关闭；启用时镜像必须固定 digest）
 container:
   enabled: false
+  rollout_user_ids: [] # 灰度用户 ID；与 rollout_project_ids 均为空时对全部用户开放
+  rollout_project_ids: [] # 灰度项目 ID；任一用户或项目命中即可使用容器执行
   owner_id: "" # 启用时必填；每个 CyberStrikeAI 部署唯一，用于 Docker 所有者标签
   image_repository: ghcr.io/usestrix/strix-sandbox
   image_digest: "" # 填 sha256:... 不可变 digest，不接受 latest/tag

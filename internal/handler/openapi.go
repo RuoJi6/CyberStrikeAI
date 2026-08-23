@@ -474,6 +474,15 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 			},
 			"schemas": map[string]interface{}{
+				"ContainerRuntimeRollout": map[string]interface{}{
+					"type": "object", "additionalProperties": false,
+					"required": []string{"enabled", "allowed", "reason"},
+					"properties": map[string]interface{}{
+						"enabled": map[string]interface{}{"type": "boolean"},
+						"allowed": map[string]interface{}{"type": "boolean"},
+						"reason":  map[string]interface{}{"type": "string", "enum": []string{"allowed", "container_runtime_disabled", "rollout_not_allowed"}},
+					},
+				},
 				"BoundaryPolicySummary":               boundaryPolicySummarySchema,
 				"BoundaryPolicyWrite":                 boundaryPolicyWriteSchema,
 				"BoundaryPolicyDetail":                boundaryPolicyDetailSchema,
@@ -2331,6 +2340,23 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"400": map[string]interface{}{"description": "分页或筛选参数无效"},
 						"401": map[string]interface{}{"description": "未授权"},
+					},
+				},
+			},
+			"/api/container-runtime-rollout": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"容器运行时"},
+					"summary":     "查询当前会话创建主体的容器灰度权限",
+					"description": "返回全局容器开关与当前用户/可访问项目的灰度结果。前端失败关闭；后端创建入口仍会再次强制校验。",
+					"operationId": "getContainerRuntimeRollout",
+					"parameters": []map[string]interface{}{
+						{"name": "project_id", "in": "query", "schema": map[string]interface{}{"type": "string"}, "description": "可选；必须是当前用户可读取的项目"},
+					},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "灰度结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ContainerRuntimeRollout"}}}},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权读取目标项目"},
+						"404": map[string]interface{}{"description": "目标项目不存在"},
 					},
 				},
 			},

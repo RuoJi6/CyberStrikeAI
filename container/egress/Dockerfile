@@ -1,16 +1,14 @@
 ARG GO_IMAGE="golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a"
-FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS build
+FROM ${GO_IMAGE} AS build
 
-ARG TARGETARCH
-ARG TARGETOS
+ARG TARGETARCH="arm64"
+ARG TARGETOS="linux"
 
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/cyberstrike-egress ./cmd/cyberstrike-egress
 COPY internal ./internal
-RUN --mount=type=cache,target=/go/pkg/mod \
-    --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+RUN CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
     go build -buildvcs=false -trimpath -ldflags="-s -w" \
     -o /out/cyberstrike-egress ./cmd/cyberstrike-egress
 

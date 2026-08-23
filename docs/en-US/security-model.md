@@ -52,6 +52,14 @@ Avoid long-term storage of:
 
 Project closeout should include cleanup of uploads, WebShell connections, C2 payloads, temporary workspaces, and bulky execution logs.
 
+## Conversation Containers and Egress Boundaries
+
+- Each container conversation gets an internal network. The Agent has no public default route and no Docker socket.
+- HTTP/HTTPS uses the per-conversation gateway. Raw TCP, custom DNS, DoH, IPv6, and host-gateway bypasses fail closed.
+- The boundary policy becomes an immutable snapshot before initialization. Snapshot and runtime generations must match or every tool execution is rejected.
+- Deleting a container while retaining its named volume reserves the next runtime generation; the replacement reuses the snapshot and preserves `/workspace`.
+- A denied request returns 403, `X-CyberStrikeAI-Blocked: true`, and a clear Agent-visible prohibition reason. It never falls back to host execution or direct target access.
+
 ## Production Baseline
 
 - Strong password and HTTPS.

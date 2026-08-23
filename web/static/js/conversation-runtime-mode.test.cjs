@@ -28,6 +28,18 @@ test('仅首条消息携带创建时执行位置', () => {
     assert.match(chat, /syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\);[\s\S]{0,320}resetNewConversationContainerControls[\s\S]{0,160}setChatRuntimeModeLocked\(false\)/);
 });
 
+test('容器执行选择先通过服务端灰度授权并在异常时失败关闭', () => {
+    assert.match(chat, /apiFetch\(`\/api\/container-runtime-rollout\$\{query\}`\)/);
+    assert.match(chat, /rollout\.allowed !== true[\s\S]{0,500}syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\)/);
+    assert.match(chat, /containerRuntimeRolloutUnavailable/);
+    assert.match(chat, /option\.disabled = true/);
+    for (const locale of [zh, en]) {
+        assert.equal(typeof locale.chat.containerRuntimeDisabled, 'string');
+        assert.equal(typeof locale.chat.containerRuntimeRolloutDenied, 'string');
+        assert.equal(typeof locale.chat.containerRuntimeRolloutUnavailable, 'string');
+    }
+});
+
 test('中英文文案明确区分执行位置与 Agent 编排', () => {
     for (const locale of [zh, en]) {
         assert.equal(typeof locale.chat.runtimeModeHost, 'string');

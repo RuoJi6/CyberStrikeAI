@@ -165,8 +165,10 @@ func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 }
 
 func TestContainerRuntimeListUsesConversationReadPermission(t *testing.T) {
-	if got := permissionForRequest(http.MethodGet, "/api/container-runtimes"); got != "chat:read" {
-		t.Fatalf("container runtime list permission = %q, want chat:read", got)
+	for _, path := range []string{"/api/container-runtimes", "/api/container-runtime-rollout"} {
+		if got := permissionForRequest(http.MethodGet, path); got != "chat:read" {
+			t.Fatalf("%s permission = %q, want chat:read", path, got)
+		}
 	}
 }
 

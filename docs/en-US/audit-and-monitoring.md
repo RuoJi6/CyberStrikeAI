@@ -85,3 +85,11 @@ After engagement:
 - Monitor: `internal/monitor/reconcile.go`
 - Monitor handler: `internal/handler/monitor.go`
 - HITL logs: `internal/handler/hitl_logs.go`
+
+## Conversation-Container Egress Audit
+
+Container egress events are separate from platform-management audit records. Each egress record should identify the conversation, container, runtime generation, boundary snapshot ID/SHA-256, normalized target, matched rule, allow/deny decision, and upstream binding. It must not persist query strings, request or response bodies, Authorization, Cookie, or credential values.
+
+- Tool execution fails closed when the runtime generation does not match the active snapshot; it never degrades to unrestricted access.
+- The collector uses bounded replay after a storage failure and does not discard accepted events merely to reduce latency.
+- Denied HTTP/HTTPS requests return HTTP 403, `X-CyberStrikeAI-Blocked: true`, and a clear bilingual prohibition message to the Agent. TCP/DNS channels that cannot carry an HTTP response remain blocked at the network layer and record the reason in egress audit.

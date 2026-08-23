@@ -78,6 +78,13 @@ const (
 
 var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
 
+// The control plane deliberately replaces the image entrypoint with a fixed,
+// non-privileged keepalive process. Image healthchecks are normally inherited
+// by Docker and may target that replaced process (for example runnerd), which
+// would incorrectly mark a healthy runtime as unhealthy. Runtime readiness is
+// verified independently, so disable the incompatible inherited healthcheck.
+var runtimeHealthcheck = &mobycontainer.HealthConfig{Test: []string{"NONE"}}
+
 var runtimeProxyEnvironmentKeys = []string{
 	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
@@ -329,6 +336,7 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 			WorkingDir:      "/workspace",
 			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 			Cmd:             []string{runtimeKeepaliveScriptForSpec(spec)},
+			Healthcheck:     cloneRuntimeHealthcheck(),
 			Env:             runtimeProxyEnvironment(spec, gatewayDNS),
 			Labels:          labels,
 		},
@@ -621,6 +629,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if !matchesRuntimeKeepalive(actual.Config, spec) {
 		return Runtime{}, fmt.Errorf("%w: created runtime keepalive process mismatch", ErrRuntimeStateConflict)
 	}
+	if !equalHealthcheck(actual.Config.Healthcheck, runtimeHealthcheck) {
+		return Runtime{}, fmt.Errorf("%w: created runtime healthcheck mismatch", ErrRuntimeStateConflict)
+	}
 	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
 		return Runtime{}, err
 	}
@@ -670,6 +681,10 @@ func runtimeKeepaliveScriptForSpec(spec RuntimeSpec) string {
 		return runtimeTLSKeepaliveScript
 	}
 	return runtimeKeepaliveScript
+}
+
+func cloneRuntimeHealthcheck() *mobycontainer.HealthConfig {
+	return &mobycontainer.HealthConfig{Test: append([]string(nil), runtimeHealthcheck.Test...)}
 }
 
 func verifyEngineSecurityBaseline(engine EngineInfo) error {

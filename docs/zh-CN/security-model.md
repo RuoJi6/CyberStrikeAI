@@ -170,6 +170,14 @@ HITL 的风险在于审批者看到的是“工具名 + 参数 + 上下文摘要
 
 建议按项目结束流程清理：附件、WebShell 连接、C2 payload、临时 workspace、长输出工具记录。
 
+## 对话容器与出站边界
+
+- 每个容器对话使用独立 internal 网络，Agent 没有公网默认路由，不挂载 Docker socket。
+- HTTP/HTTPS 通过该对话的出站网关；原始 TCP、自定义 DNS、DoH、IPv6 和宿主网关绕过失败关闭。
+- 边界规则在首次容器初始化前冻结为不可变快照。快照 generation 必须与运行时 generation 一致，不一致时所有工具执行失败关闭。
+- 删除容器但保留 named volume 时，控制面预留下一代 generation；重建后沿用同一快照并保持 `/workspace`。
+- 命中禁止规则时，网关返回 403、`X-CyberStrikeAI-Blocked: true` 和明确的 Agent 可见禁止原因；不回退宿主执行或目标直连。
+
 ## 源码锚点
 
 - 认证会话：`internal/security/auth_manager.go`
