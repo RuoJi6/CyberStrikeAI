@@ -657,6 +657,10 @@ function initContainerManagementPage(pageId) {
     if (CONTAINER_RUNTIME_DATA_PAGES.has(pageId)) {
         bindContainerRuntimeControls();
         if (!containerManagementState.loading) refreshContainerManagementData();
+    } else if (pageId === 'boundary-rules' && typeof window.initBoundaryRulesPage === 'function') {
+        window.initBoundaryRulesPage();
+    } else if (pageId === 'egress-proxies' && typeof window.initEgressManagementPage === 'function') {
+        window.initEgressManagementPage();
     } else if (pageId === 'network-activity' && typeof window.initNetworkActivityPage === 'function') {
         window.initNetworkActivityPage();
     } else if (pageId === 'egress-audit' && typeof window.initEgressAuditPage === 'function') {

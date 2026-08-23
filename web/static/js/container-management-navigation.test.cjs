@@ -39,7 +39,9 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
     }
     assert.equal(titles.size, 7);
     assert.match(template, /network-activity\.js\?v=20260822-3/);
-    assert.match(template, /container-management\.js\?v=20260823-5/);
+    assert.match(template, /boundary-rules\.js\?v=20260823-2/);
+    assert.match(template, /egress-management\.js\?v=20260823-2/);
+    assert.match(template, /container-management\.js\?v=20260823-6/);
 });
 
 test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => {
@@ -52,6 +54,7 @@ test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => 
 });
 
 test('容器管理初始化只标记当前独立页面', () => {
+    const initialized = [];
     const pages = new Map(pageIDs.map((id) => [id, {
         id: `page-${id}`,
         dataset: {},
@@ -60,7 +63,10 @@ test('容器管理初始化只标记当前独立页面', () => {
         removeAttribute(name) { this.attributes.delete(name); },
     }]));
     const context = {
-        window: {},
+        window: {
+            initBoundaryRulesPage() { initialized.push('boundary-rules'); },
+            initEgressManagementPage() { initialized.push('egress-proxies'); },
+        },
         document: {
             getElementById(id) { return pages.get(String(id).replace(/^page-/, '')) || null; },
             querySelectorAll(selector) { return selector === '[data-container-management-page]' ? [...pages.values()] : []; },
@@ -74,6 +80,9 @@ test('容器管理初始化只标记当前独立页面', () => {
     for (const id of pageIDs.filter((item) => item !== 'network-activity')) {
         assert.equal(pages.get(id).attributes.has('aria-current'), false);
     }
+    context.window.initContainerManagementPage('boundary-rules');
+    context.window.initContainerManagementPage('egress-proxies');
+    assert.deepEqual(initialized, ['boundary-rules', 'egress-proxies']);
 });
 
 test('出站暂停或冷却优先于容器运行状态展示', () => {
@@ -122,7 +131,7 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260823-2/);
+    assert.match(template, /style\.css\?v=20260823-7/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
