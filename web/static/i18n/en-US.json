@@ -294,6 +294,7 @@
     "boundaryEffectAttack": "Allow testing",
     "boundaryEffectAuth": "Credential-only access",
     "boundaryMethods": "Methods",
+    "boundaryVisitDefaultMethods": "GET, HEAD, OPTIONS (default)",
     "boundaryPaths": "Path prefixes",
     "boundaryExpires": "Expires",
     "boundaryNeverExpires": "Never",

@@ -294,6 +294,7 @@
     "boundaryEffectAttack": "允许测试",
     "boundaryEffectAuth": "仅凭据访问",
     "boundaryMethods": "方法",
+    "boundaryVisitDefaultMethods": "GET、HEAD、OPTIONS（默认）",
     "boundaryPaths": "路径前缀",
     "boundaryExpires": "过期时间",
     "boundaryNeverExpires": "永不过期",

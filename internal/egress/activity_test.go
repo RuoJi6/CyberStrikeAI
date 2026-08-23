@@ -48,7 +48,9 @@ func TestPolicyDNSActivitySeparatesPolicyDecisionFromResolutionOutcome(t *testin
 }
 
 func TestProxyHTTPActivityOmitsQueryHeadersBodiesAndRawErrors(t *testing.T) {
-	policy := testProxyPolicy(t, boundary.Rule{ID: "visit-1", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}}})
+	policy := testProxyPolicy(t, boundary.Rule{ID: "visit-1", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{
+		Host: "allowed.example", Schemes: []string{"http"}, Methods: []string{http.MethodPost},
+	}})
 	var events []ActivityEvent
 	proxy, err := NewProxy(policy, ProxyOptions{
 		Now:          func() time.Time { return time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC) },

@@ -5,8 +5,8 @@ set -euo pipefail
 : "${CYBERSTRIKE_AGENT_IMAGE:?CYBERSTRIKE_AGENT_IMAGE is required}"
 
 snapshot_id=12345678-1234-1234-1234-123456789ab6
-snapshot_sha=sha256:4ea3cd50f776125334f957864828585d2402811d0b743fdcca742f90b130b06f
-snapshot_json='{"schemaVersion":1,"policyId":"stage4-item6-policy","rules":[{"id":"allow-example","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3}]}'
+snapshot_json='{"schemaVersion":1,"policyId":"stage4-item6-policy","rules":[{"id":"allow-example","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4}]}'
+snapshot_sha="sha256:$(printf '%s\n' "$snapshot_json" | sha256sum | awk '{print $1}')"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/cyberstrike-egress-integration.XXXXXX")
 test_suffix=${CYBERSTRIKE_EGRESS_TEST_SUFFIX:-"$$"}
 internal_network="cs-egress-int-$test_suffix"
@@ -130,7 +130,10 @@ case "$allowed_status" in
 esac
 docker exec "$agent_container" getent ahostsv4 example.com >/dev/null
 expect_failure docker exec "$agent_container" getent ahostsv4 unknown.example
+expect_failure docker exec "$agent_container" getent ahostsv4 blocked.example
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://unknown.example/
+expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://blocked.example/
+expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -X POST -o /dev/null -w '%{http_code}' http://example.com/write
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1/
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com:853/
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com/dns-query
@@ -350,7 +353,7 @@ fi
 expect_failure docker exec "$agent_container" curl -sS --connect-timeout 2 --max-time 4 -o /dev/null http://example.com/
 
 printf 'docker_topology=isolated internal=2 egress=1\n'
-printf 'proxy_protocol=allowed_http_%s denied_matrix_passed\n' "$allowed_status"
+printf 'proxy_protocol=allowed_http_%s default_post_and_blocked_dns_gateway_denied\n' "$allowed_status"
 printf 'bypass_regression=direct,dns,doh,ipv6,no_proxy,external_proxy_blocked\n'
 printf 'gateway_crash=proxy_and_direct_blocked agent_running=true\n'
 printf 'upstream_unavailable=http_502 direct_fallback=false credential_metadata_leak=false\n'

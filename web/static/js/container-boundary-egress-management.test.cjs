@@ -95,6 +95,7 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     const keys = [
         'boundaryConversation', 'boundaryLoading', 'boundaryReady', 'boundarySnapshotHash',
         'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations', 'boundaryTLSEnabled',
+        'boundaryVisitDefaultMethods',
         'boundaryTLSBypassDomains', 'boundaryTLSBypassHint', 'activityHTTPS',
         'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab', 'egressAuthTab',
         'createProxy', 'createGroup', 'createAuth', 'credentialsConfigured', 'clearCredentials',
@@ -103,6 +104,8 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     for (const locale of [zh, en]) {
         for (const key of keys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
+    assert.match(boundary, /rule\.effect === 'allow-visit'/);
+    assert.match(boundary, /boundaryVisitDefaultMethods/);
     assert.match(styles, /\.container-policy-detail\s*\{/);
     assert.match(styles, /\.container-policy-rule-grid\s*\{/);
     assert.match(styles, /\.egress-management-view\s*\{/);
@@ -114,4 +117,17 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-management-view/);
     assert.match(styles, /@media \(max-width: 480px\)[\s\S]*?\.container-policy-rule-grid/);
     assert.match(styles, /@media \(max-width: 480px\)[\s\S]*?\.container-policy-snapshot-heading,[\s\S]*?flex-direction: column/);
+});
+
+test('allow-visit 空方法显示为只读默认集而非通配符', () => {
+    const source = boundary.match(/function ruleMethodsLabel\(rule\) \{[\s\S]*?\n    \}/);
+    assert.ok(source, '应找到实际 ruleMethodsLabel 实现');
+    const makeLabel = new Function('t', `${source[0]}; return ruleMethodsLabel;`);
+    const label = makeLabel((key, fallback) => key === 'boundaryVisitDefaultMethods'
+        ? 'GET、HEAD、OPTIONS（默认）'
+        : fallback);
+
+    assert.equal(label({ effect: 'allow-visit', methods: [] }), 'GET、HEAD、OPTIONS（默认）');
+    assert.equal(label({ effect: 'allow-visit', methods: ['POST'] }), 'POST');
+    assert.equal(label({ effect: 'allow-attack', methods: [] }), '*');
 });

@@ -70,6 +70,41 @@ func TestPolicyDefaultsToDenyAndUsesFixedPriority(t *testing.T) {
 	}
 }
 
+func TestPolicyAllowVisitDefaultsToReadOnlyMethods(t *testing.T) {
+	policy, err := NewPolicy([]Rule{{
+		ID: "read-only-default", Effect: EffectAllowVisit,
+		Target: RuleTarget{Host: "docs.example", Schemes: []string{"http", "https"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, method := range []string{"GET", "HEAD", "OPTIONS", "CONNECT"} {
+		decision, err := policy.Evaluate("https://docs.example/guide", method, nil, now)
+		if err != nil || !decision.Allowed || decision.RuleID != "read-only-default" {
+			t.Fatalf("default %s decision = %#v, %v", method, decision, err)
+		}
+	}
+	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+		decision, err := policy.Evaluate("https://docs.example/guide", method, nil, now)
+		if err != nil || decision.Allowed || decision.RuleID != "" || decision.Reason != ReasonDefaultDeny {
+			t.Fatalf("unauthorized %s decision = %#v, %v", method, decision, err)
+		}
+	}
+
+	explicit, err := NewPolicy([]Rule{{
+		ID: "explicit-post", Effect: EffectAllowVisit,
+		Target: RuleTarget{Host: "docs.example", Schemes: []string{"https"}, Methods: []string{"POST"}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := explicit.Evaluate("https://docs.example/submit", "POST", nil, now)
+	if err != nil || !decision.Allowed || decision.RuleID != "explicit-post" {
+		t.Fatalf("explicit POST decision = %#v, %v", decision, err)
+	}
+}
+
 func TestPolicyMatchesAllCanonicalTargetDimensions(t *testing.T) {
 	policy, err := NewPolicy([]Rule{{
 		ID:     "scoped",

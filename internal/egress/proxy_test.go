@@ -59,6 +59,41 @@ func TestProxyForwardsOnlyAuthorizedAbsoluteHTTPAndStripsProxyHeaders(t *testing
 	}
 }
 
+func TestProxyAllowVisitWithoutMethodsRejectsApplicationWrites(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "read-only-default", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}},
+	})
+	var calls atomic.Int32
+	proxy, err := NewProxy(policy, ProxyOptions{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("ok")),
+			Request:    request,
+		}, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed := httptest.NewRecorder()
+	proxy.ServeHTTP(allowed, httptest.NewRequest(http.MethodGet, "http://allowed.example/read", nil))
+	if allowed.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("GET status/calls = %d/%d", allowed.Code, calls.Load())
+	}
+
+	blocked := httptest.NewRecorder()
+	proxy.ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "http://allowed.example/write", strings.NewReader("data")))
+	body := blocked.Body.String()
+	if blocked.Code != http.StatusForbidden || calls.Load() != 1 || blocked.Header().Get("X-CyberStrikeAI-Blocked") != "true" ||
+		!strings.Contains(body, "CyberStrikeAI network boundary blocked access") ||
+		!strings.Contains(body, "CyberStrikeAI 出站边界已禁止访问该网站") || strings.Contains(body, "data") {
+		t.Fatalf("POST status/calls/header/body = %d/%d/%q/%q", blocked.Code, calls.Load(), blocked.Header().Get("X-CyberStrikeAI-Blocked"), body)
+	}
+}
+
 func TestProxyRejectsDeniedAndAmbiguousForwardRequests(t *testing.T) {
 	allowed := testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
 	proxy, err := NewProxy(allowed, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

@@ -3,6 +3,7 @@ package boundary
 import (
 	"fmt"
 	"math"
+	"net/http"
 	"net/netip"
 	"sort"
 	"strings"
@@ -342,7 +343,7 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	} else if rule.Target.Host != target.Host {
 		return false
 	}
-	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) || !containsStringOrAny(rule.Target.Methods, target.Method) {
+	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) || !ruleMethodMatches(rule, target.Method) {
 		return false
 	}
 	if len(rule.Target.PathPrefixes) == 0 {
@@ -354,6 +355,26 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 		}
 	}
 	return false
+}
+
+// ruleMethodMatches applies the frozen allow-visit contract: omitting methods
+// means ordinary read-only browsing, not every HTTP method. CONNECT is the
+// transport handshake for an HTTPS visit and remains eligible for the later
+// SNI and resolved-address checks; it does not authorize an application-level
+// write method inside an inspected TLS session.
+func ruleMethodMatches(rule compiledRule, method string) bool {
+	if len(rule.Target.Methods) != 0 {
+		return containsStringOrAny(rule.Target.Methods, method)
+	}
+	if rule.Effect != EffectAllowVisit {
+		return true
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodConnect:
+		return true
+	default:
+		return false
+	}
 }
 
 func ruleRank(rule compiledRule) int {

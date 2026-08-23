@@ -193,6 +193,14 @@
         return labels[String(effect || '')] || String(effect || '—');
     }
 
+    function ruleMethodsLabel(rule) {
+        if (Array.isArray(rule.methods) && rule.methods.length) return rule.methods.join(', ');
+        if (rule.effect === 'allow-visit') {
+            return t('boundaryVisitDefaultMethods', 'GET, HEAD, OPTIONS（默认）');
+        }
+        return '*';
+    }
+
     function actionButton(label, className, handler) {
         const button = element('button', className, label);
         button.type = 'button';
@@ -221,7 +229,7 @@
             detailField(t('host', '主机'), rule.host || '*'),
             detailField(t('protocol', '协议'), Array.isArray(rule.schemes) && rule.schemes.length ? rule.schemes.join(', ') : '*'),
             detailField(t('port', '端口'), Array.isArray(rule.ports) && rule.ports.length ? rule.ports.join(', ') : '*'),
-            detailField(t('boundaryMethods', '方法'), Array.isArray(rule.methods) && rule.methods.length ? rule.methods.join(', ') : '*'),
+            detailField(t('boundaryMethods', '方法'), ruleMethodsLabel(rule)),
             detailField(t('boundaryPaths', '路径前缀'), Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length ? rule.pathPrefixes.join(', ') : '*'),
             detailField(t('boundaryExpires', '过期时间'), rule.expiresAt ? formatDate(rule.expiresAt) : t('boundaryNeverExpires', '永不过期')),
         );
