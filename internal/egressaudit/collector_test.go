@@ -19,6 +19,13 @@ type collectorTestStore struct {
 	events  []egress.ActivityEvent
 }
 
+func (s *collectorTestStore) ApplyEgressHealthEvent(_ context.Context, _ database.EgressAuditRuntimeTarget, event egress.ActivityEvent) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.events = append(s.events, event)
+	return true, nil
+}
+
 func (s *collectorTestStore) ListRunningEgressAuditRuntimeTargets(context.Context) ([]database.EgressAuditRuntimeTarget, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

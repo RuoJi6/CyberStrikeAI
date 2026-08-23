@@ -46,7 +46,7 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 		{
 			PolicyID: policy.ID, Effect: boundary.EffectAllowAttack, Host: "attack.example",
 			Schemes: []string{"https"}, Ports: []int{443}, PathPrefixes: []string{"/v1/"},
-			Methods: []string{"GET", "POST"}, RateLimit: BoundaryRateLimit{RequestsPerSecond: 2, Burst: 5},
+			Methods: []string{"GET", "POST"}, RateLimit: BoundaryRateLimit{RequestsPerSecond: 2, Burst: 5, MaxConcurrent: 3},
 			ExpiresAt: &expiresAt, Position: 2,
 		},
 		{PolicyID: policy.ID, Effect: boundary.EffectBlocked, Host: "blocked.example", Position: 3},
@@ -99,7 +99,7 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 		t.Fatalf("normalized visit rule = %#v", rules[0])
 	}
 	attack := rules[1]
-	if attack.ExpiresAt == nil || !attack.ExpiresAt.Equal(expiresAt) || attack.RateLimit.RequestsPerSecond != 2 || attack.RateLimit.Burst != 5 {
+	if attack.ExpiresAt == nil || !attack.ExpiresAt.Equal(expiresAt) || attack.RateLimit.RequestsPerSecond != 2 || attack.RateLimit.Burst != 5 || attack.RateLimit.MaxConcurrent != 3 {
 		t.Fatalf("attack rule = %#v", attack)
 	}
 	authOnly := rules[3]

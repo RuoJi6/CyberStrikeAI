@@ -31,6 +31,7 @@ type snapshotPolicyRule struct {
 type snapshotRateLimit struct {
 	RequestsPerSecond float64 `json:"requestsPerSecond"`
 	Burst             int     `json:"burst"`
+	MaxConcurrent     int     `json:"maxConcurrent,omitempty"`
 }
 
 func compileSnapshotPolicy(encodedRules []json.RawMessage) (*boundary.Policy, error) {
@@ -49,7 +50,11 @@ func compileSnapshotPolicy(encodedRules []json.RawMessage) (*boundary.Policy, er
 		if stored.ID == "" || stored.ID != strings.TrimSpace(stored.ID) || stored.Schemes == nil || stored.Ports == nil || stored.PathPrefixes == nil || stored.Methods == nil {
 			return nil, fmt.Errorf("%w: rule %d is not canonical", ErrSnapshotIntegrity, index)
 		}
-		if math.IsNaN(stored.RateLimit.RequestsPerSecond) || math.IsInf(stored.RateLimit.RequestsPerSecond, 0) || stored.RateLimit.RequestsPerSecond < 0 || stored.RateLimit.Burst < 0 || (stored.RateLimit.RequestsPerSecond == 0) != (stored.RateLimit.Burst == 0) {
+		limit := boundary.RateLimit{
+			RequestsPerSecond: stored.RateLimit.RequestsPerSecond,
+			Burst:             stored.RateLimit.Burst, MaxConcurrent: stored.RateLimit.MaxConcurrent,
+		}
+		if math.IsNaN(stored.RateLimit.RequestsPerSecond) || math.IsInf(stored.RateLimit.RequestsPerSecond, 0) || boundary.ValidateRateLimit(limit) != nil {
 			return nil, fmt.Errorf("%w: rule %d rate limit is invalid", ErrSnapshotIntegrity, index)
 		}
 		target := boundary.RuleTarget{
@@ -69,7 +74,7 @@ func compileSnapshotPolicy(encodedRules []json.RawMessage) (*boundary.Policy, er
 		}
 		rules = append(rules, boundary.Rule{
 			ID: stored.ID, Effect: stored.Effect, Target: target,
-			AuthProfileID: authProfileID, ExpiresAt: stored.ExpiresAt,
+			AuthProfileID: authProfileID, RateLimit: limit, ExpiresAt: stored.ExpiresAt,
 		})
 	}
 	policy, err := boundary.NewPolicy(rules)

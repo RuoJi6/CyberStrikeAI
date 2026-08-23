@@ -44,9 +44,27 @@ func runConfigured(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	hup := make(chan os.Signal, 1)
+	recoveries := make(chan struct{}, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				select {
+				case recoveries <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
 	return egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
+		ManualRecovery: recoveries,
 	})
 }
 

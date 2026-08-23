@@ -274,7 +274,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"recordedAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"occurredAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"category":           map[string]interface{}{"type": "string", "enum": []string{"network", "lifecycle"}},
-			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "connect", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
+			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
 			"conversationId":     map[string]interface{}{"type": "string", "maxLength": 128},
 			"conversationTitle":  map[string]interface{}{"type": "string", "maxLength": 512},
 			"containerId":        map[string]interface{}{"type": "string", "maxLength": 128},
@@ -301,6 +301,23 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"lifecycleOperation": map[string]interface{}{"type": "string", "maxLength": 128},
 			"lifecycleState":     map[string]interface{}{"type": "string", "maxLength": 128},
 			"message":            map[string]interface{}{"type": "string", "maxLength": 1024},
+		},
+	}
+	egressHealthStateSchema := map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"description":          "对话出站网关的安全健康投影；不包含响应头、正文、凭据或 provider 错误。",
+		"required":             []string{"conversationId", "runtimeGeneration", "status", "manualRecoveryRequired", "updatedAt"},
+		"properties": map[string]interface{}{
+			"conversationId":         map[string]interface{}{"type": "string", "maxLength": 128},
+			"runtimeGeneration":      map[string]interface{}{"type": "integer", "minimum": 0},
+			"snapshotId":             map[string]interface{}{"type": "string", "maxLength": 128},
+			"snapshotSha256":         map[string]interface{}{"type": "string", "maxLength": 128},
+			"status":                 map[string]interface{}{"type": "string", "enum": []string{"healthy", "cooldown", "paused"}},
+			"signal":                 map[string]interface{}{"type": "string", "enum": []string{"upstream_rate_limited", "consecutive_login_failures", "waf_challenge", "captcha_challenge"}},
+			"cooldownUntil":          map[string]interface{}{"type": "string", "format": "date-time"},
+			"manualRecoveryRequired": map[string]interface{}{"type": "boolean"},
+			"updatedAt":              map[string]interface{}{"type": "string", "format": "date-time"},
 		},
 	}
 	egressAuditIntegritySchema := map[string]interface{}{
@@ -380,6 +397,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"EgressAuditIntegrity":                egressAuditIntegritySchema,
 				"EgressAuditSummary":                  egressAuditSummarySchema,
 				"EgressAuditList":                     egressAuditListSchema,
+				"EgressHealthState":                   egressHealthStateSchema,
 				"CreateConversationRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -2212,6 +2230,27 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"401": map[string]interface{}{"description": "未授权"},
 						"403": map[string]interface{}{"description": "无权访问该对话"},
 						"409": map[string]interface{}{"description": "容器或网关尚未就绪"},
+					},
+				},
+			},
+			"/api/conversations/{id}/egress-health": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"容器运行时"}, "summary": "查看对话出站健康状态", "operationId": "getConversationEgressHealth",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "出站健康安全投影", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressHealthState"}}}},
+						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "无权访问该对话"},
+					},
+				},
+			},
+			"/api/conversations/{id}/egress-health/recover": map[string]interface{}{
+				"post": map[string]interface{}{
+					"tags": []string{"容器运行时"}, "summary": "手动恢复对话出站网关", "operationId": "recoverConversationEgressHealth",
+					"description": "核对不可变运行时规格与 Docker 所有权后，仅向精确网关发送固定 SIGHUP 恢复信号，并写入哈希链审计。",
+					"parameters":  []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "已恢复", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressHealthState"}}}},
+						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "无权访问该对话"}, "409": map[string]interface{}{"description": "出站网关未就绪"},
 					},
 				},
 			},

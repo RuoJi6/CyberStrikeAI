@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"testing"
+	"time"
 
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 )
@@ -106,6 +107,60 @@ func TestContainerRuntimeListPaginatesSearchesAndFiltersOnServer(t *testing.T) {
 	rows, err = db.ListContainerConversationsForAccess(ctx, query)
 	if err != nil || len(rows) != 1 || rows[0].Title != "underscore_target" {
 		t.Fatalf("literal underscore search rows = %#v, %v", rows, err)
+	}
+}
+
+func TestContainerRuntimeListProjectsEgressCooldownAndPause(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	createRunning := func(title string) *Conversation {
+		conversation, err := db.CreateConversation(title, ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+		if err != nil {
+			t.Fatal(err)
+		}
+		spec := databaseRuntimeSpec(conversation.ID)
+		if _, _, err := db.Queue(ctx, spec, false); err != nil {
+			t.Fatal(err)
+		}
+		if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+			t.Fatalf("claim %s = %v, %v", conversation.ID, claimed, err)
+		}
+		if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+			ID: spec.ID, ProviderID: "provider-" + conversation.ID, Status: containerruntime.StatusRunning,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return conversation
+	}
+	cooldown := createRunning("cooldown runtime")
+	paused := createRunning("paused runtime")
+	now := time.Now().UTC()
+	insertHealth := func(conversationID, status, signal string, manual int) {
+		if _, err := db.Exec(`
+			INSERT INTO conversation_egress_health (
+				conversation_id, runtime_generation, status, signal, manual_recovery_required, updated_at
+			) VALUES (?, 1, ?, ?, ?, ?)
+		`, conversationID, status, signal, manual, now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertHealth(cooldown.ID, EgressHealthCooldown, "upstream_rate_limited", 0)
+	insertHealth(paused.ID, EgressHealthPaused, "captcha_challenge", 1)
+
+	query := ContainerRuntimeListQuery{Limit: 10, Status: "pending", Scope: RBACScopeAll}
+	rows, err := db.ListContainerConversationsForAccess(ctx, query)
+	if err != nil || len(rows) != 1 || rows[0].ID != cooldown.ID {
+		t.Fatalf("cooldown pending rows = %#v, %v", rows, err)
+	}
+	query.Status = "failed"
+	rows, err = db.ListContainerConversationsForAccess(ctx, query)
+	if err != nil || len(rows) != 1 || rows[0].ID != paused.ID {
+		t.Fatalf("paused failed rows = %#v, %v", rows, err)
+	}
+	query.Status = "all"
+	summary, err := db.SummarizeContainerConversationsForAccess(ctx, query)
+	if err != nil || summary.Total != 2 || summary.Running != 0 || summary.Attention != 2 {
+		t.Fatalf("health summary = %#v, %v", summary, err)
 	}
 }
 

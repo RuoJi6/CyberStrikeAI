@@ -165,7 +165,11 @@ func (h *BoundaryPolicyHandler) SimulatePolicy(c *gin.Context) {
 				Methods:      stored.Methods,
 			},
 			AuthProfileID: authProfileID,
-			ExpiresAt:     stored.ExpiresAt,
+			RateLimit: boundary.RateLimit{
+				RequestsPerSecond: stored.RateLimit.RequestsPerSecond,
+				Burst:             stored.RateLimit.Burst, MaxConcurrent: stored.RateLimit.MaxConcurrent,
+			},
+			ExpiresAt: stored.ExpiresAt,
 		})
 	}
 	compiled, err := boundary.NewPolicy(rules)

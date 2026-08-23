@@ -13,7 +13,7 @@
     const PAGE_SIZES = new Set([10, 20, 50, 100]);
     const CATEGORIES = new Set(['all', 'network', 'lifecycle']);
     const NETWORK_TYPES = new Set(['dns', 'http', 'connect']);
-    const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile']);
+    const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile', 'health']);
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
     const AUDIT_EVENT_FIELDS = new Set([
@@ -193,7 +193,8 @@
         const labels = {
             dns: 'DNS', http: 'HTTP', connect: 'CONNECT',
             create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
-            rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
+			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
+			health: t('auditHealth', '出站健康'),
         };
         return labels[value] || String(value || '').toUpperCase();
     }
@@ -207,6 +208,15 @@
     }
 
     function lifecycleMessage(event) {
+		if (event.eventType === 'health') {
+			const messages = {
+				cooldown_started: t('auditHealthCooldownStarted', '出站网关已进入冷却'),
+				cooldown_expired: t('auditHealthCooldownExpired', '出站网关冷却已结束'),
+				health_paused: t('auditHealthPaused', '出站网关已暂停，需要手动恢复'),
+				health_recovered: t('auditHealthRecovered', '出站网关已手动恢复'),
+			};
+			return messages[event.outcome] || t('auditHealthChanged', '出站健康状态已变更');
+		}
         if (event.result === 'failure') return t('auditLifecycleFailed', '容器生命周期操作失败');
         if (event.eventType === 'create') return t('auditRuntimeCreated', '容器运行时已创建');
         if (event.eventType === 'delete') return t('auditRuntimeDeleted', '容器运行时已删除');
@@ -234,7 +244,10 @@
             : eventTypeLabel(event.lifecycleOperation || event.eventType);
         const resolution = event.connectedIp || (event.resolvedIps || []).join(', ');
         const verdict = event.decision || event.result;
-        const rule = event.ruleId || (event.reason ? t(`activityValues.${event.reason}`, event.reason) : '') || event.lifecycleState;
+		const reason = event.eventType === 'health'
+			? t(`healthSignal.${event.reason || 'unknown'}`, event.reason || '')
+			: (event.reason ? t(`activityValues.${event.reason}`, event.reason) : '');
+		const rule = event.ruleId || reason || event.lifecycleState;
         const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
         const traceSecondary = [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
         const outcome = outcomeLabel(event);

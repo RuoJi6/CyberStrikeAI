@@ -133,6 +133,58 @@ func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {
 	h.runConversationContainerLifecycle(c, "reconcile", "对账对话容器状态", h.containerLifecycleReconcile)
 }
 
+func (h *ConversationHandler) GetConversationEgressHealth(c *gin.Context) {
+	id, ok := h.authorizeConversationContainer(c)
+	if !ok {
+		return
+	}
+	state, err := h.db.GetConversationEgressHealthState(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取出站健康状态失败"})
+		return
+	}
+	c.JSON(http.StatusOK, state)
+}
+
+func (h *ConversationHandler) RecoverConversationEgressHealth(c *gin.Context) {
+	id, ok := h.authorizeConversationContainer(c)
+	if !ok {
+		return
+	}
+	if h.egressHealthController == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "出站健康恢复服务未配置"})
+		return
+	}
+	record, err := h.db.GetContainerInitialization(c.Request.Context(), id)
+	if err != nil || record.Status != containerruntime.InitializationCreated || record.RuntimeStatus != containerruntime.StatusRunning || record.Spec.EgressGateway == nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "对话出站网关未就绪"})
+		return
+	}
+	if err := h.egressHealthController.RecoverEgressHealth(c.Request.Context(), record.Spec); err != nil {
+		h.writeContainerLifecycleError(c, id, "recover-egress-health", err)
+		return
+	}
+	conversation, err := h.db.GetConversationLite(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取对话失败"})
+		return
+	}
+	state, err := h.db.RecordManualEgressRecovery(c.Request.Context(), database.EgressAuditRuntimeTarget{
+		Record: record, ConversationTitle: conversation.Title,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "记录出站健康恢复失败"})
+		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "container", "recover-egress-health", "手动恢复对话出站网关", "conversation", id, map[string]interface{}{
+			"runtime_generation": record.RuntimeGeneration,
+			"snapshot_id":        state.SnapshotID,
+		})
+	}
+	c.JSON(http.StatusOK, state)
+}
+
 func (h *ConversationHandler) DeleteConversationContainer(c *gin.Context) {
 	id, ok := h.authorizeConversationContainer(c)
 	if !ok {

@@ -235,6 +235,12 @@
     "auditRebuild": "重建",
     "auditDelete": "删除",
     "auditReconcile": "对账",
+	"auditHealth": "出站健康",
+	"auditHealthCooldownStarted": "出站网关已进入冷却",
+	"auditHealthCooldownExpired": "出站网关冷却已结束",
+	"auditHealthPaused": "出站网关已暂停，需要手动恢复",
+	"auditHealthRecovered": "出站网关已手动恢复",
+	"auditHealthChanged": "出站健康状态已变更",
     "auditDecisionFilter": "判定",
     "auditSuccess": "成功",
     "auditFailure": "失败",
@@ -303,6 +309,18 @@
     "policyDNS": "策略 DNS",
     "policyDNSAddress": "策略 DNS 地址",
     "workspace": "工作区",
+	"egressHealth": "出站健康",
+	"egressHealthAttention": "出站保护已触发",
+	"cooldownUntil": "冷却至 {{time}}",
+	"recoverEgressHealth": "手动恢复",
+	"recoveringEgressHealth": "正在恢复…",
+	"healthSignal": {
+	  "upstream_rate_limited": "上游返回 429，网关已进入自动冷却",
+	  "consecutive_login_failures": "连续登录失败达到保护阈值",
+	  "waf_challenge": "上游 WAF 返回挑战信号",
+	  "captcha_challenge": "上游返回 CAPTCHA 信号",
+	  "unknown": "未知健康信号"
+	},
     "workspaceType": "工作区类型",
     "notConfigured": "未配置",
     "statsUnavailable": "统计暂不可用",
@@ -323,7 +341,7 @@
     "status": {
       "unknown": "未知", "not_requested": "未初始化", "queued": "已排队", "creating": "创建中", "created": "已创建", "failed": "失败",
       "running": "运行中", "stopped": "已停止", "pending": "等待中", "validating": "验证中", "ready": "已就绪",
-      "not_required": "不需要", "in_progress": "进行中", "unavailable": "不可用", "healthy": "健康"
+      "not_required": "不需要", "in_progress": "进行中", "unavailable": "不可用", "healthy": "健康", "cooldown": "冷却中", "paused": "已暂停"
     }
   },
   "dashboard": {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -273,5 +274,41 @@ func TestLoadPolicySnapshotCompilesCanonicalRulesAndRejectsNonCanonicalTargets(t
 	}
 	if _, _, err := LoadPolicySnapshot(path, testSnapshot(t, nonCanonical)); !errors.Is(err, ErrSnapshotIntegrity) {
 		t.Fatalf("non-canonical snapshot error = %v", err)
+	}
+}
+
+func TestLoadPolicySnapshotPreservesBoundedConcurrencyAndLegacyCanonicalJSON(t *testing.T) {
+	legacy := `{"schemaVersion":1,"policyId":"policy-1","rules":[{"id":"rule-1","effect":"allow-attack","host":"allowed.example","schemes":["http"],"ports":[80],"pathPrefixes":["/"],"methods":["POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2,"burst":5},"expiresAt":null,"position":1}]}`
+	configured := strings.Replace(legacy, `"burst":5`, `"burst":5,"maxConcurrent":3`, 1)
+	for name, document := range map[string]string{"legacy": legacy, "configured": configured} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "snapshot.json")
+			if err := os.WriteFile(path, []byte(document), 0o444); err != nil {
+				t.Fatal(err)
+			}
+			_, policy, err := LoadPolicySnapshot(path, testSnapshot(t, document))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := policy.Evaluate("http://allowed.example/", http.MethodPost, nil, time.Now())
+			if err != nil || decision.RateLimit.RequestsPerSecond != 2 || decision.RateLimit.Burst != 5 {
+				t.Fatalf("rate decision = %#v, %v", decision, err)
+			}
+			wantConcurrent := 0
+			if name == "configured" {
+				wantConcurrent = 3
+			}
+			if decision.RateLimit.MaxConcurrent != wantConcurrent {
+				t.Fatalf("max concurrent = %d, want %d", decision.RateLimit.MaxConcurrent, wantConcurrent)
+			}
+		})
+	}
+	invalid := strings.Replace(configured, `"maxConcurrent":3`, `"maxConcurrent":1025`, 1)
+	path := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(path, []byte(invalid), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := LoadPolicySnapshot(path, testSnapshot(t, invalid)); !errors.Is(err, ErrSnapshotIntegrity) {
+		t.Fatalf("unbounded concurrency error = %v", err)
 	}
 }

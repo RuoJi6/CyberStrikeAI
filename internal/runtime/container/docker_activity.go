@@ -153,23 +153,27 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 	if spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil ||
 		event.Event != egress.ActivityEventName || event.Timestamp.IsZero() || event.Timestamp.After(time.Now().UTC().Add(5*time.Minute)) ||
 		event.SnapshotID != spec.EgressGateway.BoundarySnapshot.ID || event.SnapshotSHA256 != spec.EgressGateway.BoundarySnapshot.SHA256 ||
-		len(event.Domain) == 0 || len(event.Domain) > 253 || strings.TrimSpace(event.Domain) != event.Domain ||
-		event.LatencyMS < 0 || event.BytesUp < 0 || event.BytesDown < 0 || len(event.ResolvedIPs) > 64 ||
+		len(event.Domain) > 253 || strings.TrimSpace(event.Domain) != event.Domain ||
+		event.LatencyMS < 0 || event.BytesUp < 0 || event.BytesDown < 0 || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 ||
 		!validActivityCode(event.Outcome, false) || !validActivityCode(event.Reason, true) || !validActivityText(event.RuleID, 256, true) {
 		return invalid()
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" {
+		if event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP:
-		if event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
+		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
 			event.HTTPStatus < 0 || event.HTTPStatus > 999 {
 			return invalid()
 		}
 	case egress.ActivityRequestCONNECT:
-		if event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 {
+		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 {
+			return invalid()
+		}
+	case egress.ActivityRequestHealth:
+		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || !validGatewayHealthEvent(event) {
 			return invalid()
 		}
 	default:
@@ -198,6 +202,22 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 		return invalid()
 	}
 	return nil
+}
+
+func validGatewayHealthEvent(event egress.ActivityEvent) bool {
+	switch event.Outcome {
+	case "cooldown_started":
+		return event.Decision == egress.ActivityDecisionBlocked && event.Reason == "upstream_rate_limited" && event.RetryAfterMS > 0
+	case "cooldown_expired":
+		return event.Decision == egress.ActivityDecisionAllowed && event.Reason == "upstream_rate_limited" && event.RetryAfterMS == 0
+	case "health_paused":
+		if event.Decision != egress.ActivityDecisionBlocked || event.RetryAfterMS != 0 {
+			return false
+		}
+		return event.Reason == "consecutive_login_failures" || event.Reason == "waf_challenge" || event.Reason == "captcha_challenge"
+	default:
+		return false
+	}
 }
 
 func validActivityCode(value string, optional bool) bool {

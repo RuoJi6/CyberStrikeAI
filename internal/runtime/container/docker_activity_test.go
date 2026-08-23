@@ -152,3 +152,33 @@ func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 		t.Fatalf("malformed activity handling = activity=%v err=%v", activity, err)
 	}
 }
+
+func TestGatewayActivityParserAcceptsOnlyClosedHealthSignals(t *testing.T) {
+	spec, _, _ := snapshotGatewayFixture(t)
+	valid := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestHealth,
+		Domain: "allowed.example", Decision: egress.ActivityDecisionBlocked, RuleID: "attack-1",
+		Reason: "upstream_rate_limited", Outcome: "cooldown_started", RetryAfterMS: 30000,
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	encoded, _ := json.Marshal(valid)
+	if _, activity, err := parseGatewayActivityLine(encoded, spec); err != nil || !activity {
+		t.Fatalf("valid health event rejected: activity=%v err=%v", activity, err)
+	}
+	for name, mutate := range map[string]func(*egress.ActivityEvent){
+		"unknown signal":     func(event *egress.ActivityEvent) { event.Reason = "provider_secret_signal" },
+		"unbounded cooldown": func(event *egress.ActivityEvent) { event.RetryAfterMS = int64(time.Hour/time.Millisecond) + 1 },
+		"health body bytes":  func(event *egress.ActivityEvent) { event.BytesDown = 1 },
+		"health path":        func(event *egress.ActivityEvent) { event.Path = "/login" },
+		"wrong verdict":      func(event *egress.ActivityEvent) { event.Decision = egress.ActivityDecisionAllowed },
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := valid
+			mutate(&candidate)
+			line, _ := json.Marshal(candidate)
+			if _, activity, err := parseGatewayActivityLine(line, spec); err == nil || !activity {
+				t.Fatalf("invalid health event accepted: %s", line)
+			}
+		})
+	}
+}

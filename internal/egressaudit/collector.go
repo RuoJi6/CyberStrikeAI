@@ -18,6 +18,7 @@ import (
 type Store interface {
 	ListRunningEgressAuditRuntimeTargets(context.Context) ([]database.EgressAuditRuntimeTarget, error)
 	AppendEgressNetworkAuditEvent(context.Context, database.EgressAuditRuntimeTarget, egress.ActivityEvent) (bool, error)
+	ApplyEgressHealthEvent(context.Context, database.EgressAuditRuntimeTarget, egress.ActivityEvent) (bool, error)
 }
 
 type ActivityStreamer interface {
@@ -107,6 +108,10 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 	}()
 	record := target.Record
 	err := c.streamer.StreamEgressActivity(ctx, record.Spec, containerruntime.ActivityStreamOptions{All: true}, func(event egress.ActivityEvent) error {
+		if event.RequestType == egress.ActivityRequestHealth {
+			_, appendErr := c.store.ApplyEgressHealthEvent(ctx, target, event)
+			return appendErr
+		}
 		_, appendErr := c.store.AppendEgressNetworkAuditEvent(ctx, target, event)
 		return appendErr
 	})

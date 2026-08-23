@@ -51,6 +51,9 @@ type fakeDockerCreationAPI struct {
 	stoppedID               string
 	stoppedIDs              []string
 	stopOpts                mobyclient.ContainerStopOptions
+	killedID                string
+	killOpts                mobyclient.ContainerKillOptions
+	killErr                 error
 	execCreateOpts          mobyclient.ExecCreateOptions
 	execContainerID         string
 	execID                  string
@@ -77,6 +80,12 @@ type fakeDockerCreationAPI struct {
 	networkRemoved          string
 	networksRemoved         []string
 	networkRemoveErr        error
+}
+
+func (f *fakeDockerCreationAPI) ContainerKill(_ context.Context, id string, options mobyclient.ContainerKillOptions) (mobyclient.ContainerKillResult, error) {
+	f.killedID = id
+	f.killOpts = options
+	return mobyclient.ContainerKillResult{}, f.killErr
 }
 
 func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyclient.ContainerCreateOptions) (mobyclient.ContainerCreateResult, error) {

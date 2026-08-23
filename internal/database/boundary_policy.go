@@ -118,6 +118,7 @@ type BoundaryPolicy struct {
 type BoundaryRateLimit struct {
 	RequestsPerSecond float64 `json:"requestsPerSecond"`
 	Burst             int     `json:"burst"`
+	MaxConcurrent     int     `json:"maxConcurrent,omitempty"`
 }
 
 type BoundaryPolicyRule struct {
@@ -327,6 +328,12 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 		return BoundaryPolicyRule{}, err
 	}
 	rule.Effect = effect
+	if err := boundary.ValidateRateLimit(boundary.RateLimit{
+		RequestsPerSecond: rule.RateLimit.RequestsPerSecond,
+		Burst:             rule.RateLimit.Burst, MaxConcurrent: rule.RateLimit.MaxConcurrent,
+	}); err != nil {
+		return BoundaryPolicyRule{}, err
+	}
 	if err := validateBoundaryRuleAuthMarker(&rule); err != nil {
 		return BoundaryPolicyRule{}, err
 	}

@@ -603,7 +603,11 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 		if err != nil || !reflect.DeepEqual(normalized, target) {
 			return fmt.Errorf("boundary snapshot rule %q target is not canonical", rule.ID)
 		}
-		if math.IsNaN(rule.RateLimit.RequestsPerSecond) || math.IsInf(rule.RateLimit.RequestsPerSecond, 0) || rule.RateLimit.RequestsPerSecond < 0 || rule.RateLimit.Burst < 0 {
+		limit := boundary.RateLimit{
+			RequestsPerSecond: rule.RateLimit.RequestsPerSecond,
+			Burst:             rule.RateLimit.Burst, MaxConcurrent: rule.RateLimit.MaxConcurrent,
+		}
+		if math.IsNaN(rule.RateLimit.RequestsPerSecond) || math.IsInf(rule.RateLimit.RequestsPerSecond, 0) || boundary.ValidateRateLimit(limit) != nil {
 			return fmt.Errorf("boundary snapshot rule %q rate limit is invalid", rule.ID)
 		}
 		authProfileID := ""
@@ -620,7 +624,7 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 		}
 		compiled = append(compiled, boundary.Rule{
 			ID: rule.ID, Effect: rule.Effect, Target: target,
-			AuthProfileID: authProfileID, ExpiresAt: rule.ExpiresAt,
+			AuthProfileID: authProfileID, RateLimit: limit, ExpiresAt: rule.ExpiresAt,
 		})
 	}
 	if _, err := boundary.NewPolicy(compiled); err != nil {

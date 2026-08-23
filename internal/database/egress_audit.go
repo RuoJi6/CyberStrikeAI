@@ -336,7 +336,7 @@ type EgressAuditRuntimeTarget struct {
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
 var egressAuditEventTypes = map[string]struct{}{
-	"all": {}, "dns": {}, "http": {}, "connect": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
+	"all": {}, "dns": {}, "http": {}, "connect": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
 }
 var egressAuditDecisions = map[string]struct{}{"all": {}, "allowed": {}, "blocked": {}, "success": {}, "failure": {}}
 
@@ -407,6 +407,7 @@ func (db *DB) initEgressAuditTables() error {
 		}
 	}
 	statements := []string{
+		createConversationEgressHealthTable,
 		createEgressAuditChainHeadsTable,
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_conversation_time ON egress_audit_events(conversation_id, occurred_at DESC)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_egress_audit_conversation_sequence ON egress_audit_events(conversation_id, chain_sequence) WHERE chain_sequence > 0`,
@@ -499,7 +500,7 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		!validEgressAuditText(event.SnapshotID, 128, false) || !validEgressAuditText(event.SnapshotSHA256, 128, false) ||
 		event.LatencyMS < 0 || event.LatencyMS > maxEgressAuditSafeInteger ||
 		event.BytesUp < 0 || event.BytesUp > maxEgressAuditSafeInteger ||
-		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || len(event.ResolvedIPs) > 64 ||
+		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 ||
 		!validEgressAuditCode(event.Outcome, false) || !validEgressAuditCode(event.Reason, true) ||
 		!validEgressAuditText(event.RuleID, 256, true) || !validEgressAuditText(event.UpstreamRouteID, 128, true) {
 		return invalid()
@@ -526,7 +527,7 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" {
+		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP:

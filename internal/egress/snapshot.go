@@ -59,6 +59,7 @@ type GatewayOptions struct {
 	ListenAddress         string
 	DNSListenAddress      string
 	SnapshotCheckInterval time.Duration
+	ManualRecovery        <-chan struct{}
 	UpstreamRoutePath     string
 	UpstreamRoute         *UpstreamRouteReference
 	AuthProfilesPath      string
@@ -372,7 +373,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan serverResult, 4)
+	results := make(chan serverResult, 5)
 	go func() { results <- serverResult{name: "HTTP proxy", err: server.Serve(listener)} }()
 	go func() {
 		results <- serverResult{name: "UDP policy DNS", err: servePolicyDNSUDP(runCtx, dnsPacket, dnsHandler)}
@@ -389,6 +390,22 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 				options.SnapshotCheckInterval),
 		}
 	}()
+	go func() {
+		recoveries := options.ManualRecovery
+		for {
+			select {
+			case <-runCtx.Done():
+				results <- serverResult{name: "manual recovery listener"}
+				return
+			case _, ok := <-recoveries:
+				if ok {
+					proxy.RecoverHealth()
+				} else {
+					recoveries = nil
+				}
+			}
+		}
+	}()
 
 	var first serverResult
 	completed := 0
@@ -400,7 +417,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	cancel()
 	_ = server.Close()
 	closeGatewayListeners(listener, dnsPacket, dnsTCP)
-	for completed < 4 {
+	for completed < 5 {
 		result := <-results
 		completed++
 		if first.name == "" && result.err != nil && !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, net.ErrClosed) {

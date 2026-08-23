@@ -12,6 +12,7 @@ const (
 	ActivityRequestDNS     = "dns"
 	ActivityRequestHTTP    = "http"
 	ActivityRequestCONNECT = "connect"
+	ActivityRequestHealth  = "health"
 
 	ActivityDecisionAllowed = "allowed"
 	ActivityDecisionBlocked = "blocked"
@@ -39,6 +40,7 @@ type ActivityEvent struct {
 	LatencyMS       int64     `json:"latencyMs"`
 	BytesUp         int64     `json:"bytesUp,omitempty"`
 	BytesDown       int64     `json:"bytesDown,omitempty"`
+	RetryAfterMS    int64     `json:"retryAfterMs,omitempty"`
 	SnapshotID      string    `json:"snapshotId"`
 	SnapshotSHA256  string    `json:"snapshotSha256"`
 }

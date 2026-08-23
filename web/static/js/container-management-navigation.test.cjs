@@ -39,7 +39,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
     }
     assert.equal(titles.size, 7);
     assert.match(template, /network-activity\.js\?v=20260822-3/);
-    assert.match(template, /container-management\.js\?v=20260822-7/);
+    assert.match(template, /container-management\.js\?v=20260823-5/);
 });
 
 test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => {
@@ -76,6 +76,34 @@ test('容器管理初始化只标记当前独立页面', () => {
     }
 });
 
+test('出站暂停或冷却优先于容器运行状态展示', () => {
+    const context = {
+        window: {},
+        document: {
+            getElementById() { return null; },
+            querySelectorAll() { return []; },
+        },
+    };
+    vm.runInNewContext(management, context);
+    assert.equal(context.containerRuntimePrimaryStatus({
+        runtimeStatus: 'running',
+        observation: { agent: { status: 'running' } },
+        egressHealth: { status: 'paused' },
+    }), 'paused');
+    assert.equal(context.containerRuntimePrimaryStatus({
+        runtimeStatus: 'running',
+        egressHealth: { status: 'cooldown' },
+    }), 'cooldown');
+    assert.equal(context.containerRuntimePrimaryStatus({
+        runtimeStatus: 'running',
+        egressHealth: { status: 'healthy' },
+    }), 'running');
+    assert.equal(context.containerRuntimeAgentStatus({
+        runtimeStatus: 'running',
+        egressHealth: { status: 'paused' },
+    }), 'running');
+});
+
 test('中英文导航与页面文案完整且窄屏布局有明确规则', () => {
     const navKeys = ['containerManagement', 'containerOverview', 'conversationContainers', 'runtimeEnvironments', 'boundaryRules', 'egressProxies', 'networkActivity', 'egressAudit'];
     const contentKeys = ['overviewTitle', 'conversationsTitle', 'runtimesTitle', 'boundaryTitle', 'proxiesTitle', 'activityTitle', 'auditTitle', 'connectingData'];
@@ -94,7 +122,7 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260823-1/);
+    assert.match(template, /style\.css\?v=20260823-2/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
@@ -131,6 +159,7 @@ test('容器管理视图使用安全观测端点和服务端分页筛选', () =>
     assert.match(management, /memoryUsageBytes/);
     assert.match(management, /boundarySnapshotSha256/);
     assert.match(management, /containerRuntimeLatestError/);
+    assert.match(management, /record\.egressHealth = state;\s*record\.observationError = '';/);
     assert.match(management, /interpolation: \{ escapeValue: false \}/);
     assert.doesNotMatch(management, /\.innerHTML\s*=/);
     for (const locale of [zh, en]) {

@@ -44,6 +44,10 @@ type ConversationEgressActivityStreamer interface {
 	StreamEgressActivity(context.Context, containerruntime.RuntimeSpec, containerruntime.ActivityStreamOptions, containerruntime.RuntimeActivitySink) error
 }
 
+type ConversationEgressHealthController interface {
+	RecoverEgressHealth(context.Context, containerruntime.RuntimeSpec) error
+}
+
 type ConversationContainerLifecycleController interface {
 	Start(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 	Stop(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
@@ -66,6 +70,7 @@ type ConversationHandler struct {
 	containerInitializations ConversationContainerInitializationProvider
 	containerObserver        ConversationContainerRuntimeObserver
 	egressActivityStreamer   ConversationEgressActivityStreamer
+	egressHealthController   ConversationEgressHealthController
 	containerLifecycle       ConversationContainerLifecycleController
 	retainedWorkspace        ConversationRetainedWorkspaceController
 }
@@ -96,6 +101,10 @@ func (h *ConversationHandler) SetContainerRuntimeObserver(observer ConversationC
 
 func (h *ConversationHandler) SetEgressActivityStreamer(streamer ConversationEgressActivityStreamer) {
 	h.egressActivityStreamer = streamer
+}
+
+func (h *ConversationHandler) SetEgressHealthController(controller ConversationEgressHealthController) {
+	h.egressHealthController = controller
 }
 
 func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {
@@ -370,6 +379,12 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 		record, getErr := h.containerInitializations.Get(c.Request.Context(), conversation.ID)
 		if getErr == nil {
 			item.apply(record)
+			if record.Spec.EgressGateway != nil {
+				health, healthErr := h.db.GetConversationEgressHealthState(c.Request.Context(), conversation.ID)
+				if healthErr == nil {
+					item.EgressHealth = &health
+				}
+			}
 		} else if !errors.Is(getErr, containerruntime.ErrNotFound) {
 			item.Status = "unavailable"
 			item.ObservationError = "status_unavailable"
@@ -408,6 +423,7 @@ type containerRuntimeListItemView struct {
 	UpdatedAt           time.Time                           `json:"updatedAt"`
 	Desired             *conversationContainerDesiredView   `json:"desired,omitempty"`
 	ObservationError    string                              `json:"observationError,omitempty"`
+	EgressHealth        *database.EgressHealthState         `json:"egressHealth,omitempty"`
 }
 
 func (item *containerRuntimeListItemView) apply(record containerruntime.InitializationRecord) {

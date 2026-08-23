@@ -54,6 +54,7 @@ type Proxy struct {
 	clientHelloTimeout time.Duration
 	maxClientHello     int
 	activitySink       ActivitySink
+	guard              *requestGuard
 }
 
 func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
@@ -101,7 +102,7 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	}
 	proxy := &Proxy{
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
-		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink,
+		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -209,6 +210,18 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	}
 	event.Decision = ActivityDecisionAllowed
 	event.Outcome = "upstream_failed"
+	release, block, transition := p.guard.acquire(decision, startedAt)
+	p.emitHealthTransition(decision, transition, startedAt)
+	if block != nil {
+		event.Decision = ActivityDecisionBlocked
+		event.Reason = block.reason
+		event.Outcome = block.outcome
+		event.HTTPStatus = http.StatusTooManyRequests
+		event.RetryAfterMS = block.retryAfterMS
+		writeRateLimitResponse(writer, block.retryAfterMS)
+		return
+	}
+	defer release()
 
 	outbound := request.Clone(request.Context())
 	outbound.RequestURI = ""
@@ -241,6 +254,8 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	defer response.Body.Close()
 	event.HTTPStatus = response.StatusCode
 	event.Outcome = "completed"
+	observedAt := p.now().UTC()
+	p.emitHealthTransition(decision, p.guard.observeResponse(decision, outbound, response, observedAt), observedAt)
 	responseHeaders := response.Header.Clone()
 	removeHopByHopHeaders(responseHeaders)
 	copyHeaders(writer.Header(), responseHeaders)
@@ -281,6 +296,17 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	}
 	event.Decision = ActivityDecisionAllowed
 	event.Outcome = "tunnel_unavailable"
+	release, block, transition := p.guard.acquire(decision, startedAt)
+	p.emitHealthTransition(decision, transition, startedAt)
+	if block != nil {
+		event.Decision = ActivityDecisionBlocked
+		event.Reason = block.reason
+		event.Outcome = block.outcome
+		event.RetryAfterMS = block.retryAfterMS
+		writeRateLimitResponse(writer, block.retryAfterMS)
+		return
+	}
+	defer release()
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {
 		event.Outcome = "hijack_unavailable"
@@ -461,6 +487,39 @@ func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAutho
 		lastErr = errors.New("authorized egress host has no usable address")
 	}
 	return nil, fmt.Errorf("dial authorized egress address: %w", lastErr)
+}
+
+// RecoverHealth is invoked only by the trusted gateway signal listener. Agent
+// traffic cannot reach this control path through the data-plane proxy.
+func (p *Proxy) RecoverHealth() {
+	if p != nil {
+		p.guard.recover()
+	}
+}
+
+func (p *Proxy) emitHealthTransition(decision boundary.Decision, transition *requestGuardTransition, now time.Time) {
+	if p == nil || transition == nil {
+		return
+	}
+	activityDecision := ActivityDecisionBlocked
+	if transition.outcome == "cooldown_expired" {
+		activityDecision = ActivityDecisionAllowed
+	}
+	emitActivity(p.activitySink, ActivityEvent{
+		Timestamp: now.UTC(), RequestType: ActivityRequestHealth,
+		Domain: decision.Target.Host, Decision: activityDecision,
+		RuleID: decision.RuleID, Reason: transition.reason,
+		Outcome: transition.outcome, RetryAfterMS: transition.retryAfterMS,
+	})
+}
+
+func writeRateLimitResponse(writer http.ResponseWriter, retryAfterMS int64) {
+	seconds := int64(1)
+	if retryAfterMS > 0 {
+		seconds = (retryAfterMS + 999) / 1000
+	}
+	writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+	http.Error(writer, "egress request temporarily limited", http.StatusTooManyRequests)
 }
 
 func normalizeConnectTarget(request *http.Request) (rawURL, authority, host string, port int, err error) {

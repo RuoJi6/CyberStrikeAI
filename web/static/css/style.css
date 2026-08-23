@@ -4273,8 +4273,43 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 }
 
 .container-runtime-status-grid {
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    padding: 18px 0;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	padding: 18px 0;
+}
+
+.container-egress-health {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	margin-bottom: 18px;
+	padding: 13px 14px;
+	border: 1px solid color-mix(in srgb, #d97706 34%, var(--border-color));
+	border-radius: 12px;
+	background: color-mix(in srgb, #d97706 6%, var(--bg-primary));
+	color: #92400e;
+	font-size: 0.78rem;
+}
+
+.container-egress-health.is-danger {
+	border-color: color-mix(in srgb, #dc2626 34%, var(--border-color));
+	background: color-mix(in srgb, #dc2626 6%, var(--bg-primary));
+	color: #b91c1c;
+}
+
+.container-egress-health p {
+	margin: 5px 0 0;
+	overflow-wrap: anywhere;
+	line-height: 1.5;
+}
+
+.container-egress-health small {
+	display: block;
+	margin-top: 5px;
+}
+
+.container-egress-health-recover {
+	flex: 0 0 auto;
 }
 
 .container-runtime-metadata {
@@ -4860,6 +4895,8 @@ html[data-theme="dark"] .container-runtime-badge.is-success { color: #86efac; }
 html[data-theme="dark"] .container-runtime-badge.is-warning { color: #fcd34d; }
 html[data-theme="dark"] .container-runtime-badge.is-danger { color: #fca5a5; }
 html[data-theme="dark"] .container-runtime-error { color: #fca5a5; }
+html[data-theme="dark"] .container-egress-health { color: #fcd34d; }
+html[data-theme="dark"] .container-egress-health.is-danger { color: #fca5a5; }
 html[data-theme="dark"] .network-activity-connection.is-live,
 html[data-theme="dark"] .network-activity-counts .is-success,
 html[data-theme="dark"] .network-activity-table td.is-decision.is-allowed strong { color: #86efac; }
@@ -4940,6 +4977,8 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .container-runtime-metadata,
     .container-environment-grid { grid-template-columns: 1fr; }
     .container-runtime-detail-heading { align-items: flex-start; }
+	.container-egress-health { align-items: stretch; flex-direction: column; }
+	.container-egress-health-recover { align-self: flex-start; }
     .network-activity-control,
     .network-activity-stream { padding: 16px; border-radius: 15px; }
     .network-activity-control-heading,

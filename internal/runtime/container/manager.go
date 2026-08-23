@@ -319,6 +319,13 @@ type RuntimeActivityStreamer interface {
 	StreamEgressActivity(context.Context, RuntimeSpec, ActivityStreamOptions, RuntimeActivitySink) error
 }
 
+// RuntimeEgressHealthController is intentionally separate from lifecycle and
+// execution. Implementations may expose only a verified, fixed manual-recovery
+// signal for the owned per-conversation gateway.
+type RuntimeEgressHealthController interface {
+	RecoverEgressHealth(context.Context, RuntimeSpec) error
+}
+
 // ToolOutputWriteRequest contains a complete oversized tool output stream. The
 // runtime implementation owns the destination and never accepts a host path or
 // arbitrary container path from the request.

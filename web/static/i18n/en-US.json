@@ -235,6 +235,12 @@
     "auditRebuild": "Rebuild",
     "auditDelete": "Delete",
     "auditReconcile": "Reconcile",
+	"auditHealth": "Egress health",
+	"auditHealthCooldownStarted": "Egress gateway entered cooldown",
+	"auditHealthCooldownExpired": "Egress gateway cooldown expired",
+	"auditHealthPaused": "Egress gateway paused and requires manual recovery",
+	"auditHealthRecovered": "Egress gateway was manually recovered",
+	"auditHealthChanged": "Egress health state changed",
     "auditDecisionFilter": "Verdict",
     "auditSuccess": "Success",
     "auditFailure": "Failure",
@@ -303,6 +309,18 @@
     "policyDNS": "Policy DNS",
     "policyDNSAddress": "Policy DNS address",
     "workspace": "Workspace",
+	"egressHealth": "Egress health",
+	"egressHealthAttention": "Egress protection triggered",
+	"cooldownUntil": "Cooldown until {{time}}",
+	"recoverEgressHealth": "Recover manually",
+	"recoveringEgressHealth": "Recovering…",
+	"healthSignal": {
+	  "upstream_rate_limited": "The upstream returned 429 and the gateway entered automatic cooldown",
+	  "consecutive_login_failures": "Consecutive login failures reached the protection threshold",
+	  "waf_challenge": "The upstream WAF returned a challenge signal",
+	  "captcha_challenge": "The upstream returned a CAPTCHA signal",
+	  "unknown": "Unknown health signal"
+	},
     "workspaceType": "Workspace type",
     "notConfigured": "Not configured",
     "statsUnavailable": "Statistics unavailable",
@@ -323,7 +341,7 @@
     "status": {
       "unknown": "Unknown", "not_requested": "Not initialized", "queued": "Queued", "creating": "Creating", "created": "Created", "failed": "Failed",
       "running": "Running", "stopped": "Stopped", "pending": "Pending", "validating": "Validating", "ready": "Ready",
-      "not_required": "Not required", "in_progress": "In progress", "unavailable": "Unavailable", "healthy": "Healthy"
+      "not_required": "Not required", "in_progress": "In progress", "unavailable": "Unavailable", "healthy": "Healthy", "cooldown": "Cooling down", "paused": "Paused"
     }
   },
   "dashboard": {

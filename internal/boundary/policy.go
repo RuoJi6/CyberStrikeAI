@@ -2,6 +2,7 @@ package boundary
 
 import (
 	"fmt"
+	"math"
 	"net/netip"
 	"sort"
 	"strings"
@@ -28,7 +29,17 @@ type Rule struct {
 	Effect        Effect     `json:"effect"`
 	Target        RuleTarget `json:"target"`
 	AuthProfileID string     `json:"authProfileId,omitempty"`
+	RateLimit     RateLimit  `json:"rateLimit"`
 	ExpiresAt     *time.Time `json:"expiresAt,omitempty"`
+}
+
+// RateLimit is the immutable request-governance contract attached to one
+// boundary rule. MaxConcurrent is additive and omitted from legacy snapshots
+// when zero, so already-bound canonical documents remain byte-for-byte valid.
+type RateLimit struct {
+	RequestsPerSecond float64 `json:"requestsPerSecond"`
+	Burst             int     `json:"burst"`
+	MaxConcurrent     int     `json:"maxConcurrent,omitempty"`
 }
 
 type Decision struct {
@@ -36,6 +47,7 @@ type Decision struct {
 	Effect        Effect        `json:"effect,omitempty"`
 	RuleID        string        `json:"ruleId,omitempty"`
 	AuthProfileID string        `json:"authProfileId,omitempty"`
+	RateLimit     RateLimit     `json:"rateLimit"`
 	Reason        string        `json:"reason"`
 	Target        RequestTarget `json:"target"`
 }
@@ -83,6 +95,9 @@ func NewPolicy(rules []Rule) (*Policy, error) {
 		}
 		if rule.Effect != EffectAuthOnly && rule.AuthProfileID != "" {
 			return nil, fmt.Errorf("boundary rule %q: auth profile requires auth-only effect", rule.ID)
+		}
+		if err := ValidateRateLimit(rule.RateLimit); err != nil {
+			return nil, fmt.Errorf("boundary rule %q: %w", rule.ID, err)
 		}
 		target, err := NormalizeRuleTarget(rule.Target)
 		if err != nil {
@@ -169,6 +184,7 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 	decision.Effect = winner.Effect
 	decision.RuleID = winner.ID
 	decision.AuthProfileID = winner.AuthProfileID
+	decision.RateLimit = winner.RateLimit
 	switch winner.Effect {
 	case EffectBlocked:
 		if len(winner.Target.PathPrefixes) > 0 {
@@ -187,6 +203,19 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		decision.Reason = ReasonAllowVisit
 	}
 	return decision, nil
+}
+
+// ValidateRateLimit rejects unbounded or non-finite attacker-controlled
+// values before they can enter an immutable snapshot or allocate gateway
+// state. Zero keeps the legacy "not explicitly configured" meaning.
+func ValidateRateLimit(limit RateLimit) error {
+	if math.IsNaN(limit.RequestsPerSecond) || math.IsInf(limit.RequestsPerSecond, 0) ||
+		limit.RequestsPerSecond < 0 || limit.RequestsPerSecond > 10000 ||
+		limit.Burst < 0 || limit.Burst > 100000 || limit.MaxConcurrent < 0 || limit.MaxConcurrent > 1024 ||
+		(limit.RequestsPerSecond == 0) != (limit.Burst == 0) {
+		return fmt.Errorf("boundary rate limit is invalid")
+	}
+	return nil
 }
 
 // AuthProfileIDs returns the canonical set of credential profiles referenced

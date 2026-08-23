@@ -88,8 +88,8 @@ function containerRuntimeElement(tagName, className = '', value = '') {
 function containerRuntimeStatusTone(status) {
     const value = String(status || '').toLowerCase();
     if (['running', 'ready', 'created', 'healthy'].includes(value)) return 'success';
-    if (['failed', 'error', 'unavailable', 'runtime_drift', 'provider_missing'].includes(value)) return 'danger';
-    if (['queued', 'creating', 'pending', 'validating', 'in_progress'].includes(value)) return 'warning';
+    if (['failed', 'error', 'unavailable', 'runtime_drift', 'provider_missing', 'paused'].includes(value)) return 'danger';
+    if (['queued', 'creating', 'pending', 'validating', 'in_progress', 'cooldown'].includes(value)) return 'warning';
     return 'neutral';
 }
 
@@ -128,8 +128,8 @@ function containerRuntimeShortHash(raw) {
     return value.length > 24 ? `${value.slice(0, 15)}…${value.slice(-8)}` : value;
 }
 
-async function containerRuntimeRequestJSON(url) {
-    const response = typeof window.apiFetch === 'function' ? await window.apiFetch(url) : await fetch(url);
+async function containerRuntimeRequestJSON(url, options = {}) {
+    const response = typeof window.apiFetch === 'function' ? await window.apiFetch(url, options) : await fetch(url, options);
     let payload = null;
     try {
         payload = await response.json();
@@ -168,15 +168,24 @@ function containerRuntimeLoadedMessage() {
 }
 
 function containerRuntimeHasAttention(record) {
-    return record.status === 'failed' || record.lifecycleState === 'failed' || Boolean(record.lastError || record.lifecycleError || record.readinessError || record.observationError);
+    return record.status === 'failed' || record.lifecycleState === 'failed' || ['cooldown', 'paused'].includes(record.egressHealth?.status)
+        || Boolean(record.lastError || record.lifecycleError || record.readinessError || record.observationError);
 }
 
 function containerRuntimeRowTitle(record) {
     return record.conversationTitle || record.title || record.conversationId || containerManagementT('untitled', '未命名对话');
 }
 
-function containerRuntimePrimaryStatus(record) {
+function containerRuntimeAgentStatus(record) {
     return record.observation?.agent?.status || record.runtimeStatus || record.status || 'unknown';
+}
+
+function containerRuntimePrimaryStatus(record) {
+    const egressHealthStatus = String(record.egressHealth?.status || '').toLowerCase();
+    if (egressHealthStatus === 'paused' || egressHealthStatus === 'cooldown') {
+        return egressHealthStatus;
+    }
+    return containerRuntimeAgentStatus(record);
 }
 
 function containerRuntimeSummaryCard(label, value, tone = 'neutral') {
@@ -338,13 +347,37 @@ function renderConversationContainerDetail() {
 
     const statusGrid = containerRuntimeElement('dl', 'container-runtime-status-grid');
     const gatewayConfigured = Boolean(record.desired?.gatewayImageDigest);
+	const egressHealthStatus = record.egressHealth?.status || (gatewayConfigured ? 'healthy' : 'not_required');
     statusGrid.append(
-        containerRuntimeDetailField(containerManagementT('agentContainer', 'Agent 容器'), containerRuntimeBadge(containerRuntimePrimaryStatus(record))),
+        containerRuntimeDetailField(containerManagementT('agentContainer', 'Agent 容器'), containerRuntimeBadge(containerRuntimeAgentStatus(record))),
         containerRuntimeDetailField(containerManagementT('egressGateway', '出站网关'), gatewayConfigured ? containerRuntimeBadge(record.observation?.gateway?.status || 'pending') : containerManagementT('notConfigured', '未配置')),
         containerRuntimeDetailField(containerManagementT('policyDNS', '策略 DNS'), containerRuntimeBadge(record.observation?.policyDnsStatus || (gatewayConfigured ? 'pending' : 'not_required'))),
         containerRuntimeDetailField(containerManagementT('workspace', '工作区'), containerRuntimeBadge(record.observation?.workspaceStatus || (record.status === 'created' ? 'ready' : 'pending'))),
+		containerRuntimeDetailField(containerManagementT('egressHealth', '出站健康'), containerRuntimeBadge(egressHealthStatus)),
     );
     root.append(statusGrid);
+
+	if (gatewayConfigured && record.egressHealth && record.egressHealth.status !== 'healthy') {
+		const health = containerRuntimeElement('section', `container-egress-health is-${containerRuntimeStatusTone(record.egressHealth.status)}`);
+		const healthText = containerRuntimeElement('div');
+		healthText.append(
+			containerRuntimeElement('strong', '', containerManagementT('egressHealthAttention', '出站保护已触发')),
+			containerRuntimeElement('p', '', containerManagementT(`healthSignal.${record.egressHealth.signal || 'unknown'}`, record.egressHealth.signal || '未知信号')),
+		);
+		if (record.egressHealth.cooldownUntil) {
+			healthText.append(containerRuntimeElement('small', '', containerManagementT('cooldownUntil', '冷却至 {{time}}', {
+				time: containerRuntimeFormatDate(record.egressHealth.cooldownUntil),
+			})));
+		}
+		health.append(healthText);
+		if (record.egressHealth.manualRecoveryRequired) {
+			const recover = containerRuntimeElement('button', 'btn-secondary container-egress-health-recover', containerManagementT('recoverEgressHealth', '手动恢复'));
+			recover.type = 'button';
+			recover.addEventListener('click', () => recoverContainerEgressHealth(record.conversationId, recover));
+			health.append(recover);
+		}
+		root.append(health);
+	}
 
     if (record.observation) {
         const resources = containerRuntimeElement('div', 'container-runtime-resources');
@@ -374,6 +407,27 @@ function renderConversationContainerDetail() {
         error.append(containerRuntimeElement('strong', '', containerManagementT('latestError', '最后错误')), containerRuntimeElement('p', '', latestError));
         root.append(error);
     }
+}
+
+async function recoverContainerEgressHealth(conversationId, button) {
+	if (!conversationId || !button || button.disabled) return;
+	button.disabled = true;
+	button.textContent = containerManagementT('recoveringEgressHealth', '正在恢复…');
+	try {
+		const state = await containerRuntimeRequestJSON(`/api/conversations/${encodeURIComponent(conversationId)}/egress-health/recover`, { method: 'POST' });
+		const record = containerManagementState.rows.find((item) => item.conversationId === conversationId);
+		if (record) {
+			record.egressHealth = state;
+			record.observationError = '';
+		}
+		renderContainerManagementData();
+	} catch (error) {
+		button.disabled = false;
+		button.textContent = containerManagementT('recoverEgressHealth', '手动恢复');
+		const record = containerManagementState.rows.find((item) => item.conversationId === conversationId);
+		if (record) record.observationError = error && error.message ? error.message : 'recovery_failed';
+		renderContainerManagementData();
+	}
 }
 
 function renderRuntimeEnvironments() {
@@ -616,6 +670,7 @@ window.initContainerManagementPage = initContainerManagementPage;
 window.refreshContainerManagementData = refreshContainerManagementData;
 window.selectContainerRuntimeConversation = selectContainerRuntimeConversation;
 window.setContainerRuntimePage = setContainerRuntimePage;
+window.recoverContainerEgressHealth = recoverContainerEgressHealth;
 
 if (typeof document.addEventListener === 'function') {
     document.addEventListener('languagechange', () => {

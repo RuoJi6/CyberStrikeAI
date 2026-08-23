@@ -9,7 +9,8 @@ import (
 
 const containerRuntimeListStatusExpression = `(CASE
 	WHEN r.conversation_id IS NULL THEN 'not_requested'
-	WHEN r.initialization_status = 'failed'
+	WHEN h.status = 'paused'
+		OR r.initialization_status = 'failed'
 		OR r.readiness_status = 'failed'
 		OR r.lifecycle_state = 'failed'
 		OR r.runtime_status = 'failed'
@@ -17,6 +18,7 @@ const containerRuntimeListStatusExpression = `(CASE
 		OR TRIM(COALESCE(r.readiness_error, '')) <> ''
 		OR TRIM(COALESCE(r.lifecycle_error, '')) <> ''
 		OR TRIM(COALESCE(r.runtime_drift, '')) <> '' THEN 'failed'
+	WHEN h.status = 'cooldown' THEN 'pending'
 	WHEN r.runtime_status = 'running' THEN 'running'
 	WHEN r.initialization_status IN ('queued', 'creating')
 		OR r.runtime_status IN ('creating', 'starting', 'stopping')
@@ -104,7 +106,8 @@ func (db *DB) ListContainerConversationsForAccess(ctx context.Context, query Con
 		SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at,
 			c.project_id, c.role_name, c.agent_mode, c.runtime_mode, c.workspace_persistent
 		FROM conversations c
-		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = c.id`+where+`
+		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = c.id
+		LEFT JOIN conversation_egress_health h ON h.conversation_id = c.id AND h.runtime_generation = r.runtime_generation`+where+`
 		ORDER BY c.updated_at DESC, c.id ASC
 		LIMIT ? OFFSET ?`, args...)
 	if err != nil {
@@ -132,9 +135,10 @@ func (db *DB) SummarizeContainerConversationsForAccess(ctx context.Context, quer
 			COALESCE(SUM(CASE WHEN json_type(r.spec_json, '$.EgressGateway') IS NOT NULL
 				AND json_type(r.spec_json, '$.EgressGateway') <> 'null' THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN c.workspace_persistent = 1 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN `+containerRuntimeListStatusExpression+` = 'failed' THEN 1 ELSE 0 END), 0)
+			COALESCE(SUM(CASE WHEN `+containerRuntimeListStatusExpression+` = 'failed' OR h.status = 'cooldown' THEN 1 ELSE 0 END), 0)
 		FROM conversations c
-		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = c.id`+where, args...)
+		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = c.id
+		LEFT JOIN conversation_egress_health h ON h.conversation_id = c.id AND h.runtime_generation = r.runtime_generation`+where, args...)
 	if err := row.Scan(&summary.Total, &summary.Running, &summary.Gateways, &summary.Persistent, &summary.Attention); err != nil {
 		if err == sql.ErrNoRows {
 			return summary, nil

@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260823-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260823-2">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -5256,7 +5256,7 @@
                                 <div class="egress-audit-filter-grid">
                                     <label class="egress-audit-field is-search"><span data-i18n="containerManagement.auditSearch">搜索</span><input id="egress-audit-search" type="search" maxlength="200" autocomplete="off" data-i18n="containerManagement.auditSearchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索对话、域名、IP、规则或出口…"></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditCategory">类别</span><select id="egress-audit-category" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="network" data-i18n="containerManagement.auditCategoryNetwork">网络</option><option value="lifecycle" data-i18n="containerManagement.auditCategoryLifecycle">生命周期</option></select></label>
-                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="connect">CONNECT</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">对账</option></select></label>
+                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="connect">CONNECT</option><option value="health" data-i18n="containerManagement.auditHealth">出站健康</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">对账</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditDecisionFilter">判定</span><select id="egress-audit-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option><option value="success" data-i18n="containerManagement.auditSuccess">成功</option><option value="failure" data-i18n="containerManagement.auditFailure">失败</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.rowsPerPage">每页</span><select id="egress-audit-page-size" data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
                                 </div>
@@ -7174,8 +7174,8 @@
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260822-3"></script>
-    <script src="/static/js/egress-audit.js?v=20260823-1"></script>
-    <script src="/static/js/container-management.js?v=20260822-7"></script>
+    <script src="/static/js/egress-audit.js?v=20260823-2"></script>
+    <script src="/static/js/container-management.js?v=20260823-5"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>
