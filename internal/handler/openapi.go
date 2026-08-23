@@ -28,6 +28,49 @@ func NewOpenAPIHandler(db *database.DB, logger *zap.Logger, conversationHdlr *Co
 	}
 }
 
+func boundaryPolicyDetailOperation(operationID, summary, method string) map[string]interface{} {
+	operation := map[string]interface{}{
+		"tags": []string{"边界策略"}, "summary": summary, "operationId": operationID,
+		"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+		"responses": map[string]interface{}{
+			"200": map[string]interface{}{"description": "可编辑草案与当前规则", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyDetail"}}}},
+			"400": map[string]interface{}{"description": "策略配置无效"}, "403": map[string]interface{}{"description": "缺少权限或不在资源范围"}, "404": map[string]interface{}{"description": "草案不存在"},
+		},
+	}
+	if method == http.MethodPut || method == "put" {
+		operation["requestBody"] = map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyWrite"}}}}
+	}
+	return operation
+}
+
+func boundaryRuleMutationOperation(operationID, summary string, creating bool) map[string]interface{} {
+	parameters := []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}}
+	status := "201"
+	if !creating {
+		status = "200"
+		parameters = append(parameters, map[string]interface{}{"name": "ruleId", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}})
+	}
+	return map[string]interface{}{
+		"tags": []string{"边界策略"}, "summary": summary, "operationId": operationID, "parameters": parameters,
+		"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryRuleWrite"}}}},
+		"responses": map[string]interface{}{
+			status: map[string]interface{}{"description": "边界规则已保存", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryRule"}}}},
+			"400":  map[string]interface{}{"description": "规则配置无效"}, "403": map[string]interface{}{"description": "缺少 boundary:write 权限或不在资源范围"}, "404": map[string]interface{}{"description": "草案或规则不存在"},
+		},
+	}
+}
+
+func boundaryRuleDeleteOperation() map[string]interface{} {
+	return map[string]interface{}{
+		"tags": []string{"边界策略"}, "summary": "删除草案边界规则", "operationId": "deleteBoundaryPolicyRule",
+		"parameters": []map[string]interface{}{
+			{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}},
+			{"name": "ruleId", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}},
+		},
+		"responses": map[string]interface{}{"204": map[string]interface{}{"description": "已删除"}, "403": map[string]interface{}{"description": "缺少 boundary:delete 权限或不在资源范围"}, "404": map[string]interface{}{"description": "规则不存在"}},
+	}
+}
+
 // GetOpenAPISpec 获取OpenAPI规范
 func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	host := c.Request.Host
@@ -64,12 +107,63 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
 		"description": "新建容器对话可选择的安全边界策略摘要；不包含规则正文或所有者标识。",
-		"required":    []string{"id", "name", "description", "updatedAt"},
+		"required":    []string{"id", "name", "description", "tlsInspectionEnabled", "updatedAt"},
 		"properties": map[string]interface{}{
-			"id":          map[string]interface{}{"type": "string"},
-			"name":        map[string]interface{}{"type": "string"},
-			"description": map[string]interface{}{"type": "string"},
-			"updatedAt":   map[string]interface{}{"type": "string", "format": "date-time"},
+			"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
+			"name":                 map[string]interface{}{"type": "string", "maxLength": 128},
+			"description":          map[string]interface{}{"type": "string", "maxLength": 2048},
+			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
+			"updatedAt":            map[string]interface{}{"type": "string", "format": "date-time"},
+		},
+	}
+	boundaryRateLimitSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false,
+		"properties": map[string]interface{}{
+			"requestsPerSecond": map[string]interface{}{"type": "number", "minimum": 0},
+			"burst":             map[string]interface{}{"type": "integer", "minimum": 0},
+			"maxConcurrent":     map[string]interface{}{"type": "integer", "minimum": 0},
+		},
+	}
+	boundaryRuleWriteSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false, "required": []string{"effect"},
+		"properties": map[string]interface{}{
+			"effect":        map[string]interface{}{"type": "string", "enum": []string{"allow-visit", "allow-attack", "blocked", "auth-only"}},
+			"host":          map[string]interface{}{"type": "string", "maxLength": 253},
+			"schemes":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"http", "https"}}},
+			"ports":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}},
+			"pathPrefixes":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"methods":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"authProfileId": map[string]interface{}{"type": "string", "format": "uuid", "nullable": true},
+			"rateLimit":     boundaryRateLimitSchema,
+			"expiresAt":     map[string]interface{}{"type": "string", "format": "date-time", "nullable": true},
+			"position":      map[string]interface{}{"type": "integer", "minimum": 0},
+		},
+	}
+	boundaryRuleSchema := map[string]interface{}{
+		"allOf": []map[string]interface{}{
+			{"$ref": "#/components/schemas/BoundaryRuleWrite"},
+			{"type": "object", "required": []string{"id", "policy_id"}, "properties": map[string]interface{}{
+				"id": map[string]interface{}{"type": "string", "format": "uuid"}, "policy_id": map[string]interface{}{"type": "string", "format": "uuid"},
+			}},
+		},
+	}
+	boundaryPolicyWriteSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false, "required": []string{"name"},
+		"properties": map[string]interface{}{
+			"name": map[string]interface{}{"type": "string", "maxLength": 128}, "description": map[string]interface{}{"type": "string", "maxLength": 2048},
+			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
+			"tlsBypassDomains": map[string]interface{}{"type": "array", "maxItems": 128, "items": map[string]interface{}{"type": "string", "maxLength": 253},
+				"description": "证书固定兼容域名；仅在启用 HTTPS 完整审计时允许。",
+			},
+		},
+	}
+	boundaryPolicyDetailSchema := map[string]interface{}{
+		"allOf": []map[string]interface{}{
+			{"$ref": "#/components/schemas/BoundaryPolicySummary"},
+			{"type": "object", "required": []string{"tlsBypassDomains", "rules"}, "properties": map[string]interface{}{
+				"tlsBypassDomains": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"rules":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/BoundaryRule"}},
+			}},
 		},
 	}
 	conversationEgressModeRequestSchema := map[string]interface{}{
@@ -274,7 +368,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"recordedAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"occurredAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"category":           map[string]interface{}{"type": "string", "enum": []string{"network", "lifecycle"}},
-			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
+			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "https", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
 			"conversationId":     map[string]interface{}{"type": "string", "maxLength": 128},
 			"conversationTitle":  map[string]interface{}{"type": "string", "maxLength": 512},
 			"containerId":        map[string]interface{}{"type": "string", "maxLength": 128},
@@ -381,6 +475,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 			"schemas": map[string]interface{}{
 				"BoundaryPolicySummary":               boundaryPolicySummarySchema,
+				"BoundaryPolicyWrite":                 boundaryPolicyWriteSchema,
+				"BoundaryPolicyDetail":                boundaryPolicyDetailSchema,
+				"BoundaryRuleWrite":                   boundaryRuleWriteSchema,
+				"BoundaryRule":                        boundaryRuleSchema,
 				"EgressProxy":                         egressProxySchema,
 				"EgressProxyWrite":                    egressProxyWriteSchema,
 				"EgressAuthProfile":                   egressAuthProfileSchema,
@@ -1781,6 +1879,31 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"403": map[string]interface{}{"description": "缺少 boundary:read 权限"},
 					},
 				},
+				"post": map[string]interface{}{
+					"tags": []string{"边界策略"}, "summary": "创建可编辑边界策略草案", "operationId": "createBoundaryPolicy",
+					"description": "需要 boundary:write。HTTPS 完整审计默认关闭；启用后在对话快照中冻结设置。",
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyWrite"}}}},
+					"responses": map[string]interface{}{
+						"201": map[string]interface{}{"description": "草案已创建", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyDetail"}}}},
+						"400": map[string]interface{}{"description": "策略配置无效"}, "403": map[string]interface{}{"description": "缺少 boundary:write 权限"},
+					},
+				},
+			},
+			"/api/boundary-policies/{id}": map[string]interface{}{
+				"get": boundaryPolicyDetailOperation("getBoundaryPolicy", "读取可编辑边界策略草案", "get"),
+				"put": boundaryPolicyDetailOperation("updateBoundaryPolicy", "更新可编辑边界策略草案", "put"),
+				"delete": map[string]interface{}{
+					"tags": []string{"边界策略"}, "summary": "删除未被对话选择的草案", "operationId": "deleteBoundaryPolicy",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+					"responses":  map[string]interface{}{"204": map[string]interface{}{"description": "已删除"}, "403": map[string]interface{}{"description": "缺少权限或不在资源范围"}, "404": map[string]interface{}{"description": "草案不存在"}, "409": map[string]interface{}{"description": "草案仍被对话选择"}},
+				},
+			},
+			"/api/boundary-policies/{id}/rules": map[string]interface{}{
+				"post": boundaryRuleMutationOperation("createBoundaryPolicyRule", "向草案添加边界规则", true),
+			},
+			"/api/boundary-policies/{id}/rules/{ruleId}": map[string]interface{}{
+				"put":    boundaryRuleMutationOperation("updateBoundaryPolicyRule", "更新草案边界规则", false),
+				"delete": boundaryRuleDeleteOperation(),
 			},
 			"/api/boundary-policies/{id}/simulate": map[string]interface{}{
 				"post": map[string]interface{}{
@@ -2265,7 +2388,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						{"name": "conversation_id", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 128}},
 						{"name": "q", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 200}},
 						{"name": "category", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "network", "lifecycle"}}},
-						{"name": "event_type", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "dns", "http", "connect", "create", "start", "stop", "rebuild", "delete", "reconcile"}}},
+						{"name": "event_type", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "dns", "http", "https", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}}},
 						{"name": "decision", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "allowed", "blocked", "success", "failure"}}},
 						{"name": "since", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
 						{"name": "until", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},

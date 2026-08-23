@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,9 @@ const (
 	LabelEgressUpstreamSHA256  = "com.cyberstrike.egress.upstream-route-sha256"
 	LabelEgressAuthProfilesID  = "com.cyberstrike.egress.auth-profiles-id"
 	LabelEgressAuthSHA256      = "com.cyberstrike.egress.auth-profiles-sha256"
+	LabelEgressTLSAuthorityID  = "com.cyberstrike.egress.tls-authority-id"
+	LabelEgressTLSCertSHA256   = "com.cyberstrike.egress.tls-certificate-sha256"
+	LabelEgressTLSKeySHA256    = "com.cyberstrike.egress.tls-private-key-sha256"
 	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
 	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
 	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
@@ -69,6 +73,7 @@ const (
 	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
 	egressGatewayProxyPort         = 3128
 	runtimeKeepaliveScript         = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
+	runtimeTLSKeepaliveScript      = "umask 077; cat /etc/ssl/certs/ca-certificates.crt " + egress.TLSAuthorityCertificateContainerPath + " > " + egress.TLSAgentCABundlePath + " || exit 70; " + runtimeKeepaliveScript
 )
 
 var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
@@ -76,6 +81,7 @@ var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
 var runtimeProxyEnvironmentKeys = []string{
 	"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 	"http_proxy", "https_proxy", "all_proxy", "no_proxy",
+	"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS",
 }
 
 type dockerCreationAPI interface {
@@ -118,6 +124,7 @@ type DockerManagerOptions struct {
 	EgressSnapshotRoot     string
 	EgressUpstreamRoot     string
 	EgressAuthProfilesRoot string
+	EgressTLSAuthorityRoot string
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -134,6 +141,7 @@ type DockerManager struct {
 	snapshotStore     *egress.SnapshotStore
 	upstreamStore     *egress.UpstreamRouteStore
 	authProfilesStore *egress.AuthProfilesStore
+	tlsAuthorityStore *egress.TLSAuthorityStore
 	ownerID           string
 	operationTimeout  time.Duration
 }
@@ -193,6 +201,14 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 			return nil, fmt.Errorf("configure egress auth profiles store: %w", err)
 		}
 	}
+	var tlsAuthorityStore *egress.TLSAuthorityStore
+	if strings.TrimSpace(options.EgressTLSAuthorityRoot) != "" {
+		var err error
+		tlsAuthorityStore, err = egress.NewTLSAuthorityStore(options.EgressTLSAuthorityRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure TLS authority store: %w", err)
+		}
+	}
 	globalConcurrent := options.GlobalConcurrentExec
 	if globalConcurrent == 0 {
 		globalConcurrent = defaultGlobalConcurrentExec
@@ -214,7 +230,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
 		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
 		snapshotStore: snapshotStore, upstreamStore: upstreamStore, authProfilesStore: authProfilesStore,
-		ownerID: ownerID, operationTimeout: operationTimeout,
+		tlsAuthorityStore: tlsAuthorityStore,
+		ownerID:           ownerID, operationTimeout: operationTimeout,
 	}, nil
 }
 
@@ -295,6 +312,10 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 	pinned, _ := pinnedImageReference(spec.Image)
 	name := runtimeContainerName(spec.ID)
 	labels := runtimeLabels(m.ownerID, spec)
+	hostConfig, err := m.runtimeContainerHostConfig(spec, gatewayDNS)
+	if err != nil {
+		return Runtime{}, m.rollbackCreatedResources(networkCreated, egressNetworkCreated, workspaceCreated, gatewayID, spec, err)
+	}
 	createResult, err := m.api.ContainerCreate(ctx, mobyclient.ContainerCreateOptions{
 		Name:  name,
 		Image: pinned,
@@ -307,11 +328,11 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 			NetworkDisabled: spec.Security.NetworkMode == NetworkNone,
 			WorkingDir:      "/workspace",
 			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
-			Cmd:             []string{runtimeKeepaliveScript},
+			Cmd:             []string{runtimeKeepaliveScriptForSpec(spec)},
 			Env:             runtimeProxyEnvironment(spec, gatewayDNS),
 			Labels:          labels,
 		},
-		HostConfig:       runtimeHostConfigWithPolicyDNS(spec, gatewayDNS),
+		HostConfig:       hostConfig,
 		NetworkingConfig: runtimeNetworkingConfig(spec, conversationNetwork),
 	})
 	if err != nil {
@@ -597,7 +618,7 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if actual.Config.WorkingDir != spec.Workspace.MountPath {
 		return Runtime{}, fmt.Errorf("%w: created runtime working directory mismatch", ErrRuntimeStateConflict)
 	}
-	if !matchesRuntimeKeepalive(actual.Config) {
+	if !matchesRuntimeKeepalive(actual.Config, spec) {
 		return Runtime{}, fmt.Errorf("%w: created runtime keepalive process mismatch", ErrRuntimeStateConflict)
 	}
 	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
@@ -637,11 +658,18 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	}, nil
 }
 
-func matchesRuntimeKeepalive(config *mobycontainer.Config) bool {
+func matchesRuntimeKeepalive(config *mobycontainer.Config, spec RuntimeSpec) bool {
 	return config != nil && len(config.Entrypoint) == 2 &&
 		config.Entrypoint[0] == runtimeKeepaliveEntrypoint[0] &&
 		config.Entrypoint[1] == runtimeKeepaliveEntrypoint[1] &&
-		len(config.Cmd) == 1 && config.Cmd[0] == runtimeKeepaliveScript
+		len(config.Cmd) == 1 && config.Cmd[0] == runtimeKeepaliveScriptForSpec(spec)
+}
+
+func runtimeKeepaliveScriptForSpec(spec RuntimeSpec) string {
+	if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
+		return runtimeTLSKeepaliveScript
+	}
+	return runtimeKeepaliveScript
 }
 
 func verifyEngineSecurityBaseline(engine EngineInfo) error {
@@ -729,12 +757,29 @@ func runtimeHostConfigWithPolicyDNS(spec RuntimeSpec, address string) *mobyconta
 	return host
 }
 
+func (m *DockerManager) runtimeContainerHostConfig(spec RuntimeSpec, policyDNSAddress string) (*mobycontainer.HostConfig, error) {
+	host := runtimeHostConfigWithPolicyDNS(spec, policyDNSAddress)
+	if spec.EgressGateway == nil || spec.EgressGateway.TLSAuthority == nil {
+		return host, nil
+	}
+	certificatePath, _, _, err := m.loadTLSAuthority(spec)
+	if err != nil {
+		return nil, err
+	}
+	host.Mounts = append(host.Mounts, mobymount.Mount{
+		Type: mobymount.TypeBind, Source: certificatePath,
+		Target: egress.TLSAuthorityCertificateContainerPath, ReadOnly: true,
+		BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+	})
+	return host, nil
+}
+
 func runtimeProxyEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
 	if !requiresPolicyDNS(spec) {
 		return nil
 	}
 	proxyURL := "http://" + gatewayAddress + ":" + strconv.Itoa(egressGatewayProxyPort)
-	return []string{
+	environment := []string{
 		"HTTP_PROXY=" + proxyURL,
 		"HTTPS_PROXY=" + proxyURL,
 		"ALL_PROXY=" + proxyURL,
@@ -744,6 +789,17 @@ func runtimeProxyEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
 		"all_proxy=" + proxyURL,
 		"no_proxy=",
 	}
+	if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
+		environment = append(environment,
+			"SSL_CERT_FILE="+egress.TLSAgentCABundlePath,
+			"CURL_CA_BUNDLE="+egress.TLSAgentCABundlePath,
+			"REQUESTS_CA_BUNDLE="+egress.TLSAgentCABundlePath,
+			"PIP_CERT="+egress.TLSAgentCABundlePath,
+			"GIT_SSL_CAINFO="+egress.TLSAgentCABundlePath,
+			"NODE_EXTRA_CA_CERTS="+egress.TLSAuthorityCertificateContainerPath,
+		)
+	}
+	return environment
 }
 
 func verifyRuntimeProxyEnvironment(actual []string, spec RuntimeSpec, gatewayAddress string) error {
@@ -862,18 +918,41 @@ func validRuntimePolicyDNSSettings(actual *mobycontainer.HostConfig, spec Runtim
 }
 
 func verifyWorkspaceHostMounts(actual []mobymount.Mount, spec RuntimeSpec) error {
-	if !spec.Workspace.Persistent {
+	expectedCount := 0
+	if spec.Workspace.Persistent {
+		expectedCount++
+	}
+	if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
+		expectedCount++
+	}
+	if len(actual) != expectedCount {
+		return fmt.Errorf("%w: runtime trusted mount count mismatch", ErrRuntimeStateConflict)
+	}
+	if !spec.Workspace.Persistent && expectedCount == 0 {
 		if len(actual) != 0 {
 			return fmt.Errorf("%w: ephemeral runtime declares a persistent mount", ErrRuntimeStateConflict)
 		}
 		return nil
 	}
-	if len(actual) != 1 {
-		return fmt.Errorf("%w: persistent runtime must declare exactly one named volume", ErrRuntimeStateConflict)
+	seenWorkspace, seenTLS := false, false
+	for _, mount := range actual {
+		switch mount.Target {
+		case spec.Workspace.MountPath:
+			if !spec.Workspace.Persistent || seenWorkspace || mount.Type != mobymount.TypeVolume || mount.Source != spec.Workspace.VolumeName || mount.ReadOnly || (mount.VolumeOptions != nil && mount.VolumeOptions.NoCopy) {
+				return fmt.Errorf("%w: persistent workspace named volume mismatch", ErrRuntimeStateConflict)
+			}
+			seenWorkspace = true
+		case egress.TLSAuthorityCertificateContainerPath:
+			if spec.EgressGateway == nil || spec.EgressGateway.TLSAuthority == nil || seenTLS || mount.Type != mobymount.TypeBind || !filepath.IsAbs(mount.Source) || !mount.ReadOnly || mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate {
+				return fmt.Errorf("%w: Agent TLS authority certificate mount mismatch", ErrRuntimeStateConflict)
+			}
+			seenTLS = true
+		default:
+			return fmt.Errorf("%w: runtime declares an unexpected mount", ErrRuntimeStateConflict)
+		}
 	}
-	mount := actual[0]
-	if mount.Type != mobymount.TypeVolume || mount.Source != spec.Workspace.VolumeName || mount.Target != spec.Workspace.MountPath || mount.ReadOnly || (mount.VolumeOptions != nil && mount.VolumeOptions.NoCopy) {
-		return fmt.Errorf("%w: persistent workspace named volume mismatch", ErrRuntimeStateConflict)
+	if seenWorkspace != spec.Workspace.Persistent || seenTLS != (spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil) {
+		return fmt.Errorf("%w: runtime trusted mount is missing", ErrRuntimeStateConflict)
 	}
 	return nil
 }
@@ -943,6 +1022,11 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	if gateway.AuthProfiles != nil {
 		labels[LabelEgressAuthProfilesID] = gateway.AuthProfiles.ID
 		labels[LabelEgressAuthSHA256] = gateway.AuthProfiles.SHA256
+	}
+	if gateway.TLSAuthority != nil {
+		labels[LabelEgressTLSAuthorityID] = gateway.TLSAuthority.ID
+		labels[LabelEgressTLSCertSHA256] = gateway.TLSAuthority.CertificateSHA256
+		labels[LabelEgressTLSKeySHA256] = gateway.TLSAuthority.PrivateKeySHA256
 	}
 	return labels
 }

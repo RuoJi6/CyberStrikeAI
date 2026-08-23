@@ -19,7 +19,10 @@ import (
 	"github.com/google/uuid"
 )
 
-const boundaryPolicySnapshotSchemaVersion = 1
+const (
+	boundaryPolicySnapshotSchemaVersion    = 1
+	boundaryPolicyTLSSnapshotSchemaVersion = 2
+)
 
 var (
 	ErrConversationBoundarySnapshotNotFound = errors.New("conversation boundary snapshot not found")
@@ -31,9 +34,15 @@ var (
 // consumed by later egress enforcement stages. It deliberately excludes draft
 // names and timestamps so equivalent rule sets produce identical hashes.
 type BoundaryPolicySnapshotDocument struct {
-	SchemaVersion int                          `json:"schemaVersion"`
-	PolicyID      string                       `json:"policyId"`
-	Rules         []BoundaryPolicySnapshotRule `json:"rules"`
+	SchemaVersion int                                  `json:"schemaVersion"`
+	PolicyID      string                               `json:"policyId"`
+	Rules         []BoundaryPolicySnapshotRule         `json:"rules"`
+	TLSInspection *BoundaryPolicyTLSInspectionSnapshot `json:"tlsInspection,omitempty"`
+}
+
+type BoundaryPolicyTLSInspectionSnapshot struct {
+	Enabled       bool     `json:"enabled"`
+	BypassDomains []string `json:"bypassDomains"`
 }
 
 type BoundaryPolicySnapshotRule struct {
@@ -146,21 +155,9 @@ func (db *DB) EnsureConversationBoundarySnapshot(ctx context.Context, conversati
 	if selectionErr != nil && !errors.Is(selectionErr, sql.ErrNoRows) {
 		return ConversationBoundarySnapshot{}, fmt.Errorf("load boundary policy selection: %w", selectionErr)
 	}
-	document := BoundaryPolicySnapshotDocument{
-		SchemaVersion: boundaryPolicySnapshotSchemaVersion,
-		PolicyID:      strings.TrimSpace(policyID),
-		Rules:         []BoundaryPolicySnapshotRule{},
-	}
-	if document.PolicyID != "" {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM boundary_policies WHERE id = ?`, document.PolicyID).Scan(&exists); err != nil {
-			return ConversationBoundarySnapshot{}, fmt.Errorf("load selected boundary policy: %w", err)
-		}
-		rules, err := listBoundaryPolicyRulesForSnapshot(ctx, tx, document.PolicyID)
-		if err != nil {
-			return ConversationBoundarySnapshot{}, err
-		}
-		document.Rules = rules
+	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID)
+	if err != nil {
+		return ConversationBoundarySnapshot{}, err
 	}
 	canonicalJSON, digest, err := canonicalBoundarySnapshot(document)
 	if err != nil {
@@ -466,9 +463,25 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 	if document.PolicyID == "" {
 		return document, nil
 	}
-	var exists int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM boundary_policies WHERE id = ?`, document.PolicyID).Scan(&exists); err != nil {
+	var tlsEnabled bool
+	var bypassJSON string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT tls_inspection_enabled, tls_bypass_domains_json
+		FROM boundary_policies WHERE id = ?
+	`, document.PolicyID).Scan(&tlsEnabled, &bypassJSON); err != nil {
 		return BoundaryPolicySnapshotDocument{}, fmt.Errorf("load selected boundary policy: %w", err)
+	}
+	if tlsEnabled {
+		var bypassDomains []string
+		if err := json.Unmarshal([]byte(bypassJSON), &bypassDomains); err != nil {
+			return BoundaryPolicySnapshotDocument{}, fmt.Errorf("decode selected policy TLS bypass domains: %w", err)
+		}
+		normalized, err := normalizeTLSBypassDomains(bypassDomains)
+		if err != nil || !reflect.DeepEqual(normalized, bypassDomains) {
+			return BoundaryPolicySnapshotDocument{}, fmt.Errorf("selected policy TLS bypass domains are not canonical")
+		}
+		document.SchemaVersion = boundaryPolicyTLSSnapshotSchemaVersion
+		document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: normalized}
 	}
 	rules, err := listBoundaryPolicyRulesForSnapshot(ctx, tx, document.PolicyID)
 	if err != nil {
@@ -572,8 +585,20 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) error {
-	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion {
+	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion {
 		return fmt.Errorf("unsupported boundary snapshot schema version %d", document.SchemaVersion)
+	}
+	if document.TLSInspection == nil && document.SchemaVersion != boundaryPolicySnapshotSchemaVersion {
+		return fmt.Errorf("TLS boundary snapshot must include TLS inspection settings")
+	}
+	if document.TLSInspection != nil {
+		if document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion || !document.TLSInspection.Enabled {
+			return fmt.Errorf("TLS inspection snapshot settings are inconsistent")
+		}
+		normalized, err := normalizeTLSBypassDomains(document.TLSInspection.BypassDomains)
+		if err != nil || !reflect.DeepEqual(normalized, document.TLSInspection.BypassDomains) {
+			return fmt.Errorf("TLS inspection bypass domains are not canonical")
+		}
 	}
 	if document.PolicyID != strings.TrimSpace(document.PolicyID) {
 		return fmt.Errorf("boundary snapshot policy id is not canonical")

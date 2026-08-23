@@ -163,7 +163,7 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 		if event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
 			return invalid()
 		}
-	case egress.ActivityRequestHTTP:
+	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
 		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
 			event.HTTPStatus < 0 || event.HTTPStatus > 999 {
 			return invalid()

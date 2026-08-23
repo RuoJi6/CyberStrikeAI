@@ -12,9 +12,23 @@ const styles = read('web', 'static', 'css', 'style.css');
 const zh = JSON.parse(read('web', 'static', 'i18n', 'zh-CN.json'));
 const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
 
-test('边界规则页读取已绑定对话的不可变快照', () => {
+test('边界规则页提供草案 CRUD 并读取已绑定对话的不可变快照', () => {
     for (const id of [
         'boundary-rules-phase',
+        'boundary-policy-select',
+        'boundary-policy-form',
+        'boundary-policy-name',
+        'boundary-policy-description',
+		'boundary-policy-tls-enabled',
+		'boundary-policy-tls-bypass',
+        'boundary-policy-rule-list',
+        'boundary-rule-form',
+        'boundary-rule-effect',
+        'boundary-rule-host',
+        'boundary-rule-schemes',
+        'boundary-rule-ports',
+        'boundary-rule-paths',
+        'boundary-rule-methods',
         'boundary-rules-conversation',
         'boundary-rules-refresh',
         'boundary-rules-load-state',
@@ -22,8 +36,14 @@ test('边界规则页读取已绑定对话的不可变快照', () => {
     ]) assert.match(template, new RegExp(`id="${id}"`));
 
     assert.match(boundary, /\/api\/container-runtimes\?page=1&page_size=100&status=all/);
+    assert.match(boundary, /\/api\/boundary-policies/);
+    assert.match(boundary, /\/rules['"]? \+ \(ruleID/);
+    assert.match(boundary, /jsonOptions\(id \? 'PUT' : 'POST', payload\)/);
+    assert.match(boundary, /\{ method: 'DELETE' \}/);
     assert.match(boundary, /\/api\/conversations\/['"]? \+ encodeURIComponent\(state\.selectedConversationId\) \+ ['"]?\/boundary/);
     assert.match(boundary, /boundarySnapshotSha256/);
+	assert.match(boundary, /tlsInspectionEnabled/);
+	assert.match(boundary, /tlsBypassDomains/);
     assert.match(boundary, /snapshot\.document && Array\.isArray\(snapshot\.document\.rules\)/);
     assert.match(boundary, /boundary_conversation/);
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
@@ -74,7 +94,8 @@ test('新管理页不注入非受信 HTML，也不把凭据写入浏览器存储
 test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     const keys = [
         'boundaryConversation', 'boundaryLoading', 'boundaryReady', 'boundarySnapshotHash',
-        'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations',
+        'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations', 'boundaryTLSEnabled',
+        'boundaryTLSBypassDomains', 'boundaryTLSBypassHint', 'activityHTTPS',
         'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab', 'egressAuthTab',
         'createProxy', 'createGroup', 'createAuth', 'credentialsConfigured', 'clearCredentials',
         'groupMembers', 'priority', 'weight', 'proxyDeleteConfirm', 'groupDeleteConfirm', 'authDeleteConfirm',

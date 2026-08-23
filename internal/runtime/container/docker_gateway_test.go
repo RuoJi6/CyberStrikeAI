@@ -288,6 +288,63 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	}
 }
 
+func TestTLSInspectionMountsPrivateKeyOnlyIntoGatewayAndCertificateReadOnlyIntoAgent(t *testing.T) {
+	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
+	tlsStore, err := egress.NewTLSAuthorityStore(filepath.Join(t.TempDir(), "tls-authorities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := egress.GenerateTLSAuthority(spec.ConversationID, time.Now().UTC(), 24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reference, certificatePath, privateKeyPath, err := tlsStore.Put("12345678-1234-1234-1234-123456789abc", authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.EgressGateway.TLSAuthority = &EgressTLSAuthoritySpec{
+		ID: reference.ID, BoundarySnapshotID: spec.EgressGateway.BoundarySnapshot.ID,
+		CertificateSHA256: reference.CertificateSHA256, PrivateKeySHA256: reference.PrivateKeySHA256,
+	}
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{
+		OwnerID: "instance-01", EgressSnapshotRoot: snapshotRoot, EgressTLSAuthorityRoot: tlsStore.Root(), OperationTimeout: time.Second,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gatewayHost, err := manager.egressGatewayContainerConfig(spec, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gatewayHost.Mounts) != 3 {
+		t.Fatalf("gateway TLS mounts = %#v", gatewayHost.Mounts)
+	}
+	assertReadOnlyBindMount(t, gatewayHost.Mounts[1], certificatePath, egress.TLSAuthorityCertificateContainerPath)
+	assertReadOnlyBindMount(t, gatewayHost.Mounts[2], privateKeyPath, egress.TLSAuthorityPrivateKeyContainerPath)
+
+	agentHost, err := manager.runtimeContainerHostConfig(spec, "172.30.0.2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agentHost.Mounts) != 1 {
+		t.Fatalf("agent TLS mounts = %#v", agentHost.Mounts)
+	}
+	assertReadOnlyBindMount(t, agentHost.Mounts[0], certificatePath, egress.TLSAuthorityCertificateContainerPath)
+	if strings.Contains(strings.Join(runtimeProxyEnvironment(spec, "172.30.0.2"), "\n"), privateKeyPath) ||
+		strings.Contains(runtimeKeepaliveScriptForSpec(spec), egress.TLSAuthorityPrivateKeyContainerPath) {
+		t.Fatal("agent configuration disclosed the TLS authority private key")
+	}
+}
+
+func assertReadOnlyBindMount(t *testing.T, mount mobymount.Mount, source, target string) {
+	t.Helper()
+	if mount.Type != mobymount.TypeBind || mount.Source != source || mount.Target != target || !mount.ReadOnly ||
+		mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate {
+		t.Fatalf("read-only bind mount = %#v, want %s -> %s", mount, source, target)
+	}
+}
+
 func TestDockerManagerBindsGatewayOnlyUpstreamRouteAndRejectsMissingOrWritableRoute(t *testing.T) {
 	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
 	routeStore, err := egress.NewUpstreamRouteStore(filepath.Join(t.TempDir(), "upstream-routes"))

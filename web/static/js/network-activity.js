@@ -22,7 +22,7 @@
         tool: 'activity_tool',
         route: 'activity_route',
     });
-    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'connect']);
+    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'https', 'connect']);
     const DECISIONS = new Set(['all', 'allowed', 'blocked']);
     const AGENTS = new Set(['all', 'container-agent']);
     const TOOLS = new Set(['all', 'unknown']);
@@ -137,7 +137,7 @@
 
     function isSafeActivityEvent(value) {
         if (!value || typeof value !== 'object') return false;
-        if (!['dns', 'http', 'connect'].includes(value.requestType)) return false;
+        if (!['dns', 'http', 'https', 'connect'].includes(value.requestType)) return false;
         if (!['allowed', 'blocked'].includes(value.decision)) return false;
         if (typeof value.domain !== 'string' || value.domain.length < 1 || value.domain.length > 253) return false;
         if (typeof value.timestamp !== 'string' || Number.isNaN(new Date(value.timestamp).getTime())) return false;
@@ -315,7 +315,7 @@
     function activityRow(event) {
         const row = create('tr', `is-${event.decision}`);
         const requestType = String(event.requestType || '').toUpperCase();
-        const requestDetail = event.requestType === 'http'
+        const requestDetail = event.requestType === 'http' || event.requestType === 'https'
             ? [event.method, event.path].filter(Boolean).join(' ')
             : (event.requestType === 'connect' ? `:${event.port || 443}` : '');
         const target = event.port ? `${event.domain}:${event.port}` : event.domain;
@@ -328,11 +328,11 @@
         const route = event.upstreamRouteId ? `${t('activityRoute', '路由')} ${event.upstreamRouteId}` : t('activityDirectRoute', '直接出口');
         const result = activityText(event.outcome || 'unknown', event.outcome || 'unknown');
         const performance = `${Number(event.latencyMs || 0)} ms · ↑${formatBytes(event.bytesUp)} ↓${formatBytes(event.bytesDown)}`;
-        const status = event.requestType === 'http' && event.httpStatus ? `HTTP ${event.httpStatus} · ${performance}` : performance;
+        const status = (event.requestType === 'http' || event.requestType === 'https') && event.httpStatus ? `HTTP ${event.httpStatus} · ${performance}` : performance;
         row.append(
             cell(t('activityTime', '时间'), formatTime(event.timestamp), new Date(event.timestamp).toLocaleDateString()),
             cell(t('activityRequest', '请求'), requestType, requestDetail, 'is-request'),
-            cell(t('activityTarget', '目标'), target, event.requestType === 'http' ? event.path : '', 'is-target'),
+            cell(t('activityTarget', '目标'), target, event.requestType === 'http' || event.requestType === 'https' ? event.path : '', 'is-target'),
             cell(t('activityResolution', '解析 / 连接'), resolved, connected, 'is-resolution'),
             cell(t('activityDecision', '策略判定'), decision, rule, `is-decision is-${event.decision}`),
             cell(t('activityContext', '上下文'), agent, `${tool} · ${route}`, 'is-context'),

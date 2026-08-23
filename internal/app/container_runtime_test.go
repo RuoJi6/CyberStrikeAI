@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/config"
@@ -16,6 +17,48 @@ import (
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
 )
+
+func TestMaterializeConversationTLSAuthorityIsConversationScopedStableAndRotates(t *testing.T) {
+	store, err := egress.NewTLSAuthorityStore(filepath.Join(t.TempDir(), "tls-authorities"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := database.ConversationBoundarySnapshot{
+		SnapshotID: "12345678-1234-1234-1234-123456789abc", ConversationID: "conversation-one",
+		Document: database.BoundaryPolicySnapshotDocument{
+			SchemaVersion: 2, TLSInspection: &database.BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: []string{}},
+		},
+	}
+	now := time.Unix(1_788_000_000, 0).UTC()
+	first, err := materializeConversationTLSAuthorityAt(store, snapshot, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := materializeConversationTLSAuthorityAt(store, snapshot, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil || retry == nil || *first != *retry || first.ID == snapshot.SnapshotID || first.BoundarySnapshotID != snapshot.SnapshotID {
+		t.Fatalf("stable authority references = %#v / %#v", first, retry)
+	}
+	rotated, err := materializeConversationTLSAuthorityAt(store, snapshot, now.Add(tlsAuthorityRotationPeriod))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated == nil || rotated.ID == first.ID || rotated.CertificateSHA256 == first.CertificateSHA256 {
+		t.Fatalf("rotated authority reference = %#v, original %#v", rotated, first)
+	}
+	other := snapshot
+	other.SnapshotID = "87654321-4321-4321-4321-cba987654321"
+	other.ConversationID = "conversation-two"
+	isolated, err := materializeConversationTLSAuthorityAt(store, other, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if isolated == nil || isolated.ID == first.ID || isolated.CertificateSHA256 == first.CertificateSHA256 || isolated.BoundarySnapshotID != other.SnapshotID {
+		t.Fatalf("conversation authority isolation = %#v / %#v", first, isolated)
+	}
+}
 
 func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	cfg := config.Default()
@@ -40,7 +83,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	snapshot := containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot, nil, nil)
+	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +272,7 @@ func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
 	}
 	spec, err := conversationContainerSpec(cfg, "conversation-01", true, containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-	}, nil, nil)
+	}, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

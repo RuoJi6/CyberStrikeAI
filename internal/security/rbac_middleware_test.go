@@ -128,6 +128,22 @@ func TestBoundarySimulationUsesReadPermissionDespitePOST(t *testing.T) {
 	}
 }
 
+func TestBoundaryDraftRoutesUseCRUDPermissions(t *testing.T) {
+	for _, test := range []struct{ method, path, want string }{
+		{http.MethodPost, "/api/boundary-policies", "boundary:write"},
+		{http.MethodGet, "/api/boundary-policies/:id", "boundary:read"},
+		{http.MethodPut, "/api/boundary-policies/:id", "boundary:write"},
+		{http.MethodDelete, "/api/boundary-policies/:id", "boundary:delete"},
+		{http.MethodPost, "/api/boundary-policies/:id/rules", "boundary:write"},
+		{http.MethodPut, "/api/boundary-policies/:id/rules/:ruleId", "boundary:write"},
+		{http.MethodDelete, "/api/boundary-policies/:id/rules/:ruleId", "boundary:delete"},
+	} {
+		if got := permissionForRequest(test.method, test.path); got != test.want {
+			t.Fatalf("%s %s permission = %q, want %q", test.method, test.path, got, test.want)
+		}
+	}
+}
+
 func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 	tests := map[string]string{
 		http.MethodGet:    "egress:read",

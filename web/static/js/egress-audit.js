@@ -12,7 +12,7 @@
 
     const PAGE_SIZES = new Set([10, 20, 50, 100]);
     const CATEGORIES = new Set(['all', 'network', 'lifecycle']);
-    const NETWORK_TYPES = new Set(['dns', 'http', 'connect']);
+    const NETWORK_TYPES = new Set(['dns', 'http', 'https', 'connect']);
     const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile', 'health']);
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
@@ -191,7 +191,7 @@
 
     function eventTypeLabel(value) {
         const labels = {
-            dns: 'DNS', http: 'HTTP', connect: 'CONNECT',
+            dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT',
             create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
 			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
 			health: t('auditHealth', '出站健康'),

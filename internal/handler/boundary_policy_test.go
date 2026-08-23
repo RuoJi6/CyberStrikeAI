@@ -60,8 +60,97 @@ func boundarySimulationRouter(db *database.DB, session security.Session) *gin.En
 	router.Use(security.RBACMiddleware(db))
 	handler := NewBoundaryPolicyHandler(db, zap.NewNop())
 	router.GET("/api/boundary-policies", handler.List)
+	router.POST("/api/boundary-policies", handler.Create)
+	router.GET("/api/boundary-policies/:id", handler.Get)
+	router.PUT("/api/boundary-policies/:id", handler.Update)
+	router.DELETE("/api/boundary-policies/:id", handler.Delete)
+	router.POST("/api/boundary-policies/:id/rules", handler.CreateRule)
+	router.PUT("/api/boundary-policies/:id/rules/:ruleId", handler.UpdateRule)
+	router.DELETE("/api/boundary-policies/:id/rules/:ruleId", handler.DeleteRule)
 	router.POST("/api/boundary-policies/:id/simulate", handler.SimulatePolicy)
 	return router
+}
+
+func performBoundaryJSON(router *gin.Engine, method, path string, body interface{}) *httptest.ResponseRecorder {
+	payload, _ := json.Marshal(body)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recorder, request)
+	return recorder
+}
+
+func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
+	db, _ := newBoundaryPolicyHandlerTestDB(t)
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{
+			"boundary:read": true, "boundary:write": true, "boundary:delete": true,
+		},
+	})
+
+	created := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies", map[string]interface{}{
+		"name": "UI editable", "description": "draft", "tlsInspectionEnabled": true,
+		"tlsBypassDomains": []string{"Pinned.Example.", "updates.example"},
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
+	}
+	var policy boundaryPolicyDetail
+	if err := json.Unmarshal(created.Body.Bytes(), &policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.ID == "" || policy.Name != "UI editable" || policy.Rules == nil ||
+		!policy.TLSInspectionEnabled || len(policy.TLSBypassDomains) != 2 || policy.TLSBypassDomains[0] != "pinned.example" {
+		t.Fatalf("created policy = %#v", policy)
+	}
+
+	ruleCreated := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies/"+policy.ID+"/rules", map[string]interface{}{
+		"effect": "allow-attack", "host": "API.Example.", "schemes": []string{"https"},
+		"ports": []int{443}, "pathPrefixes": []string{"/v1"}, "methods": []string{"post"},
+		"position": 1, "rateLimit": map[string]interface{}{"requestsPerSecond": 2, "burst": 3, "maxConcurrent": 1},
+	})
+	if ruleCreated.Code != http.StatusCreated {
+		t.Fatalf("create rule status = %d: %s", ruleCreated.Code, ruleCreated.Body.String())
+	}
+	var rule database.BoundaryPolicyRule
+	if err := json.Unmarshal(ruleCreated.Body.Bytes(), &rule); err != nil {
+		t.Fatal(err)
+	}
+	if rule.ID == "" || rule.Host != "api.example" || len(rule.Methods) != 1 || rule.Methods[0] != "POST" {
+		t.Fatalf("created rule = %#v", rule)
+	}
+
+	ruleUpdated := performBoundaryJSON(router, http.MethodPut, "/api/boundary-policies/"+policy.ID+"/rules/"+rule.ID, map[string]interface{}{
+		"effect": "blocked", "host": "blocked.example", "schemes": []string{"http", "https"}, "position": 2,
+		"rateLimit": map[string]interface{}{"requestsPerSecond": 0, "burst": 0, "maxConcurrent": 0},
+	})
+	if ruleUpdated.Code != http.StatusOK || !strings.Contains(ruleUpdated.Body.String(), "blocked.example") {
+		t.Fatalf("update rule status = %d: %s", ruleUpdated.Code, ruleUpdated.Body.String())
+	}
+
+	policyUpdated := performBoundaryJSON(router, http.MethodPut, "/api/boundary-policies/"+policy.ID, map[string]interface{}{
+		"name": "UI edited", "description": "updated draft", "tlsInspectionEnabled": false,
+		"tlsBypassDomains": []string{},
+	})
+	if policyUpdated.Code != http.StatusOK || !strings.Contains(policyUpdated.Body.String(), "blocked.example") ||
+		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":false`) {
+		t.Fatalf("update policy status = %d: %s", policyUpdated.Code, policyUpdated.Body.String())
+	}
+
+	detail := performBoundaryJSON(router, http.MethodGet, "/api/boundary-policies/"+policy.ID, nil)
+	if detail.Code != http.StatusOK || !strings.Contains(detail.Body.String(), "UI edited") {
+		t.Fatalf("detail status = %d: %s", detail.Code, detail.Body.String())
+	}
+
+	deletedRule := performBoundaryJSON(router, http.MethodDelete, "/api/boundary-policies/"+policy.ID+"/rules/"+rule.ID, nil)
+	if deletedRule.Code != http.StatusNoContent {
+		t.Fatalf("delete rule status = %d: %s", deletedRule.Code, deletedRule.Body.String())
+	}
+	deletedPolicy := performBoundaryJSON(router, http.MethodDelete, "/api/boundary-policies/"+policy.ID, nil)
+	if deletedPolicy.Code != http.StatusNoContent {
+		t.Fatalf("delete policy status = %d: %s", deletedPolicy.Code, deletedPolicy.Body.String())
+	}
 }
 
 func TestBoundaryPolicyListIsScopedAndUsesSafeProjection(t *testing.T) {
@@ -242,8 +331,16 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	}
 	paths := spec["paths"].(map[string]interface{})
 	listPath, ok := paths["/api/boundary-policies"].(map[string]interface{})
-	if !ok || listPath["get"] == nil {
+	if !ok || listPath["get"] == nil || listPath["post"] == nil {
 		t.Fatalf("boundary list path = %#v", listPath)
+	}
+	detailPath, ok := paths["/api/boundary-policies/{id}"].(map[string]interface{})
+	if !ok || detailPath["get"] == nil || detailPath["put"] == nil || detailPath["delete"] == nil {
+		t.Fatalf("boundary detail CRUD path = %#v", detailPath)
+	}
+	rulesPath, ok := paths["/api/boundary-policies/{id}/rules/{ruleId}"].(map[string]interface{})
+	if !ok || rulesPath["put"] == nil || rulesPath["delete"] == nil {
+		t.Fatalf("boundary rule CRUD path = %#v", rulesPath)
 	}
 	path, ok := paths["/api/boundary-policies/{id}/simulate"].(map[string]interface{})
 	if !ok || path["post"] == nil {
@@ -256,6 +353,11 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	schemas := spec["components"].(map[string]interface{})["schemas"].(map[string]interface{})
 	if _, ok := schemas["BoundaryPolicySummary"].(map[string]interface{}); !ok {
 		t.Fatal("BoundaryPolicySummary schema is missing")
+	}
+	for _, name := range []string{"BoundaryPolicyWrite", "BoundaryPolicyDetail", "BoundaryRuleWrite", "BoundaryRule"} {
+		if _, ok := schemas[name].(map[string]interface{}); !ok {
+			t.Fatalf("%s schema is missing", name)
+		}
 	}
 	snapshotSchema, ok := schemas["ConversationBoundarySnapshot"].(map[string]interface{})
 	if !ok {

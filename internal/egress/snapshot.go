@@ -40,19 +40,27 @@ type SnapshotReference struct {
 }
 
 type SnapshotReport struct {
-	Event               string `json:"event"`
-	SnapshotID          string `json:"snapshotId"`
-	SHA256              string `json:"sha256"`
-	UpstreamRouteID     string `json:"upstreamRouteId,omitempty"`
-	UpstreamRouteSHA256 string `json:"upstreamRouteSha256,omitempty"`
-	AuthProfilesID      string `json:"authProfilesId,omitempty"`
-	AuthProfilesSHA256  string `json:"authProfilesSha256,omitempty"`
+	Event                string `json:"event"`
+	SnapshotID           string `json:"snapshotId"`
+	SHA256               string `json:"sha256"`
+	UpstreamRouteID      string `json:"upstreamRouteId,omitempty"`
+	UpstreamRouteSHA256  string `json:"upstreamRouteSha256,omitempty"`
+	AuthProfilesID       string `json:"authProfilesId,omitempty"`
+	AuthProfilesSHA256   string `json:"authProfilesSha256,omitempty"`
+	TLSAuthorityID       string `json:"tlsAuthorityId,omitempty"`
+	TLSCertificateSHA256 string `json:"tlsCertificateSha256,omitempty"`
 }
 
 type snapshotEnvelope struct {
-	SchemaVersion int               `json:"schemaVersion"`
-	PolicyID      string            `json:"policyId"`
-	Rules         []json.RawMessage `json:"rules"`
+	SchemaVersion int                  `json:"schemaVersion"`
+	PolicyID      string               `json:"policyId"`
+	Rules         []json.RawMessage    `json:"rules"`
+	TLSInspection *TLSInspectionPolicy `json:"tlsInspection,omitempty"`
+}
+
+type TLSInspectionPolicy struct {
+	Enabled       bool     `json:"enabled"`
+	BypassDomains []string `json:"bypassDomains"`
 }
 
 type GatewayOptions struct {
@@ -64,6 +72,9 @@ type GatewayOptions struct {
 	UpstreamRoute         *UpstreamRouteReference
 	AuthProfilesPath      string
 	AuthProfiles          *AuthProfilesReference
+	TLSCertificatePath    string
+	TLSPrivateKeyPath     string
+	TLSAuthority          *TLSAuthorityReference
 	Proxy                 ProxyOptions
 	DNS                   DNSOptions
 }
@@ -178,72 +189,100 @@ func (s *SnapshotStore) Put(reference SnapshotReference, canonicalJSON string) (
 }
 
 func LoadSnapshot(path string, reference SnapshotReference) (SnapshotReport, error) {
-	report, _, err := loadPolicySnapshot(path, reference)
+	report, _, _, err := loadPolicySnapshot(path, reference)
 	return report, err
 }
 
 func LoadPolicySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, error) {
+	report, policy, _, err := loadPolicySnapshot(path, reference)
+	return report, policy, err
+}
+
+func LoadGatewaySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, *TLSInspectionPolicy, error) {
 	return loadPolicySnapshot(path, reference)
 }
 
-func loadPolicySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, error) {
+func loadPolicySnapshot(path string, reference SnapshotReference) (SnapshotReport, *boundary.Policy, *TLSInspectionPolicy, error) {
 	if err := validateSnapshotReference(reference); err != nil {
-		return SnapshotReport{}, nil, err
+		return SnapshotReport{}, nil, nil, err
 	}
 	file, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return SnapshotReport{}, nil, fmt.Errorf("open egress snapshot: %w", err)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("open egress snapshot: %w", err)
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return SnapshotReport{}, nil, fmt.Errorf("stat egress snapshot: %w", err)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("stat egress snapshot: %w", err)
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o222 != 0 || info.Size() < 2 || info.Size() > maxSnapshotBytes {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: snapshot file type or size is invalid", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: snapshot file type or size is invalid", ErrSnapshotIntegrity)
 	}
 	content, err := io.ReadAll(io.LimitReader(file, maxSnapshotBytes+1))
 	if err != nil {
-		return SnapshotReport{}, nil, fmt.Errorf("read egress snapshot: %w", err)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("read egress snapshot: %w", err)
 	}
 	return validateSnapshotPolicyBytes(reference, content)
 }
 
 func validateSnapshotBytes(reference SnapshotReference, content []byte) (SnapshotReport, error) {
-	report, _, err := validateSnapshotPolicyBytes(reference, content)
+	report, _, _, err := validateSnapshotPolicyBytes(reference, content)
 	return report, err
 }
 
-func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (SnapshotReport, *boundary.Policy, error) {
+func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (SnapshotReport, *boundary.Policy, *TLSInspectionPolicy, error) {
 	if err := validateSnapshotReference(reference); err != nil {
-		return SnapshotReport{}, nil, err
+		return SnapshotReport{}, nil, nil, err
 	}
 	digestBytes := sha256.Sum256(content)
 	actual := "sha256:" + hex.EncodeToString(digestBytes[:])
 	if subtle.ConstantTimeCompare([]byte(actual), []byte(reference.SHA256)) != 1 {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: SHA-256 mismatch", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: SHA-256 mismatch", ErrSnapshotIntegrity)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	var document snapshotEnvelope
 	if err := decoder.Decode(&document); err != nil {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: decode snapshot: %v", ErrSnapshotIntegrity, err)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: decode snapshot: %v", ErrSnapshotIntegrity, err)
 	}
 	var extra interface{}
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
 	}
-	if document.SchemaVersion != 1 || document.Rules == nil {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
+	if (document.SchemaVersion != 1 && document.SchemaVersion != 2) || document.Rules == nil {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
 	}
 	if document.PolicyID == "" && len(document.Rules) != 0 {
-		return SnapshotReport{}, nil, fmt.Errorf("%w: default-deny snapshot contains rules", ErrSnapshotIntegrity)
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: default-deny snapshot contains rules", ErrSnapshotIntegrity)
+	}
+	if (document.SchemaVersion == 1 && document.TLSInspection != nil) || (document.SchemaVersion == 2 && document.TLSInspection == nil) {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: TLS snapshot settings are inconsistent", ErrSnapshotIntegrity)
+	}
+	if document.TLSInspection != nil {
+		if err := validateTLSInspectionPolicy(document.TLSInspection); err != nil {
+			return SnapshotReport{}, nil, nil, fmt.Errorf("%w: %v", ErrSnapshotIntegrity, err)
+		}
 	}
 	policy, err := compileSnapshotPolicy(document.Rules)
 	if err != nil {
-		return SnapshotReport{}, nil, err
+		return SnapshotReport{}, nil, nil, err
 	}
-	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, policy, nil
+	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, policy, document.TLSInspection, nil
+}
+
+func validateTLSInspectionPolicy(policy *TLSInspectionPolicy) error {
+	if policy == nil || !policy.Enabled || policy.BypassDomains == nil || len(policy.BypassDomains) > 128 {
+		return errors.New("TLS inspection settings are invalid")
+	}
+	previous := ""
+	for _, raw := range policy.BypassDomains {
+		host, err := boundary.NormalizeHost(raw)
+		if err != nil || strings.Contains(host, "/") || host != raw || (previous != "" && previous >= host) {
+			return errors.New("TLS bypass domains are not canonical")
+		}
+		previous = host
+	}
+	return nil
 }
 
 func validateSnapshotReference(reference SnapshotReference) error {
@@ -275,7 +314,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if options.SnapshotCheckInterval == 0 {
 		options.SnapshotCheckInterval = defaultSnapshotCheckInterval
 	}
-	report, policy, err := LoadPolicySnapshot(path, reference)
+	report, policy, tlsInspection, err := LoadGatewaySnapshot(path, reference)
 	if err != nil {
 		return err
 	}
@@ -312,6 +351,21 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		report.AuthProfilesID = options.AuthProfiles.ID
 		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
 	}
+	tlsConfigured := strings.TrimSpace(options.TLSCertificatePath) != "" || strings.TrimSpace(options.TLSPrivateKeyPath) != "" || options.TLSAuthority != nil
+	if tlsInspection != nil {
+		if !tlsConfigured || strings.TrimSpace(options.TLSCertificatePath) == "" || strings.TrimSpace(options.TLSPrivateKeyPath) == "" || options.TLSAuthority == nil {
+			return errors.New("TLS inspection requires certificate, private key and authority reference")
+		}
+		authority, _, tlsErr := LoadTLSAuthority(options.TLSCertificatePath, options.TLSPrivateKeyPath, *options.TLSAuthority, time.Now().UTC())
+		if tlsErr != nil {
+			return tlsErr
+		}
+		options.Proxy.TLSAuthority = authority
+		report.TLSAuthorityID = options.TLSAuthority.ID
+		report.TLSCertificateSHA256 = options.TLSAuthority.CertificateSHA256
+	} else if tlsConfigured {
+		return errors.New("TLS authority configured for a snapshot without TLS inspection")
+	}
 	var outputMu sync.Mutex
 	decorateActivitySink := func(existing ActivitySink) ActivitySink {
 		if output == nil {
@@ -328,6 +382,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		}
 	}
 	options.Proxy.ActivitySink = decorateActivitySink(options.Proxy.ActivitySink)
+	options.Proxy.TLSInspection = tlsInspection
 	options.DNS.ActivitySink = decorateActivitySink(options.DNS.ActivitySink)
 	proxy, err := NewProxy(policy, options.Proxy)
 	if err != nil {
@@ -387,6 +442,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 			err: monitorGatewayIntegrity(runCtx, path, reference,
 				options.UpstreamRoutePath, options.UpstreamRoute,
 				options.AuthProfilesPath, options.AuthProfiles,
+				options.TLSCertificatePath, options.TLSPrivateKeyPath, options.TLSAuthority,
 				options.SnapshotCheckInterval),
 		}
 	}()
@@ -436,7 +492,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	return fmt.Errorf("serve %s: %w", first.name, first.err)
 }
 
-func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, authPath string, authReference *AuthProfilesReference, interval time.Duration) error {
+func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, authPath string, authReference *AuthProfilesReference, tlsCertificatePath, tlsPrivateKeyPath string, tlsReference *TLSAuthorityReference, interval time.Duration) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -457,6 +513,11 @@ func monitorGatewayIntegrity(ctx context.Context, path string, reference Snapsho
 					return fmt.Errorf("revalidate immutable auth profiles: %w", err)
 				}
 			}
+			if tlsReference != nil {
+				if _, _, err := LoadTLSAuthority(tlsCertificatePath, tlsPrivateKeyPath, *tlsReference, time.Now().UTC()); err != nil {
+					return fmt.Errorf("revalidate immutable TLS authority: %w", err)
+				}
+			}
 		}
 	}
 }
@@ -472,7 +533,7 @@ func CheckGateway(path string, reference SnapshotReference, routePath string, ro
 }
 
 func CheckGatewayWithOptions(path string, reference SnapshotReference, options GatewayOptions, output io.Writer) error {
-	report, policy, err := LoadPolicySnapshot(path, reference)
+	report, policy, tlsInspection, err := LoadGatewaySnapshot(path, reference)
 	if err != nil {
 		return err
 	}
@@ -504,6 +565,19 @@ func CheckGatewayWithOptions(path string, reference SnapshotReference, options G
 	}
 	if _, err := authProfilesForPolicy(policy, authDocument); err != nil {
 		return err
+	}
+	tlsConfigured := strings.TrimSpace(options.TLSCertificatePath) != "" || strings.TrimSpace(options.TLSPrivateKeyPath) != "" || options.TLSAuthority != nil
+	if tlsInspection != nil {
+		if !tlsConfigured || strings.TrimSpace(options.TLSCertificatePath) == "" || strings.TrimSpace(options.TLSPrivateKeyPath) == "" || options.TLSAuthority == nil {
+			return errors.New("TLS inspection requires certificate, private key and authority reference")
+		}
+		if _, _, err := LoadTLSAuthority(options.TLSCertificatePath, options.TLSPrivateKeyPath, *options.TLSAuthority, time.Now().UTC()); err != nil {
+			return err
+		}
+		report.TLSAuthorityID = options.TLSAuthority.ID
+		report.TLSCertificateSHA256 = options.TLSAuthority.CertificateSHA256
+	} else if tlsConfigured {
+		return errors.New("TLS authority configured for a snapshot without TLS inspection")
 	}
 	report.Event = "boundary_snapshot_healthy"
 	if output == nil {

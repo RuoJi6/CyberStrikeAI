@@ -32,6 +32,7 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.version="${VERSION}"
 
 COPY --from=build /out/cyberstrike-egress /cyberstrike-egress
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 USER 65532:65532
 ENTRYPOINT ["/cyberstrike-egress"]

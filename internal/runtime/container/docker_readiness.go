@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"cyberstrike-ai/internal/egress"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -138,19 +140,38 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 			}
 		}
 	}
-	if !spec.Workspace.Persistent && len(actual.Mounts) != 0 {
-		return fmt.Errorf("%w: ephemeral runtime has an unexpected mount", ErrRuntimeNotReady)
+	expectedMounts := 0
+	if spec.Workspace.Persistent {
+		expectedMounts++
 	}
-	if spec.Workspace.Persistent && len(actual.Mounts) != 1 {
-		return fmt.Errorf("%w: persistent runtime does not have exactly one workspace volume", ErrRuntimeNotReady)
+	if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
+		expectedMounts++
 	}
+	if len(actual.Mounts) != expectedMounts {
+		return fmt.Errorf("%w: runtime trusted mount count mismatch", ErrRuntimeNotReady)
+	}
+	seenWorkspace, seenTLSCertificate := false, false
 	for _, mount := range actual.Mounts {
 		if strings.EqualFold(mount.Destination, "/var/run/docker.sock") || strings.EqualFold(mount.Destination, "/run/docker.sock") || strings.Contains(strings.ToLower(mount.Source), "docker.sock") {
 			return fmt.Errorf("%w: Docker Socket is mounted into the runtime", ErrRuntimeNotReady)
 		}
-		if !spec.Workspace.Persistent || mount.Type != mobymount.TypeVolume || mount.Name != spec.Workspace.VolumeName || mount.Destination != spec.Workspace.MountPath || !mount.RW {
+		switch mount.Destination {
+		case spec.Workspace.MountPath:
+			if !spec.Workspace.Persistent || seenWorkspace || mount.Type != mobymount.TypeVolume || mount.Name != spec.Workspace.VolumeName || !mount.RW {
+				return fmt.Errorf("%w: unexpected runtime mount at %s", ErrRuntimeNotReady, mount.Destination)
+			}
+			seenWorkspace = true
+		case egress.TLSAuthorityCertificateContainerPath:
+			if spec.EgressGateway == nil || spec.EgressGateway.TLSAuthority == nil || seenTLSCertificate || mount.Type != mobymount.TypeBind || !filepath.IsAbs(mount.Source) || mount.RW {
+				return fmt.Errorf("%w: unexpected runtime mount at %s", ErrRuntimeNotReady, mount.Destination)
+			}
+			seenTLSCertificate = true
+		default:
 			return fmt.Errorf("%w: unexpected runtime mount at %s", ErrRuntimeNotReady, mount.Destination)
 		}
+	}
+	if seenWorkspace != spec.Workspace.Persistent || seenTLSCertificate != (spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil) {
+		return fmt.Errorf("%w: runtime trusted mount is missing", ErrRuntimeNotReady)
 	}
 	for path := range actual.Config.Volumes {
 		if path == "/var/run/docker.sock" || path == "/run/docker.sock" {

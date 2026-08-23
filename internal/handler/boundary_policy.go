@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"net/http"
@@ -25,10 +26,41 @@ type BoundaryPolicyHandler struct {
 }
 
 type boundaryPolicySummary struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Description          string    `json:"description"`
+	TLSInspectionEnabled bool      `json:"tlsInspectionEnabled"`
+	UpdatedAt            time.Time `json:"updatedAt"`
+}
+
+type boundaryPolicyDetail struct {
+	ID                   string                        `json:"id"`
+	Name                 string                        `json:"name"`
+	Description          string                        `json:"description"`
+	TLSInspectionEnabled bool                          `json:"tlsInspectionEnabled"`
+	TLSBypassDomains     []string                      `json:"tlsBypassDomains"`
+	UpdatedAt            time.Time                     `json:"updatedAt"`
+	Rules                []database.BoundaryPolicyRule `json:"rules"`
+}
+
+type boundaryPolicyWriteRequest struct {
+	Name                 string   `json:"name" binding:"required"`
+	Description          string   `json:"description"`
+	TLSInspectionEnabled bool     `json:"tlsInspectionEnabled"`
+	TLSBypassDomains     []string `json:"tlsBypassDomains"`
+}
+
+type boundaryRuleWriteRequest struct {
+	Effect        boundary.Effect            `json:"effect" binding:"required"`
+	Host          string                     `json:"host"`
+	Schemes       []string                   `json:"schemes"`
+	Ports         []int                      `json:"ports"`
+	PathPrefixes  []string                   `json:"pathPrefixes"`
+	Methods       []string                   `json:"methods"`
+	AuthProfileID *string                    `json:"authProfileId"`
+	RateLimit     database.BoundaryRateLimit `json:"rateLimit"`
+	ExpiresAt     *time.Time                 `json:"expiresAt"`
+	Position      int                        `json:"position"`
 }
 
 func NewBoundaryPolicyHandler(db *database.DB, logger *zap.Logger) *BoundaryPolicyHandler {
@@ -57,10 +89,178 @@ func (h *BoundaryPolicyHandler) List(c *gin.Context) {
 	items := make([]boundaryPolicySummary, 0, len(policies))
 	for _, policy := range policies {
 		items = append(items, boundaryPolicySummary{
-			ID: policy.ID, Name: policy.Name, Description: policy.Description, UpdatedAt: policy.UpdatedAt,
+			ID: policy.ID, Name: policy.Name, Description: policy.Description,
+			TLSInspectionEnabled: policy.TLSInspectionEnabled, UpdatedAt: policy.UpdatedAt,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"items": items})
+}
+
+// Get returns one editable source draft with its current rules. It never
+// returns immutable snapshot data or another user's policy outside RBAC scope.
+func (h *BoundaryPolicyHandler) Get(c *gin.Context) {
+	policy, err := h.db.GetBoundaryPolicy(c.Request.Context(), strings.TrimSpace(c.Param("id")))
+	if errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+		return
+	}
+	if err != nil {
+		h.logger.Error("读取边界策略失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界策略"})
+		return
+	}
+	rules, err := h.db.ListBoundaryPolicyRules(c.Request.Context(), policy.ID)
+	if err != nil {
+		h.logger.Error("读取边界规则失败", zap.String("policy_id", policy.ID), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界规则"})
+		return
+	}
+	c.JSON(http.StatusOK, boundaryPolicyDetail{
+		ID: policy.ID, Name: policy.Name, Description: policy.Description,
+		TLSInspectionEnabled: policy.TLSInspectionEnabled, TLSBypassDomains: policy.TLSBypassDomains,
+		UpdatedAt: policy.UpdatedAt, Rules: rules,
+	})
+}
+
+func (h *BoundaryPolicyHandler) Create(c *gin.Context) {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	var request boundaryPolicyWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "边界策略名称不能为空"})
+		return
+	}
+	created, err := h.db.CreateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
+		Name: request.Name, Description: request.Description, OwnerUserID: session.UserID,
+		TLSInspectionEnabled: request.TLSInspectionEnabled, TLSBypassDomains: request.TLSBypassDomains,
+	})
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "创建边界策略失败", err)
+		return
+	}
+	c.JSON(http.StatusCreated, boundaryPolicyDetail{
+		ID: created.ID, Name: created.Name, Description: created.Description,
+		TLSInspectionEnabled: created.TLSInspectionEnabled, TLSBypassDomains: created.TLSBypassDomains,
+		UpdatedAt: created.UpdatedAt, Rules: []database.BoundaryPolicyRule{},
+	})
+}
+
+func (h *BoundaryPolicyHandler) Update(c *gin.Context) {
+	var request boundaryPolicyWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "边界策略名称不能为空"})
+		return
+	}
+	updated, err := h.db.UpdateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
+		ID: strings.TrimSpace(c.Param("id")), Name: request.Name, Description: request.Description,
+		TLSInspectionEnabled: request.TLSInspectionEnabled, TLSBypassDomains: request.TLSBypassDomains,
+	})
+	if errors.Is(err, database.ErrBoundaryPolicyNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+		return
+	}
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "更新边界策略失败", err)
+		return
+	}
+	rules, err := h.db.ListBoundaryPolicyRules(c.Request.Context(), updated.ID)
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "读取更新后的边界规则失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, boundaryPolicyDetail{
+		ID: updated.ID, Name: updated.Name, Description: updated.Description,
+		TLSInspectionEnabled: updated.TLSInspectionEnabled, TLSBypassDomains: updated.TLSBypassDomains,
+		UpdatedAt: updated.UpdatedAt, Rules: rules,
+	})
+}
+
+func (h *BoundaryPolicyHandler) Delete(c *gin.Context) {
+	err := h.db.DeleteBoundaryPolicy(c.Request.Context(), strings.TrimSpace(c.Param("id")))
+	switch {
+	case errors.Is(err, database.ErrBoundaryPolicyNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+	case errors.Is(err, database.ErrBoundaryPolicyInUse):
+		c.JSON(http.StatusConflict, gin.H{"error": "边界策略仍被对话选择，请先切换相关对话策略"})
+	case err != nil:
+		writeBoundaryPolicyStorageError(c, h.logger, "删除边界策略失败", err)
+	default:
+		c.Status(http.StatusNoContent)
+	}
+}
+
+func boundaryRuleFromRequest(policyID, ruleID string, request boundaryRuleWriteRequest) database.BoundaryPolicyRule {
+	return database.BoundaryPolicyRule{
+		ID: strings.TrimSpace(ruleID), PolicyID: strings.TrimSpace(policyID), Effect: request.Effect,
+		Host: request.Host, Schemes: request.Schemes, Ports: request.Ports,
+		PathPrefixes: request.PathPrefixes, Methods: request.Methods,
+		AuthProfileID: request.AuthProfileID, RateLimit: request.RateLimit,
+		ExpiresAt: request.ExpiresAt, Position: request.Position,
+	}
+}
+
+func (h *BoundaryPolicyHandler) CreateRule(c *gin.Context) {
+	var request boundaryRuleWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "边界规则请求格式无效"})
+		return
+	}
+	if _, err := h.db.GetBoundaryPolicy(c.Request.Context(), strings.TrimSpace(c.Param("id"))); errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+		return
+	} else if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "读取边界策略失败", err)
+		return
+	}
+	created, err := h.db.CreateBoundaryPolicyRule(c.Request.Context(), boundaryRuleFromRequest(c.Param("id"), "", request))
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "创建边界规则失败", err)
+		return
+	}
+	c.JSON(http.StatusCreated, created)
+}
+
+func (h *BoundaryPolicyHandler) UpdateRule(c *gin.Context) {
+	var request boundaryRuleWriteRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "边界规则请求格式无效"})
+		return
+	}
+	updated, err := h.db.UpdateBoundaryPolicyRule(c.Request.Context(), boundaryRuleFromRequest(c.Param("id"), c.Param("ruleId"), request))
+	if errors.Is(err, database.ErrBoundaryRuleNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界规则不存在"})
+		return
+	}
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "更新边界规则失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, updated)
+}
+
+func (h *BoundaryPolicyHandler) DeleteRule(c *gin.Context) {
+	err := h.db.DeleteBoundaryPolicyRule(c.Request.Context(), c.Param("id"), c.Param("ruleId"))
+	if errors.Is(err, database.ErrBoundaryRuleNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界规则不存在"})
+		return
+	}
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "删除边界规则失败", err)
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func writeBoundaryPolicyStorageError(c *gin.Context, logger *zap.Logger, message string, err error) {
+	logger.Error(message, zap.Error(err))
+	status := http.StatusBadRequest
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		status = http.StatusServiceUnavailable
+	}
+	c.JSON(status, gin.H{"error": err.Error()})
 }
 
 // GetConversationSnapshot GET /api/conversations/:id/boundary returns the

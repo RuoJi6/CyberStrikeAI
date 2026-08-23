@@ -89,15 +89,20 @@ type AuthProfilesProvider interface {
 	ResolveAuthProfiles(ctx context.Context, conversationID, snapshotID string) (*EgressAuthProfilesSpec, error)
 }
 
+type TLSAuthorityProvider interface {
+	ResolveTLSAuthority(ctx context.Context, conversationID, snapshotID string) (*EgressTLSAuthoritySpec, error)
+}
+
 // LifecycleController coordinates Docker mutations with durable control-plane
 // state. It never accepts a provider/container ID from a handler.
 type LifecycleController struct {
-	manager       RuntimeManager
-	checker       RuntimeReadinessChecker
-	store         LifecycleStore
-	egressGateway *EgressGatewaySpec
-	snapshots     BoundarySnapshotProvider
-	authProfiles  AuthProfilesProvider
+	manager        RuntimeManager
+	checker        RuntimeReadinessChecker
+	store          LifecycleStore
+	egressGateway  *EgressGatewaySpec
+	snapshots      BoundarySnapshotProvider
+	authProfiles   AuthProfilesProvider
+	tlsAuthorities TLSAuthorityProvider
 }
 
 type LifecycleControllerOptions struct {
@@ -110,6 +115,7 @@ type LifecycleControllerOptions struct {
 	// supplies it so explicit rebuilds can bind the current immutable snapshot.
 	BoundarySnapshots BoundarySnapshotProvider
 	AuthProfiles      AuthProfilesProvider
+	TLSAuthorities    TLSAuthorityProvider
 }
 
 func NewLifecycleController(manager RuntimeManager, store LifecycleStore) (*LifecycleController, error) {
@@ -132,6 +138,7 @@ func NewLifecycleControllerWithOptions(manager RuntimeManager, store LifecycleSt
 	return &LifecycleController{
 		manager: manager, checker: checker, store: store,
 		egressGateway: gateway, snapshots: options.BoundarySnapshots, authProfiles: options.AuthProfiles,
+		tlsAuthorities: options.TLSAuthorities,
 	}, nil
 }
 
@@ -461,6 +468,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway.BoundarySnapshot = current.BoundarySnapshot
 			gateway.UpstreamRoute = current.UpstreamRoute
 			gateway.AuthProfiles = current.AuthProfiles
+			gateway.TLSAuthority = current.TLSAuthority
 			spec.EgressGateway = &gateway
 		}
 		if c.authProfiles != nil {
@@ -470,6 +478,15 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			}
 			gateway := *spec.EgressGateway
 			gateway.AuthProfiles = authProfiles
+			spec.EgressGateway = &gateway
+		}
+		if c.tlsAuthorities != nil {
+			authority, err := c.tlsAuthorities.ResolveTLSAuthority(ctx, spec.ConversationID, "")
+			if err != nil {
+				return RuntimeSpec{}, fmt.Errorf("resolve gateway TLS authority: %w", err)
+			}
+			gateway := *spec.EgressGateway
+			gateway.TLSAuthority = authority
 			spec.EgressGateway = &gateway
 		}
 		if err := ValidateSpec(spec); err != nil {
@@ -496,6 +513,13 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			return RuntimeSpec{}, fmt.Errorf("resolve gateway auth profiles: %w", authErr)
 		}
 		gateway.AuthProfiles = authProfiles
+	}
+	if c.tlsAuthorities != nil {
+		authority, authorityErr := c.tlsAuthorities.ResolveTLSAuthority(ctx, spec.ConversationID, requestedSnapshotID)
+		if authorityErr != nil {
+			return RuntimeSpec{}, fmt.Errorf("resolve gateway TLS authority: %w", authorityErr)
+		}
+		gateway.TLSAuthority = authority
 	}
 	spec.EgressGateway = &gateway
 	if err := ValidateSpec(spec); err != nil {

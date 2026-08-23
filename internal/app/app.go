@@ -515,7 +515,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerTLSAuthorityStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
@@ -544,11 +544,15 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if authErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation auth profiles: %w", authErr)
 			}
+			tlsAuthority, tlsErr := materializeConversationTLSAuthority(containerTLSAuthorityStore, snapshot)
+			if tlsErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation TLS authority: %w", tlsErr)
+			}
 			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute, authProfiles)
+			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute, authProfiles, tlsAuthority)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
@@ -1520,6 +1524,13 @@ func setupRoutes(
 
 		// 边界策略列表受 RBAC 资源范围约束；模拟只执行确定性本地判定，不解析 DNS 或发起网络请求。
 		protected.GET("/boundary-policies", boundaryPolicyHandler.List)
+		protected.POST("/boundary-policies", boundaryPolicyHandler.Create)
+		protected.GET("/boundary-policies/:id", boundaryPolicyHandler.Get)
+		protected.PUT("/boundary-policies/:id", boundaryPolicyHandler.Update)
+		protected.DELETE("/boundary-policies/:id", boundaryPolicyHandler.Delete)
+		protected.POST("/boundary-policies/:id/rules", boundaryPolicyHandler.CreateRule)
+		protected.PUT("/boundary-policies/:id/rules/:ruleId", boundaryPolicyHandler.UpdateRule)
+		protected.DELETE("/boundary-policies/:id/rules/:ruleId", boundaryPolicyHandler.DeleteRule)
 		protected.POST("/boundary-policies/:id/simulate", boundaryPolicyHandler.SimulatePolicy)
 
 		// 出站代理凭据仅在服务端加密保存；所有响应都是无凭据投影。

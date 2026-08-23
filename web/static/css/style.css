@@ -4995,6 +4995,63 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .egress-resource-empty p { margin: 0; font-size: 0.76rem; line-height: 1.55; }
 .container-policy-empty.is-compact { min-height: 100px; }
 
+.boundary-draft-management,
+.boundary-snapshot-viewer {
+    min-width: 0;
+    margin-top: 18px;
+    padding: 20px;
+    border: 1px solid var(--border-color);
+    border-radius: 17px;
+    background: var(--bg-secondary);
+    box-shadow: 0 14px 34px color-mix(in srgb, #0f172a 5%, transparent);
+}
+
+.boundary-draft-heading,
+.boundary-rule-editor-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.boundary-draft-heading h3,
+.boundary-rule-editor-heading h4 { margin: 4px 0 0; color: var(--text-primary); font-size: 1rem; }
+.boundary-draft-heading p,
+.boundary-rule-editor-heading p { max-width: 760px; margin: 6px 0 0; color: var(--text-secondary); font-size: 0.76rem; line-height: 1.55; }
+.boundary-draft-heading-actions,
+.boundary-form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+
+.boundary-draft-picker { margin-top: 18px; }
+.boundary-draft-picker label,
+.boundary-form-grid label { display: grid; gap: 7px; min-width: 0; color: var(--text-secondary); font-size: 0.72rem; font-weight: 650; }
+.boundary-draft-picker select,
+.boundary-form-grid input:not([type="checkbox"]),
+.boundary-form-grid select {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding: 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 11px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+}
+.boundary-policy-form,
+.boundary-rule-form { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border-color); }
+.boundary-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.boundary-form-grid .is-wide { grid-column: 1 / -1; }
+.boundary-form-toggle { display: flex !important; grid-template-columns: auto 1fr; align-items: center; justify-content: start; gap: 9px; color: var(--text-primary) !important; }
+.boundary-form-toggle input { width: auto; margin: 0; }
+#boundary-policy-tls-bypass-field[hidden] { display: none !important; }
+#boundary-policy-tls-bypass-field small { color: var(--text-secondary); font-size: 0.66rem; font-weight: 450; line-height: 1.5; }
+.boundary-form-actions { justify-content: flex-end; margin-top: 16px; }
+.boundary-rule-editor { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border-color); }
+.boundary-rule-editor[hidden],
+.boundary-rule-form[hidden] { display: none !important; }
+.container-policy-rule.is-editing { border-color: color-mix(in srgb, var(--primary-color) 55%, var(--border-color)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 10%, transparent); }
+.boundary-rule-card-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-left: auto; }
+.boundary-snapshot-viewer { margin-bottom: 0; }
+
 .egress-management-summary {
     display: grid;
     grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -5188,6 +5245,8 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .container-policy-rule-grid { grid-template-columns: 1fr 1fr; }
     .container-policy-snapshot,
     .container-policy-rules,
+    .boundary-draft-management,
+    .boundary-snapshot-viewer,
     .egress-management-list-pane,
     .egress-management-form { padding: 16px; border-radius: 15px; }
     .egress-management-tabs > .btn-secondary { width: 100%; margin-left: 0; }
@@ -5195,6 +5254,10 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .egress-resource-actions { justify-content: flex-end; }
     .egress-group-member { grid-template-columns: 1fr 1fr; }
     .egress-group-member-choice { grid-column: 1 / -1; }
+    .boundary-draft-heading,
+    .boundary-rule-editor-heading { align-items: stretch; flex-direction: column; }
+    .boundary-draft-heading-actions { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+    .boundary-draft-heading-actions button { width: 100%; }
 }
 
 @media (max-width: 480px) {
@@ -5205,6 +5268,7 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .container-runtime-pagination { grid-template-columns: 1fr 1fr; }
     .container-policy-metadata,
     .container-policy-rule-grid,
+    .boundary-form-grid,
     .egress-management-summary,
     .egress-form-grid,
     .egress-group-member { grid-template-columns: 1fr; }
@@ -5219,6 +5283,8 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .egress-resource-actions { display: grid; grid-template-columns: 1fr 1fr; }
     .egress-form-actions button,
     .egress-resource-actions button { width: 100%; }
+    .boundary-form-actions { display: grid; grid-template-columns: 1fr; }
+    .boundary-form-actions button { width: 100%; }
     .container-runtime-page-summary { grid-column: 1 / -1; grid-row: 1; white-space: normal; }
     .network-activity-actions { display: grid; grid-template-columns: 1fr 1fr; }
     .network-activity-actions .btn-secondary { width: 100%; }

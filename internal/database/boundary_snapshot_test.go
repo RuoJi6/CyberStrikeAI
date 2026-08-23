@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -87,6 +88,41 @@ func TestConversationBoundarySnapshotCanonicalJSONAndSHA256(t *testing.T) {
 	loaded, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID)
 	if err != nil || loaded.CanonicalJSON != snapshot.CanonicalJSON || loaded.SHA256 != snapshot.SHA256 {
 		t.Fatalf("loaded = %#v, %v", loaded, err)
+	}
+}
+
+func TestConversationBoundarySnapshotFreezesTLSInspectionAndCanonicalBypassDomains(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy, err := db.CreateBoundaryPolicy(context.Background(), BoundaryPolicy{
+		ID: "tls-policy", Name: "TLS inspection", TLSInspectionEnabled: true,
+		TLSBypassDomains: []string{"Pinned.Example.", "updates.example", "pinned.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateBoundaryPolicyRule(context.Background(), BoundaryPolicyRule{
+		ID: "allow", PolicyID: policy.ID, Effect: boundary.EffectAllowVisit,
+		Host: "target.example", Schemes: []string{"https"}, Methods: []string{"GET"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	snapshot, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Document.SchemaVersion != 2 || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 2 || snapshot.Document.TLSInspection.BypassDomains[0] != "pinned.example" {
+		t.Fatalf("TLS snapshot = %#v", snapshot.Document)
+	}
+	if !strings.Contains(snapshot.CanonicalJSON, `"tlsInspection":{"enabled":true,"bypassDomains":["pinned.example","updates.example"]}`) {
+		t.Fatalf("TLS canonical JSON = %s", snapshot.CanonicalJSON)
+	}
+	if _, err := db.UpdateBoundaryPolicy(context.Background(), BoundaryPolicy{ID: policy.ID, Name: policy.Name}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := db.GetConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil || loaded.CanonicalJSON != snapshot.CanonicalJSON || loaded.Document.TLSInspection == nil {
+		t.Fatalf("TLS snapshot changed with draft: %#v err=%v", loaded, err)
 	}
 }
 

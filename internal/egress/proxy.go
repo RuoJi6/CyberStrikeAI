@@ -2,6 +2,7 @@ package egress
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -39,6 +40,8 @@ type ProxyOptions struct {
 	ClientHelloTimeout time.Duration
 	MaxClientHello     int
 	ActivitySink       ActivitySink
+	TLSInspection      *TLSInspectionPolicy
+	TLSAuthority       *TLSAuthority
 }
 
 // Proxy is the policy-enforcing HTTP forward proxy and HTTPS CONNECT tunnel.
@@ -55,6 +58,8 @@ type Proxy struct {
 	maxClientHello     int
 	activitySink       ActivitySink
 	guard              *requestGuard
+	tlsInspection      *TLSInspectionPolicy
+	tlsAuthority       *TLSAuthority
 }
 
 func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
@@ -70,6 +75,14 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	authProfiles, err := authProfilesForPolicy(policy, options.AuthProfiles)
 	if err != nil {
 		return nil, err
+	}
+	if options.TLSInspection != nil {
+		if err := validateTLSInspectionPolicy(options.TLSInspection); err != nil {
+			return nil, err
+		}
+		if options.TLSAuthority == nil {
+			return nil, errors.New("TLS inspection requires a conversation authority")
+		}
 	}
 	baseDialContext := options.DialContext
 	if baseDialContext == nil {
@@ -103,6 +116,7 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	proxy := &Proxy{
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
+		tlsInspection: options.TLSInspection, tlsAuthority: options.TLSAuthority,
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -159,18 +173,26 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) {
+	p.serveForwardRequest(writer, request, false)
+}
+
+func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Request, inspectedTLS bool) {
 	if request.URL == nil || !request.URL.IsAbs() || request.URL.Scheme == "" || request.URL.Host == "" {
 		http.Error(writer, "absolute HTTP proxy target required", http.StatusBadRequest)
 		return
 	}
 	startedAt := p.now().UTC()
 	decision, err := p.policy.Evaluate(request.URL.String(), request.Method, nil, startedAt)
-	if err != nil || decision.Target.Scheme != "http" {
+	if err != nil || (decision.Target.Scheme != "http" && (!inspectedTLS || decision.Target.Scheme != "https")) {
 		http.Error(writer, "invalid HTTP proxy target", http.StatusBadRequest)
 		return
 	}
+	requestType := ActivityRequestHTTP
+	if inspectedTLS {
+		requestType = ActivityRequestHTTPS
+	}
 	event := ActivityEvent{
-		Timestamp: startedAt, RequestType: ActivityRequestHTTP,
+		Timestamp: startedAt, RequestType: requestType,
 		Domain: decision.Target.Host, Port: decision.Target.Port,
 		Decision: ActivityDecisionBlocked, RuleID: decision.RuleID, Reason: decision.Reason,
 		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected",
@@ -191,7 +213,7 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 	}
 	if isDNSOverHTTP(request, decision.Target.Path) {
 		event.Outcome = "encrypted_dns_denied"
-		http.Error(writer, "DNS over HTTP is not permitted", http.StatusForbidden)
+		writeBoundaryDeniedResponse(writer, decision.Target.Host, "encrypted-dns-denied", decision.RuleID)
 		return
 	}
 	var authProfile *GatewayAuthProfile
@@ -199,13 +221,13 @@ func (p *Proxy) serveForward(writer http.ResponseWriter, request *http.Request) 
 		profile, ok := p.authProfiles[decision.AuthProfileID]
 		if !decision.Allowed || !ok {
 			event.Outcome = "auth_profile_unavailable"
-			http.Error(writer, "egress authentication profile unavailable", http.StatusForbidden)
+			writeBoundaryDeniedResponse(writer, decision.Target.Host, "auth-profile-unavailable", decision.RuleID)
 			return
 		}
 		authProfile = &profile
 	} else if !proxyDecisionAllowed(decision) {
 		event.Outcome = "policy_denied"
-		http.Error(writer, "egress policy denied request", http.StatusForbidden)
+		writeBoundaryDeniedResponse(writer, decision.Target.Host, decision.Reason, decision.RuleID)
 		return
 	}
 	event.Decision = ActivityDecisionAllowed
@@ -274,10 +296,27 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
-	decision, err := p.policy.Evaluate(targetURL, http.MethodConnect, nil, startedAt)
-	if err != nil {
-		http.Error(writer, "egress policy denied CONNECT", http.StatusForbidden)
-		return
+	interceptTLS := p.shouldInterceptTLS(targetHost)
+	decision := boundary.Decision{}
+	if interceptTLS {
+		target, normalizeErr := boundary.NormalizeRequestTarget(targetURL, http.MethodConnect)
+		if normalizeErr != nil {
+			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			return
+		}
+		preflight, evaluateErr := p.policy.EvaluateDNS(targetHost, nil, startedAt)
+		decision = boundary.Decision{Allowed: preflight.Allowed, Effect: preflight.Effect, RuleID: preflight.RuleID, Reason: preflight.Reason, Target: target}
+		if evaluateErr != nil {
+			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			return
+		}
+	} else {
+		var evaluateErr error
+		decision, evaluateErr = p.policy.Evaluate(targetURL, http.MethodConnect, nil, startedAt)
+		if evaluateErr != nil {
+			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			return
+		}
 	}
 	event := ActivityEvent{
 		Timestamp: startedAt, RequestType: ActivityRequestCONNECT,
@@ -290,23 +329,25 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		event.LatencyMS = activityLatencyMS(startedAt, p.now().UTC())
 		emitActivity(p.activitySink, event)
 	}()
-	if !proxyDecisionAllowed(decision) {
-		http.Error(writer, "egress policy denied CONNECT", http.StatusForbidden)
+	if !decision.Allowed || (!interceptTLS && !proxyDecisionAllowed(decision)) {
+		writeBoundaryDeniedResponse(writer, targetHost, decision.Reason, decision.RuleID)
 		return
 	}
 	event.Decision = ActivityDecisionAllowed
 	event.Outcome = "tunnel_unavailable"
-	release, block, transition := p.guard.acquire(decision, startedAt)
-	p.emitHealthTransition(decision, transition, startedAt)
-	if block != nil {
-		event.Decision = ActivityDecisionBlocked
-		event.Reason = block.reason
-		event.Outcome = block.outcome
-		event.RetryAfterMS = block.retryAfterMS
-		writeRateLimitResponse(writer, block.retryAfterMS)
-		return
+	if !interceptTLS {
+		release, block, transition := p.guard.acquire(decision, startedAt)
+		p.emitHealthTransition(decision, transition, startedAt)
+		if block != nil {
+			event.Decision = ActivityDecisionBlocked
+			event.Reason = block.reason
+			event.Outcome = block.outcome
+			event.RetryAfterMS = block.retryAfterMS
+			writeRateLimitResponse(writer, block.retryAfterMS)
+			return
+		}
+		defer release()
 	}
-	defer release()
 	hijacker, ok := writer.(http.Hijacker)
 	if !ok {
 		event.Outcome = "hijack_unavailable"
@@ -341,6 +382,14 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	sniURL := (&url.URL{Scheme: "https", Host: targetAuthority, Path: "/"}).String()
+	if interceptTLS {
+		event.Outcome = "tls_inspection_failed"
+		if err := p.serveInterceptedTLS(client, buffered.Reader, clientHello, targetAuthority, targetHost); err != nil {
+			return
+		}
+		event.Outcome = "tls_inspection_closed"
+		return
+	}
 	sniDecision, err := p.policy.Evaluate(sniURL, http.MethodConnect, nil, p.now().UTC())
 	if err != nil || !proxyDecisionAllowed(sniDecision) || sniDecision.Target.Host != serverName || sniDecision.Target.Port != targetPort {
 		event.Decision = ActivityDecisionBlocked
@@ -372,6 +421,90 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	event.BytesUp += uploaded
 	event.BytesDown = downloaded
 	event.Outcome = "tunnel_closed"
+}
+
+func (p *Proxy) shouldInterceptTLS(host string) bool {
+	if p == nil || p.tlsInspection == nil || !p.tlsInspection.Enabled || p.tlsAuthority == nil {
+		return false
+	}
+	for _, bypass := range p.tlsInspection.BypassDomains {
+		if host == bypass || strings.HasSuffix(host, "."+bypass) {
+			return false
+		}
+	}
+	return true
+}
+
+type replayConn struct {
+	net.Conn
+	reader io.Reader
+}
+
+func (connection *replayConn) Read(content []byte) (int, error) {
+	return connection.reader.Read(content)
+}
+
+type interceptedResponseWriter struct {
+	writer      *bufio.Writer
+	header      http.Header
+	wroteHeader bool
+}
+
+func (writer *interceptedResponseWriter) Header() http.Header { return writer.header }
+
+func (writer *interceptedResponseWriter) WriteHeader(status int) {
+	if writer.wroteHeader {
+		return
+	}
+	writer.wroteHeader = true
+	removeHopByHopHeaders(writer.header)
+	writer.header.Set("Connection", "close")
+	_, _ = fmt.Fprintf(writer.writer, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
+	_ = writer.header.Write(writer.writer)
+	_, _ = io.WriteString(writer.writer, "\r\n")
+}
+
+func (writer *interceptedResponseWriter) Write(content []byte) (int, error) {
+	if !writer.wroteHeader {
+		writer.WriteHeader(http.StatusOK)
+	}
+	return writer.writer.Write(content)
+}
+
+func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, clientHello []byte, authority, host string) error {
+	leafDER, leafKey, err := p.tlsAuthority.leafCertificate(host, p.now().UTC())
+	if err != nil {
+		return err
+	}
+	replayed := &replayConn{Conn: client, reader: io.MultiReader(bytes.NewReader(clientHello), buffered)}
+	tlsClient := tls.Server(replayed, &tls.Config{
+		MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"},
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{leafDER, p.tlsAuthority.Certificate.Raw}, PrivateKey: leafKey,
+		}},
+	})
+	if err := tlsClient.Handshake(); err != nil {
+		return fmt.Errorf("complete inspected TLS handshake: %w", err)
+	}
+	request, err := http.ReadRequest(bufio.NewReader(tlsClient))
+	if err != nil {
+		return fmt.Errorf("read inspected HTTPS request: %w", err)
+	}
+	defer request.Body.Close()
+	request.URL.Scheme = "https"
+	request.URL.Host = authority
+	response := &interceptedResponseWriter{writer: bufio.NewWriter(tlsClient), header: make(http.Header)}
+	p.serveForwardRequest(response, request, true)
+	if !response.wroteHeader {
+		response.WriteHeader(http.StatusNoContent)
+	}
+	if err := response.writer.Flush(); err != nil {
+		return fmt.Errorf("flush inspected HTTPS response: %w", err)
+	}
+	if err := tlsClient.Close(); err != nil {
+		return fmt.Errorf("close inspected HTTPS response: %w", err)
+	}
+	return nil
 }
 
 type proxyDialContextKey struct{}
@@ -520,6 +653,36 @@ func writeRateLimitResponse(writer http.ResponseWriter, retryAfterMS int64) {
 	}
 	writer.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 	http.Error(writer, "egress request temporarily limited", http.StatusTooManyRequests)
+}
+
+// writeBoundaryDeniedResponse gives command-line tools and the Agent a stable,
+// explicit explanation instead of an ambiguous transport failure. It only
+// includes the normalized host and policy metadata; paths, queries, headers,
+// request bodies and credentials are deliberately excluded.
+func writeBoundaryDeniedResponse(writer http.ResponseWriter, host, reason, ruleID string) {
+	host = safeBoundaryResponseValue(host, "the requested website")
+	reason = safeBoundaryResponseValue(reason, boundary.ReasonDefaultDeny)
+	ruleID = safeBoundaryResponseValue(ruleID, "default-deny")
+	body := fmt.Sprintf(
+		"CyberStrikeAI network boundary blocked access to %s (reason: %s; rule: %s). The request was not sent to the website.\nCyberStrikeAI 出站边界已禁止访问该网站（目标：%s；原因：%s；规则：%s），请求未发送到目标站点。\n",
+		host, reason, ruleID, host, reason, ruleID)
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("X-CyberStrikeAI-Blocked", "true")
+	writer.Header().Set("X-CyberStrikeAI-Block-Reason", reason)
+	writer.Header().Set("X-CyberStrikeAI-Block-Rule", ruleID)
+	writer.Header().Set("Proxy-Status", `CyberStrikeAI; error="policy_denied"`)
+	writer.WriteHeader(http.StatusForbidden)
+	_, _ = io.WriteString(writer, body)
+}
+
+func safeBoundaryResponseValue(value, fallback string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "\r\n\x00") {
+		return fallback
+	}
+	return value
 }
 
 func normalizeConnectTarget(request *http.Request) (rawURL, authority, host string, port int, err error) {

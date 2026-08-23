@@ -146,6 +146,17 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 			return invalidSpec("egress gateway auth profiles must be bound to the boundary snapshot")
 		}
 	}
+	if spec.TLSAuthority != nil {
+		if spec.BoundarySnapshot == nil || spec.TLSAuthority.BoundarySnapshotID != spec.BoundarySnapshot.ID {
+			return invalidSpec("egress gateway TLS authority must be bound to the boundary snapshot")
+		}
+		if id := strings.TrimSpace(spec.TLSAuthority.ID); id != spec.TLSAuthority.ID || !generatedNamePattern.MatchString(id) {
+			return invalidSpec("egress gateway TLS authority id must be canonical and label-safe")
+		}
+		if !sha256DigestPattern.MatchString(spec.TLSAuthority.CertificateSHA256) || !sha256DigestPattern.MatchString(spec.TLSAuthority.PrivateKeySHA256) {
+			return invalidSpec("egress gateway TLS authority digests must be lowercase sha256 digests")
+		}
+	}
 	return nil
 }
 

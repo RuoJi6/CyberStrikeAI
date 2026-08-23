@@ -4,12 +4,16 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -84,6 +88,190 @@ func TestProxyRejectsDeniedAndAmbiguousForwardRequests(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestData(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "blocked-site", Effect: boundary.EffectBlocked,
+		Target: boundary.RuleTarget{Host: "blocked.example", Schemes: []string{"http", "https"}},
+	})
+	proxy, err := NewProxy(policy, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("blocked request reached transport")
+		return nil, nil
+	})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "must-not-appear-in-block-message"
+	request := httptest.NewRequest(http.MethodPost, "http://blocked.example/private?token="+secret, strings.NewReader("password="+secret))
+	request.Header.Set("Authorization", "Bearer "+secret)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Blocked") != "true" || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonBlockedTarget || recorder.Header().Get("X-CyberStrikeAI-Block-Rule") != "blocked-site" {
+		t.Fatalf("blocked response = %d headers=%#v", recorder.Code, recorder.Header())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(body, "blocked.example") || strings.Contains(body, secret) || strings.Contains(body, "/private") || strings.Contains(body, "Authorization") {
+		t.Fatalf("unsafe or unclear blocked response = %q", body)
+	}
+
+	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
+	connect.Host = "blocked.example:443"
+	connect.RequestURI = connect.Host
+	connectRecorder := httptest.NewRecorder()
+	proxy.ServeHTTP(connectRecorder, connect)
+	if connectRecorder.Code != http.StatusForbidden || connectRecorder.Header().Get("Proxy-Status") == "" || !strings.Contains(connectRecorder.Body.String(), "blocked.example") {
+		t.Fatalf("CONNECT blocked response = %d headers=%#v body=%q", connectRecorder.Code, connectRecorder.Header(), connectRecorder.Body.String())
+	}
+}
+
+func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndDoesNotPersistSecrets(t *testing.T) {
+	policy := testProxyPolicy(t,
+		boundary.Rule{ID: "allow-safe", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"GET"}, PathPrefixes: []string{"/safe"}}},
+		boundary.Rule{ID: "allow-upload", Effect: boundary.EffectAllowAttack, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"POST"}, PathPrefixes: []string{"/upload"}}},
+		boundary.Rule{ID: "block-admin", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"/admin"}}},
+	)
+	authority, err := GenerateTLSAuthority("conversation-one", time.Now().UTC(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []ActivityEvent
+	proxy, err := NewProxy(policy, ProxyOptions{
+		TLSInspection: &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{}},
+		TLSAuthority:  authority,
+		ActivitySink:  func(event ActivityEvent) { events = append(events, event) },
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Scheme != "https" || request.URL.Host != "inspect.example:443" {
+				t.Fatalf("inspected outbound target = %s %s", request.Method, request.URL)
+			}
+			if request.Method == http.MethodPost && request.URL.Path == "/upload" {
+				content, readErr := io.ReadAll(request.Body)
+				if readErr != nil || string(content) != "password=stage8-secret-must-not-leak&file=%00%ff" {
+					t.Fatalf("inspected upload body = %q, err=%v", content, readErr)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/octet-stream"}}, Body: io.NopCloser(bytes.NewReader([]byte{0, 255, 1, 2}))}, nil
+			}
+			if request.URL.Path != "/safe/report" || request.Method != http.MethodGet {
+				t.Fatalf("inspected outbound request = %s %s", request.Method, request.URL)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/plain"}}, Body: io.NopCloser(strings.NewReader("inspected-ok"))}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(authority.CertificatePEM) {
+		t.Fatal("append conversation CA")
+	}
+	secret := "stage8-secret-must-not-leak"
+	response := performInspectedTLSRequest(t, proxy, roots, "GET /safe/report?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nAuthorization: Bearer "+secret+"\r\nConnection: close\r\n\r\n")
+	allowedBody, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK || string(allowedBody) != "inspected-ok" {
+		t.Fatalf("allowed HTTPS response = %d %q", response.StatusCode, allowedBody)
+	}
+	uploadBody := "password=" + secret + "&file=%00%ff"
+	upload := performInspectedTLSRequest(t, proxy, roots, "POST /upload HTTP/1.1\r\nHost: inspect.example\r\nCookie: session="+secret+"\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "+strconv.Itoa(len(uploadBody))+"\r\nConnection: close\r\n\r\n"+uploadBody)
+	binaryBody, _ := io.ReadAll(upload.Body)
+	_ = upload.Body.Close()
+	if upload.StatusCode != http.StatusOK || !bytes.Equal(binaryBody, []byte{0, 255, 1, 2}) {
+		t.Fatalf("inspected upload response = %d %v", upload.StatusCode, binaryBody)
+	}
+
+	denied := performInspectedTLSRequest(t, proxy, roots, "GET /admin?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")
+	deniedBody, _ := io.ReadAll(denied.Body)
+	_ = denied.Body.Close()
+	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(string(deniedBody), "block-admin") {
+		t.Fatalf("denied inspected HTTPS response = %d %q", denied.StatusCode, deniedBody)
+	}
+	encoded, _ := json.Marshal(events)
+	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "Authorization") || strings.Contains(string(encoded), "Cookie") || strings.Contains(string(encoded), "token=") || strings.Contains(string(encoded), "password=") {
+		t.Fatalf("TLS activity leaked request secrets: %s", encoded)
+	}
+	foundPathDecision := false
+	for _, event := range events {
+		if event.Domain == "inspect.example" && event.Path == "/admin" && event.Decision == ActivityDecisionBlocked && event.RuleID == "block-admin" {
+			foundPathDecision = true
+		}
+	}
+	if !foundPathDecision {
+		t.Fatalf("missing decrypted path decision: %#v", events)
+	}
+}
+
+func TestProxyTLSInspectionBypassMatchesPinnedDomainAndSubdomainsOnly(t *testing.T) {
+	authority, err := GenerateTLSAuthority("conversation-bypass", time.Now().UTC(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := NewProxy(testProxyPolicy(t), ProxyOptions{
+		TLSInspection: &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{"pinned.example"}},
+		TLSAuthority:  authority,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.shouldInterceptTLS("pinned.example") || proxy.shouldInterceptTLS("api.pinned.example") || !proxy.shouldInterceptTLS("notpinned.example") {
+		t.Fatal("TLS certificate-pinning bypass domain boundary mismatch")
+	}
+}
+
+type hijackResponseWriter struct {
+	header http.Header
+	conn   net.Conn
+	reader *bufio.Reader
+	writer *bufio.Writer
+}
+
+func (writer *hijackResponseWriter) Header() http.Header               { return writer.header }
+func (writer *hijackResponseWriter) WriteHeader(int)                   {}
+func (writer *hijackResponseWriter) Write(content []byte) (int, error) { return len(content), nil }
+func (writer *hijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return writer.conn, bufio.NewReadWriter(writer.reader, writer.writer), nil
+}
+
+func performInspectedTLSRequest(t *testing.T, proxy *Proxy, roots *x509.CertPool, rawRequest string) *http.Response {
+	t.Helper()
+	clientSide, proxySide := net.Pipe()
+	writer := &hijackResponseWriter{header: make(http.Header), conn: proxySide, reader: bufio.NewReader(proxySide), writer: bufio.NewWriter(proxySide)}
+	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
+	connect.Host = "inspect.example:443"
+	connect.RequestURI = connect.Host
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proxy.ServeHTTP(writer, connect)
+	}()
+	clientReader := bufio.NewReader(clientSide)
+	connectResponse, err := http.ReadResponse(clientReader, &http.Request{Method: http.MethodConnect})
+	if err != nil || connectResponse.StatusCode != http.StatusOK {
+		_ = clientSide.Close()
+		t.Fatalf("read inspected CONNECT response: status=%v err=%v", connectResponse, err)
+	}
+	tlsClient := tls.Client(&replayConn{Conn: clientSide, reader: clientReader}, &tls.Config{ServerName: "inspect.example", RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err := tlsClient.Handshake(); err != nil {
+		_ = clientSide.Close()
+		t.Fatal(err)
+	}
+	if _, err := io.WriteString(tlsClient, rawRequest); err != nil {
+		_ = clientSide.Close()
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(tlsClient), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		_ = clientSide.Close()
+		t.Fatal(err)
+	}
+	content, err := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	_ = tlsClient.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	response.Body = io.NopCloser(bytes.NewReader(content))
+	return response
 }
 
 func TestProxyAuthOnlyInjectsGatewayCredentialAndRejectsMissingOrExtraProfiles(t *testing.T) {

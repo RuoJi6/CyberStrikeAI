@@ -11,6 +11,7 @@ const (
 
 	ActivityRequestDNS     = "dns"
 	ActivityRequestHTTP    = "http"
+	ActivityRequestHTTPS   = "https"
 	ActivityRequestCONNECT = "connect"
 	ActivityRequestHealth  = "health"
 

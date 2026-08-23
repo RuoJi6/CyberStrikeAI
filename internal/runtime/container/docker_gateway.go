@@ -304,7 +304,7 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if status != expectedStatus {
 		return fmt.Errorf("%w: egress gateway state %s does not match agent state %s", ErrRuntimeStateConflict, status, expectedStatus)
 	}
-	if expectedStatus == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec), authProfilesReference(spec)) {
+	if expectedStatus == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec), authProfilesReference(spec), tlsAuthorityReference(spec)) {
 		return fmt.Errorf("%w: running egress gateway does not report the exact healthy snapshot", ErrRuntimeStateConflict)
 	}
 	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
@@ -391,6 +391,16 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 			BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
 		})
 	}
+	if spec.EgressGateway.TLSAuthority != nil {
+		certificatePath, privateKeyPath, _, err := m.loadTLSAuthority(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		hostConfig.Mounts = append(hostConfig.Mounts,
+			mobymount.Mount{Type: mobymount.TypeBind, Source: certificatePath, Target: egress.TLSAuthorityCertificateContainerPath, ReadOnly: true, BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate}},
+			mobymount.Mount{Type: mobymount.TypeBind, Source: privateKeyPath, Target: egress.TLSAuthorityPrivateKeyContainerPath, ReadOnly: true, BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate}},
+		)
+	}
 	return config, hostConfig, nil
 }
 
@@ -419,6 +429,16 @@ func egressGatewayCommand(spec RuntimeSpec, action string) []string {
 			"--auth-profiles-path", egress.AuthProfilesContainerPath,
 			"--auth-profiles-id", auth.ID,
 			"--auth-profiles-sha256", auth.SHA256,
+		)
+	}
+	if spec.EgressGateway.TLSAuthority != nil {
+		authority := spec.EgressGateway.TLSAuthority
+		command = append(command,
+			"--tls-ca-cert-path", egress.TLSAuthorityCertificateContainerPath,
+			"--tls-ca-key-path", egress.TLSAuthorityPrivateKeyContainerPath,
+			"--tls-ca-id", authority.ID,
+			"--tls-ca-cert-sha256", authority.CertificateSHA256,
+			"--tls-ca-key-sha256", authority.PrivateKeySHA256,
 		)
 	}
 	return command
@@ -495,6 +515,33 @@ func authProfilesReference(spec RuntimeSpec) *egress.AuthProfilesReference {
 	return &egress.AuthProfilesReference{ID: auth.ID, SHA256: auth.SHA256}
 }
 
+func tlsAuthorityReference(spec RuntimeSpec) *egress.TLSAuthorityReference {
+	if spec.EgressGateway == nil || spec.EgressGateway.TLSAuthority == nil {
+		return nil
+	}
+	authority := spec.EgressGateway.TLSAuthority
+	return &egress.TLSAuthorityReference{ID: authority.ID, CertificateSHA256: authority.CertificateSHA256, PrivateKeySHA256: authority.PrivateKeySHA256}
+}
+
+func (m *DockerManager) loadTLSAuthority(spec RuntimeSpec) (string, string, *egress.TLSAuthority, error) {
+	reference := tlsAuthorityReference(spec)
+	if reference == nil {
+		return "", "", nil, nil
+	}
+	if m.tlsAuthorityStore == nil {
+		return "", "", nil, fmt.Errorf("%w: TLS authority store is not configured", ErrRuntimeStateConflict)
+	}
+	certificatePath, keyPath, err := m.tlsAuthorityStore.Paths(*reference)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("%w: resolve TLS authority: %v", ErrRuntimeStateConflict, err)
+	}
+	authority, _, err := egress.LoadTLSAuthority(certificatePath, keyPath, *reference, time.Now().UTC())
+	if err != nil {
+		return "", "", nil, fmt.Errorf("%w: verify TLS authority: %v", ErrRuntimeStateConflict, err)
+	}
+	return certificatePath, keyPath, authority, nil
+}
+
 func (m *DockerManager) loadAuthProfiles(spec RuntimeSpec) (string, egress.AuthProfilesDocument, error) {
 	reference := authProfilesReference(spec)
 	if reference == nil {
@@ -542,6 +589,14 @@ func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.Host
 				return err
 			}
 			expectedMounts[egress.AuthProfilesContainerPath] = authPath
+		}
+		if spec.EgressGateway.TLSAuthority != nil {
+			certificatePath, privateKeyPath, _, err := m.loadTLSAuthority(spec)
+			if err != nil {
+				return err
+			}
+			expectedMounts[egress.TLSAuthorityCertificateContainerPath] = certificatePath
+			expectedMounts[egress.TLSAuthorityPrivateKeyContainerPath] = privateKeyPath
 		}
 		if len(actual.Mounts) != len(expectedMounts) {
 			return fmt.Errorf("%w: egress gateway trusted mount count mismatch", ErrRuntimeStateConflict)
@@ -603,7 +658,7 @@ func equalHealthcheck(actual, expected *mobycontainer.HealthConfig) bool {
 	return equalStrings(actual.Test, expected.Test) && actual.Interval == expected.Interval && actual.Timeout == expected.Timeout && actual.StartPeriod == expected.StartPeriod && actual.StartInterval == expected.StartInterval && actual.Retries == expected.Retries
 }
 
-func healthySnapshotReport(health *mobycontainer.Health, reference egress.SnapshotReference, routeReference *egress.UpstreamRouteReference, authReference *egress.AuthProfilesReference) bool {
+func healthySnapshotReport(health *mobycontainer.Health, reference egress.SnapshotReference, routeReference *egress.UpstreamRouteReference, authReference *egress.AuthProfilesReference, tlsReference *egress.TLSAuthorityReference) bool {
 	if health == nil || health.Status != mobycontainer.Healthy || len(health.Log) == 0 {
 		return false
 	}
@@ -626,9 +681,16 @@ func healthySnapshotReport(health *mobycontainer.Health, reference egress.Snapsh
 		return false
 	}
 	if authReference == nil {
-		return report.AuthProfilesID == "" && report.AuthProfilesSHA256 == ""
+		if report.AuthProfilesID != "" || report.AuthProfilesSHA256 != "" {
+			return false
+		}
+	} else if report.AuthProfilesID != authReference.ID || report.AuthProfilesSHA256 != authReference.SHA256 {
+		return false
 	}
-	return report.AuthProfilesID == authReference.ID && report.AuthProfilesSHA256 == authReference.SHA256
+	if tlsReference == nil {
+		return report.TLSAuthorityID == "" && report.TLSCertificateSHA256 == ""
+	}
+	return report.TLSAuthorityID == tlsReference.ID && report.TLSCertificateSHA256 == tlsReference.CertificateSHA256
 }
 
 func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource, policyDNSAddress string) *mobynetwork.NetworkingConfig {
@@ -747,6 +809,11 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 		labels[LabelEgressAuthProfilesID] = gateway.AuthProfiles.ID
 		labels[LabelEgressAuthSHA256] = gateway.AuthProfiles.SHA256
 	}
+	if gateway.TLSAuthority != nil {
+		labels[LabelEgressTLSAuthorityID] = gateway.TLSAuthority.ID
+		labels[LabelEgressTLSCertSHA256] = gateway.TLSAuthority.CertificateSHA256
+		labels[LabelEgressTLSKeySHA256] = gateway.TLSAuthority.PrivateKeySHA256
+	}
 	return labels
 }
 
@@ -760,6 +827,7 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressSnapshotID, LabelEgressSnapshotSHA256,
 		LabelEgressUpstreamRouteID, LabelEgressUpstreamSHA256,
 		LabelEgressAuthProfilesID, LabelEgressAuthSHA256,
+		LabelEgressTLSAuthorityID, LabelEgressTLSCertSHA256, LabelEgressTLSKeySHA256,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -830,6 +898,15 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 	authSHA256 := strings.TrimSpace(labels[LabelEgressAuthSHA256])
 	if authID != "" || authSHA256 != "" {
 		gateway.AuthProfiles = &EgressAuthProfilesSpec{ID: authID, SHA256: authSHA256}
+	}
+	tlsID := strings.TrimSpace(labels[LabelEgressTLSAuthorityID])
+	tlsCertificateSHA256 := strings.TrimSpace(labels[LabelEgressTLSCertSHA256])
+	tlsPrivateKeySHA256 := strings.TrimSpace(labels[LabelEgressTLSKeySHA256])
+	if tlsID != "" || tlsCertificateSHA256 != "" || tlsPrivateKeySHA256 != "" {
+		gateway.TLSAuthority = &EgressTLSAuthoritySpec{
+			ID: tlsID, BoundarySnapshotID: snapshotID,
+			CertificateSHA256: tlsCertificateSHA256, PrivateKeySHA256: tlsPrivateKeySHA256,
+		}
 	}
 	if err := ValidateEgressGatewaySpec(*gateway); err != nil {
 		return nil, err

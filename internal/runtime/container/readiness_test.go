@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"cyberstrike-ai/internal/egress"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -144,6 +145,33 @@ func TestDockerManagerValidateReadinessAllowsOnlyOwnedWorkspaceVolume(t *testing
 	api.containerResult.Container.Mounts[0].Name = "foreign-volume"
 	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); !errors.Is(err, ErrRuntimeNotReady) {
 		t.Fatalf("foreign mount error = %v", err)
+	}
+}
+
+func TestReadinessAllowsOnlyReadOnlyTLSCertificateMountInAgent(t *testing.T) {
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{
+		ID:     "12345678-1234-1234-1234-123456789abc",
+		SHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	spec.EgressGateway.TLSAuthority = &EgressTLSAuthoritySpec{
+		ID: "87654321-4321-4321-8321-cba987654321", BoundarySnapshotID: spec.EgressGateway.BoundarySnapshot.ID,
+		CertificateSHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		PrivateKeySHA256:  "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+	api := newSuccessfulGatewayCreationAPI(spec, "instance-01")
+	agent := api.containerResults[runtimeContainerName(spec.ID)].Container
+	agent.Mounts = []mobycontainer.MountPoint{{
+		Type: mobymount.TypeBind, Source: "/trusted/tls/ca.crt",
+		Destination: egress.TLSAuthorityCertificateContainerPath, RW: false,
+	}}
+	if err := verifyReadinessIsolation(agent, spec); err != nil {
+		t.Fatalf("read-only Agent CA readiness: %v", err)
+	}
+
+	agent.Mounts[0].Destination = egress.TLSAuthorityPrivateKeyContainerPath
+	if err := verifyReadinessIsolation(agent, spec); !errors.Is(err, ErrRuntimeNotReady) {
+		t.Fatalf("Agent private-key mount was not rejected: %v", err)
 	}
 }
 

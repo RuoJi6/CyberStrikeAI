@@ -19,24 +19,31 @@ import (
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
-func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, credentialCipher *egress.CredentialCipher, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, *egress.SnapshotStore, *egress.UpstreamRouteStore, *egress.AuthProfilesStore, error) {
+const tlsAuthorityRotationPeriod = 6 * 24 * time.Hour
+
+func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, credentialCipher *egress.CredentialCipher, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, *egress.SnapshotStore, *egress.UpstreamRouteStore, *egress.AuthProfilesStore, *egress.TLSAuthorityStore, error) {
 	if cfg == nil || !cfg.Container.Enabled {
-		return nil, nil, nil, nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil
 	}
 	snapshotStore, err := egress.NewSnapshotStore(cfg.Container.EgressSnapshotDir)
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	upstreamStore, err := egress.NewUpstreamRouteStore(filepath.Join(snapshotStore.Root(), "upstream-routes"))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	authProfilesStore, err := egress.NewAuthProfilesStore(filepath.Join(snapshotStore.Root(), "auth-profiles"))
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
+	tlsAuthorityStore, err := egress.NewTLSAuthorityStore(filepath.Join(snapshotStore.Root(), "tls-authorities"))
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	manager, err := containerruntime.NewDockerManagerFromEnvironment(containerruntime.DockerManagerOptions{
 		OwnerID:                strings.TrimSpace(cfg.Container.OwnerID),
@@ -44,14 +51,16 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 		EgressSnapshotRoot:     snapshotStore.Root(),
 		EgressUpstreamRoot:     upstreamStore.Root(),
 		EgressAuthProfilesRoot: authProfilesStore.Root(),
+		EgressTLSAuthorityRoot: tlsAuthorityStore.Root(),
 	})
 	if err != nil {
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	gatewaySpec := conversationEgressGatewaySpec(cfg)
 	initializerStore := &boundarySnapshotInitializationStore{
 		DB: db, SnapshotStore: snapshotStore, UpstreamStore: upstreamStore, AuthProfilesStore: authProfilesStore,
-		CredentialCipher: credentialCipher, EgressGateway: &gatewaySpec,
+		TLSAuthorityStore: tlsAuthorityStore,
+		CredentialCipher:  credentialCipher, EgressGateway: &gatewaySpec,
 	}
 	initializer, err := containerruntime.NewInitializer(manager, initializerStore, containerruntime.InitializerOptions{
 		Workers:       cfg.Container.InitializerWorkers,
@@ -60,7 +69,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 	})
 	if err != nil {
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	controller, err := containerruntime.NewLifecycleControllerWithOptions(manager, db, containerruntime.LifecycleControllerOptions{
 		EgressGateway: &gatewaySpec,
@@ -68,19 +77,22 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 			DB: db, SnapshotStore: snapshotStore, AuthProfilesStore: authProfilesStore, CredentialCipher: credentialCipher,
 		},
 		AuthProfiles: &boundarySnapshotRuntimeProvider{
-			DB: db, SnapshotStore: snapshotStore, AuthProfilesStore: authProfilesStore, CredentialCipher: credentialCipher,
+			DB: db, SnapshotStore: snapshotStore, AuthProfilesStore: authProfilesStore, TLSAuthorityStore: tlsAuthorityStore, CredentialCipher: credentialCipher,
+		},
+		TLSAuthorities: &boundarySnapshotRuntimeProvider{
+			DB: db, SnapshotStore: snapshotStore, AuthProfilesStore: authProfilesStore, TLSAuthorityStore: tlsAuthorityStore, CredentialCipher: credentialCipher,
 		},
 	})
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	orphanScanner, err := containerruntime.NewOrphanScanner(manager, db, containerruntime.OrphanScannerOptions{})
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, err
+		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
 	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = db.EnsureContainerRuntimeBoundarySnapshots(migrationCtx)
@@ -88,7 +100,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("bind boundary snapshots for durable container runtimes: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("bind boundary snapshots for durable container runtimes: %w", err)
 	}
 	egressMigrationCtx, egressMigrationCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = db.EnsureContainerRuntimeEgressBindings(egressMigrationCtx)
@@ -96,7 +108,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("bind upstream egress for durable container runtimes: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("bind upstream egress for durable container runtimes: %w", err)
 	}
 	rebuildRecoveryCtx, rebuildRecoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	interruptedBoundaryRebuilds, err := db.MarkPendingConversationBoundaryRebuildsInterrupted(rebuildRecoveryCtx)
@@ -104,7 +116,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 	if err != nil {
 		_ = initializer.Close(context.Background())
 		_ = manager.Close()
-		return nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("inspect interrupted boundary rebuilds: %w", err)
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("inspect interrupted boundary rebuilds: %w", err)
 	}
 	if interruptedBoundaryRebuilds > 0 {
 		logger.Warn("检测到服务重启中断的边界快照重建请求；执行将失败关闭直到显式重试",
@@ -138,7 +150,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 		zap.String("toolInventoryDigest", cfg.Container.ToolInventoryDigest),
 		zap.Int("toolCount", len(cfg.Container.ToolInventory.Tools)),
 	)
-	return initializer, manager, controller, orphanScanner, snapshotStore, upstreamStore, authProfilesStore, nil
+	return initializer, manager, controller, orphanScanner, snapshotStore, upstreamStore, authProfilesStore, tlsAuthorityStore, nil
 }
 
 // boundarySnapshotInitializationStore is the final fail-closed guard before a
@@ -149,6 +161,7 @@ type boundarySnapshotInitializationStore struct {
 	SnapshotStore     *egress.SnapshotStore
 	UpstreamStore     *egress.UpstreamRouteStore
 	AuthProfilesStore *egress.AuthProfilesStore
+	TLSAuthorityStore *egress.TLSAuthorityStore
 	CredentialCipher  *egress.CredentialCipher
 	EgressGateway     *containerruntime.EgressGatewaySpec
 }
@@ -177,6 +190,10 @@ func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, convers
 	if err != nil {
 		return containerruntime.InitializationRecord{}, false, fmt.Errorf("materialize conversation auth profiles before runtime claim: %w", err)
 	}
+	tlsAuthority, err := materializeConversationTLSAuthority(s.TLSAuthorityStore, snapshot)
+	if err != nil {
+		return containerruntime.InitializationRecord{}, false, fmt.Errorf("materialize conversation TLS authority before runtime claim: %w", err)
+	}
 	record, err := s.DB.GetContainerInitialization(ctx, conversationID)
 	if err != nil {
 		return containerruntime.InitializationRecord{}, false, err
@@ -191,12 +208,14 @@ func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, convers
 			gateway.BoundarySnapshot = &snapshotSpec
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
+			gateway.TLSAuthority = tlsAuthority
 			target.EgressGateway = &gateway
 		} else if target.EgressGateway != nil {
 			gateway := *target.EgressGateway
 			gateway.BoundarySnapshot = &snapshotSpec
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
+			gateway.TLSAuthority = tlsAuthority
 			target.EgressGateway = &gateway
 		}
 		if _, err := s.DB.UpgradeQueuedContainerRuntimeTopology(ctx, conversationID, target); err != nil {
@@ -210,6 +229,7 @@ type boundarySnapshotRuntimeProvider struct {
 	DB                *database.DB
 	SnapshotStore     *egress.SnapshotStore
 	AuthProfilesStore *egress.AuthProfilesStore
+	TLSAuthorityStore *egress.TLSAuthorityStore
 	CredentialCipher  *egress.CredentialCipher
 }
 
@@ -245,6 +265,55 @@ func (p *boundarySnapshotRuntimeProvider) ResolveAuthProfiles(ctx context.Contex
 		return nil, err
 	}
 	return materializeConversationAuthProfiles(ctx, p.DB, p.CredentialCipher, p.AuthProfilesStore, snapshot)
+}
+
+func (p *boundarySnapshotRuntimeProvider) ResolveTLSAuthority(ctx context.Context, conversationID, snapshotID string) (*containerruntime.EgressTLSAuthoritySpec, error) {
+	if p == nil || p.DB == nil || p.TLSAuthorityStore == nil {
+		return nil, fmt.Errorf("TLS authority provider is not configured")
+	}
+	var snapshot database.ConversationBoundarySnapshot
+	var err error
+	if strings.TrimSpace(snapshotID) == "" {
+		snapshot, err = p.DB.GetConversationBoundarySnapshot(ctx, conversationID)
+	} else {
+		snapshot, err = p.DB.GetPendingConversationBoundarySnapshot(ctx, conversationID, snapshotID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return materializeConversationTLSAuthority(p.TLSAuthorityStore, snapshot)
+}
+
+func materializeConversationTLSAuthority(store *egress.TLSAuthorityStore, snapshot database.ConversationBoundarySnapshot) (*containerruntime.EgressTLSAuthoritySpec, error) {
+	return materializeConversationTLSAuthorityAt(store, snapshot, time.Now().UTC())
+}
+
+func materializeConversationTLSAuthorityAt(store *egress.TLSAuthorityStore, snapshot database.ConversationBoundarySnapshot, now time.Time) (*containerruntime.EgressTLSAuthoritySpec, error) {
+	if snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled {
+		return nil, nil
+	}
+	if store == nil {
+		return nil, fmt.Errorf("TLS authority store is not configured")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	} else {
+		now = now.UTC()
+	}
+	rotationBucket := now.Unix() / int64(tlsAuthorityRotationPeriod/time.Second)
+	authorityID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(snapshot.SnapshotID+":"+fmt.Sprint(rotationBucket))).String()
+	authority, err := egress.GenerateTLSAuthority(snapshot.ConversationID, now, 7*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	reference, _, _, err := store.Put(authorityID, authority)
+	if err != nil {
+		return nil, err
+	}
+	return &containerruntime.EgressTLSAuthoritySpec{
+		ID: reference.ID, BoundarySnapshotID: snapshot.SnapshotID,
+		CertificateSHA256: reference.CertificateSHA256, PrivateKeySHA256: reference.PrivateKeySHA256,
+	}, nil
 }
 
 func materializeBoundarySnapshot(store *egress.SnapshotStore, snapshot database.ConversationBoundarySnapshot) (containerruntime.EgressBoundarySnapshotSpec, error) {
@@ -447,7 +516,7 @@ func logContainerIdleStop(logger *zap.Logger, report containerruntime.IdleStopRe
 
 // conversationContainerSpec converts trusted configuration into the immutable
 // specification used when phase 2 requests a container for first execution.
-func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec) (containerruntime.RuntimeSpec, error) {
+func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec) (containerruntime.RuntimeSpec, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return containerruntime.RuntimeSpec{}, fmt.Errorf("%w: conversation container runtime is disabled", containerruntime.ErrEngineUnavailable)
 	}
@@ -494,6 +563,7 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			gateway.BoundarySnapshot = &snapshot
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
+			gateway.TLSAuthority = tlsAuthority
 			return &gateway
 		}(),
 	}

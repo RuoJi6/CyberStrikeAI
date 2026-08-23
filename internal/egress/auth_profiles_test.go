@@ -151,7 +151,7 @@ func TestGatewayIntegrityMonitorChecksAuthProfilesWithoutUpstreamRoute(t *testin
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- monitorGatewayIntegrity(ctx, snapshotPath, snapshotReference, "", nil, authPath, &authReference, 5*time.Millisecond)
+		done <- monitorGatewayIntegrity(ctx, snapshotPath, snapshotReference, "", nil, authPath, &authReference, "", "", nil, 5*time.Millisecond)
 	}()
 	if err := os.Chmod(authPath, 0o644); err != nil {
 		t.Fatal(err)

@@ -336,7 +336,7 @@ type EgressAuditRuntimeTarget struct {
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
 var egressAuditEventTypes = map[string]struct{}{
-	"all": {}, "dns": {}, "http": {}, "connect": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
+	"all": {}, "dns": {}, "http": {}, "https": {}, "connect": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
 }
 var egressAuditDecisions = map[string]struct{}{"all": {}, "allowed": {}, "blocked": {}, "success": {}, "failure": {}}
 
@@ -530,7 +530,7 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
 			return invalid()
 		}
-	case egress.ActivityRequestHTTP:
+	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
 		if event.Port < 1 || event.Port > 65535 || !validEgressAuditMethod(event.Method) ||
 			!validEgressAuditPath(event.Path) || event.HTTPStatus < 0 || event.HTTPStatus > 999 {
 			return invalid()

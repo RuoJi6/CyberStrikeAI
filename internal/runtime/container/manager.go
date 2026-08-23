@@ -162,6 +162,15 @@ type EgressAuthProfilesSpec struct {
 	SHA256 string
 }
 
+// EgressTLSAuthoritySpec binds one short-lived conversation CA. The Agent is
+// given only CertificateSHA256 material; the private key mount is gateway-only.
+type EgressTLSAuthoritySpec struct {
+	ID                 string
+	BoundarySnapshotID string
+	CertificateSHA256  string
+	PrivateKeySHA256   string
+}
+
 // EgressGatewaySpec pins the only image that may bridge a conversation's
 // internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
@@ -170,6 +179,7 @@ type EgressGatewaySpec struct {
 	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
 	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
 	AuthProfiles     *EgressAuthProfilesSpec     `json:",omitempty"`
+	TLSAuthority     *EgressTLSAuthoritySpec     `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.

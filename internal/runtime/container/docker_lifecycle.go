@@ -154,6 +154,9 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if _, _, err := m.loadAuthProfiles(spec); err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 		}
+		if _, _, _, err := m.loadTLSAuthority(spec); err != nil {
+			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
+		}
 		result, err := m.api.ContainerInspect(ctx, providerID, mobyclient.ContainerInspectOptions{Size: false})
 		if err != nil {
 			if containerderrdefs.IsNotFound(err) {
@@ -168,7 +171,7 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if state == nil {
 			return fmt.Errorf("%w: egress gateway state is missing", ErrRuntimeNotReady)
 		}
-		if state.Running && healthySnapshotReport(state.Health, reference, upstreamRouteReference(spec), authProfilesReference(spec)) {
+		if state.Running && healthySnapshotReport(state.Health, reference, upstreamRouteReference(spec), authProfilesReference(spec), tlsAuthorityReference(spec)) {
 			return nil
 		}
 		if !state.Running || state.Status == mobycontainer.StateExited || state.Status == mobycontainer.StateDead || (state.Health != nil && state.Health.Status == mobycontainer.Unhealthy) {
@@ -691,9 +694,6 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
 		return Runtime{}, err
 	}
-	if !matchesRuntimeKeepalive(actual.Config) {
-		return Runtime{}, fmt.Errorf("%w: runtime %s keepalive process drifted", ErrRuntimeStateConflict, expectedID)
-	}
 	createdAt, err := time.Parse(time.RFC3339Nano, actual.Created)
 	if err != nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s creation time is invalid", ErrRuntimeStateConflict, expectedID)
@@ -702,6 +702,9 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 	securitySpec, err := runtimeSecuritySpecFromLabels(labels)
 	if err != nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s egress labels are invalid", ErrRuntimeStateConflict, expectedID)
+	}
+	if !matchesRuntimeKeepalive(actual.Config, securitySpec) {
+		return Runtime{}, fmt.Errorf("%w: runtime %s keepalive process drifted", ErrRuntimeStateConflict, expectedID)
 	}
 	if securitySpec.EgressGateway != nil {
 		if _, err := m.inspectOwnedEgressGateway(ctx, securitySpec, &actual, status); err != nil {

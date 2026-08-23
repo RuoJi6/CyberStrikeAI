@@ -428,7 +428,7 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	if !api.createOpts.Config.NetworkDisabled || api.createOpts.HostConfig.NetworkMode != mobycontainer.NetworkMode(NetworkNone) {
 		t.Fatalf("network was not disabled: %#v / %#v", api.createOpts.Config, api.createOpts.HostConfig)
 	}
-	if !matchesRuntimeKeepalive(api.createOpts.Config) {
+	if !matchesRuntimeKeepalive(api.createOpts.Config, spec) {
 		t.Fatalf("fixed keepalive process was not configured: %#v", api.createOpts.Config)
 	}
 	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || len(api.createOpts.HostConfig.CapAdd) != 0 {
