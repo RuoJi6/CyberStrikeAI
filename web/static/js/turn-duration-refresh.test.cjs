@@ -72,20 +72,35 @@ function createHarness(nowMs) {
     return context;
 }
 
-test('刷新运行中任务时忽略摘要中的零耗时并按开始时间恢复', () => {
+test('刷新运行中任务时使用服务端耗时快照而不受客户端时钟漂移影响', () => {
     const startedAt = '2026-08-12T02:00:00.000Z';
     const startedMs = Date.parse(startedAt);
-    const context = createHarness(startedMs + 65_000);
+    const context = createHarness(startedMs + (43 * 60_000) + 65_000);
     const message = createMessage();
 
     context.setAssistantTurnTiming(message, {
         startedAt,
         durationMs: 0,
+        elapsedMs: 65_000,
         status: 'running',
     });
 
     assert.equal(message.dataset.turnDurationMs, undefined);
     assert.match(message.label.innerHTML, /已处理 1 分钟 5 秒/);
+    assert.doesNotMatch(message.label.innerHTML, /43 分钟/);
+});
+
+test('运行中占位在耗时快照返回前从本地零秒起跑', () => {
+    const context = createHarness(Date.parse('2026-08-12T02:43:00.000Z'));
+    const message = createMessage();
+
+    context.setAssistantTurnTiming(message, {
+        startedAt: '2026-08-12T02:00:00.000Z',
+        status: 'running',
+    });
+
+    assert.match(message.label.innerHTML, /已处理 0 秒/);
+    assert.doesNotMatch(message.label.innerHTML, /43 分钟/);
 });
 
 test('已完成任务仍优先使用持久化耗时', () => {
@@ -111,6 +126,7 @@ test('容器启动只占用顶部计时摘要且就绪后恢复普通对话耗�
 
     context.setAssistantTurnTiming(message, {
         startedAt,
+        elapsedMs: 31_000,
         status: 'running',
     });
     assert.match(message.label.innerHTML, /容器正在启动中 · 31 秒/);

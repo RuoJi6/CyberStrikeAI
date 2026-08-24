@@ -4132,8 +4132,14 @@ function handleStreamEvent(event, progressElement, progressId,
                     progressNode.dataset.containerInitializationState = initializationState;
                     const requestedAtMs = Date.parse(String(initializationData.requestedAt || initializationData.startedAt || ''));
                     if (Number.isFinite(requestedAtMs)) {
-                        progressNode.dataset.turnStartedAtMs = String(requestedAtMs);
-                        progressNode.dataset.turnStartedAt = new Date(requestedAtMs).toISOString();
+                        // 保留服务端时间供诊断，但实时计时继续使用 addProgressMessage
+                        // 在浏览器本地记录的起点。否则虚拟机时钟漂移会直接
+                        // 变成用户看到的“已处理 43 分钟”。
+                        progressNode.dataset.turnServerStartedAt = new Date(requestedAtMs).toISOString();
+                        if (!Number.isFinite(Number(progressNode.dataset.turnStartedAtMs))) {
+                            progressNode.dataset.turnStartedAtMs = String(Date.now());
+                            progressNode.dataset.turnStartedAt = new Date().toISOString();
+                        }
                     }
                     startProgressElapsedClock(progressId);
                 } else {
@@ -4143,13 +4149,27 @@ function handleStreamEvent(event, progressElement, progressId,
             }
 
             const runningAssistantId = typeof getAssistantId === 'function' ? getAssistantId() : null;
-            const runningAssistant = runningAssistantId ? document.getElementById(runningAssistantId) : findLastAssistantMessageElInChat();
+            // 当前页面有新建 progress 卡时，assistantId 为空表示本轮助手消息
+            // 尚未创建；不能回退到上一轮助手消息并把它改成运行中。
+            // 仅无 progress DOM 的刷新/补流路径才复用持久化占位消息。
+            const runningAssistant = runningAssistantId
+                ? document.getElementById(runningAssistantId)
+                : (progressNode ? null : findLastAssistantMessageElInChat());
             if (runningAssistant && runningAssistant.dataset) {
                 if (initializationState === 'initializing') {
                     runningAssistant.dataset.turnPhase = 'container_initializing';
                     if (typeof window.setAssistantTurnTiming === 'function') {
+                        const localStartedAtMs = progressNode && progressNode.dataset
+                            ? Number(progressNode.dataset.turnStartedAtMs)
+                            : NaN;
+                        const localElapsedMs = Number.isFinite(localStartedAtMs)
+                            ? Math.max(0, Date.now() - localStartedAtMs)
+                            : undefined;
                         window.setAssistantTurnTiming(runningAssistant, {
-                            startedAt: initializationData.requestedAt || initializationData.startedAt || runningAssistant.dataset.turnStartedAt,
+                            startedAt: progressNode && progressNode.dataset
+                                ? progressNode.dataset.turnStartedAt
+                                : runningAssistant.dataset.turnStartedAt,
+                            elapsedMs: localElapsedMs,
                             status: 'running'
                         });
                     }
@@ -7085,11 +7105,18 @@ function renderActiveTasks(tasks) {
         return task && String(task.conversationId || '') === visibleConversationId;
     });
     if (visibleAssistant && visibleAssistant.dataset) {
-        if (visibleTask && visibleTask.status === 'initializing') {
-            visibleAssistant.dataset.turnPhase = 'container_initializing';
+        const visibleAssistantIsRunningTurn = visibleAssistant.dataset.turnStatus === 'running' ||
+            assistantMessageNeedsTaskReplayReconcile(visibleAssistant);
+        if (visibleTask && visibleAssistantIsRunningTurn) {
+            if (visibleTask.status === 'initializing') {
+                visibleAssistant.dataset.turnPhase = 'container_initializing';
+            } else if (visibleAssistant.dataset.turnPhase === 'container_initializing') {
+                delete visibleAssistant.dataset.turnPhase;
+            }
             if (typeof window.setAssistantTurnTiming === 'function') {
                 window.setAssistantTurnTiming(visibleAssistant, {
                     startedAt: visibleTask.startedAt || visibleAssistant.dataset.turnStartedAt,
+                    elapsedMs: visibleTask.elapsedMs,
                     status: 'running'
                 });
             }

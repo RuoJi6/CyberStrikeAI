@@ -191,6 +191,31 @@ func TestProcessDetailsSummaryIncludesPersistedTurnTiming(t *testing.T) {
 	}
 }
 
+func TestProcessDetailsSummaryIncludesRunningElapsedTime(t *testing.T) {
+	db, _, messageID := setupProcessDetailsSummaryTest(t)
+	startedAt := time.Now().Add(-65 * time.Second)
+	if _, err := db.Exec(
+		"UPDATE messages SET content = ?, created_at = ?, updated_at = ? WHERE id = ?",
+		"处理中...", startedAt, startedAt, messageID,
+	); err != nil {
+		t.Fatalf("update running message timing: %v", err)
+	}
+
+	summary, err := db.GetProcessDetailsSummary(messageID)
+	if err != nil {
+		t.Fatalf("GetProcessDetailsSummary: %v", err)
+	}
+	if summary.Status != "running" {
+		t.Fatalf("status = %q, want running", summary.Status)
+	}
+	if summary.ElapsedMs == nil {
+		t.Fatal("running summary should expose elapsedMs")
+	}
+	if got := *summary.ElapsedMs; got < 64_000 || got > 67_000 {
+		t.Fatalf("elapsedMs = %d, want about 65000", got)
+	}
+}
+
 func TestProcessDetailsSummaryTreatsCancelledPlaceholderAsTerminal(t *testing.T) {
 	db, conversationID, messageID := setupProcessDetailsSummaryTest(t)
 	startedAt := "2026-08-10T08:00:00Z"

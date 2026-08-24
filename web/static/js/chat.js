@@ -4778,6 +4778,7 @@ function prefetchProcessDetailsSummaryHint(messageId, messageElement) {
                     startedAt: s.startedAt,
                     completedAt: s.completedAt,
                     durationMs: s.durationMs,
+                    elapsedMs: s.elapsedMs,
                     status: s.status || 'completed'
                 });
             }
@@ -5176,11 +5177,25 @@ function setAssistantTurnTiming(messageElementOrId, timing) {
     if (value.status) messageElement.dataset.turnStatus = String(value.status);
     const status = String(messageElement.dataset.turnStatus || 'completed');
     if (status === 'running') {
-        // 摘要接口对运行中任务返回 durationMs=0。刷新页面时不能把这个快照
-        // 当作固定耗时保存，否则后续渲染会一直显示“已处理 0 秒”。
+        // 运行中耗时必须在同一时钟域内计算。服务端返回的 elapsedMs
+        // 是服务端内部时差，前端以收到快照的本地时间为锚点继续增长；
+        // 不直接用浏览器 Date.now() 减虚拟机 startedAt，避免两台机器时钟漂移。
         delete messageElement.dataset.turnDurationMs;
         delete messageElement.dataset.turnCompletedAt;
+        const explicitElapsed = Number(value.elapsedMs);
+        if (Number.isFinite(explicitElapsed) && explicitElapsed >= 0) {
+            messageElement.dataset.turnElapsedBaseMs = String(Math.round(explicitElapsed));
+            messageElement.dataset.turnElapsedBaseAtMs = String(Date.now());
+        } else if (!Number.isFinite(Number(messageElement.dataset.turnElapsedBaseMs)) ||
+            !Number.isFinite(Number(messageElement.dataset.turnElapsedBaseAtMs))) {
+            // 首次渲染的运行中占位先从 0 秒起跑，随后的摘要/任务快照
+            // 会用服务端已运行时长对齐。这比短暂显示跨机时钟差更可靠。
+            messageElement.dataset.turnElapsedBaseMs = '0';
+            messageElement.dataset.turnElapsedBaseAtMs = String(Date.now());
+        }
     } else {
+        delete messageElement.dataset.turnElapsedBaseMs;
+        delete messageElement.dataset.turnElapsedBaseAtMs;
         const explicitDuration = Number(value.durationMs);
         if (Number.isFinite(explicitDuration) && explicitDuration >= 0) {
             messageElement.dataset.turnDurationMs = String(Math.round(explicitDuration));
@@ -5208,11 +5223,15 @@ function syncAssistantTurnSummary(messageElementOrId) {
     const expanded = !!(timeline && timeline.classList.contains('expanded'));
     const status = String(messageElement.dataset.turnStatus || 'completed');
     let durationMs = Number(messageElement.dataset.turnDurationMs);
-    if (!Number.isFinite(durationMs) || durationMs < 0) {
+    if (status === 'running') {
+        const elapsedBaseMs = Number(messageElement.dataset.turnElapsedBaseMs);
+        const elapsedBaseAtMs = Number(messageElement.dataset.turnElapsedBaseAtMs);
+        durationMs = Number.isFinite(elapsedBaseMs) && elapsedBaseMs >= 0 && Number.isFinite(elapsedBaseAtMs)
+            ? elapsedBaseMs + Math.max(0, Date.now() - elapsedBaseAtMs)
+            : 0;
+    } else if (!Number.isFinite(durationMs) || durationMs < 0) {
         const startedAt = assistantTurnTimestamp(messageElement.dataset.turnStartedAt);
-        const completedAt = status === 'running'
-            ? Date.now()
-            : assistantTurnTimestamp(messageElement.dataset.turnCompletedAt);
+        const completedAt = assistantTurnTimestamp(messageElement.dataset.turnCompletedAt);
         durationMs = Number.isFinite(startedAt) && Number.isFinite(completedAt)
             ? Math.max(0, completedAt - startedAt)
             : 0;

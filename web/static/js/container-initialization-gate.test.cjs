@@ -21,6 +21,10 @@ test('容器初始化保持运行态、实时计时并在就绪后续跑', () =>
         monitor.indexOf("case 'error':", monitor.indexOf("case 'container_initialization':"))
     );
     assert.doesNotMatch(initializationCase, /addTimelineItem\(/);
+    assert.match(initializationCase, /turnServerStartedAt/);
+    assert.doesNotMatch(initializationCase, /turnStartedAtMs = String\(requestedAtMs\)/);
+    assert.match(initializationCase, /progressNode \? null : findLastAssistantMessageElInChat\(\)/);
+    assert.match(initializationCase, /elapsedMs: localElapsedMs/);
     assert.match(monitor, /if \(!initializationIsActive\) \{[\s\S]*upsertTerminalAssistantMessage\(event\.message, preferredMessageId\)/);
     assert.match(monitor, /t\.status === 'running' \|\| t\.status === 'initializing' \|\| t\.status === 'cancelling'/);
     assert.match(monitor, /window\.getConversationExecutionStatus/);

@@ -1638,6 +1638,7 @@ type ProcessDetailsSummary struct {
 	StartedAt       *time.Time                    `json:"startedAt,omitempty"`
 	CompletedAt     *time.Time                    `json:"completedAt,omitempty"`
 	DurationMs      int64                         `json:"durationMs"`
+	ElapsedMs       *int64                        `json:"elapsedMs,omitempty"`
 	Status          string                        `json:"status,omitempty"`
 }
 
@@ -1698,6 +1699,13 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 		}
 	} else if strings.TrimSpace(messageContent) == "处理中..." || strings.TrimSpace(messageContent) == "Processing..." {
 		summary.Status = "running"
+		if summary.StartedAt != nil {
+			elapsedMs := time.Since(*summary.StartedAt).Milliseconds()
+			if elapsedMs < 0 {
+				elapsedMs = 0
+			}
+			summary.ElapsedMs = &elapsedMs
+		}
 	} else {
 		summary.Status = "completed"
 		if messageUpdatedAt.Valid {

@@ -30,6 +30,7 @@ type AgentTask struct {
 	Title          string    `json:"title,omitempty"`
 	Message        string    `json:"message,omitempty"`
 	StartedAt      time.Time `json:"startedAt"`
+	ElapsedMS      int64     `json:"elapsedMs"`
 	Status         string    `json:"status"`
 	CancellingAt   time.Time `json:"-"` // 进入 cancelling 状态的时间，用于清理长时间卡住的任务
 
@@ -586,12 +587,18 @@ func (m *AgentTaskManager) GetActiveTasks() []*AgentTask {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	now := time.Now()
 	result := make([]*AgentTask, 0, len(m.tasks))
 	for _, task := range m.tasks {
+		elapsedMS := now.Sub(task.StartedAt).Milliseconds()
+		if elapsedMS < 0 {
+			elapsedMS = 0
+		}
 		result = append(result, &AgentTask{
 			ConversationID: task.ConversationID,
 			Message:        task.Message,
 			StartedAt:      task.StartedAt,
+			ElapsedMS:      elapsedMS,
 			Status:         task.Status,
 		})
 	}

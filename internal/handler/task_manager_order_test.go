@@ -29,3 +29,24 @@ func TestGetActiveTasksUsesStableCreationOrder(t *testing.T) {
 		}
 	}
 }
+
+func TestGetActiveTasksIncludesServerClockElapsedTime(t *testing.T) {
+	m := NewAgentTaskManager()
+	m.mu.Lock()
+	m.tasks = map[string]*AgentTask{
+		"conversation-running": {
+			ConversationID: "conversation-running",
+			StartedAt:      time.Now().Add(-65 * time.Second),
+			Status:         "running",
+		},
+	}
+	m.mu.Unlock()
+
+	tasks := m.GetActiveTasks()
+	if len(tasks) != 1 {
+		t.Fatalf("GetActiveTasks() length = %d, want 1", len(tasks))
+	}
+	if got := tasks[0].ElapsedMS; got < 64_000 || got > 67_000 {
+		t.Fatalf("ElapsedMS = %d, want about 65000", got)
+	}
+}
