@@ -56,7 +56,7 @@ func TestProxyProtocolRejectsMalformedCONNECTAuthoritiesBeforeNetwork(t *testing
 
 func TestProxyBypassRegressionRejectsDNSPrivateAndMetadataTargetsBeforeNetwork(t *testing.T) {
 	policy := testProxyPolicy(t,
-		boundary.Rule{ID: "allowed", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http", "https"}, Ports: []int{53, 80, 443, 784, 853, 8853}}},
+		boundary.Rule{ID: "allowed", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http", "https"}, Ports: []int{80, 443}}},
 		boundary.Rule{ID: "doh", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "dns.google", Schemes: []string{"https"}, Ports: []int{443}}},
 		boundary.Rule{ID: "metadata", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "metadata.google.internal", Schemes: []string{"http"}, Ports: []int{80}}},
 		boundary.Rule{ID: "docker-host", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "host.docker.internal", Schemes: []string{"http"}, Ports: []int{80}}},

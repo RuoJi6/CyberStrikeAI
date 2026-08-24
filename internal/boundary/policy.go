@@ -148,10 +148,6 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
 		return decision, nil
 	}
-	if forbiddenDNSServicePort(target.Port) {
-		decision.Allowed, decision.Reason = false, ReasonDNSServicePort
-		return decision, nil
-	}
 	if address, err := netip.ParseAddr(target.Host); err == nil {
 		if forbiddenAddress(address) {
 			decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
@@ -164,7 +160,8 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 			return decision, nil
 		}
 	}
-	return p.evaluateTarget(target, decision, now), nil
+	decision = p.evaluateTarget(target, decision, now)
+	return requireExplicitDNSServiceAuthorization(decision), nil
 }
 
 // EvaluateNetwork applies the same immutable rules to a raw TCP, UDP or ICMP target.
@@ -194,10 +191,6 @@ func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, reso
 		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
 		return decision, nil
 	}
-	if protocol != "icmp" && forbiddenDNSServicePort(port) {
-		decision.Allowed, decision.Reason = false, ReasonDNSServicePort
-		return decision, nil
-	}
 	if address, parseErr := netip.ParseAddr(host); parseErr == nil && forbiddenAddress(address) {
 		decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
 		return decision, nil
@@ -208,7 +201,25 @@ func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, reso
 			return decision, nil
 		}
 	}
-	return p.evaluateTarget(target, decision, now), nil
+	decision = p.evaluateTarget(target, decision, now)
+	return requireExplicitDNSServiceAuthorization(decision), nil
+}
+
+// requireExplicitDNSServiceAuthorization preserves the DNS-bypass guard for
+// default decisions while allowing an operator-authored rule to authorize a
+// known DNS service endpoint. This keeps a no-boundary/default-allow snapshot
+// from silently enabling alternate resolvers, but makes an explicit matching
+// target rule authoritative.
+func requireExplicitDNSServiceAuthorization(decision Decision) Decision {
+	if !forbiddenDNSServicePort(decision.Target.Port) || decision.RuleID != "" {
+		return decision
+	}
+	decision.Allowed = false
+	decision.Effect = ""
+	decision.AuthProfileID = ""
+	decision.RateLimit = RateLimit{}
+	decision.Reason = ReasonDNSServicePort
+	return decision
 }
 
 func (p *Policy) defaultDecision(target RequestTarget) Decision {

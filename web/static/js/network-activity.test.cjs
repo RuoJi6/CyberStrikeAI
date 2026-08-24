@@ -70,7 +70,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
         'network-activity-tool', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-    assert.match(template, /network-activity\.js\?v=20260824-3/);
+    assert.match(template, /network-activity\.js\?v=20260824-6/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);
@@ -78,6 +78,14 @@ test('network activity page is a real incremental authenticated stream UI', () =
     assert.match(source, /MAX_EVENTS = 500/);
     assert.match(source, /MAX_PAUSED_EVENTS = 500/);
     assert.match(source, /MAX_SEEN_EVENTS = 1000/);
+    assert.equal(activity.maxRenderedEventsForTest, 100);
+    assert.equal(activity.renderThrottleMsForTest, 250);
+    assert.match(source, /visible\.slice\(visible\.length - MAX_RENDERED_EVENTS\)/);
+    assert.match(source, /function scheduleEventRender\(\)/);
+    assert.match(source, /state\.renderTimer !== null/);
+    assert.match(source, /root\.setTimeout\(function \(\) \{[\s\S]*?RENDER_THROTTLE_MS/);
+    assert.match(source, /function yieldToMainThread\(\)/);
+    assert.match(source, /await yieldToMainThread\(\)/);
     assert.doesNotMatch(source, /EventSource\s*\(/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
     assert.match(router, /stopNetworkActivityPage\(\)/);

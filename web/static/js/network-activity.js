@@ -13,6 +13,8 @@
     const MAX_EVENTS = 500;
     const MAX_PAUSED_EVENTS = 500;
     const MAX_SEEN_EVENTS = 1000;
+    const MAX_RENDERED_EVENTS = 100;
+    const RENDER_THROTTLE_MS = 250;
     const READY_STABILITY_MS = 150;
     const URL_PARAMS = Object.freeze({
         conversation: 'activity_conversation',
@@ -53,6 +55,7 @@
         connectionDetail: '',
         statusBeforePause: 'live',
         loadGeneration: 0,
+        renderTimer: null,
     };
 
     function t(key, fallback, values) {
@@ -391,22 +394,37 @@
         const summary = element('network-activity-summary');
         if (!body || !empty || !table) return;
         const visible = filteredEvents();
-        body.replaceChildren(...visible.map(activityRow));
-        const hasEvents = visible.length > 0;
+        const rendered = visible.length > MAX_RENDERED_EVENTS
+            ? visible.slice(visible.length - MAX_RENDERED_EVENTS)
+            : visible;
+        body.replaceChildren(...rendered.map(activityRow));
+        const hasEvents = rendered.length > 0;
         table.hidden = !hasEvents;
         empty.hidden = hasEvents;
         if (summary) {
             summary.textContent = state.events.length
-                ? t('activitySummary', '已接收 {{total}} 条，当前显示 {{visible}} 条', { total: state.events.length, visible: visible.length })
+                ? t('activitySummary', '已接收 {{total}} 条，当前显示 {{visible}} 条', { total: state.events.length, visible: rendered.length })
                 : t('activityEmptySummary', '尚未收到网络活动');
         }
-        renderCounts(visible);
+        renderCounts(rendered);
         updateActionControls();
         if (hasEvents && state.follow) {
             const wrap = element('network-activity-table-wrap');
             const schedule = typeof root.requestAnimationFrame === 'function' ? root.requestAnimationFrame.bind(root) : root.setTimeout;
             if (wrap) schedule(function () { wrap.scrollTop = wrap.scrollHeight; }, 0);
         }
+    }
+
+    function scheduleEventRender() {
+        if (state.renderTimer !== null) return;
+        state.renderTimer = root.setTimeout(function () {
+            state.renderTimer = null;
+            renderEvents();
+        }, RENDER_THROTTLE_MS);
+    }
+
+    function yieldToMainThread() {
+        return new Promise(function (resolve) { root.setTimeout(resolve, 0); });
     }
 
     function addActivity(event) {
@@ -425,7 +443,7 @@
         }
         state.events.push(event);
         if (state.events.length > MAX_EVENTS) state.events.splice(0, state.events.length - MAX_EVENTS);
-        renderEvents();
+        scheduleEventRender();
     }
 
     function cancelStream() {
@@ -509,6 +527,7 @@
                         terminalCode = String(payload && payload.code || 'stream_closed');
                     }
                 });
+                await yieldToMainThread();
             }
             if (!controller.signal.aborted) throw responseError(503, terminalCode || 'stream_closed');
         } catch (error) {
@@ -682,6 +701,10 @@
         state.active = false;
         state.loadGeneration += 1;
         cancelStream();
+        if (state.renderTimer !== null) {
+            root.clearTimeout(state.renderTimer);
+            state.renderTimer = null;
+        }
         setConnectionStatus('idle');
     }
 
@@ -705,6 +728,8 @@
         shouldShowConnectingForTest: shouldShowConnecting,
         connectionStatusNeedsUpdateForTest: connectionStatusNeedsUpdate,
         readyStabilityMsForTest: READY_STABILITY_MS,
+        maxRenderedEventsForTest: MAX_RENDERED_EVENTS,
+        renderThrottleMsForTest: RENDER_THROTTLE_MS,
         filteredEventsForTest: function (events, filters) {
             const previous = { events: state.events, domain: state.domain, requestType: state.requestType, decision: state.decision, agent: state.agent, tool: state.tool, route: state.route };
             state.events = events;

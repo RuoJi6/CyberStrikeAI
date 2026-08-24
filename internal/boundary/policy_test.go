@@ -138,6 +138,49 @@ func TestPolicyExplicitDefaultAllowKeepsReservedTargetsBlocked(t *testing.T) {
 	if err != nil || blocked.Allowed || blocked.Reason != ReasonForbiddenAddress {
 		t.Fatalf("reserved default = %#v, %v", blocked, err)
 	}
+	blockedDNS, err := policy.EvaluateNetwork("8.8.8.8", 53, "udp", nil, now)
+	if err != nil || blockedDNS.Allowed || blockedDNS.Reason != ReasonDNSServicePort || blockedDNS.RuleID != "" {
+		t.Fatalf("default DNS service = %#v, %v", blockedDNS, err)
+	}
+}
+
+func TestPolicyDNSServicePortsRequireExplicitMatchingRule(t *testing.T) {
+	now := time.Now().UTC()
+	policy, err := NewPolicy([]Rule{{
+		ID: "authorized-dns-service", Effect: EffectAllowVisit,
+		Target: RuleTarget{Host: "47.116.200.74"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name     string
+		protocol string
+		port     int
+	}{
+		{name: "HTTP probe", protocol: "http", port: 53},
+		{name: "TCP DNS", protocol: "tcp", port: 53},
+		{name: "UDP DNS", protocol: "udp", port: 53},
+		{name: "DNS over TLS", protocol: "tcp", port: 853},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var decision Decision
+			var evalErr error
+			if test.protocol == "http" {
+				decision, evalErr = policy.Evaluate("http://47.116.200.74:53/", "GET", nil, now)
+			} else {
+				decision, evalErr = policy.EvaluateNetwork("47.116.200.74", test.port, test.protocol, nil, now)
+			}
+			if evalErr != nil || !decision.Allowed || decision.RuleID != "authorized-dns-service" || decision.Reason != ReasonAllowVisit {
+				t.Fatalf("decision = %#v, %v", decision, evalErr)
+			}
+		})
+	}
+
+	unmatched, err := policy.EvaluateNetwork("47.116.200.75", 53, "udp", nil, now)
+	if err != nil || unmatched.Allowed || unmatched.RuleID != "" || unmatched.Reason != ReasonDNSServicePort {
+		t.Fatalf("unmatched DNS service = %#v, %v", unmatched, err)
+	}
 }
 
 func TestPolicyMatchesAllCanonicalTargetDimensions(t *testing.T) {
@@ -210,10 +253,6 @@ func TestPolicyRejectsForbiddenTargetsBeforeAllowRules(t *testing.T) {
 		{name: "unique local IPv6", url: "http://[fd00:ec2::254]/", wantReason: ReasonForbiddenAddress},
 		{name: "carrier grade NAT", url: "http://100.64.0.1/", wantReason: ReasonForbiddenAddress},
 		{name: "Docker API", url: "https://example.com:2376/", wantReason: ReasonDockerAPIPort},
-		{name: "plain DNS", url: "http://example.com:53/", wantReason: ReasonDNSServicePort},
-		{name: "DNS over QUIC", url: "https://example.com:784/", wantReason: ReasonDNSServicePort},
-		{name: "DNS over TLS", url: "https://example.com:853/", wantReason: ReasonDNSServicePort},
-		{name: "DNS over QUIC alternate", url: "https://example.com:8853/", wantReason: ReasonDNSServicePort},
 		{name: "known DoH host", url: "https://dns.google/", wantReason: ReasonForbiddenDNSHost},
 		{name: "known DoH subdomain", url: "https://tenant.dns.nextdns.io/", wantReason: ReasonForbiddenDNSHost},
 		{name: "DNS rebinding", url: "https://allowed.example/", resolved: []netip.Addr{netip.MustParseAddr("192.168.1.5")}, wantReason: ReasonDNSRebinding},
