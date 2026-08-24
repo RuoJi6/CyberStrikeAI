@@ -1381,6 +1381,8 @@ func (db *DB) AddProcessDetailWithID(messageID, conversationID, eventType, messa
 		return "", fmt.Errorf("添加过程详情失败: %w", err)
 	}
 
+	db.maybeRecordModelTokenUsage(messageID, conversationID, id, eventType, data)
+
 	return id, nil
 }
 
@@ -1569,6 +1571,11 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 		return nil, fmt.Errorf("统计工具调用详情失败: %w", err)
 	}
 
+	pendingToolStatus := "result_missing"
+	if summary.Status == "running" {
+		pendingToolStatus = "running"
+	}
+
 	execRows, err := db.Query(
 		"SELECT id, event_type, data FROM process_details WHERE message_id = ? AND event_type IN ('tool_call', 'tool_result') ORDER BY created_at ASC, rowid ASC",
 		messageID,
@@ -1609,10 +1616,10 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 				ProcessDetailID: strings.TrimSpace(detailID),
 				ToolName:        toolName,
 				ToolCallID:      toolCallID,
-				// This summary is reconstructed from persisted history, not live
-				// execution state. Until a matching result is found the honest state
-				// is "result_missing", never "running".
-				Status: "result_missing",
+				// This summary is reconstructed from persisted history. For an
+				// active assistant turn, a missing result means the call is still
+				// pending; after the turn is terminal it is genuinely incomplete.
+				Status: pendingToolStatus,
 			})
 			matchedToolIndexes = append(matchedToolIndexes, false)
 			if toolCallID != "" {
@@ -1667,6 +1674,7 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 		return nil, fmt.Errorf("遍历工具执行摘要失败: %w", err)
 	}
 	execRows.Close()
+	db.applyPersistedToolExecutionStatuses(summary.ToolExecutions)
 
 	rows, err := db.Query(
 		"SELECT data FROM process_details WHERE message_id = ? AND event_type = 'iteration' ORDER BY created_at ASC, rowid ASC",
@@ -1733,6 +1741,24 @@ func toolResultStatusFromPayload(payload map[string]interface{}, eventType strin
 		return "failed"
 	}
 	return "completed"
+}
+
+func (db *DB) applyPersistedToolExecutionStatuses(executions []ProcessDetailsToolExecution) {
+	for i := range executions {
+		execID := strings.TrimSpace(executions[i].ExecutionID)
+		if execID == "" {
+			continue
+		}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM tool_executions WHERE id = ?`, execID).Scan(&status); err != nil {
+			continue
+		}
+		status = strings.ToLower(strings.TrimSpace(status))
+		if status == "" {
+			continue
+		}
+		executions[i].Status = status
+	}
 }
 
 func matchToolExecutionIndex(
