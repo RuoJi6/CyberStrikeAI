@@ -19,6 +19,30 @@ RUN set -eux; \
     rm -rf /app/certs; \
     update-ca-certificates --fresh
 
+# Install the reviewed ARM64 security-tool baseline at image build time. The
+# control plane still verifies each executable against the digest-bound tool
+# inventory before declaring a conversation runtime ready; no tools are
+# downloaded dynamically when a conversation starts.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        arp-scan \
+        default-mysql-client \
+        dnsutils \
+        iproute2 \
+        iputils-ping \
+        libcap2-bin \
+        masscan \
+        netcat-openbsd \
+        openssh-client \
+        python3-netifaces \
+        responder \
+        tcpdump; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --chown=root:root responder-wrapper.sh /usr/local/bin/responder
+RUN chmod 0755 /usr/local/bin/responder
+
 LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       org.opencontainers.image.description="Digest-pinned CyberStrikeAI Agent runtime derived from Strix 1.3.0" \
       org.opencontainers.image.documentation="${SOURCE_URL}/blob/${VCS_REF}/docs/en-US/container-image-supply-chain.md" \

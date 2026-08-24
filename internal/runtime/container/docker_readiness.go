@@ -51,7 +51,7 @@ func (m *DockerManager) ValidateReadiness(ctx context.Context, runtime Runtime, 
 	if actual.Config == nil || actual.HostConfig == nil {
 		return ReadinessReport{}, fmt.Errorf("%w: runtime configuration is incomplete", ErrRuntimeNotReady)
 	}
-	if actual.Config.WorkingDir != spec.Workspace.MountPath {
+	if actual.Config.User != runtimeAgentUser || actual.Config.WorkingDir != spec.Workspace.MountPath {
 		return ReadinessReport{}, fmt.Errorf("%w: workspace working directory mismatch", ErrRuntimeNotReady)
 	}
 	for key, expected := range runtimeLabels(m.ownerID, spec) {
@@ -120,6 +120,9 @@ func verifyReadinessIsolation(actual mobycontainer.InspectResponse, spec Runtime
 	}
 	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
 		return fmt.Errorf("%w: runtime proxy environment mismatch", ErrRuntimeNotReady)
+	}
+	if err := verifyRuntimeWorkspaceEnvironment(actual.Config.Env); err != nil {
+		return fmt.Errorf("%w: runtime workspace environment mismatch", ErrRuntimeNotReady)
 	}
 	if actual.NetworkSettings != nil {
 		if len(actual.NetworkSettings.Ports) != 0 {

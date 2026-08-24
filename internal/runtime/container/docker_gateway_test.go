@@ -69,7 +69,7 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	if len(agentOptions.HostConfig.DNS) != 0 {
 		t.Fatalf("legacy snapshot-less gateway unexpectedly became policy DNS: %#v", agentOptions.HostConfig.DNS)
 	}
-	if expected := runtimeProxyEnvironment(spec, ""); !equalStrings(agentOptions.Config.Env, expected) {
+	if expected := runtimeContainerEnvironment(spec, ""); !equalStrings(agentOptions.Config.Env, expected) {
 		t.Fatalf("legacy snapshot-less gateway did not neutralize inherited proxy settings: %#v", agentOptions.Config.Env)
 	}
 	if len(agentOptions.NetworkingConfig.EndpointsConfig) != 1 || agentOptions.NetworkingConfig.EndpointsConfig[internalName] == nil || agentOptions.NetworkingConfig.EndpointsConfig[egressName] != nil {
@@ -78,7 +78,7 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	if len(gatewayOptions.NetworkingConfig.EndpointsConfig) != 2 || gatewayOptions.NetworkingConfig.EndpointsConfig[internalName] == nil || gatewayOptions.NetworkingConfig.EndpointsConfig[egressName] == nil {
 		t.Fatalf("gateway network endpoints = %#v", gatewayOptions.NetworkingConfig)
 	}
-	if gatewayOptions.HostConfig.NetworkMode != mobycontainer.NetworkMode(internalName) || gatewayOptions.HostConfig.Privileged || !gatewayOptions.HostConfig.ReadonlyRootfs || len(gatewayOptions.HostConfig.CapDrop) != 1 || gatewayOptions.HostConfig.CapDrop[0] != "ALL" || len(gatewayOptions.HostConfig.CapAdd) != 0 || !containsString(gatewayOptions.HostConfig.SecurityOpt, "no-new-privileges") {
+	if gatewayOptions.HostConfig.NetworkMode != mobycontainer.NetworkMode(internalName) || gatewayOptions.HostConfig.Privileged || !gatewayOptions.HostConfig.ReadonlyRootfs || len(gatewayOptions.HostConfig.CapDrop) != 1 || gatewayOptions.HostConfig.CapDrop[0] != "ALL" || !equalCapabilitySets(gatewayOptions.HostConfig.CapAdd, gatewayCapabilities) || !containsString(gatewayOptions.HostConfig.SecurityOpt, "no-new-privileges") || gatewayOptions.HostConfig.Sysctls["net.ipv4.ip_forward"] != "1" {
 		t.Fatalf("gateway security baseline = %#v", gatewayOptions.HostConfig)
 	}
 	if len(gatewayOptions.HostConfig.Binds) != 0 || len(gatewayOptions.HostConfig.Mounts) != 0 || len(gatewayOptions.HostConfig.PortBindings) != 0 || len(gatewayOptions.HostConfig.Devices) != 0 || len(gatewayOptions.HostConfig.DeviceRequests) != 0 {
@@ -264,7 +264,7 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	if internalEndpoint == nil || internalEndpoint.IPAMConfig == nil || internalEndpoint.IPAMConfig.IPv4Address.String() != "172.30.0.2" {
 		t.Fatalf("gateway static policy DNS endpoint = %#v", internalEndpoint)
 	}
-	if expected := runtimeProxyEnvironment(spec, "172.30.0.2"); !equalStrings(agentOptions.Config.Env, expected) {
+	if expected := runtimeContainerEnvironment(spec, "172.30.0.2"); !equalStrings(agentOptions.Config.Env, expected) {
 		t.Fatalf("agent proxy environment = %#v, want %#v", agentOptions.Config.Env, expected)
 	}
 	if len(gatewayOptions.HostConfig.Binds) != 0 || len(gatewayOptions.HostConfig.Mounts) != 1 {
@@ -285,6 +285,11 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	}
 	if len(api.startedIDs) != 2 || api.startedIDs[0] != "provider-gateway-1" || api.startedIDs[1] != "provider-agent-1" {
 		t.Fatalf("snapshot-aware start order = %#v", api.startedIDs)
+	}
+	if api.execContainerID != "provider-agent-1" || api.execCreateOpts.User != runtimeRootExecUser || api.execCreateOpts.Privileged ||
+		!equalStrings(api.execCreateOpts.Cmd, []string{"/sbin/ip", "route", "replace", "default", "via", "172.30.0.2"}) ||
+		!equalStrings(api.execCreateOpts.Env, runtimeExecEnvironment(nil)) {
+		t.Fatalf("runtime default route helper = container %q options %#v", api.execContainerID, api.execCreateOpts)
 	}
 }
 
@@ -566,16 +571,23 @@ func TestDockerManagerRejectsAgentProxyEnvironmentDrift(t *testing.T) {
 		name   string
 		mutate func([]string) []string
 	}{
-		{name: "missing", mutate: func(values []string) []string { return values[1:] }},
+		{name: "missing", mutate: func(values []string) []string {
+			return removeTestEnvironmentKey(values, "HTTP_PROXY")
+		}},
 		{name: "external proxy", mutate: func(values []string) []string {
-			values[0] = "HTTP_PROXY=http://203.0.113.10:3128"
-			return values
+			return replaceTestEnvironmentEntry(values, "HTTP_PROXY", "http://203.0.113.10:3128")
 		}},
 		{name: "no proxy bypass", mutate: func(values []string) []string {
-			values[3] = "NO_PROXY=localhost,127.0.0.1"
+			return replaceTestEnvironmentEntry(values, "NO_PROXY", "localhost,127.0.0.1")
+		}},
+		{name: "duplicate", mutate: func(values []string) []string {
+			for _, entry := range values {
+				if strings.HasPrefix(entry, "HTTP_PROXY=") {
+					return append(values, entry)
+				}
+			}
 			return values
 		}},
-		{name: "duplicate", mutate: func(values []string) []string { return append(values, values[0]) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -600,6 +612,28 @@ func TestDockerManagerRejectsAgentProxyEnvironmentDrift(t *testing.T) {
 			}
 		})
 	}
+}
+
+func removeTestEnvironmentKey(values []string, key string) []string {
+	prefix := key + "="
+	result := make([]string, 0, len(values))
+	for _, entry := range values {
+		if !strings.HasPrefix(entry, prefix) {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+func replaceTestEnvironmentEntry(values []string, key, value string) []string {
+	prefix := key + "="
+	for index, entry := range values {
+		if strings.HasPrefix(entry, prefix) {
+			values[index] = prefix + value
+			return values
+		}
+	}
+	return append(values, prefix+value)
 }
 
 func TestDockerManagerRejectsProxyEnvironmentWithoutSnapshotGateway(t *testing.T) {
@@ -814,7 +848,7 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 	policyDNSAddress := netip.MustParseAddr("172.30.0.2")
 	if requiresPolicyDNS(spec) {
 		agent.Container.HostConfig.DNS = []netip.Addr{policyDNSAddress}
-		agent.Container.Config.Env = runtimeProxyEnvironment(spec, policyDNSAddress.String())
+		agent.Container.Config.Env = runtimeContainerEnvironment(spec, policyDNSAddress.String())
 	}
 	agent.Container.NetworkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
 		ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: netip.MustParseAddr("172.30.0.3")},

@@ -90,18 +90,18 @@ func (m *DockerManager) OpenInteractiveExec(ctx context.Context, spec RuntimeSpe
 	controlFile := "/tmp/.cyberstrike-exec-" + uuid.NewString() + ".pid"
 	created, err := api.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
+		User:         runtimeRootExecUser,
 		TTY:          true,
 		ConsoleSize:  mobyclient.ConsoleSize{Height: uint(request.Rows), Width: uint(request.Cols)},
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,
 		WorkingDir:   spec.Workspace.MountPath,
-		Env: []string{
+		Env: runtimeExecEnvironment([]string{
 			"TERM=xterm-256color",
-			"HOME=" + spec.Workspace.MountPath,
 			"COLUMNS=" + strconv.Itoa(int(request.Cols)),
 			"LINES=" + strconv.Itoa(int(request.Rows)),
-		},
+		}),
 		Cmd: []string{"/bin/sh", "-c", interactiveExecWrapperScript, "cyberstrike-interactive-shell", controlFile},
 	})
 	if err != nil {

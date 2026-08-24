@@ -280,13 +280,15 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 	controlFile := "/tmp/.cyberstrike-exec-" + uuid.NewString() + ".pid"
 	wrappedCommand := []string{"/bin/sh", "-c", containerExecWrapperScript, "cyberstrike-exec", controlFile, spec.Workspace.MountPath, workingDir}
 	wrappedCommand = append(wrappedCommand, request.Command...)
+	execStartedAt := time.Now().UTC()
 	created, err := m.execAPI.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
+		User:         runtimeRootExecUser,
 		TTY:          request.TTY,
 		AttachStdin:  false,
 		AttachStdout: true,
 		AttachStderr: true,
-		Env:          append([]string(nil), request.Env...),
+		Env:          runtimeExecEnvironment(request.Env),
 		WorkingDir:   spec.Workspace.MountPath,
 		Cmd:          wrappedCommand,
 	})
@@ -348,7 +350,39 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 			m.terminateExecProcess(spec, runtime, controlFile),
 		)
 	}
-	return ExecResult{ExecID: created.ID, ExitCode: inspection.ExitCode}, nil
+	result := ExecResult{ExecID: created.ID, ExitCode: inspection.ExitCode}
+	if inspection.ExitCode != 0 {
+		m.emitBoundaryBlockFeedback(ctx, spec, execStartedAt, sink)
+	}
+	return result, nil
+}
+
+func (m *DockerManager) emitBoundaryBlockFeedback(ctx context.Context, spec RuntimeSpec, since time.Time, sink ExecOutputSink) {
+	if sink == nil || ctx == nil || ctx.Err() != nil {
+		return
+	}
+	event, ok := m.latestBlockedEgressActivity(ctx, spec, since)
+	if !ok {
+		return
+	}
+	target := event.Domain
+	if target == "" {
+		target = event.ConnectedIP
+	}
+	if event.Port > 0 {
+		target += ":" + fmt.Sprintf("%d", event.Port)
+	}
+	rule := event.RuleID
+	if rule == "" {
+		rule = "默认策略"
+	}
+	reason := event.Reason
+	if reason == "" {
+		reason = "policy_denied"
+	}
+	message := fmt.Sprintf("\n[CyberStrikeAI 网络边界] 已阻止本次 %s 访问：目标 %s，原因 %s，规则 %s。请求未到达目标；请调整本对话的边界策略后重试。\n",
+		strings.ToUpper(event.RequestType), target, reason, rule)
+	_ = sink(ExecStreamStderr, []byte(message))
 }
 
 func (m *DockerManager) terminateExecProcess(spec RuntimeSpec, expected Runtime, controlFile string) error {
@@ -373,6 +407,7 @@ func (m *DockerManager) terminateExecProcess(spec RuntimeSpec, expected Runtime,
 	}
 	created, err := m.execAPI.ExecCreate(ctx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
+		User:         runtimeRootExecUser,
 		TTY:          false,
 		AttachStdin:  false,
 		AttachStdout: true,

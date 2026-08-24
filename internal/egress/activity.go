@@ -18,6 +18,7 @@ const (
 	ActivityRequestCONNECT = "connect"
 	ActivityRequestTCP     = "tcp"
 	ActivityRequestUDP     = "udp"
+	ActivityRequestICMP    = "icmp"
 	ActivityRequestHealth  = "health"
 
 	ActivityDecisionAllowed = "allowed"
@@ -118,6 +119,8 @@ type ActivityEvent struct {
 	Timestamp       time.Time   `json:"timestamp"`
 	RequestType     string      `json:"requestType"`
 	Domain          string      `json:"domain"`
+	DNSQueryType    string      `json:"dnsQueryType,omitempty"`
+	DNSAnswers      []string    `json:"dnsAnswers,omitempty"`
 	ResolvedIPs     []string    `json:"resolvedIps,omitempty"`
 	ConnectedIP     string      `json:"connectedIp,omitempty"`
 	Port            int         `json:"port,omitempty"`

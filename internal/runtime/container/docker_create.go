@@ -43,6 +43,7 @@ const (
 	LabelWorkspacePersistent   = "com.cyberstrike.workspace-persistent"
 	LabelWorkspaceVolume       = "com.cyberstrike.workspace-volume"
 	LabelNetworkMode           = "com.cyberstrike.network-mode"
+	LabelCapabilityProfile     = "com.cyberstrike.capability-profile"
 	LabelEgressGateway         = "com.cyberstrike.egress-gateway"
 	LabelEgressImageRepository = "com.cyberstrike.egress.image-repository"
 	LabelEgressImageDigest     = "com.cyberstrike.egress.image-digest"
@@ -73,9 +74,23 @@ const (
 	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
 	egressGatewayProxyPort         = 3128
 	egressGatewaySOCKS5Port        = 1080
-	runtimeKeepaliveScript         = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
+	runtimeWorkspaceInitScript     = "umask 077; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; "
+	runtimeKeepaliveScript         = runtimeWorkspaceInitScript + "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 	runtimeTLSKeepaliveScript      = "umask 077; cat /etc/ssl/certs/ca-certificates.crt " + egress.TLSAuthorityCertificateContainerPath + " > " + egress.TLSAgentCABundlePath + " || exit 70; " + runtimeKeepaliveScript
+	runtimeAgentUser               = "pentester"
+	runtimeRootExecUser            = "0:0"
+	runtimeCapabilityProfile       = "root-security-tools-v1"
 )
+
+// runtimeAgentCapabilities is the reviewed, closed capability set available
+// only to root processes started through the trusted exec boundary. The
+// long-lived container process remains the image's pentester user and has no
+// effective capabilities. SYS_ADMIN, device access, host networking and the
+// Docker socket are deliberately absent.
+var runtimeAgentCapabilities = []string{
+	"CHOWN", "DAC_OVERRIDE", "FOWNER", "FSETID", "KILL", "SETGID", "SETUID", "SYS_CHROOT",
+	"NET_BIND_SERVICE", "NET_RAW", "NET_ADMIN", "SYS_PTRACE",
+}
 
 var runtimeKeepaliveEntrypoint = []string{"/bin/sh", "-c"}
 
@@ -334,11 +349,12 @@ func (m *DockerManager) create(ctx context.Context, spec RuntimeSpec, authorized
 		},
 		Config: &mobycontainer.Config{
 			NetworkDisabled: spec.Security.NetworkMode == NetworkNone,
+			User:            runtimeAgentUser,
 			WorkingDir:      "/workspace",
 			Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 			Cmd:             []string{runtimeKeepaliveScriptForSpec(spec)},
 			Healthcheck:     cloneRuntimeHealthcheck(),
-			Env:             runtimeProxyEnvironment(spec, gatewayDNS),
+			Env:             runtimeContainerEnvironment(spec, gatewayDNS),
 			Labels:          labels,
 		},
 		HostConfig:       hostConfig,
@@ -624,7 +640,7 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 	if actual.Config == nil {
 		return Runtime{}, fmt.Errorf("%w: created runtime has no configuration", ErrRuntimeStateConflict)
 	}
-	if actual.Config.WorkingDir != spec.Workspace.MountPath {
+	if actual.Config.User != runtimeAgentUser || actual.Config.WorkingDir != spec.Workspace.MountPath {
 		return Runtime{}, fmt.Errorf("%w: created runtime working directory mismatch", ErrRuntimeStateConflict)
 	}
 	if !matchesRuntimeKeepalive(actual.Config, spec) {
@@ -634,6 +650,9 @@ func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSp
 		return Runtime{}, fmt.Errorf("%w: created runtime healthcheck mismatch", ErrRuntimeStateConflict)
 	}
 	if err := verifyRuntimeProxyEnvironment(actual.Config.Env, spec, gatewayAddress); err != nil {
+		return Runtime{}, err
+	}
+	if err := verifyRuntimeWorkspaceEnvironment(actual.Config.Env); err != nil {
 		return Runtime{}, err
 	}
 	for key, expected := range expectedLabels {
@@ -735,6 +754,7 @@ func runtimeHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 		},
 		RestartPolicy:  mobycontainer.RestartPolicy{Name: mobycontainer.RestartPolicyDisabled},
 		CapDrop:        []string{"ALL"},
+		CapAdd:         append([]string(nil), runtimeAgentCapabilities...),
 		ReadonlyRootfs: true,
 		SecurityOpt:    []string{"no-new-privileges"},
 		Tmpfs: map[string]string{
@@ -820,6 +840,78 @@ func runtimeProxyEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
 	return environment
 }
 
+var runtimeWorkspaceEnvironmentKeys = []string{
+	"HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "PIP_CACHE_DIR", "PYTHONUSERBASE", "VIRTUAL_ENV", "PATH",
+}
+
+func runtimeWorkspaceEnvironment() []string {
+	return []string{
+		"HOME=/workspace",
+		"XDG_CACHE_HOME=/workspace/.cache",
+		"XDG_CONFIG_HOME=/workspace/.config",
+		"XDG_DATA_HOME=/workspace/.local/share",
+		"PIP_CACHE_DIR=/workspace/.cache/pip",
+		"PYTHONUSERBASE=/workspace/.local",
+		"VIRTUAL_ENV=/workspace/.venv",
+		"PATH=/workspace/.venv/bin:/workspace/.local/bin:/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+	}
+}
+
+func runtimeContainerEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
+	environment := runtimeWorkspaceEnvironment()
+	return append(environment, runtimeProxyEnvironment(spec, gatewayAddress)...)
+}
+
+func runtimeExecEnvironment(requested []string) []string {
+	managed := make(map[string]struct{}, len(runtimeWorkspaceEnvironmentKeys))
+	for _, key := range runtimeWorkspaceEnvironmentKeys {
+		managed[key] = struct{}{}
+	}
+	result := make([]string, 0, len(requested)+len(runtimeWorkspaceEnvironmentKeys))
+	for _, entry := range requested {
+		key, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if _, controlled := managed[key]; controlled {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return append(result, runtimeWorkspaceEnvironment()...)
+}
+
+func verifyRuntimeWorkspaceEnvironment(actual []string) error {
+	expected := make(map[string]string, len(runtimeWorkspaceEnvironmentKeys))
+	for _, entry := range runtimeWorkspaceEnvironment() {
+		key, value, _ := strings.Cut(entry, "=")
+		expected[key] = value
+	}
+	observed := make(map[string]string, len(expected))
+	for _, entry := range actual {
+		key, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if _, managed := expected[key]; !managed {
+			continue
+		}
+		if _, duplicate := observed[key]; duplicate {
+			return fmt.Errorf("%w: runtime workspace environment contains duplicate %s", ErrRuntimeStateConflict, key)
+		}
+		observed[key] = value
+	}
+	if len(observed) != len(expected) {
+		return fmt.Errorf("%w: runtime workspace environment keys mismatch", ErrRuntimeStateConflict)
+	}
+	for key, value := range expected {
+		if observed[key] != value {
+			return fmt.Errorf("%w: runtime workspace environment %s mismatch", ErrRuntimeStateConflict, key)
+		}
+	}
+	return nil
+}
+
 func verifyRuntimeProxyEnvironment(actual []string, spec RuntimeSpec, gatewayAddress string) error {
 	expectedEntries := runtimeProxyEnvironment(spec, gatewayAddress)
 	expected := make(map[string]string, len(expectedEntries))
@@ -884,7 +976,7 @@ func verifyRuntimeSecurityBaseline(actual *mobycontainer.HostConfig, spec Runtim
 	if actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: created runtime has privileged access, host mounts, devices, or published ports", ErrRuntimeStateConflict)
 	}
-	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
+	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || !equalCapabilitySets(actual.CapAdd, runtimeAgentCapabilities) || !containsString(actual.SecurityOpt, "no-new-privileges") {
 		return fmt.Errorf("%w: created runtime privilege restrictions mismatch", ErrRuntimeStateConflict)
 	}
 	if actual.RestartPolicy.Name != mobycontainer.RestartPolicyDisabled {
@@ -984,6 +1076,38 @@ func containsString(values []string, expected string) bool {
 	return false
 }
 
+func equalCapabilitySets(actual, expected []string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	seen := make(map[string]int, len(expected))
+	for _, value := range expected {
+		seen[canonicalCapabilityName(value)]++
+	}
+	for _, value := range actual {
+		key := canonicalCapabilityName(value)
+		if seen[key] == 0 {
+			return false
+		}
+		seen[key]--
+	}
+	for _, count := range seen {
+		if count != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// Docker accepts capability names with or without CAP_ and returns the
+// canonical CAP_* spelling from ContainerInspect. Compare the semantic set so
+// a container created from our closed allowlist does not fail its own
+// post-create verification solely because the engine normalized the names.
+func canonicalCapabilityName(value string) string {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return strings.TrimPrefix(value, "CAP_")
+}
+
 func runtimeContainerName(id RuntimeID) string {
 	return "cyberstrike-agent-" + string(id)
 }
@@ -1011,6 +1135,7 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		LabelWorkspacePersistent: strconv.FormatBool(spec.Workspace.Persistent),
 		LabelWorkspaceVolume:     spec.Workspace.VolumeName,
 		LabelNetworkMode:         string(spec.Security.NetworkMode),
+		LabelCapabilityProfile:   runtimeCapabilityProfile,
 	}
 	if spec.EgressGateway == nil {
 		return labels

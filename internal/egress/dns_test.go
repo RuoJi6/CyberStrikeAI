@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +128,143 @@ func TestPolicyDNSFailsClosedForRebindingAndResolverFailure(t *testing.T) {
 	}
 }
 
+func TestPolicyDNSForwardsFullRecordTypesAndAuditsAnswers(t *testing.T) {
+	now := time.Date(2026, 8, 24, 14, 30, 0, 0, time.UTC)
+	policy := testDNSPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
+	tests := []struct {
+		name       string
+		queryType  dnsmessage.Type
+		wantRecord string
+		answer     func(*dnsmessage.Builder, dnsmessage.ResourceHeader) error
+	}{
+		{name: "A", queryType: dnsmessage.TypeA, wantRecord: "allowed.example A 93.184.216.34", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.AResource(header, dnsmessage.AResource{A: [4]byte{93, 184, 216, 34}})
+		}},
+		{name: "AAAA", queryType: dnsmessage.TypeAAAA, wantRecord: "allowed.example AAAA 2001:4860:4860::8888", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.AAAAResource(header, dnsmessage.AAAAResource{AAAA: netip.MustParseAddr("2001:4860:4860::8888").As16()})
+		}},
+		{name: "CNAME", queryType: dnsmessage.TypeCNAME, wantRecord: "allowed.example CNAME alias.allowed.example", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.CNAMEResource(header, dnsmessage.CNAMEResource{CNAME: dnsName(t, "alias.allowed.example.")})
+		}},
+		{name: "NS", queryType: dnsmessage.TypeNS, wantRecord: "allowed.example NS ns1.allowed.example", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.NSResource(header, dnsmessage.NSResource{NS: dnsName(t, "ns1.allowed.example.")})
+		}},
+		{name: "MX", queryType: dnsmessage.TypeMX, wantRecord: "allowed.example MX 10 mail.allowed.example", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.MXResource(header, dnsmessage.MXResource{Pref: 10, MX: dnsName(t, "mail.allowed.example.")})
+		}},
+		{name: "TXT", queryType: dnsmessage.TypeTXT, wantRecord: "allowed.example TXT v=spf1 -all", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.TXTResource(header, dnsmessage.TXTResource{TXT: []string{"v=spf1", "-all"}})
+		}},
+		{name: "SRV", queryType: dnsmessage.TypeSRV, wantRecord: "_mysql._tcp.allowed.example SRV 10 20 3306 mysql.allowed.example", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.SRVResource(header, dnsmessage.SRVResource{Priority: 10, Weight: 20, Port: 3306, Target: dnsName(t, "mysql.allowed.example.")})
+		}},
+		{name: "PTR", queryType: dnsmessage.TypePTR, wantRecord: "allowed.example PTR ptr.allowed.example", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.PTRResource(header, dnsmessage.PTRResource{PTR: dnsName(t, "ptr.allowed.example.")})
+		}},
+		{name: "CAA", queryType: dnsTypeCAA, wantRecord: "allowed.example CAA 0 issue letsencrypt.org", answer: func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+			return builder.UnknownResource(header, dnsmessage.UnknownResource{Type: dnsTypeCAA, Data: append([]byte{0, 5}, []byte("issueletsencrypt.org")...)})
+		}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var captured ActivityEvent
+			handler, err := NewPolicyDNS(policy, DNSOptions{
+				Now: func() time.Time { return now },
+				Exchange: func(_ context.Context, query []byte) ([]byte, error) {
+					return dnsAnswerResponse(t, query, test.answer)
+				},
+				ActivitySink: func(event ActivityEvent) { captured = event },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			queryName := "allowed.example."
+			if test.queryType == dnsmessage.TypeSRV {
+				queryName = "_mysql._tcp.allowed.example."
+			}
+			query := dnsQuery(t, uint16(100+index), queryName, test.queryType)
+			response, err := handler.HandleQuery(context.Background(), query)
+			if err != nil {
+				t.Fatal(err)
+			}
+			header, answers := parseDNSResponse(t, response)
+			if header.RCode != dnsmessage.RCodeSuccess || len(answers) != 1 {
+				t.Fatalf("response = %#v / %#v", header, answers)
+			}
+			if captured.Event != ActivityEventName || captured.Decision != ActivityDecisionAllowed || captured.DNSQueryType != strings.ToLower(test.name) ||
+				len(captured.DNSAnswers) != 1 || captured.DNSAnswers[0] != test.wantRecord {
+				t.Fatalf("activity = %#v", captured)
+			}
+		})
+	}
+}
+
+func TestPolicyDNSMatchesSRVBoundaryAgainstBaseDomainAndPreservesOwnerName(t *testing.T) {
+	now := time.Date(2026, 8, 24, 14, 45, 0, 0, time.UTC)
+	policy := testDNSPolicy(t, boundary.Rule{ID: "mysql", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
+	var captured ActivityEvent
+	exchanged := false
+	handler, err := NewPolicyDNS(policy, DNSOptions{
+		Now: func() time.Time { return now },
+		Exchange: func(_ context.Context, query []byte) ([]byte, error) {
+			exchanged = true
+			return dnsAnswerResponse(t, query, func(builder *dnsmessage.Builder, header dnsmessage.ResourceHeader) error {
+				return builder.SRVResource(header, dnsmessage.SRVResource{
+					Priority: 10, Weight: 20, Port: 3306, Target: dnsName(t, "mysql.allowed.example."),
+				})
+			})
+		},
+		ActivitySink: func(event ActivityEvent) { captured = event },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := handler.HandleQuery(context.Background(), dnsQuery(t, 150, "_mysql._tcp.allowed.example.", dnsmessage.TypeSRV))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, answers := parseDNSResponse(t, response)
+	if !exchanged || header.RCode != dnsmessage.RCodeSuccess || len(answers) != 1 {
+		t.Fatalf("SRV response = exchanged %v / %#v / %#v", exchanged, header, answers)
+	}
+	if captured.Domain != "_mysql._tcp.allowed.example" || captured.DNSQueryType != "srv" || captured.RuleID != "mysql" || captured.Decision != ActivityDecisionAllowed {
+		t.Fatalf("SRV activity = %#v", captured)
+	}
+}
+
+func TestPolicyDNSPreservesCNAMEChainAndCreatesTTLBoundAddressLease(t *testing.T) {
+	now := time.Date(2026, 8, 24, 15, 0, 0, 0, time.UTC)
+	policy := testDNSPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
+	leases := NewDNSLeaseStore()
+	var captured ActivityEvent
+	handler, err := NewPolicyDNS(policy, DNSOptions{
+		Now:       func() time.Time { return now },
+		DNSLeases: leases,
+		Exchange: func(_ context.Context, query []byte) ([]byte, error) {
+			return dnsCNAMEChainResponse(t, query)
+		},
+		ActivitySink: func(event ActivityEvent) { captured = event },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := handler.HandleQuery(context.Background(), dnsQuery(t, 200, "allowed.example.", dnsmessage.TypeA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, answers := parseDNSResponse(t, response)
+	if header.RCode != dnsmessage.RCodeSuccess || len(answers) != 2 || len(captured.DNSAnswers) != 2 {
+		t.Fatalf("CNAME response = %#v / %#v / %#v", header, answers, captured)
+	}
+	address := netip.MustParseAddr("93.184.216.34")
+	if domains := leases.Domains(address, now.Add(16*time.Second)); len(domains) != 1 || domains[0] != "allowed.example" {
+		t.Fatalf("active DNS lease = %#v", domains)
+	}
+	if domains := leases.Domains(address, now.Add(18*time.Second)); len(domains) != 0 {
+		t.Fatalf("expired DNS lease = %#v", domains)
+	}
+}
+
 func TestPolicyDNSServesUDPAndTCPOnTheSamePort(t *testing.T) {
 	policy := testDNSPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
 	handler, err := NewPolicyDNS(policy, DNSOptions{LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
@@ -235,6 +373,78 @@ func dnsQuery(t *testing.T, id uint16, host string, queryType dnsmessage.Type) [
 		t.Fatal(err)
 	}
 	return query
+}
+
+func dnsName(t *testing.T, value string) dnsmessage.Name {
+	t.Helper()
+	name, err := dnsmessage.NewName(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return name
+}
+
+func dnsAnswerResponse(t *testing.T, query []byte, answer func(*dnsmessage.Builder, dnsmessage.ResourceHeader) error) ([]byte, error) {
+	t.Helper()
+	var parser dnsmessage.Parser
+	header, err := parser.Start(query)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 {
+		return nil, errors.New("unexpected DNS test query")
+	}
+	question := questions[0]
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: header.ID, Response: true, RecursionDesired: header.RecursionDesired, RecursionAvailable: true})
+	builder.EnableCompression()
+	if err := builder.StartQuestions(); err != nil {
+		return nil, err
+	}
+	if err := builder.Question(question); err != nil {
+		return nil, err
+	}
+	if err := builder.StartAnswers(); err != nil {
+		return nil, err
+	}
+	resourceHeader := dnsmessage.ResourceHeader{Name: question.Name, Type: question.Type, Class: dnsmessage.ClassINET, TTL: 17}
+	if err := answer(&builder, resourceHeader); err != nil {
+		return nil, err
+	}
+	return builder.Finish()
+}
+
+func dnsCNAMEChainResponse(t *testing.T, query []byte) ([]byte, error) {
+	t.Helper()
+	var parser dnsmessage.Parser
+	header, err := parser.Start(query)
+	if err != nil {
+		return nil, err
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 {
+		return nil, errors.New("unexpected DNS CNAME test query")
+	}
+	question := questions[0]
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: header.ID, Response: true, RecursionDesired: true, RecursionAvailable: true})
+	builder.EnableCompression()
+	if err := builder.StartQuestions(); err != nil {
+		return nil, err
+	}
+	if err := builder.Question(question); err != nil {
+		return nil, err
+	}
+	if err := builder.StartAnswers(); err != nil {
+		return nil, err
+	}
+	if err := builder.CNAMEResource(dnsmessage.ResourceHeader{Name: question.Name, Type: dnsmessage.TypeCNAME, Class: dnsmessage.ClassINET, TTL: 30}, dnsmessage.CNAMEResource{CNAME: dnsName(t, "alias.allowed.example.")}); err != nil {
+		return nil, err
+	}
+	alias := dnsName(t, "alias.allowed.example.")
+	if err := builder.AResource(dnsmessage.ResourceHeader{Name: alias, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 17}, dnsmessage.AResource{A: [4]byte{93, 184, 216, 34}}); err != nil {
+		return nil, err
+	}
+	return builder.Finish()
 }
 
 func parseDNSResponse(t *testing.T, packet []byte) (dnsmessage.Header, []dnsmessage.Resource) {

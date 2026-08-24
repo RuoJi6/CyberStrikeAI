@@ -108,7 +108,7 @@ inspect_image() {
 }
 
 inspect_image agent "$agent_ref" "pentester" "docker-entrypoint.sh"
-inspect_image egress "$egress_ref" "65532:65532" "/cyberstrike-egress"
+inspect_image egress "$egress_ref" "0:0" "/cyberstrike-egress"
 
 scanner_version=$(docker run --rm --network none \
   --entrypoint /usr/local/bin/trivy "$agent_ref" version | \

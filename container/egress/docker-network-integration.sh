@@ -5,7 +5,7 @@ set -euo pipefail
 : "${CYBERSTRIKE_AGENT_IMAGE:?CYBERSTRIKE_AGENT_IMAGE is required}"
 
 snapshot_id=12345678-1234-1234-1234-123456789ab6
-snapshot_json='{"schemaVersion":1,"policyId":"stage4-item6-policy","rules":[{"id":"allow-example","effect":"allow-visit","host":"example.com","schemes":["http","https","tcp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5}]}'
+snapshot_json='{"schemaVersion":1,"policyId":"stage4-item6-policy","rules":[{"id":"allow-example","effect":"allow-visit","host":"example.com","schemes":["http","https","icmp","tcp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5}]}'
 snapshot_sha="sha256:$(printf '%s\n' "$snapshot_json" | sha256sum | awk '{print $1}')"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/cyberstrike-egress-integration.XXXXXX")
 test_suffix=${CYBERSTRIKE_EGRESS_TEST_SUFFIX:-"$$"}
@@ -21,6 +21,75 @@ auth_snapshot_path="$test_root/auth-boundary.json"
 auth_profiles_path="$test_root/auth-profiles.json"
 mismatch_profiles_path="$test_root/auth-profiles-mismatch.json"
 open_snapshot_path="$test_root/open-boundary.json"
+
+gateway_security_args=(
+  --read-only
+  --user 0:0
+  --cap-drop ALL
+  --cap-add NET_ADMIN
+  --cap-add NET_RAW
+  --security-opt no-new-privileges
+  --sysctl net.ipv4.ip_forward=1
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=16777216
+)
+
+agent_security_args=(
+  --read-only
+  --user pentester
+  --cap-drop ALL
+  --cap-add CHOWN
+  --cap-add DAC_OVERRIDE
+  --cap-add FOWNER
+  --cap-add FSETID
+  --cap-add KILL
+  --cap-add SETGID
+  --cap-add SETUID
+  --cap-add SYS_CHROOT
+  --cap-add NET_BIND_SERVICE
+  --cap-add NET_RAW
+  --cap-add NET_ADMIN
+  --cap-add SYS_PTRACE
+  --security-opt no-new-privileges
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=67108864
+  --tmpfs /workspace:rw,nosuid,nodev,mode=1777,size=1073741824
+)
+
+agent_workspace_env=(
+  --env HOME=/workspace
+  --env XDG_CACHE_HOME=/workspace/.cache
+  --env XDG_CONFIG_HOME=/workspace/.config
+  --env PIP_CACHE_DIR=/workspace/.cache/pip
+  --env VIRTUAL_ENV=/workspace/.venv
+  --env PATH=/workspace/.venv/bin:/workspace/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+)
+agent_keepalive_script="umask 077; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; trap 'exit 0' TERM INT; while :; do sleep 3600; done"
+
+configure_agent_route() {
+  local container=$1 gateway=$2
+  docker exec --user 0:0 "$container" /sbin/ip route replace default via "$gateway"
+}
+
+assert_gateway_security() {
+  local container=$1
+  [[ "$(docker inspect --format '{{.Config.User}}' "$container")" == "0:0" ]] || fail "gateway is not running as root"
+  [[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" == true ]] || fail "gateway root filesystem is writable"
+  [[ "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container")" == '["ALL"]' ]] || fail "gateway capability drop set drifted"
+  [[ "$(docker inspect --format '{{json .HostConfig.CapAdd}}' "$container")" == '["CAP_NET_ADMIN","CAP_NET_RAW"]' ]] || fail "gateway capability add set drifted"
+  [[ "$(docker inspect --format '{{index .HostConfig.Sysctls "net.ipv4.ip_forward"}}' "$container")" == 1 ]] || fail "gateway IP forwarding is disabled"
+}
+
+assert_agent_security() {
+  local container=$1
+  local expected='["CAP_CHOWN","CAP_DAC_OVERRIDE","CAP_FOWNER","CAP_FSETID","CAP_KILL","CAP_NET_ADMIN","CAP_NET_BIND_SERVICE","CAP_NET_RAW","CAP_SETGID","CAP_SETUID","CAP_SYS_CHROOT","CAP_SYS_PTRACE"]'
+  [[ "$(docker inspect --format '{{.Config.User}}' "$container")" == pentester ]] || fail "Agent keepalive is not pentester"
+  [[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" == true ]] || fail "Agent root filesystem is writable"
+  [[ "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container")" == '["ALL"]' ]] || fail "Agent capability drop set drifted"
+  [[ "$(docker inspect --format '{{json .HostConfig.CapAdd}}' "$container")" == "$expected" ]] || fail "Agent capability add set drifted"
+  [[ "$(docker exec "$container" id -u)" != 0 ]] || fail "Agent keepalive user unexpectedly has root identity"
+  [[ "$(docker exec --user 0:0 "$container" id -u)" == 0 ]] || fail "trusted Agent exec cannot enter root"
+  docker exec "$container" test -x /workspace/.venv/bin/python3 || fail "workspace virtual environment was not initialized"
+  expect_failure docker exec "$container" sudo -n true
+}
 
 cleanup() {
   docker rm -f "$agent_container" "$gateway_container" "$capture_container" >/dev/null 2>&1 || true
@@ -74,7 +143,7 @@ docker network create --driver bridge --internal --opt com.docker.network.bridge
 docker network create --driver bridge "$egress_network" >/dev/null
 
 docker run -d --name "$gateway_container" --network "$internal_network" \
-  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  "${gateway_security_args[@]}" \
   --mount type=bind,source="$snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" run \
   --snapshot-path /etc/cyberstrike/boundary.json \
@@ -102,9 +171,14 @@ gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$
 proxy="http://$gateway_ip:3128"
 socks_proxy="socks5h://$gateway_ip:1080"
 docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
+  "${agent_security_args[@]}" \
+  "${agent_workspace_env[@]}" \
   --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
   --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
-  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "trap 'exit 0' TERM INT; while :; do sleep 3600; done" >/dev/null
+  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
+configure_agent_route "$agent_container" "$gateway_ip"
+assert_gateway_security "$gateway_container"
+assert_agent_security "$agent_container"
 
 [[ "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}' "$internal_network")" == true ]] || fail "internal bridge inhibit_ipv4 drifted"
 internal_gateway=$(docker network inspect --format '{{with index .IPAM.Config 0}}{{.Gateway}}{{end}}' "$internal_network")
@@ -131,9 +205,7 @@ done
 [[ -z "$(docker exec "$agent_container" printenv no_proxy)" ]] || fail "no_proxy is not empty"
 [[ "$(docker inspect --format '{{range .HostConfig.Dns}}{{.}}{{end}}' "$agent_container")" == "$gateway_ip" ]] || fail "agent DNS does not point to the gateway"
 route4=$(docker exec "$agent_container" ip -4 route)
-if grep -Eq '(^default| via )' <<<"$route4"; then
-  fail "agent gained a default or via route: $route4"
-fi
+grep -Eq "^default via ${gateway_ip//./\\.}( |$)" <<<"$route4" || fail "agent default route does not use the gateway: $route4"
 
 allowed_status=$(docker exec "$agent_container" curl -sS --connect-timeout 8 --max-time 15 -o /dev/null -w '%{http_code}' http://example.com/)
 case "$allowed_status" in
@@ -161,9 +233,15 @@ expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -H 'Accept: application/dns-json' -o /dev/null -w '%{http_code}' http://example.com/api
 expect_failure docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null https://dns.google/dns-query
 
-expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null http://example.com/'
+docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 8 --max-time 15 --noproxy "*" -o /dev/null http://example.com/'
+docker logs "$gateway_container" 2>&1 | grep '"requestType":"tcp"' | grep '"decision":"allowed"' | grep -q '"domain":"example.com"' || fail "direct TCP request was not allowed through the packet gateway"
+docker exec --user 0:0 "$agent_container" ping -c 1 -W 5 example.com >/dev/null
+docker logs "$gateway_container" 2>&1 | grep '"requestType":"icmp"' | grep -q '"decision":"allowed"' || fail "ICMP request was not allowed and audited"
+docker exec --user 0:0 "$agent_container" nmap -Pn -sS -p 80 --max-retries 0 --host-timeout 10s example.com >/dev/null
+docker exec --user 0:0 "$agent_container" nmap -Pn -sU -p 123 --max-retries 0 --host-timeout 10s time.cloudflare.com >/dev/null || true
+docker logs "$gateway_container" 2>&1 | grep '"requestType":"udp"' | grep '"decision":"allowed"' | grep -q '"ruleId":"allow-ntp"' || fail "direct UDP scan was not allowed and audited"
 expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null http://1.1.1.1/'
-expect_failure docker exec "$agent_container" /bin/sh -c 'NO_PROXY="*" no_proxy="*" curl -sS --connect-timeout 2 --max-time 4 -o /dev/null http://example.com/'
+docker exec "$agent_container" /bin/sh -c 'NO_PROXY="*" no_proxy="*" curl -sS --connect-timeout 8 --max-time 15 -o /dev/null http://example.com/'
 expect_failure docker exec "$agent_container" /bin/sh -c 'HTTP_PROXY=http://203.0.113.10:3128 HTTPS_PROXY=http://203.0.113.10:3128 ALL_PROXY=http://203.0.113.10:3128 http_proxy=http://203.0.113.10:3128 https_proxy=http://203.0.113.10:3128 all_proxy=http://203.0.113.10:3128 curl -sS --connect-timeout 2 --max-time 4 -o /dev/null http://example.com/'
 expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null telnet://1.1.1.1:53'
 expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -g -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null "http://[2606:4700:4700::1111]/"'
@@ -184,7 +262,7 @@ printf '%s\n' "$open_snapshot_json" >"$open_snapshot_path"
 chmod 0444 "$open_snapshot_path"
 open_snapshot_sha="sha256:$(sha256sum "$open_snapshot_path" | awk '{print $1}')"
 docker run -d --name "$gateway_container" --network "$internal_network" \
-  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  "${gateway_security_args[@]}" \
   --mount type=bind,source="$open_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" run \
   --snapshot-path /etc/cyberstrike/boundary.json \
@@ -200,9 +278,14 @@ gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$
 proxy="http://$gateway_ip:3128"
 socks_proxy="socks5h://$gateway_ip:1080"
 docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
+  "${agent_security_args[@]}" \
+  "${agent_workspace_env[@]}" \
   --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
   --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
-  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "trap 'exit 0' TERM INT; while :; do sleep 3600; done" >/dev/null
+  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
+configure_agent_route "$agent_container" "$gateway_ip"
+assert_gateway_security "$gateway_container"
+assert_agent_security "$agent_container"
 open_http_status=$(docker exec "$agent_container" curl -sS --connect-timeout 8 --max-time 15 -o /dev/null -w '%{http_code}' -X DELETE http://example.com/)
 case "$open_http_status" in
   2*|3*|4*) ;;
@@ -234,7 +317,7 @@ chmod 0444 "$route_path"
 route_sha="sha256:$(sha256sum "$route_path" | awk '{print $1}')"
 
 docker run -d --name "$gateway_container" --network "$internal_network" \
-  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  "${gateway_security_args[@]}" \
   --mount type=bind,source="$snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
   --mount type=bind,source="$route_path",target=/etc/cyberstrike/upstream.json,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" run \
@@ -320,7 +403,7 @@ chmod 0444 "$auth_route_path"
 auth_route_sha="sha256:$(sha256sum "$auth_route_path" | awk '{print $1}')"
 
 docker run -d --name "$gateway_container" --network "$internal_network" \
-  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  "${gateway_security_args[@]}" \
   --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
   --mount type=bind,source="$auth_route_path",target=/etc/cyberstrike/upstream.json,readonly \
   --mount type=bind,source="$auth_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
@@ -371,9 +454,14 @@ gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$
 proxy="http://$gateway_ip:3128"
 socks_proxy="socks5h://$gateway_ip:1080"
 docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
+  "${agent_security_args[@]}" \
+  "${agent_workspace_env[@]}" \
   --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
   --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
-  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "trap 'exit 0' TERM INT; while :; do sleep 3600; done" >/dev/null
+  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
+configure_agent_route "$agent_container" "$gateway_ip"
+assert_gateway_security "$gateway_container"
+assert_agent_security "$agent_container"
 agent_inspect=$(docker inspect "$agent_container")
 if grep -Fq "$auth_secret_probe" <<<"$agent_inspect"; then
   fail "auth-only credential leaked into Agent metadata"
@@ -425,7 +513,7 @@ expect_failure docker exec "$agent_container" curl -sS --connect-timeout 2 --max
 printf 'docker_topology=isolated internal=2 egress=1\n'
 printf 'proxy_protocol=allowed_http_%s default_post_and_blocked_dns_gateway_denied\n' "$allowed_status"
 printf 'default_boundary=open http=%s https_connect=allowed tcp=allowed udp=allowed private_reserved=blocked\n' "$open_http_status"
-printf 'bypass_regression=direct,dns,doh,ipv6,no_proxy,external_proxy_blocked\n'
+printf 'packet_gateway=direct_tcp_allowed disallowed_ip,doh,ipv6,external_proxy_blocked\n'
 printf 'gateway_crash=proxy_and_direct_blocked agent_running=true\n'
 printf 'upstream_unavailable=http_502 direct_fallback=false credential_metadata_leak=false\n'
 printf 'auth_only=http_204 override=true agent_read=false metadata_leak=false full_packet_audit=true mismatch_fail_closed=true cross_snapshot_reuse=false integrity_exit=true\n'

@@ -456,8 +456,11 @@ func TestDockerManagerCreateUsesSystemNameAndOwnerLabels(t *testing.T) {
 	if !equalHealthcheck(api.createOpts.Config.Healthcheck, runtimeHealthcheck) {
 		t.Fatalf("inherited image healthcheck was not disabled: %#v", api.createOpts.Config.Healthcheck)
 	}
-	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || len(api.createOpts.HostConfig.CapAdd) != 0 {
+	if !api.createOpts.HostConfig.ReadonlyRootfs || api.createOpts.HostConfig.Privileged || len(api.createOpts.HostConfig.CapDrop) != 1 || api.createOpts.HostConfig.CapDrop[0] != "ALL" || !equalCapabilitySets(api.createOpts.HostConfig.CapAdd, runtimeAgentCapabilities) {
 		t.Fatalf("privilege baseline = %#v", api.createOpts.HostConfig)
+	}
+	if api.createOpts.Config.User != runtimeAgentUser {
+		t.Fatalf("long-lived runtime user = %q, want %q", api.createOpts.Config.User, runtimeAgentUser)
 	}
 	if !containsString(api.createOpts.HostConfig.SecurityOpt, "no-new-privileges") || api.createOpts.HostConfig.NanoCPUs != spec.Resources.NanoCPUs || api.createOpts.HostConfig.Memory != spec.Resources.MemoryBytes || api.createOpts.HostConfig.MemorySwap != spec.Resources.MemoryBytes {
 		t.Fatalf("resource/security options = %#v", api.createOpts.HostConfig)
@@ -922,6 +925,17 @@ func TestDockerManagerCreateAppliesOperationTimeout(t *testing.T) {
 	}
 }
 
+func TestEqualCapabilitySetsAcceptsDockerInspectCanonicalPrefix(t *testing.T) {
+	actual := []string{"CAP_NET_RAW", "CAP_NET_ADMIN", "CAP_SYS_PTRACE"}
+	expected := []string{"SYS_PTRACE", "NET_ADMIN", "NET_RAW"}
+	if !equalCapabilitySets(actual, expected) {
+		t.Fatal("Docker inspect capability names should match the requested semantic set")
+	}
+	if equalCapabilitySets(actual, []string{"NET_RAW", "NET_ADMIN", "SYS_ADMIN"}) {
+		t.Fatal("different capability sets must not match")
+	}
+}
+
 func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned string) *fakeDockerCreationAPI {
 	if pinned == "" {
 		pinned, _ = pinnedImageReference(spec.Image)
@@ -961,10 +975,11 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 			Config: &mobycontainer.Config{
 				Image:           pinned,
 				NetworkDisabled: spec.Security.NetworkMode == NetworkNone,
+				User:            runtimeAgentUser,
 				WorkingDir:      spec.Workspace.MountPath,
 				Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 				Cmd:             []string{runtimeKeepaliveScript},
-				Env:             runtimeProxyEnvironment(spec, ""),
+				Env:             runtimeContainerEnvironment(spec, ""),
 				Labels:          runtimeLabels(ownerID, spec),
 			},
 			HostConfig:      runtimeHostConfig(spec),

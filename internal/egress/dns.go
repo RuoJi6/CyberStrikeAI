@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,13 @@ const (
 	maxDNSAddresses         = 64
 	maxConcurrentDNSQueries = 32
 	maxTCPDNSQueries        = 32
+	maxDNSRecords           = 128
+	maxDNSRecordTextBytes   = 1024
 )
+
+const dnsTypeCAA dnsmessage.Type = 257
+
+type DNSExchangeFunc func(context.Context, []byte) ([]byte, error)
 
 type DNSOptions struct {
 	LookupNetIP   LookupNetIPFunc
@@ -32,6 +39,8 @@ type DNSOptions struct {
 	AnswerTTL     uint32
 	LookupTimeout time.Duration
 	ActivitySink  ActivitySink
+	DNSLeases     *DNSLeaseStore
+	Exchange      DNSExchangeFunc
 }
 
 // PolicyDNS resolves only names that are usable by an active rule in the
@@ -44,6 +53,9 @@ type PolicyDNS struct {
 	answerTTL     uint32
 	lookupTimeout time.Duration
 	activitySink  ActivitySink
+	dnsLeases     *DNSLeaseStore
+	exchange      DNSExchangeFunc
+	legacyLookup  bool
 }
 
 func NewPolicyDNS(policy *boundary.Policy, options DNSOptions) (*PolicyDNS, error) {
@@ -54,9 +66,6 @@ func NewPolicyDNS(policy *boundary.Policy, options DNSOptions) (*PolicyDNS, erro
 		return nil, errors.New("egress DNS lookup timeout must not be negative")
 	}
 	lookup := options.LookupNetIP
-	if lookup == nil {
-		lookup = net.DefaultResolver.LookupNetIP
-	}
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -69,7 +78,19 @@ func NewPolicyDNS(policy *boundary.Policy, options DNSOptions) (*PolicyDNS, erro
 	if timeout == 0 {
 		timeout = defaultDNSLookupTimeout
 	}
-	return &PolicyDNS{policy: policy, lookupNetIP: lookup, now: now, answerTTL: ttl, lookupTimeout: timeout, activitySink: options.ActivitySink}, nil
+	exchange := options.Exchange
+	legacyLookup := exchange == nil && lookup != nil
+	if exchange == nil && !legacyLookup {
+		var err error
+		exchange, err = systemDNSExchange()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &PolicyDNS{
+		policy: policy, lookupNetIP: lookup, now: now, answerTTL: ttl, lookupTimeout: timeout,
+		activitySink: options.ActivitySink, dnsLeases: options.DNSLeases, exchange: exchange, legacyLookup: legacyLookup,
+	}, nil
 }
 
 func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, error) {
@@ -90,7 +111,10 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 	}
 	question := questions[0]
 	startedAt := d.now().UTC()
-	event := ActivityEvent{Timestamp: startedAt, RequestType: ActivityRequestDNS, Domain: strings.TrimSuffix(question.Name.String(), "."), Decision: ActivityDecisionBlocked, Outcome: "rejected"}
+	event := ActivityEvent{
+		Timestamp: startedAt, RequestType: ActivityRequestDNS, Domain: strings.TrimSuffix(question.Name.String(), "."),
+		DNSQueryType: strings.ToLower(dnsQueryTypeName(question.Type)), Decision: ActivityDecisionBlocked, Outcome: "rejected",
+	}
 	defer func() {
 		event.LatencyMS = activityLatencyMS(startedAt, d.now().UTC())
 		emitActivity(d.activitySink, event)
@@ -103,9 +127,18 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 		event.Outcome = "unsupported_class"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeRefused, nil, d.answerTTL)
 	}
-	host := question.Name.String()
-	initial, err := d.policy.EvaluateDNS(host, nil, d.now().UTC())
-	if initial.Host != "" {
+	if !supportedDNSQueryType(question.Type) {
+		event.Outcome = "unsupported_query_type"
+		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
+	}
+	policyHost, err := dnsPolicyHost(question)
+	if err != nil {
+		event.Outcome = "invalid_query_name"
+		event.Reason = err.Error()
+		return buildDNSResponse(header, &question, dnsmessage.RCodeRefused, nil, d.answerTTL)
+	}
+	initial, err := d.policy.EvaluateDNS(policyHost, nil, d.now().UTC())
+	if initial.Host != "" && question.Type != dnsmessage.TypeSRV {
 		event.Domain = initial.Host
 	}
 	event.RuleID = initial.RuleID
@@ -114,11 +147,48 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 		event.Outcome = "policy_denied"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
 	}
+	if d.legacyLookup {
+		return d.handleLegacyAddressQuery(ctx, header, question, initial, &event)
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, d.lookupTimeout)
+	defer cancel()
+	response, err := d.exchange(lookupCtx, packet)
+	if err != nil {
+		event.Decision = ActivityDecisionAllowed
+		event.Outcome = "lookup_failed"
+		return buildDNSResponse(header, &question, dnsmessage.RCodeServerFailure, nil, d.answerTTL)
+	}
+	metadata, err := inspectDNSResponse(response, header.ID, question)
+	if err != nil {
+		event.Decision = ActivityDecisionAllowed
+		event.Outcome = "invalid_answer"
+		return buildDNSResponse(header, &question, dnsmessage.RCodeServerFailure, nil, d.answerTTL)
+	}
+	event.DNSAnswers = metadata.records
+	addresses := metadata.addresses
+	event.ResolvedIPs = activityIPStrings(addresses)
+	if len(addresses) != 0 {
+		final, finalErr := d.policy.EvaluateDNS(initial.Host, addresses, d.now().UTC())
+		event.RuleID = final.RuleID
+		event.Reason = final.Reason
+		if finalErr != nil || !final.Allowed || final.RuleID != initial.RuleID || final.Effect != initial.Effect {
+			event.Outcome = "policy_denied_after_resolution"
+			return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
+		}
+	}
+	event.Decision = ActivityDecisionAllowed
+	event.Outcome = dnsResponseOutcome(metadata.rcode)
+	if d.dnsLeases != nil && len(addresses) != 0 {
+		d.dnsLeases.Remember(initial.Host, addresses, metadata.addressTTL, d.now().UTC())
+	}
+	return response, nil
+}
+
+func (d *PolicyDNS) handleLegacyAddressQuery(ctx context.Context, header dnsmessage.Header, question dnsmessage.Question, initial boundary.DNSDecision, event *ActivityEvent) ([]byte, error) {
 	if question.Type != dnsmessage.TypeA && question.Type != dnsmessage.TypeAAAA {
 		event.Outcome = "unsupported_query_type"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
-
 	lookupCtx, cancel := context.WithTimeout(ctx, d.lookupTimeout)
 	defer cancel()
 	resolved, err := d.lookupNetIP(lookupCtx, "ip", initial.Host)
@@ -135,15 +205,259 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 	}
 	event.ResolvedIPs = activityIPStrings(addresses)
 	final, err := d.policy.EvaluateDNS(initial.Host, addresses, d.now().UTC())
-	event.RuleID = final.RuleID
-	event.Reason = final.Reason
+	event.RuleID, event.Reason = final.RuleID, final.Reason
 	if err != nil || !final.Allowed || final.RuleID != initial.RuleID || final.Effect != initial.Effect {
 		event.Outcome = "policy_denied_after_resolution"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
 	}
-	event.Decision = ActivityDecisionAllowed
-	event.Outcome = "resolved"
+	event.Decision, event.Outcome = ActivityDecisionAllowed, "resolved"
+	if d.dnsLeases != nil {
+		d.dnsLeases.Remember(initial.Host, addresses, d.answerTTL, d.now().UTC())
+	}
 	return buildDNSResponse(header, &question, dnsmessage.RCodeSuccess, addresses, d.answerTTL)
+}
+
+type dnsResponseMetadata struct {
+	rcode      dnsmessage.RCode
+	addresses  []netip.Addr
+	records    []string
+	addressTTL uint32
+}
+
+func inspectDNSResponse(packet []byte, expectedID uint16, expectedQuestion dnsmessage.Question) (dnsResponseMetadata, error) {
+	var parser dnsmessage.Parser
+	header, err := parser.Start(packet)
+	if err != nil || !header.Response || header.ID != expectedID || header.Truncated {
+		return dnsResponseMetadata{}, errors.New("upstream DNS response header is invalid")
+	}
+	questions, err := parser.AllQuestions()
+	if err != nil || len(questions) != 1 || questions[0] != expectedQuestion {
+		return dnsResponseMetadata{}, errors.New("upstream DNS response question mismatch")
+	}
+	answers, err := parser.AllAnswers()
+	if err != nil {
+		return dnsResponseMetadata{}, err
+	}
+	authorities, err := parser.AllAuthorities()
+	if err != nil {
+		return dnsResponseMetadata{}, err
+	}
+	additionals, err := parser.AllAdditionals()
+	if err != nil {
+		return dnsResponseMetadata{}, err
+	}
+	resources := append(append(append([]dnsmessage.Resource(nil), answers...), authorities...), additionals...)
+	metadata := dnsResponseMetadata{rcode: header.RCode}
+	seenAddresses := make(map[netip.Addr]struct{})
+	for _, resource := range resources {
+		record, addresses, ttl, ok := summarizeDNSResource(resource)
+		if ok && len(metadata.records) < maxDNSRecords {
+			metadata.records = append(metadata.records, record)
+		}
+		for _, raw := range addresses {
+			address := raw.Unmap()
+			if !address.IsValid() || address.Zone() != "" {
+				return dnsResponseMetadata{}, errors.New("upstream DNS response contains an invalid address")
+			}
+			if _, duplicate := seenAddresses[address]; !duplicate {
+				seenAddresses[address] = struct{}{}
+				metadata.addresses = append(metadata.addresses, address)
+			}
+			if ttl != 0 && (metadata.addressTTL == 0 || ttl < metadata.addressTTL) {
+				metadata.addressTTL = ttl
+			}
+		}
+	}
+	if len(metadata.addresses) > maxDNSAddresses {
+		return dnsResponseMetadata{}, errors.New("upstream DNS response contains too many addresses")
+	}
+	return metadata, nil
+}
+
+func summarizeDNSResource(resource dnsmessage.Resource) (string, []netip.Addr, uint32, bool) {
+	name := strings.TrimSuffix(resource.Header.Name.String(), ".")
+	prefix := name + " " + dnsQueryTypeName(resource.Header.Type) + " "
+	var value string
+	var addresses []netip.Addr
+	switch body := resource.Body.(type) {
+	case *dnsmessage.AResource:
+		address := netip.AddrFrom4(body.A)
+		value, addresses = address.String(), []netip.Addr{address}
+	case *dnsmessage.AAAAResource:
+		address := netip.AddrFrom16(body.AAAA).Unmap()
+		value, addresses = address.String(), []netip.Addr{address}
+	case *dnsmessage.CNAMEResource:
+		value = strings.TrimSuffix(body.CNAME.String(), ".")
+	case *dnsmessage.NSResource:
+		value = strings.TrimSuffix(body.NS.String(), ".")
+	case *dnsmessage.PTRResource:
+		value = strings.TrimSuffix(body.PTR.String(), ".")
+	case *dnsmessage.MXResource:
+		value = strconv.Itoa(int(body.Pref)) + " " + strings.TrimSuffix(body.MX.String(), ".")
+	case *dnsmessage.TXTResource:
+		value = strings.Join(body.TXT, " ")
+	case *dnsmessage.SRVResource:
+		value = fmt.Sprintf("%d %d %d %s", body.Priority, body.Weight, body.Port, strings.TrimSuffix(body.Target.String(), "."))
+	case *dnsmessage.UnknownResource:
+		if resource.Header.Type == dnsTypeCAA && len(body.Data) >= 2 && int(body.Data[1])+2 <= len(body.Data) {
+			tagLength := int(body.Data[1])
+			value = fmt.Sprintf("%d %s %s", body.Data[0], body.Data[2:2+tagLength], body.Data[2+tagLength:])
+		} else {
+			return "", nil, 0, false
+		}
+	default:
+		return "", nil, 0, false
+	}
+	record := prefix + strings.TrimSpace(value)
+	if len(record) > maxDNSRecordTextBytes {
+		record = record[:maxDNSRecordTextBytes]
+	}
+	return record, addresses, resource.Header.TTL, true
+}
+
+func supportedDNSQueryType(recordType dnsmessage.Type) bool {
+	switch recordType {
+	case dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.TypeCNAME, dnsmessage.TypeNS, dnsmessage.TypeMX,
+		dnsmessage.TypeTXT, dnsmessage.TypeSRV, dnsmessage.TypePTR, dnsTypeCAA:
+		return true
+	default:
+		return false
+	}
+}
+
+// dnsPolicyHost returns the hostname that boundary rules should evaluate for a
+// DNS question. SRV owner names intentionally begin with underscore labels,
+// which are not hostnames and must not be passed to boundary.NormalizeHost.
+// The complete owner name is still forwarded upstream and written to audit.
+func dnsPolicyHost(question dnsmessage.Question) (string, error) {
+	owner := strings.TrimSuffix(question.Name.String(), ".")
+	if question.Type != dnsmessage.TypeSRV {
+		return owner, nil
+	}
+	labels := strings.Split(owner, ".")
+	if len(labels) < 3 || len(labels[0]) < 2 || (labels[1] != "_tcp" && labels[1] != "_udp") {
+		return "", errors.New("SRV query name must be _service._tcp.example.com or _service._udp.example.com")
+	}
+	service := strings.TrimPrefix(labels[0], "_")
+	for index, character := range service {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || (character == '-' && index > 0 && index < len(service)-1) {
+			continue
+		}
+		return "", errors.New("SRV service label is invalid")
+	}
+	return strings.Join(labels[2:], "."), nil
+}
+
+func dnsQueryTypeName(recordType dnsmessage.Type) string {
+	switch recordType {
+	case dnsmessage.TypeA:
+		return "A"
+	case dnsmessage.TypeAAAA:
+		return "AAAA"
+	case dnsmessage.TypeCNAME:
+		return "CNAME"
+	case dnsmessage.TypeNS:
+		return "NS"
+	case dnsmessage.TypeMX:
+		return "MX"
+	case dnsmessage.TypeTXT:
+		return "TXT"
+	case dnsmessage.TypeSRV:
+		return "SRV"
+	case dnsmessage.TypePTR:
+		return "PTR"
+	case dnsTypeCAA:
+		return "CAA"
+	case dnsmessage.TypeOPT:
+		return "OPT"
+	default:
+		return "TYPE" + strconv.Itoa(int(recordType))
+	}
+}
+
+func dnsResponseOutcome(rcode dnsmessage.RCode) string {
+	if rcode == dnsmessage.RCodeSuccess {
+		return "resolved"
+	}
+	return "upstream_" + strings.ToLower(rcode.String())
+}
+
+func systemDNSExchange() (DNSExchangeFunc, error) {
+	content, err := os.ReadFile("/etc/resolv.conf")
+	if err != nil {
+		return nil, fmt.Errorf("read gateway resolver configuration: %w", err)
+	}
+	servers := make([]string, 0, 3)
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "nameserver" {
+			if address, parseErr := netip.ParseAddr(fields[1]); parseErr == nil && address.IsValid() && address.Zone() == "" {
+				servers = append(servers, net.JoinHostPort(address.String(), "53"))
+			}
+		}
+	}
+	if len(servers) == 0 {
+		return nil, errors.New("gateway resolver configuration has no valid nameserver")
+	}
+	return func(ctx context.Context, query []byte) ([]byte, error) {
+		var failures []error
+		for _, server := range servers {
+			response, exchangeErr := exchangeDNSPacket(ctx, "udp", server, query)
+			if exchangeErr == nil {
+				var parser dnsmessage.Parser
+				header, parseErr := parser.Start(response)
+				if parseErr == nil && header.Truncated {
+					response, exchangeErr = exchangeDNSPacket(ctx, "tcp", server, query)
+				}
+			}
+			if exchangeErr == nil {
+				return response, nil
+			}
+			failures = append(failures, exchangeErr)
+		}
+		return nil, errors.Join(failures...)
+	}, nil
+}
+
+func exchangeDNSPacket(ctx context.Context, network, address string, query []byte) ([]byte, error) {
+	connection, err := (&net.Dialer{}).DialContext(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	defer connection.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = connection.SetDeadline(deadline)
+	}
+	if network == "tcp" {
+		if len(query) > int(^uint16(0)) {
+			return nil, errors.New("DNS query is too large")
+		}
+		framed := make([]byte, 2+len(query))
+		binary.BigEndian.PutUint16(framed[:2], uint16(len(query)))
+		copy(framed[2:], query)
+		if err := writeAll(connection, framed); err != nil {
+			return nil, err
+		}
+		var length [2]byte
+		if _, err := io.ReadFull(connection, length[:]); err != nil {
+			return nil, err
+		}
+		response := make([]byte, int(binary.BigEndian.Uint16(length[:])))
+		if _, err := io.ReadFull(connection, response); err != nil {
+			return nil, err
+		}
+		return response, nil
+	}
+	if err := writeAll(connection, query); err != nil {
+		return nil, err
+	}
+	response := make([]byte, 64<<10)
+	count, err := connection.Read(response)
+	if err != nil {
+		return nil, err
+	}
+	return response[:count], nil
 }
 
 func canonicalDNSAddresses(resolved []netip.Addr) ([]netip.Addr, error) {

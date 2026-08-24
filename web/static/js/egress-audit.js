@@ -12,13 +12,13 @@
 
     const PAGE_SIZES = new Set([10, 20, 50, 100]);
     const CATEGORIES = new Set(['all', 'network', 'lifecycle']);
-    const NETWORK_TYPES = new Set(['dns', 'http', 'https', 'connect', 'tcp', 'udp']);
+    const NETWORK_TYPES = new Set(['dns', 'http', 'https', 'connect', 'tcp', 'udp', 'icmp']);
     const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile', 'health']);
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
     const AUDIT_EVENT_FIELDS = new Set([
         'id', 'chainSequence', 'previousHash', 'eventHash', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
-        'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'resolvedIps',
+        'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'dnsQueryType', 'dnsAnswers', 'resolvedIps',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
         'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket',
     ]);
@@ -156,7 +156,7 @@
         if (Number.isNaN(Date.parse(event.occurredAt))) return false;
         const safeFields = [
             [event.conversationTitle, 512], [event.containerId, 128], [event.agentId, 128],
-            [event.snapshotId, 128], [event.snapshotSha256, 128], [event.domain, 253],
+            [event.snapshotId, 128], [event.snapshotSha256, 128], [event.domain, 253], [event.dnsQueryType, 128],
             [event.connectedIp, 64], [event.ruleId, 256], [event.reason, 128],
             [event.upstreamRouteId, 128], [event.method, 32], [event.path, 1024],
             [event.outcome, 128], [event.lifecycleOperation, 128], [event.lifecycleState, 128], [event.message, 1024],
@@ -166,6 +166,8 @@
         if (event.category === 'network' && event.eventType === 'http' && !safeString(event.path, 1024)) return false;
         const resolvedIps = event.resolvedIps === undefined ? [] : event.resolvedIps;
         if (!Array.isArray(resolvedIps) || resolvedIps.length > 64 || resolvedIps.some((value) => !safeString(value, 64))) return false;
+        const dnsAnswers = event.dnsAnswers === undefined ? [] : event.dnsAnswers;
+        if (!Array.isArray(dnsAnswers) || dnsAnswers.length > 128 || dnsAnswers.some((value) => !safeString(value, 1024))) return false;
         for (const [value, maximum] of [[event.runtimeGeneration, Number.MAX_SAFE_INTEGER], [event.port, 65535], [event.httpStatus, 999], [event.latencyMs, Number.MAX_SAFE_INTEGER], [event.bytesUp, Number.MAX_SAFE_INTEGER], [event.bytesDown, Number.MAX_SAFE_INTEGER]]) {
             const numeric = Number(value || 0);
             if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) return false;
@@ -230,19 +232,23 @@
         if (event.eventType === 'http' || event.eventType === 'https') {
             primary = [event.method || eventTypeLabel(event.eventType), event.path || '/'].filter(Boolean).join(' ');
         } else if (event.eventType === 'connect' || event.eventType === 'tcp' || event.eventType === 'udp') {
-            primary = `CONNECT ${event.domain || '—'}${event.port ? `:${event.port}` : ''}`;
+            primary = `${eventTypeLabel(event.eventType)} ${event.domain || '—'}${event.port ? `:${event.port}` : ''}`;
+        } else if (event.eventType === 'icmp') {
+            primary = `ICMP ${event.domain || '—'}`;
         } else if (event.eventType === 'dns') {
-            primary = `DNS ${event.domain || '—'}`;
+            primary = `DNS ${(event.dnsQueryType || '').toUpperCase()} ${event.domain || '—'}`.replace('DNS  ', 'DNS ');
         }
         return {
             primary,
-            secondary: `↑${formatBytes(event.bytesUp)} · ↓${formatBytes(event.bytesDown)}`,
+            secondary: event.eventType === 'dns' && Array.isArray(event.dnsAnswers) && event.dnsAnswers.length
+                ? event.dnsAnswers.join(' · ')
+                : `↑${formatBytes(event.bytesUp)} · ↓${formatBytes(event.bytesDown)}`,
         };
     }
 
     function eventTypeLabel(value) {
         const labels = {
-            dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT', tcp: 'TCP', udp: 'UDP',
+            dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT', tcp: 'TCP', udp: 'UDP', icmp: 'ICMP',
             create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
 			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
 			health: t('auditHealth', '出站健康'),
@@ -320,7 +326,7 @@
         const target = event.category === 'network'
             ? `${event.domain || '—'}${event.port ? `:${event.port}` : ''}`
             : eventTypeLabel(event.lifecycleOperation || event.eventType);
-        const resolution = event.connectedIp || (event.resolvedIps || []).join(', ');
+        const resolution = event.connectedIp || (event.resolvedIps || []).join(', ') || (event.dnsAnswers || []).join(' · ');
         const verdict = event.decision || event.result;
 		const reason = event.eventType === 'health'
 			? t(`healthSignal.${event.reason || 'unknown'}`, event.reason || '')

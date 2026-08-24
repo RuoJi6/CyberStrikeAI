@@ -77,7 +77,7 @@ docker run --name "$agent_name" --platform "$platform" --network none \
 docker rm "$agent_name" >/dev/null
 
 docker run --name "$egress_name" --platform "$platform" --network none \
-  --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
+  --read-only --user 0:0 --cap-drop ALL --cap-add NET_ADMIN --cap-add NET_RAW --security-opt no-new-privileges \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=16777216 \
   --mount "type=bind,source=$snapshot_path,target=/etc/cyberstrike/boundary.json,readonly" \
   "$egress_image" check \

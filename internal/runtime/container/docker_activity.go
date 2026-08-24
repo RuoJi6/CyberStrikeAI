@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	defaultActivityTail = 100
-	maxActivityTail     = 500
-	maxActivityLine     = 1024 << 10
+	defaultActivityTail             = 100
+	maxActivityTail                 = 500
+	maxActivityLine                 = 1024 << 10
+	execBoundaryFeedbackTail        = 100
+	maxExecBoundaryFeedbackLogBytes = 4 << 20
 )
 
 var safeActivityCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
@@ -33,6 +35,66 @@ type dockerContainerLogsAPI interface {
 }
 
 var _ RuntimeActivityStreamer = (*DockerManager)(nil)
+
+// latestBlockedEgressActivity performs a bounded, non-following read of the
+// verified gateway log. It is intentionally best-effort: packet enforcement
+// remains inside the gateway, while this projection gives a failed tool call a
+// clear model-facing explanation without exposing raw provider errors.
+func (m *DockerManager) latestBlockedEgressActivity(ctx context.Context, spec RuntimeSpec, since time.Time) (egress.ActivityEvent, bool) {
+	if m == nil || m.api == nil || spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil {
+		return egress.ActivityEvent{}, false
+	}
+	observation, err := m.Observe(ctx, spec)
+	if err != nil || observation.Gateway == nil || observation.Gateway.Status != StatusRunning || strings.TrimSpace(observation.Gateway.ProviderID) == "" {
+		return egress.ActivityEvent{}, false
+	}
+	logsAPI, ok := m.api.(dockerContainerLogsAPI)
+	if !ok {
+		return egress.ActivityEvent{}, false
+	}
+	logs, err := logsAPI.ContainerLogs(ctx, observation.Gateway.ProviderID, mobyclient.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: false,
+		Follow:     false,
+		Tail:       strconv.Itoa(execBoundaryFeedbackTail),
+		Since:      since.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		return egress.ActivityEvent{}, false
+	}
+	defer logs.Close()
+
+	var stdout bytes.Buffer
+	limited := io.LimitReader(logs, maxExecBoundaryFeedbackLogBytes+1)
+	if _, err := stdcopy.StdCopy(&stdout, io.Discard, limited); err != nil || stdout.Len() > maxExecBoundaryFeedbackLogBytes {
+		return egress.ActivityEvent{}, false
+	}
+	scanner := bufio.NewScanner(&stdout)
+	scanner.Buffer(make([]byte, 4096), maxActivityLine)
+	var latest egress.ActivityEvent
+	found := false
+	for scanner.Scan() {
+		event, isActivity, parseErr := parseGatewayActivityLine(scanner.Bytes(), spec)
+		if parseErr != nil {
+			return egress.ActivityEvent{}, false
+		}
+		if !isActivity || event.Timestamp.Before(since.Add(-2*time.Second)) || event.Decision != egress.ActivityDecisionBlocked {
+			continue
+		}
+		switch event.RequestType {
+		case egress.ActivityRequestTCP, egress.ActivityRequestUDP, egress.ActivityRequestICMP:
+		default:
+			continue
+		}
+		if !found || event.Timestamp.After(latest.Timestamp) {
+			latest, found = event, true
+		}
+	}
+	if scanner.Err() != nil {
+		return egress.ActivityEvent{}, false
+	}
+	return latest, found
+}
 
 // StreamEgressActivity verifies the exact owned runtime topology before it
 // follows the gateway's bounded local Docker log. Non-activity startup and
@@ -154,26 +216,30 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 		event.Event != egress.ActivityEventName || event.Timestamp.IsZero() || event.Timestamp.After(time.Now().UTC().Add(5*time.Minute)) ||
 		event.SnapshotID != spec.EgressGateway.BoundarySnapshot.ID || event.SnapshotSHA256 != spec.EgressGateway.BoundarySnapshot.SHA256 ||
 		len(event.Domain) > 253 || strings.TrimSpace(event.Domain) != event.Domain ||
-		event.LatencyMS < 0 || event.BytesUp < 0 || event.BytesDown < 0 || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 ||
+		event.LatencyMS < 0 || event.BytesUp < 0 || event.BytesDown < 0 || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 || len(event.DNSAnswers) > 128 ||
 		!validActivityCode(event.Outcome, false) || !validActivityCode(event.Reason, true) || !validActivityText(event.RuleID, 256, true) {
 		return invalid()
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
+		if event.Domain == "" || !validActivityCode(event.DNSQueryType, true) || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
-		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Domain == "" || event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
 			event.HTTPStatus < 0 || event.HTTPStatus > 999 || egress.ValidateHTTPPacket(event.HTTPPacket) != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestCONNECT, egress.ActivityRequestTCP, egress.ActivityRequestUDP:
-		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Domain == "" || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
+			return invalid()
+		}
+	case egress.ActivityRequestICMP:
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHealth:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || event.HTTPPacket != nil || !validGatewayHealthEvent(event) {
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || event.HTTPPacket != nil || !validGatewayHealthEvent(event) {
 			return invalid()
 		}
 	default:
@@ -185,6 +251,11 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 	for _, raw := range event.ResolvedIPs {
 		address, err := netip.ParseAddr(raw)
 		if err != nil || !address.IsValid() || address.Zone() != "" || address.String() != raw {
+			return invalid()
+		}
+	}
+	for _, answer := range event.DNSAnswers {
+		if !validActivityText(answer, 1024, false) {
 			return invalid()
 		}
 	}

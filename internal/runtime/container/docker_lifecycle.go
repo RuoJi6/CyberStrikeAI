@@ -130,6 +130,20 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 		}
 		return Runtime{}, fmt.Errorf("start runtime %s: %w", id, err)
 	}
+	if spec.EgressGateway != nil {
+		if err := m.configureRuntimeDefaultRoute(operationCtx, spec, runtime.ProviderID, gateway); err != nil {
+			seconds := int(defaultRuntimeStopTimeout / time.Second)
+			_, agentStopErr := m.api.ContainerStop(operationCtx, runtime.ProviderID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+			_, gatewayStopErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+			if agentStopErr != nil && !containerderrdefs.IsNotFound(agentStopErr) {
+				err = errors.Join(err, fmt.Errorf("rollback runtime after route failure: %w", agentStopErr))
+			}
+			if gatewayStopErr != nil && !containerderrdefs.IsNotFound(gatewayStopErr) {
+				err = errors.Join(err, fmt.Errorf("rollback egress gateway after route failure: %w", gatewayStopErr))
+			}
+			return Runtime{}, err
+		}
+	}
 	started, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
 		return Runtime{}, err

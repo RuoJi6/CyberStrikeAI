@@ -64,6 +64,12 @@ type TLSInspectionPolicy struct {
 	BypassDomains []string `json:"bypassDomains"`
 }
 
+type packetGatewayRunner interface {
+	Done() <-chan error
+}
+
+type packetGatewayStarter func(context.Context, *boundary.Policy, PacketOptions) (packetGatewayRunner, error)
+
 type GatewayOptions struct {
 	ListenAddress         string
 	SOCKS5ListenAddress   string
@@ -79,6 +85,8 @@ type GatewayOptions struct {
 	TLSAuthority          *TLSAuthorityReference
 	Proxy                 ProxyOptions
 	DNS                   DNSOptions
+	Packet                PacketOptions
+	packetGatewayStarter  packetGatewayStarter
 }
 
 // SnapshotStore materializes immutable database snapshots into a trusted host
@@ -393,6 +401,10 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	options.Proxy.ActivitySink = decorateActivitySink(options.Proxy.ActivitySink)
 	options.Proxy.TLSInspection = tlsInspection
 	options.DNS.ActivitySink = decorateActivitySink(options.DNS.ActivitySink)
+	options.Packet.ActivitySink = decorateActivitySink(options.Packet.ActivitySink)
+	dnsLeases := NewDNSLeaseStore()
+	options.DNS.DNSLeases = dnsLeases
+	options.Packet.DNSLeases = dnsLeases
 	proxy, err := NewProxy(policy, options.Proxy)
 	if err != nil {
 		return err
@@ -435,14 +447,30 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		Handler: proxy, ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 32 << 10,
 	}
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	packetStarter := options.packetGatewayStarter
+	if packetStarter == nil {
+		packetStarter = func(ctx context.Context, policy *boundary.Policy, packetOptions PacketOptions) (packetGatewayRunner, error) {
+			return startPacketGateway(ctx, policy, packetOptions)
+		}
+	}
+	packetGateway, err := packetStarter(runCtx, policy, options.Packet)
+	if err != nil {
+		closeGatewayListeners(listener, dnsPacket, dnsTCP)
+		_ = socksListener.Close()
+		return err
+	}
 	report.Event = "boundary_snapshot_loaded"
 	if output != nil {
 		outputMu.Lock()
 		err := json.NewEncoder(output).Encode(report)
 		outputMu.Unlock()
 		if err != nil {
+			cancel()
 			closeGatewayListeners(listener, dnsPacket, dnsTCP)
 			_ = socksListener.Close()
+			<-packetGateway.Done()
 			return fmt.Errorf("report loaded boundary snapshot: %w", err)
 		}
 	}
@@ -450,14 +478,13 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		name string
 		err  error
 	}
-	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	results := make(chan serverResult, 6)
+	results := make(chan serverResult, 7)
 	go func() { results <- serverResult{name: "HTTP proxy", err: server.Serve(listener)} }()
 	go func() { results <- serverResult{name: "SOCKS5 proxy", err: socksProxy.Serve(runCtx, socksListener)} }()
 	go func() {
 		results <- serverResult{name: "UDP policy DNS", err: servePolicyDNSUDP(runCtx, dnsPacket, dnsHandler)}
 	}()
+	go func() { results <- serverResult{name: "L3/L4 packet gateway", err: <-packetGateway.Done()} }()
 	go func() {
 		results <- serverResult{name: "TCP policy DNS", err: servePolicyDNSTCP(runCtx, dnsTCP, dnsHandler)}
 	}()
@@ -499,7 +526,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	_ = server.Close()
 	closeGatewayListeners(listener, dnsPacket, dnsTCP)
 	_ = socksListener.Close()
-	for completed < 6 {
+	for completed < 7 {
 		result := <-results
 		completed++
 		if first.name == "" && result.err != nil && !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, net.ErrClosed) {

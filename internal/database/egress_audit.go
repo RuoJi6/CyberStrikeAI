@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	snapshot_id TEXT NOT NULL DEFAULT '',
 	snapshot_sha256 TEXT NOT NULL DEFAULT '',
 	domain TEXT NOT NULL DEFAULT '',
+	dns_query_type TEXT NOT NULL DEFAULT '',
+	dns_answers_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(dns_answers_json)),
 	resolved_ips_json TEXT NOT NULL DEFAULT '[]',
 	connected_ip TEXT NOT NULL DEFAULT '',
 	port INTEGER NOT NULL DEFAULT 0,
@@ -136,7 +138,7 @@ BEGIN
 	UPDATE egress_audit_events
 	SET chain_sequence = COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1,
 		previous_hash = COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
-		event_hash = cyberstrike_egress_audit_hash_packet(
+		event_hash = cyberstrike_egress_audit_hash_dns(
 			COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 			CAST(COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1 AS TEXT),
 			CAST(NEW.id AS TEXT), CAST(NEW.event_key AS TEXT), CAST(NEW.recorded_at AS TEXT), CAST(NEW.occurred_at AS TEXT),
@@ -147,7 +149,7 @@ BEGIN
 			CAST(NEW.reason AS TEXT), CAST(NEW.upstream_route_id AS TEXT), CAST(NEW.method AS TEXT), CAST(NEW.path AS TEXT),
 			CAST(NEW.http_status AS TEXT), CAST(NEW.outcome AS TEXT), CAST(NEW.latency_ms AS TEXT), CAST(NEW.bytes_up AS TEXT),
 			CAST(NEW.bytes_down AS TEXT), CAST(NEW.lifecycle_operation AS TEXT), CAST(NEW.lifecycle_state AS TEXT), CAST(NEW.message AS TEXT),
-			CAST(NEW.http_packet_json AS TEXT)
+			CAST(NEW.http_packet_json AS TEXT), CAST(NEW.dns_query_type AS TEXT), CAST(NEW.dns_answers_json AS TEXT)
 		)
 	WHERE id = NEW.id;
 	INSERT INTO egress_audit_chain_heads (conversation_id, last_sequence, last_hash, event_count, updated_at)
@@ -297,6 +299,8 @@ type EgressAuditEvent struct {
 	SnapshotID         string             `json:"snapshotId,omitempty"`
 	SnapshotSHA256     string             `json:"snapshotSha256,omitempty"`
 	Domain             string             `json:"domain,omitempty"`
+	DNSQueryType       string             `json:"dnsQueryType,omitempty"`
+	DNSAnswers         []string           `json:"dnsAnswers,omitempty"`
 	ResolvedIPs        []string           `json:"resolvedIps,omitempty"`
 	ConnectedIP        string             `json:"connectedIp,omitempty"`
 	Port               int                `json:"port,omitempty"`
@@ -354,7 +358,7 @@ type EgressAuditRuntimeTarget struct {
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
 var egressAuditEventTypes = map[string]struct{}{
-	"all": {}, "dns": {}, "http": {}, "https": {}, "connect": {}, "tcp": {}, "udp": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
+	"all": {}, "dns": {}, "http": {}, "https": {}, "connect": {}, "tcp": {}, "udp": {}, "icmp": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
 }
 var egressAuditDecisions = map[string]struct{}{"all": {}, "allowed": {}, "blocked": {}, "success": {}, "failure": {}}
 
@@ -379,6 +383,18 @@ func egressAuditHashValuesWithPacket(values ...interface{}) string {
 		return egressAuditHashValues(values[:len(values)-1]...)
 	}
 	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v2-packet\x00", values...)
+}
+
+func egressAuditHashValuesWithDNS(values ...interface{}) string {
+	if len(values) < 2 {
+		return egressAuditHashValuesWithPacket(values...)
+	}
+	dnsType := fmt.Sprint(values[len(values)-2])
+	dnsAnswers := fmt.Sprint(values[len(values)-1])
+	if dnsType == "" && (dnsAnswers == "" || dnsAnswers == "[]") {
+		return egressAuditHashValuesWithPacket(values[:len(values)-2]...)
+	}
+	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v3-dns\x00", values...)
 }
 
 func egressAuditHashWithDomain(domain string, values ...interface{}) string {
@@ -434,6 +450,8 @@ func (db *DB) initEgressAuditTables() error {
 		{"previous_hash", "ALTER TABLE egress_audit_events ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''"},
 		{"event_hash", "ALTER TABLE egress_audit_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"},
 		{"http_packet_json", "ALTER TABLE egress_audit_events ADD COLUMN http_packet_json TEXT NOT NULL DEFAULT ''"},
+		{"dns_query_type", "ALTER TABLE egress_audit_events ADD COLUMN dns_query_type TEXT NOT NULL DEFAULT ''"},
+		{"dns_answers_json", "ALTER TABLE egress_audit_events ADD COLUMN dns_answers_json TEXT NOT NULL DEFAULT '[]'"},
 	} {
 		if err := db.addColumnIfMissing("egress_audit_events", column.name, column.statement); err != nil {
 			return fmt.Errorf("initialize egress audit chain column %s: %w", column.name, err)
@@ -500,6 +518,10 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	if err != nil {
 		return false, fmt.Errorf("encode egress audit resolved addresses: %w", err)
 	}
+	dnsAnswersJSON, err := json.Marshal(event.DNSAnswers)
+	if err != nil {
+		return false, fmt.Errorf("encode egress audit DNS answers: %w", err)
+	}
 	packetJSON := ""
 	if event.HTTPPacket != nil {
 		encodedPacket, encodeErr := json.Marshal(event.HTTPPacket)
@@ -526,13 +548,13 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 		INSERT OR IGNORE INTO egress_audit_events (
 			id, event_key, recorded_at, occurred_at, category, event_type,
 			conversation_id, conversation_title, container_id, agent_id, runtime_generation,
-			snapshot_id, snapshot_sha256, domain, resolved_ips_json, connected_ip, port,
+			snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 			decision, rule_id, reason, upstream_route_id, method, path, http_status,
 			outcome, latency_ms, bytes_up, bytes_down, http_packet_json, message
-		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, eventKey, formatSQLiteUTC(now), formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType,
 		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
-		event.SnapshotID, event.SnapshotSHA256, event.Domain, string(resolvedJSON), event.ConnectedIP, event.Port,
+		event.SnapshotID, event.SnapshotSHA256, event.Domain, event.DNSQueryType, string(dnsAnswersJSON), string(resolvedJSON), event.ConnectedIP, event.Port,
 		event.Decision, event.RuleID, event.Reason, event.UpstreamRouteID, event.Method, event.Path, event.HTTPStatus,
 		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, packetJSON, "gateway network decision")
 	if err != nil {
@@ -578,17 +600,21 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		!validEgressAuditText(event.SnapshotID, 128, false) || !validEgressAuditText(event.SnapshotSHA256, 128, false) ||
 		event.LatencyMS < 0 || event.LatencyMS > maxEgressAuditSafeInteger ||
 		event.BytesUp < 0 || event.BytesUp > maxEgressAuditSafeInteger ||
-		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 ||
+		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 || len(event.DNSAnswers) > 128 ||
 		!validEgressAuditCode(event.Outcome, false) || !validEgressAuditCode(event.Reason, true) ||
 		!validEgressAuditText(event.RuleID, 256, true) || !validEgressAuditText(event.UpstreamRouteID, 128, true) {
 		return invalid()
 	}
-	normalizedDomain, err := boundary.NormalizeHost(event.Domain)
-	if err != nil || normalizedDomain != event.Domain {
+	if !validEgressAuditDomain(event.RequestType, event.DNSQueryType, event.Domain) {
 		return invalid()
 	}
 	for _, raw := range event.ResolvedIPs {
 		if !validEgressAuditIP(raw) {
+			return invalid()
+		}
+	}
+	for _, answer := range event.DNSAnswers {
+		if !validEgressAuditText(answer, 1024, false) {
 			return invalid()
 		}
 	}
@@ -605,22 +631,60 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
+		if !validEgressAuditCode(event.DNSQueryType, true) || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
-		if event.Port < 1 || event.Port > 65535 || !validEgressAuditMethod(event.Method) ||
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port < 1 || event.Port > 65535 || !validEgressAuditMethod(event.Method) ||
 			!validEgressAuditPath(event.Path) || event.HTTPStatus < 0 || event.HTTPStatus > 999 || egress.ValidateHTTPPacket(event.HTTPPacket) != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestCONNECT, egress.ActivityRequestTCP, egress.ActivityRequestUDP:
-		if event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
+			return invalid()
+		}
+	case egress.ActivityRequestICMP:
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	default:
 		return invalid()
 	}
 	return nil
+}
+
+func validEgressAuditDomain(requestType, dnsQueryType, domain string) bool {
+	if requestType != egress.ActivityRequestDNS || dnsQueryType != "srv" {
+		normalized, err := boundary.NormalizeHost(domain)
+		return err == nil && normalized == domain
+	}
+	// SRV owner names are DNS names rather than hostnames. Their first two
+	// labels intentionally contain underscores (for example
+	// _sip._tcp.example.com), while the policy-bearing suffix remains a
+	// canonical host. Keep this exception narrow so HTTP and routed packet
+	// events cannot smuggle non-host targets into the audit projection.
+	labels := strings.Split(domain, ".")
+	if len(labels) < 3 || !validEgressAuditSRVLabel(labels[0]) || (labels[1] != "_tcp" && labels[1] != "_udp") {
+		return false
+	}
+	suffix := strings.Join(labels[2:], ".")
+	normalized, err := boundary.NormalizeHost(suffix)
+	return err == nil && normalized == suffix
+}
+
+func validEgressAuditSRVLabel(label string) bool {
+	if len(label) < 2 || len(label) > 63 || label[0] != '_' {
+		return false
+	}
+	service := label[1:]
+	for index, character := range service {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') ||
+			(character == '-' && index > 0 && index < len(service)-1) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func validEgressAuditCode(value string, optional bool) bool {
@@ -704,6 +768,8 @@ type egressAuditChainRow struct {
 	SnapshotID         string
 	SnapshotSHA256     string
 	Domain             string
+	DNSQueryType       string
+	DNSAnswersJSON     string
 	ResolvedIPsJSON    string
 	ConnectedIP        string
 	Port               int64
@@ -731,7 +797,7 @@ type egressAuditChainRow struct {
 const egressAuditChainSelect = `
 	SELECT id, event_key, CAST(recorded_at AS TEXT), CAST(occurred_at AS TEXT), category, event_type,
 		conversation_id, conversation_title, container_id, agent_id, runtime_generation,
-		snapshot_id, snapshot_sha256, domain, resolved_ips_json, connected_ip, port,
+		snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 		decision, result, rule_id, reason, upstream_route_id, method, path, http_status,
 		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json,
 		chain_sequence, previous_hash, event_hash
@@ -742,7 +808,7 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 	err := scanner.Scan(
 		&row.ID, &row.EventKey, &row.RecordedAt, &row.OccurredAt, &row.Category, &row.EventType,
 		&row.ConversationID, &row.ConversationTitle, &row.ContainerID, &row.AgentID, &row.RuntimeGeneration,
-		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
+		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.DNSQueryType, &row.DNSAnswersJSON, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
 		&row.Decision, &row.Result, &row.RuleID, &row.Reason, &row.UpstreamRouteID, &row.Method, &row.Path, &row.HTTPStatus,
 		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON,
 		&row.ChainSequence, &row.PreviousHash, &row.EventHash,
@@ -751,14 +817,14 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 }
 
 func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int64) string {
-	return egressAuditHashValuesWithPacket(
+	return egressAuditHashValuesWithDNS(
 		previousHash, strconv.FormatInt(sequence, 10), row.ID, row.EventKey, row.RecordedAt, row.OccurredAt,
 		row.Category, row.EventType, row.ConversationID, row.ConversationTitle, row.ContainerID, row.AgentID,
 		strconv.FormatInt(row.RuntimeGeneration, 10), row.SnapshotID, row.SnapshotSHA256, row.Domain,
 		row.ResolvedIPsJSON, row.ConnectedIP, strconv.FormatInt(row.Port, 10), row.Decision, row.Result,
 		row.RuleID, row.Reason, row.UpstreamRouteID, row.Method, row.Path, strconv.FormatInt(row.HTTPStatus, 10),
 		row.Outcome, strconv.FormatInt(row.LatencyMS, 10), strconv.FormatInt(row.BytesUp, 10), strconv.FormatInt(row.BytesDown, 10),
-		row.LifecycleOperation, row.LifecycleState, row.Message, row.HTTPPacketJSON,
+		row.LifecycleOperation, row.LifecycleState, row.Message, row.HTTPPacketJSON, row.DNSQueryType, row.DNSAnswersJSON,
 	)
 }
 
@@ -1063,10 +1129,11 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 		pattern := "%" + query + "%"
 		where += ` AND (e.conversation_title LIKE ? ESCAPE '\' OR e.conversation_id LIKE ? ESCAPE '\'
 			OR e.domain LIKE ? ESCAPE '\' OR e.connected_ip LIKE ? ESCAPE '\'
-			OR e.resolved_ips_json LIKE ? ESCAPE '\' OR e.rule_id LIKE ? ESCAPE '\'
+			OR e.resolved_ips_json LIKE ? ESCAPE '\' OR e.dns_query_type LIKE ? ESCAPE '\'
+			OR e.dns_answers_json LIKE ? ESCAPE '\' OR e.rule_id LIKE ? ESCAPE '\'
 			OR e.reason LIKE ? ESCAPE '\' OR e.upstream_route_id LIKE ? ESCAPE '\'
 			OR e.lifecycle_operation LIKE ? ESCAPE '\' OR e.message LIKE ? ESCAPE '\')`
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 12; i++ {
 			args = append(args, pattern)
 		}
 	}
@@ -1077,7 +1144,7 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 const egressAuditSelect = `
 	SELECT e.id, e.chain_sequence, e.previous_hash, e.event_hash, e.recorded_at, e.occurred_at, e.category, e.event_type,
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
-		e.snapshot_id, e.snapshot_sha256, e.domain, e.resolved_ips_json, e.connected_ip, e.port,
+		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
 		e.lifecycle_operation, e.lifecycle_state, e.message
@@ -1087,7 +1154,7 @@ const egressAuditSelect = `
 const egressAuditDetailSelect = `
 	SELECT e.id, e.chain_sequence, e.previous_hash, e.event_hash, e.recorded_at, e.occurred_at, e.category, e.event_type,
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
-		e.snapshot_id, e.snapshot_sha256, e.domain, e.resolved_ips_json, e.connected_ip, e.port,
+		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
 		e.lifecycle_operation, e.lifecycle_state, e.message, e.http_packet_json
@@ -1163,11 +1230,11 @@ func scanEgressAuditEvent(scanner egressAuditScanner) (EgressAuditEvent, error) 
 
 func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bool) (EgressAuditEvent, error) {
 	var event EgressAuditEvent
-	var recordedAt, occurredAt, resolvedJSON, packetJSON string
+	var recordedAt, occurredAt, dnsAnswersJSON, resolvedJSON, packetJSON string
 	destinations := []interface{}{
 		&event.ID, &event.ChainSequence, &event.PreviousHash, &event.EventHash, &recordedAt, &occurredAt, &event.Category, &event.EventType,
 		&event.ConversationID, &event.ConversationTitle, &event.ContainerID, &event.AgentID, &event.RuntimeGeneration,
-		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &resolvedJSON, &event.ConnectedIP, &event.Port,
+		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &event.DNSQueryType, &dnsAnswersJSON, &resolvedJSON, &event.ConnectedIP, &event.Port,
 		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &event.UpstreamRouteID, &event.Method, &event.Path,
 		&event.HTTPStatus, &event.Outcome, &event.LatencyMS, &event.BytesUp, &event.BytesDown,
 		&event.LifecycleOperation, &event.LifecycleState, &event.Message,
@@ -1190,6 +1257,11 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 	if resolvedJSON != "" {
 		if err := json.Unmarshal([]byte(resolvedJSON), &event.ResolvedIPs); err != nil {
 			return event, fmt.Errorf("decode egress audit resolved addresses: %w", err)
+		}
+	}
+	if dnsAnswersJSON != "" {
+		if err := json.Unmarshal([]byte(dnsAnswersJSON), &event.DNSAnswers); err != nil {
+			return event, fmt.Errorf("decode egress audit DNS answers: %w", err)
 		}
 	}
 	if packetJSON != "" {

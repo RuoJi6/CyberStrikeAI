@@ -98,6 +98,7 @@ func (m *DockerManager) writeWorkspaceFile(ctx context.Context, spec RuntimeSpec
 
 	created, err := m.execAPI.ExecCreate(operationCtx, runtime.ProviderID, mobyclient.ExecCreateOptions{
 		Privileged:   false,
+		User:         runtimeRootExecUser,
 		TTY:          false,
 		AttachStdin:  true,
 		AttachStdout: true,

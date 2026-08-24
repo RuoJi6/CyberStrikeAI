@@ -215,7 +215,7 @@ func NormalizeHost(raw string) (string, error) {
 
 func NormalizeScheme(raw string) (string, error) {
 	scheme := strings.ToLower(strings.TrimSpace(raw))
-	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "udp" {
+	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "udp" && scheme != "icmp" {
 		return "", fmt.Errorf("%w: unsupported scheme %q", ErrInvalidTarget, raw)
 	}
 	return scheme, nil
@@ -233,6 +233,9 @@ func NormalizePort(scheme string, port int) (int, error) {
 		}
 		if canonicalScheme == "http" {
 			return 80, nil
+		}
+		if canonicalScheme == "icmp" {
+			return 0, nil
 		}
 		return 0, fmt.Errorf("%w: %s requires an explicit port", ErrInvalidTarget, canonicalScheme)
 	}

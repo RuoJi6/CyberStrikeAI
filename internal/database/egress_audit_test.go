@@ -603,6 +603,12 @@ func TestEgressAuditRejectsUnsafeNetworkProjectionBeforePersistence(t *testing.T
 			t.Fatal(err)
 		}
 		lower := strings.ToLower(name)
+		// dns_query_type is bounded resolver metadata (for example A, MX or
+		// SRV), not an HTTP query string. Keep the broad secret-material guard
+		// while explicitly allowing this audited DNS discriminator.
+		if lower == "dns_query_type" {
+			continue
+		}
 		for _, forbidden := range []string{"header", "body", "query", "cookie", "authorization", "credential", "secret"} {
 			if strings.Contains(lower, forbidden) {
 				t.Fatalf("audit schema contains forbidden column %q", name)
@@ -611,6 +617,49 @@ func TestEgressAuditRejectsUnsafeNetworkProjectionBeforePersistence(t *testing.T
 	}
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestEgressAuditPersistsSRVOwnerAndFollowingDNSEvents(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "complete DNS audit")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("running targets = %#v, %v", targets, err)
+	}
+
+	base := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestDNS,
+		Decision: egress.ActivityDecisionAllowed, RuleID: "allow-dns", Reason: "allow-visit", Outcome: "upstream_rcodenameerror",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	srv := base
+	srv.Domain = "_sip._tcp.sip.voice.google.com"
+	srv.DNSQueryType = "srv"
+	inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], srv)
+	if err != nil || !inserted {
+		t.Fatalf("append SRV event = %v, %v", inserted, err)
+	}
+	caa := base
+	caa.Timestamp = base.Timestamp.Add(time.Millisecond)
+	caa.Domain = "google.com"
+	caa.DNSQueryType = "caa"
+	inserted, err = db.AppendEgressNetworkAuditEvent(ctx, targets[0], caa)
+	if err != nil || !inserted {
+		t.Fatalf("append event after SRV = %v, %v", inserted, err)
+	}
+
+	items, err := db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Category: "network", Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 2 {
+		t.Fatalf("DNS audit events = %#v, %v", items, err)
+	}
+	wantTypes := map[string]bool{"srv": false, "caa": false}
+	for _, item := range items {
+		wantTypes[item.DNSQueryType] = true
+	}
+	if !wantTypes["srv"] || !wantTypes["caa"] {
+		t.Fatalf("DNS query types = %#v", wantTypes)
 	}
 }
 

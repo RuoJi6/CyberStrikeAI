@@ -167,18 +167,21 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 	return p.evaluateTarget(target, decision, now), nil
 }
 
-// EvaluateNetwork applies the same immutable rules to a raw TCP or UDP target.
+// EvaluateNetwork applies the same immutable rules to a raw TCP, UDP or ICMP target.
 // HTTP-only path and method constraints do not apply to transport connections.
 func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, resolvedIPs []netip.Addr, now time.Time) (Decision, error) {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	if protocol != "tcp" && protocol != "udp" {
+	if protocol != "tcp" && protocol != "udp" && protocol != "icmp" {
 		return Decision{}, fmt.Errorf("unsupported network protocol %q", protocol)
 	}
 	host, err := NormalizeHost(rawHost)
 	if err != nil {
 		return Decision{}, err
 	}
-	if port < 1 || port > 65535 {
+	if protocol == "icmp" && port != 0 {
+		return Decision{}, fmt.Errorf("%w: ICMP does not use a port", ErrInvalidTarget)
+	}
+	if protocol != "icmp" && (port < 1 || port > 65535) {
 		return Decision{}, fmt.Errorf("%w: port %d is outside 1..65535", ErrInvalidTarget, port)
 	}
 	target := RequestTarget{Scheme: protocol, Host: host, Port: port, Path: "/"}
@@ -187,11 +190,11 @@ func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, reso
 		decision.Allowed, decision.Reason = false, reason
 		return decision, nil
 	}
-	if port == 2375 || port == 2376 {
+	if protocol != "icmp" && (port == 2375 || port == 2376) {
 		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
 		return decision, nil
 	}
-	if forbiddenDNSServicePort(port) {
+	if protocol != "icmp" && forbiddenDNSServicePort(port) {
 		decision.Allowed, decision.Reason = false, ReasonDNSServicePort
 		return decision, nil
 	}
@@ -410,9 +413,9 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) {
 		return false
 	}
-	if target.Scheme == "tcp" || target.Scheme == "udp" {
+	if target.Scheme == "tcp" || target.Scheme == "udp" || target.Scheme == "icmp" {
 		// Transport connections have no HTTP path or method. Explicitly selected
-		// TCP/UDP schemes therefore ignore those HTTP-only dimensions.
+		// TCP/UDP/ICMP schemes therefore ignore those HTTP-only dimensions.
 		return rule.Effect != EffectAuthOnly
 	}
 	if !ruleMethodMatches(rule, target.Method) {

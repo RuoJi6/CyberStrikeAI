@@ -23,7 +23,7 @@
         tool: 'activity_tool',
         route: 'activity_route',
     });
-    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'https', 'connect', 'tcp', 'udp']);
+    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'https', 'connect', 'tcp', 'udp', 'icmp']);
     const DECISIONS = new Set(['all', 'allowed', 'blocked']);
     const AGENTS = new Set(['all', 'container-agent']);
     const TOOLS = new Set(['all', 'unknown']);
@@ -138,19 +138,22 @@
 
     function isSafeActivityEvent(value) {
         if (!value || typeof value !== 'object') return false;
-        if (!['dns', 'http', 'https', 'connect', 'tcp', 'udp'].includes(value.requestType)) return false;
+        if (!['dns', 'http', 'https', 'connect', 'tcp', 'udp', 'icmp'].includes(value.requestType)) return false;
         if (!['allowed', 'blocked'].includes(value.decision)) return false;
         if (typeof value.domain !== 'string' || value.domain.length < 1 || value.domain.length > 253) return false;
         if (typeof value.timestamp !== 'string' || Number.isNaN(new Date(value.timestamp).getTime())) return false;
         if (value.agent !== undefined && (typeof value.agent !== 'string' || value.agent.length > 128)) return false;
         if (value.tool !== undefined && (typeof value.tool !== 'string' || value.tool.length > 256)) return false;
         if (value.upstreamRouteId !== undefined && (typeof value.upstreamRouteId !== 'string' || !/^$|^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value.upstreamRouteId))) return false;
+        if (value.dnsQueryType !== undefined && (typeof value.dnsQueryType !== 'string' || value.dnsQueryType.length > 128)) return false;
+        if (value.dnsAnswers !== undefined && (!Array.isArray(value.dnsAnswers) || value.dnsAnswers.length > 128 || value.dnsAnswers.some((answer) => typeof answer !== 'string' || answer.length > 1024))) return false;
         return true;
     }
 
     function activityEventKey(event) {
         return JSON.stringify([
             event.timestamp, event.requestType, event.domain, event.port || 0,
+            event.dnsQueryType || '', Array.isArray(event.dnsAnswers) ? event.dnsAnswers : [],
             Array.isArray(event.resolvedIps) ? event.resolvedIps : [], event.connectedIp || '',
             event.decision, event.ruleId || '', event.reason || '', event.upstreamRouteId || '',
             event.method || '', event.path || '', event.httpStatus || 0, event.outcome || '',
@@ -321,12 +324,16 @@
 
     function activityRow(event) {
         const row = create('tr', `is-${event.decision}`);
-        const requestType = String(event.requestType || '').toUpperCase();
+        const requestType = event.requestType === 'dns' && event.dnsQueryType
+            ? `DNS ${String(event.dnsQueryType).toUpperCase()}`
+            : String(event.requestType || '').toUpperCase();
         const requestDetail = event.requestType === 'http' || event.requestType === 'https'
             ? [event.method, event.path].filter(Boolean).join(' ')
             : (['connect', 'tcp', 'udp'].includes(event.requestType) ? `:${event.port || 0}` : '');
         const target = event.port ? `${event.domain}:${event.port}` : event.domain;
-        const resolved = Array.isArray(event.resolvedIps) && event.resolvedIps.length ? event.resolvedIps.join(', ') : '—';
+        const resolved = Array.isArray(event.resolvedIps) && event.resolvedIps.length
+            ? event.resolvedIps.join(', ')
+            : (Array.isArray(event.dnsAnswers) && event.dnsAnswers.length ? event.dnsAnswers.join(' · ') : '—');
         const connected = event.connectedIp ? `${t('activityConnected', '连接')} ${event.connectedIp}` : '';
         const decision = activityText(event.decision, event.decision);
         const rule = event.ruleId ? `${t('activityRule', '规则')} ${event.ruleId}` : activityText(event.reason || 'default-deny', event.reason || 'default-deny');
@@ -357,7 +364,7 @@
             if (state.tool !== 'all' && (event.tool || 'unknown') !== state.tool) return false;
             if (state.route !== 'all' && (event.upstreamRouteId || 'direct') !== state.route) return false;
             if (!query) return true;
-            const haystack = [event.domain, event.connectedIp, ...(Array.isArray(event.resolvedIps) ? event.resolvedIps : [])]
+            const haystack = [event.domain, event.connectedIp, event.dnsQueryType, ...(Array.isArray(event.resolvedIps) ? event.resolvedIps : []), ...(Array.isArray(event.dnsAnswers) ? event.dnsAnswers : [])]
                 .join(' ').normalize('NFKC').toLocaleLowerCase();
             return haystack.includes(query);
         });

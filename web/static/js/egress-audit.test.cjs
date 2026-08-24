@@ -56,6 +56,13 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, latencyMs: -1 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, port: 70000 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: new Array(65).fill('1.1.1.1') }), false);
+    const dns = { ...network, eventType: 'dns', method: '', path: '', dnsQueryType: 'mx', dnsAnswers: ['allowed.example MX 10 mail.allowed.example'] };
+    const icmp = { ...network, eventType: 'icmp', method: '', path: '', port: 0, bytesUp: 0, bytesDown: 0 };
+    assert.equal(audit.isSafeAuditEvent(dns), true);
+    assert.equal(audit.isSafeAuditEvent(icmp), true);
+    assert.equal(audit.isSafeAuditEvent({ ...dns, dnsAnswers: new Array(129).fill('A') }), false);
+    assert.deepEqual(audit.packetSummaryForTest(dns), { primary: 'DNS MX allowed.example', secondary: 'allowed.example MX 10 mail.allowed.example' });
+    assert.deepEqual(audit.packetSummaryForTest(icmp), { primary: 'ICMP allowed.example', secondary: '↑0 B · ↓0 B' });
     assert.deepEqual(audit.packetSummaryForTest(network), { primary: 'GET /safe', secondary: '↑1.5 KiB · ↓4.0 KiB' });
     assert.deepEqual(audit.packetSummaryForTest(lifecycle), { primary: '—', secondary: '' });
 });
@@ -89,7 +96,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260824-3/);
+    assert.match(template, /egress-audit\.js\?v=20260824-4/);
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);

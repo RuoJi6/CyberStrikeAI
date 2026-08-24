@@ -1,7 +1,9 @@
 package container
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -12,10 +14,58 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/egress"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobynetwork "github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 )
+
+func TestDockerManagerExecAppendsBoundedRawBoundaryDenial(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	base := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	api := &fakeActivityDockerAPI{fakeDockerCreationAPI: base}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root, OperationTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	base.execExitCode = 1
+	event := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestTCP,
+		Domain: "203.0.113.10", ConnectedIP: "203.0.113.10", Port: 22,
+		Decision: egress.ActivityDecisionBlocked, Reason: "default_deny", Outcome: "policy_denied",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var multiplexed bytes.Buffer
+	writeActivityLogFrame(&multiplexed, append(encoded, '\n'))
+	api.logs = multiplexed.Bytes()
+
+	var stderr strings.Builder
+	result, err := manager.Exec(context.Background(), spec, ExecRequest{Command: []string{"nc", "-vz", "203.0.113.10", "22"}}, func(stream ExecStream, chunk []byte) error {
+		if stream == ExecStreamStderr {
+			stderr.Write(chunk)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ExitCode != 1 || !strings.Contains(stderr.String(), "已阻止本次 TCP 访问") || !strings.Contains(stderr.String(), "203.0.113.10:22") || !strings.Contains(stderr.String(), "default_deny") {
+		t.Fatalf("result/feedback = %#v / %q", result, stderr.String())
+	}
+	if api.logsContainerID != "provider-gateway-1" || api.logsOptions.Follow || api.logsOptions.Tail != "100" || api.logsOptions.Since == "" {
+		t.Fatalf("bounded feedback log request = %q %#v", api.logsContainerID, api.logsOptions)
+	}
+}
 
 func TestDockerManagerExecUsesOwnedRunningRuntime(t *testing.T) {
 	spec := creationSpec()
@@ -52,6 +102,9 @@ func TestDockerManagerExecUsesOwnedRunningRuntime(t *testing.T) {
 	}
 	if api.execContainerID != "provider-container-1" || api.execCreateOpts.Privileged || api.execCreateOpts.TTY || api.execCreateOpts.AttachStdin || !api.execCreateOpts.AttachStdout || !api.execCreateOpts.AttachStderr {
 		t.Fatalf("unsafe exec target/options: %q %#v", api.execContainerID, api.execCreateOpts)
+	}
+	if api.execCreateOpts.User != runtimeRootExecUser || !equalStrings(api.execCreateOpts.Env, runtimeExecEnvironment(nil)) {
+		t.Fatalf("exec identity/environment = %q / %#v", api.execCreateOpts.User, api.execCreateOpts.Env)
 	}
 	if !wrappedExecEndsWith(api.execCreateOpts.Cmd, []string{"/bin/sh", "-c", "printf ok"}) || api.execCreateOpts.WorkingDir != "/workspace" || len(api.execCreateOpts.Cmd) < 8 || api.execCreateOpts.Cmd[6] != "/workspace/subdir" {
 		t.Fatalf("exec command/workdir = %q / %q", strings.Join(api.execCreateOpts.Cmd, "\x00"), api.execCreateOpts.WorkingDir)

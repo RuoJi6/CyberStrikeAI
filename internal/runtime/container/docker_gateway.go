@@ -23,8 +23,10 @@ const (
 	gatewayNetworkModeLabel = "internal-egress"
 	egressNetworkModeLabel  = "egress"
 	gatewayBinaryPath       = "/cyberstrike-egress"
-	gatewayUser             = "65532:65532"
+	gatewayUser             = "0:0"
 )
+
+var gatewayCapabilities = []string{"NET_ADMIN", "NET_RAW"}
 
 func EgressGatewayContainerName(id RuntimeID) string {
 	return "cyberstrike-egress-" + string(id)
@@ -339,8 +341,9 @@ func egressGatewayHostConfig(spec RuntimeSpec) *mobycontainer.HostConfig {
 			"max-file": strconv.Itoa(resources.LogMaxFiles), "compress": "true",
 		}},
 		RestartPolicy: mobycontainer.RestartPolicy{Name: mobycontainer.RestartPolicyDisabled},
-		CapDrop:       []string{"ALL"}, ReadonlyRootfs: true, SecurityOpt: []string{"no-new-privileges"},
-		Tmpfs: map[string]string{"/tmp": tmpfsOptions(resources.TmpfsBytes, true)},
+		CapDrop:       []string{"ALL"}, CapAdd: append([]string(nil), gatewayCapabilities...), ReadonlyRootfs: true, SecurityOpt: []string{"no-new-privileges"},
+		Sysctls: map[string]string{"net.ipv4.ip_forward": "1"},
+		Tmpfs:   map[string]string{"/tmp": tmpfsOptions(resources.TmpfsBytes, true)},
 		Resources: mobycontainer.Resources{
 			NanoCPUs: resources.NanoCPUs, Memory: resources.MemoryBytes, MemorySwap: resources.MemoryBytes,
 			PidsLimit: &pidsLimit, Ulimits: []*mobycontainer.Ulimit{{
@@ -612,8 +615,11 @@ func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.Host
 			return fmt.Errorf("%w: egress gateway trusted mount is missing", ErrRuntimeStateConflict)
 		}
 	}
-	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || len(actual.CapAdd) != 0 || !containsString(actual.SecurityOpt, "no-new-privileges") {
+	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || !equalCapabilitySets(actual.CapAdd, gatewayCapabilities) || !containsString(actual.SecurityOpt, "no-new-privileges") {
 		return fmt.Errorf("%w: egress gateway privilege restrictions mismatch", ErrRuntimeStateConflict)
+	}
+	if len(actual.Sysctls) != 1 || actual.Sysctls["net.ipv4.ip_forward"] != "1" {
+		return fmt.Errorf("%w: egress gateway forwarding sysctl mismatch", ErrRuntimeStateConflict)
 	}
 	if len(actual.DNS) != 0 || len(actual.DNSOptions) != 0 || len(actual.DNSSearch) != 0 || len(actual.ExtraHosts) != 0 || len(actual.Links) != 0 {
 		return fmt.Errorf("%w: egress gateway declares custom DNS, hosts, or links", ErrRuntimeStateConflict)

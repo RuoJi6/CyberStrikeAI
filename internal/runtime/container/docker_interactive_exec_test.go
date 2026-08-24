@@ -56,6 +56,9 @@ func TestDockerManagerInteractiveExecTargetsOnlyOwnedRunningContainer(t *testing
 	if api.execContainerID != "provider-container-1" || api.execCreateOpts.Privileged || !api.execCreateOpts.TTY || !api.execCreateOpts.AttachStdin || !api.execCreateOpts.AttachStdout || !api.execCreateOpts.AttachStderr {
 		t.Fatalf("unsafe interactive exec target/options: %q %#v", api.execContainerID, api.execCreateOpts)
 	}
+	if api.execCreateOpts.User != runtimeRootExecUser {
+		t.Fatalf("interactive exec user = %q, want %q", api.execCreateOpts.User, runtimeRootExecUser)
+	}
 	if api.execCreateOpts.WorkingDir != "/workspace" || len(api.execCreateOpts.Cmd) != 5 || api.execCreateOpts.Cmd[0] != "/bin/sh" || api.execCreateOpts.Cmd[2] != interactiveExecWrapperScript || !strings.HasPrefix(api.execCreateOpts.Cmd[4], "/tmp/.cyberstrike-exec-") {
 		t.Fatalf("interactive exec command/workdir = %#v / %q", api.execCreateOpts.Cmd, api.execCreateOpts.WorkingDir)
 	}

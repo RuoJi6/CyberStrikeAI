@@ -24,6 +24,22 @@ type lockedBuffer struct {
 	b  bytes.Buffer
 }
 
+type testPacketGatewayRunner struct {
+	done <-chan error
+}
+
+func (runner testPacketGatewayRunner) Done() <-chan error { return runner.done }
+
+func startTestPacketGateway(ctx context.Context, _ *boundary.Policy, _ PacketOptions) (packetGatewayRunner, error) {
+	done := make(chan error, 1)
+	go func() {
+		<-ctx.Done()
+		done <- nil
+		close(done)
+	}()
+	return testPacketGatewayRunner{done: done}, nil
+}
+
 func (b *lockedBuffer) Write(content []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -155,7 +171,7 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	var output lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0"})
+		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", packetGatewayStarter: startTestPacketGateway})
 	}()
 	deadline := time.Now().Add(time.Second)
 	for !strings.Contains(output.String(), reference.SHA256) && time.Now().Before(deadline) {
@@ -189,6 +205,7 @@ func TestConfiguredGatewayStopsWhenSnapshotIntegrityDrifts(t *testing.T) {
 	go func() {
 		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{
 			ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
+			packetGatewayStarter: startTestPacketGateway,
 		})
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -237,6 +254,7 @@ func TestConfiguredGatewayReportsAndMonitorsImmutableUpstreamRoute(t *testing.T)
 		done <- RunWithSnapshot(ctx, snapshotPath, snapshotReference, &output, GatewayOptions{
 			ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
 			UpstreamRoutePath: routePath, UpstreamRoute: &routeReference,
+			packetGatewayStarter: startTestPacketGateway,
 		})
 	}()
 	deadline := time.Now().Add(time.Second)
