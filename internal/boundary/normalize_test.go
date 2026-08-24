@@ -129,7 +129,7 @@ func TestNormalizePathRejectsParserDifferentials(t *testing.T) {
 func TestNormalizeRuleTargetSortsAndDeduplicatesCanonicalValues(t *testing.T) {
 	got, err := NormalizeRuleTarget(RuleTarget{
 		Host:         " BÜCHER.example. ",
-		Schemes:      []string{"HTTPS", "http", "https"},
+		Schemes:      []string{"UDP", "HTTPS", "tcp", "http", "https"},
 		Ports:        []int{443, 80, 443},
 		PathPrefixes: []string{"/v1//", "/v1/%2e/", "/"},
 		Methods:      []string{"post", "GET", "POST"},
@@ -139,7 +139,7 @@ func TestNormalizeRuleTargetSortsAndDeduplicatesCanonicalValues(t *testing.T) {
 	}
 	want := RuleTarget{
 		Host:         "xn--bcher-kva.example",
-		Schemes:      []string{"http", "https"},
+		Schemes:      []string{"http", "https", "tcp", "udp"},
 		Ports:        []int{80, 443},
 		PathPrefixes: []string{"/", "/v1/"},
 		Methods:      []string{"GET", "POST"},

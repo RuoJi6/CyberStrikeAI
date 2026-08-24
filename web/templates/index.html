@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260824-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260824-12">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1259,16 +1259,16 @@
                                                 <div class="container-conversation-options-heading">
                                                     <div>
                                                         <h4 id="container-conversation-options-title" data-i18n="chat.containerSecurityOptionsTitle">容器安全与出口</h4>
-                                                        <p data-i18n="chat.containerSecurityOptionsHint">这些选择仅用于新对话，并在首次启动容器后锁定。</p>
+                                                        <p data-i18n="chat.containerSecurityOptionsHint">边界与出口选择在首次启动后锁定；出站网络审计可随时开关。</p>
                                                     </div>
                                                     <span id="container-conversation-options-status" class="container-conversation-options-status" data-i18n="chat.containerOptionsLoading" aria-live="polite">正在加载…</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="container-conversation-field-label" for="boundary-policy-select" data-i18n="chat.boundaryPolicyLabel">边界策略</label>
                                                     <select id="boundary-policy-select" data-unified-select="single" onchange="syncConversationBoundarySelection()">
-                                                        <option value="" data-i18n="chat.boundaryPolicyDefaultDeny">默认拒绝（空策略）</option>
+                                                        <option value="" data-i18n="chat.boundaryPolicyDefaultAllow">不设置边界（允许全部外部访问）</option>
                                                     </select>
-                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultDenyHint">不选择草案时生成默认拒绝快照；容器无法访问任何目标。</span>
+                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；Docker、宿主机与保留地址仍保持隔离。</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="container-conversation-field-label" for="conversation-egress-mode-select" data-i18n="chat.egressModeLabel">上游出口</label>
@@ -1285,11 +1285,27 @@
                                                     <select id="conversation-egress-target-select" data-unified-select="single" onchange="syncConversationEgressTarget()"></select>
                                                     <span id="conversation-egress-target-hint" class="container-conversation-field-hint" data-i18n="chat.egressTargetHint">仅显示当前账号可访问且已脱敏的资源。</span>
                                                 </div>
+                                                <div class="container-conversation-field is-runtime-editable">
+                                                    <label class="workspace-persistence-toggle" for="conversation-egress-audit-toggle">
+                                                        <span class="workspace-persistence-toggle-copy">
+                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.egressAuditLabel">记录出站网络审计</span>
+                                                            <span id="conversation-egress-audit-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.egressAuditHint">记录 HTTP、HTTPS、DNS 和 CONNECT；关闭后仍保留容器生命周期事件，适合高流量 fuzz。</span>
+                                                        </span>
+                                                        <input type="checkbox" id="conversation-egress-audit-toggle" checked onchange="syncConversationEgressAudit(this.checked)" aria-describedby="conversation-egress-audit-hint">
+                                                        <span class="workspace-persistence-switch" aria-hidden="true"></span>
+                                                    </label>
+                                                </div>
                                             </section>
                                         </div>
                                     </div>
                                     <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">
                                 </div>
+                                <button type="button" id="chat-container-workspace-btn" class="role-selector-btn chat-container-workspace-btn" hidden onclick="toggleChatContainerWorkspacePanel()" aria-expanded="false" aria-controls="chat-container-workspace-panel" data-i18n="chat.containerWorkspaceButton" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="工作目录与容器终端" aria-label="工作目录与容器终端">
+                                    <span class="role-selector-icon" aria-hidden="true">
+                                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="4.5" width="17" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="m7.5 9 2.5 2.5L7.5 14M12.5 14h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                    </span>
+                                    <span class="role-selector-text" data-i18n="chat.containerWorkspaceShort">工作区</span>
+                                </button>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
                                     <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="选择角色">
                                         <span id="role-selector-icon" class="role-selector-icon">🔵</span>
@@ -1484,9 +1500,52 @@
                                 </div>
                                 </div>
                             </div>
+                            <aside id="chat-container-workspace-panel" class="container-terminal-drawer chat-container-terminal-drawer" hidden aria-labelledby="chat-container-workspace-title">
+                                <div class="container-terminal-drawer-width-handle" data-container-terminal-resize="width" data-terminal-view="chat" role="separator" aria-orientation="vertical" data-i18n="chat.resizeContainerTerminalWidth" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="拖动调整侧栏宽度" aria-label="拖动调整侧栏宽度"></div>
+                                <div class="container-terminal-panel-header">
+                                    <div><span class="container-terminal-eyebrow" data-i18n="chat.containerTerminalEyebrow">对话容器</span><h3 id="chat-container-workspace-title" data-i18n="chat.containerWorkspaceTitle">工作目录与交互式终端</h3></div>
+                                    <button type="button" class="container-terminal-close" onclick="closeChatContainerWorkspacePanel()" data-i18n="common.close" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="关闭" aria-label="关闭">×</button>
+                                </div>
+                                <div class="container-terminal-drawer-body">
+                                    <div class="container-terminal-info-pane">
+                                        <div class="container-terminal-workspace-grid is-stacked">
+                                            <div><span data-i18n="chat.containerWorkspacePath">容器工作目录</span><code id="chat-container-path">—</code></div>
+                                            <div><span data-i18n="chat.hostWorkspacePath">宿主机工作目录</span><code id="chat-container-host-path">—</code></div>
+                                        </div>
+                                        <div class="container-terminal-actions">
+                                            <span id="chat-container-terminal-status" role="status" aria-live="polite" data-i18n="chat.containerWorkspaceLoading">正在读取容器工作目录…</span>
+                                            <button type="button" id="chat-container-terminal-open" class="btn-primary" data-require-permission="terminal:execute" onclick="openChatContainerShell()" disabled data-i18n="chat.openContainerShell">打开交互式 Shell</button>
+                                        </div>
+                                    </div>
+                                    <div id="chat-container-terminal-height-handle" class="container-terminal-height-handle" data-container-terminal-resize="height" data-terminal-view="chat" role="separator" aria-orientation="horizontal" data-i18n="chat.resizeContainerTerminalHeight" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="拖动调整终端高度" aria-label="拖动调整终端高度" hidden></div>
+                                    <div id="chat-container-terminal-root" class="container-terminal-root is-drawer" hidden></div>
+                                </div>
+                            </aside>
                         </div>
                     </div>
                 </div>
+
+                <aside id="conversation-container-terminal-drawer" class="container-terminal-drawer conversation-container-terminal-drawer" hidden aria-labelledby="conversation-container-terminal-title">
+                    <div class="container-terminal-drawer-width-handle" data-container-terminal-resize="width" data-terminal-view="conversation" role="separator" aria-orientation="vertical" data-i18n="chat.resizeContainerTerminalWidth" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="拖动调整侧栏宽度" aria-label="拖动调整侧栏宽度"></div>
+                    <div class="container-terminal-panel-header">
+                        <div><span class="container-terminal-eyebrow" data-i18n="containerManagement.terminalEyebrow">对话容器</span><h3 id="conversation-container-terminal-title" data-i18n="containerManagement.workspaceAndTerminal">工作目录与交互式终端</h3></div>
+                        <button type="button" class="container-terminal-close" onclick="closeConversationContainerTerminalDrawer()" data-i18n="common.close" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="关闭" aria-label="关闭">×</button>
+                    </div>
+                    <div class="container-terminal-drawer-body">
+                        <div class="container-terminal-info-pane">
+                            <div class="container-terminal-workspace-grid is-stacked">
+                                <div><span data-i18n="chat.containerWorkspacePath">容器工作目录</span><code id="conversation-container-path">—</code></div>
+                                <div><span data-i18n="chat.hostWorkspacePath">宿主机工作目录</span><code id="conversation-container-host-path">—</code></div>
+                            </div>
+                            <div class="container-terminal-actions">
+                                <span id="conversation-container-terminal-status" role="status" aria-live="polite" data-i18n="chat.containerWorkspaceLoading">正在读取容器工作目录…</span>
+                                <button type="button" id="conversation-container-terminal-open" class="btn-primary" data-require-permission="terminal:execute" onclick="openConversationContainerShell()" disabled data-i18n="chat.openContainerShell">打开交互式 Shell</button>
+                            </div>
+                        </div>
+                        <div id="conversation-container-terminal-height-handle" class="container-terminal-height-handle" data-container-terminal-resize="height" data-terminal-view="conversation" role="separator" aria-orientation="horizontal" data-i18n="chat.resizeContainerTerminalHeight" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="拖动调整终端高度" aria-label="拖动调整终端高度" hidden></div>
+                        <div id="conversation-container-terminal-root" class="container-terminal-root is-drawer" hidden></div>
+                    </div>
+                </aside>
 
                 <div id="page-hitl" class="page">
                     <div class="page-header">
@@ -5178,14 +5237,35 @@
 
                 <div id="page-boundary-rules" class="page container-management-page" data-container-management-page="boundary-rules">
                     <div class="container-management-shell">
-                        <div class="page-header container-management-header">
-                            <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.boundaryTitle">边界规则</h2><p data-i18n="containerManagement.boundarySubtitle">配置可编辑策略草案，并核对对话已绑定的不可变规则快照。</p></div>
+                        <div class="page-header container-management-header boundary-page-header">
+                            <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.boundaryTitle">边界规则</h2><p data-i18n="containerManagement.boundarySubtitle">集中管理可复用的网络边界策略，查看使用关系并按需切换。</p></div>
+                            <button id="boundary-policy-new" class="btn-primary" type="button" data-require-permission="boundary:write">+  新建策略</button>
                         </div>
                         <div class="page-content container-management-content">
-                            <section class="container-management-surface" aria-labelledby="boundary-rules-focus-title"><span class="container-management-surface-icon" aria-hidden="true">⌁</span><div><h3 id="boundary-rules-focus-title" data-i18n="containerManagement.boundaryFocusTitle">失败关闭的策略边界</h3><p data-i18n="containerManagement.boundaryFocusDescription">配置规则草案，核对快照 hash、激活代次和实际判定。</p></div><span id="boundary-rules-phase" class="container-management-phase" role="status" aria-live="polite" data-i18n="containerManagement.boundaryLoading">正在加载边界配置…</span></section>
-                            <section class="boundary-draft-management" aria-labelledby="boundary-draft-title">
-                                <div class="boundary-draft-heading"><div><span class="container-runtime-kicker">可编辑配置</span><h3 id="boundary-draft-title">策略草案</h3><p>填写允许或阻断的目标。草案修改不会影响已运行对话，显式重建后才生成并激活新快照。</p></div><div class="boundary-draft-heading-actions"><button id="boundary-policy-new" class="btn-secondary" type="button">新建策略</button><button id="boundary-policy-delete" class="btn-danger" type="button" disabled>删除策略</button></div></div>
-                                <div class="boundary-draft-picker"><label><span>选择策略草案</span><select id="boundary-policy-select" data-unified-select="single" data-unified-search="true"><option value="">选择或新建边界策略</option></select></label></div>
+                            <section class="boundary-policy-catalog" aria-labelledby="boundary-policy-catalog-title">
+                                <div class="boundary-policy-toolbar">
+                                    <label class="container-runtime-search"><span class="sr-only">搜索边界策略</span><input id="boundary-policy-search" type="search" maxlength="200" autocomplete="off" placeholder="搜索策略名或说明…"></label>
+                                    <label class="boundary-policy-page-size"><span>每页</span><select id="boundary-policy-page-size" data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20">20</option><option value="50">50</option></select></label>
+                                    <button id="boundary-rules-refresh" class="btn-secondary" type="button" data-i18n="containerManagement.refresh">刷新状态</button>
+                                </div>
+                                <div class="boundary-policy-list-heading"><div><h3 id="boundary-policy-catalog-title">策略列表</h3><p>一行一个策略；已使用的策略需先在对话容器中切换后才能删除。</p></div><span id="boundary-rules-phase" class="container-management-phase" role="status" aria-live="polite">正在加载边界策略…</span></div>
+                                <div id="boundary-rules-load-state" class="container-policy-load-state" role="status" aria-live="polite"></div>
+                                <div class="boundary-policy-table-header" aria-hidden="true"><span>策略名称</span><span>规则 / 协议</span><span>使用中</span><span>更新时间</span><span>操作</span></div>
+                                <div id="boundary-policy-list" class="boundary-policy-list" role="list"></div>
+                                <div id="boundary-policy-pagination" class="container-runtime-pagination"></div>
+                            </section>
+
+                            <button id="boundary-policy-detail-backdrop" class="boundary-policy-drawer-backdrop" type="button" aria-label="关闭策略详情" hidden></button>
+                            <aside id="boundary-policy-detail-drawer" class="boundary-policy-detail-drawer" aria-labelledby="boundary-policy-detail-title" aria-hidden="true" hidden>
+                                <div class="boundary-policy-drawer-header"><div><span class="container-runtime-kicker">边界策略详情</span><h3 id="boundary-policy-detail-title">策略详情</h3></div><button id="boundary-policy-detail-close" class="boundary-policy-icon-button" type="button" aria-label="关闭">×</button></div>
+                                <div id="boundary-policy-detail-body" class="boundary-policy-detail-body"></div>
+                                <div class="boundary-policy-drawer-actions"><button id="boundary-policy-detail-delete" class="btn-danger" type="button">删除策略</button><button id="boundary-policy-detail-edit" class="btn-primary" type="button">修改策略</button></div>
+                            </aside>
+
+                            <div id="boundary-policy-editor-modal" class="boundary-policy-editor-modal" role="dialog" aria-modal="true" aria-labelledby="boundary-policy-editor-title" hidden>
+                                <div class="boundary-policy-editor-dialog">
+                                    <div class="boundary-policy-editor-header"><div><span class="container-runtime-kicker">可编辑草案</span><h3 id="boundary-policy-editor-title">新建边界策略</h3><p>修改草案不会自动改变运行中容器；在对话容器中切换后才生成新快照。</p></div><button id="boundary-policy-editor-close" class="boundary-policy-icon-button" type="button" aria-label="关闭">×</button></div>
+                                    <div class="boundary-policy-editor-body">
                                 <form id="boundary-policy-form" class="boundary-policy-form">
                                     <input id="boundary-policy-id" type="hidden">
                                     <div class="boundary-form-grid">
@@ -5194,20 +5274,21 @@
 										<label class="boundary-form-toggle is-wide"><input id="boundary-policy-tls-enabled" type="checkbox"><span data-i18n="containerManagement.boundaryTLSEnabled">启用 HTTPS 完整审计（默认关闭；为该对话注入独立短期 CA）</span></label>
 										<label id="boundary-policy-tls-bypass-field" class="is-wide" hidden><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
                                     </div>
-                                    <div class="boundary-form-actions"><button class="btn-primary" type="submit">保存策略</button><button id="boundary-policy-reset" class="btn-secondary" type="button">取消编辑</button></div>
+                                    <div class="boundary-form-actions"><button id="boundary-policy-reset" class="btn-secondary" type="button">取消</button><button class="btn-primary" type="submit">保存策略</button></div>
                                 </form>
                                 <div id="boundary-policy-editor" class="boundary-rule-editor" hidden>
                                     <div class="boundary-rule-editor-heading"><div><h4>策略规则</h4><p>逗号分隔多个协议、端口、路径或方法；留空表示该维度不限。</p></div><button id="boundary-rule-new" class="btn-secondary" type="button">新增规则</button></div>
                                     <div id="boundary-policy-rule-list" class="container-policy-rule-list"></div>
                                     <form id="boundary-rule-form" class="boundary-rule-form" hidden>
+                                        <div class="boundary-rule-floating-heading"><div><span class="container-runtime-kicker">可编辑规则</span><h4 id="boundary-rule-form-title">新增边界规则</h4><p>协议、端口、路径和方法留空时，表示不限制该维度。</p></div><button id="boundary-rule-close" class="boundary-policy-icon-button" type="button" aria-label="关闭规则编辑器">×</button></div>
                                         <input id="boundary-rule-id" type="hidden">
                                         <div class="boundary-form-grid">
                                             <label><span>效果</span><select id="boundary-rule-effect" data-unified-select="single" data-unified-search="false"><option value="allow-visit">允许访问</option><option value="allow-attack">允许测试</option><option value="blocked">显式阻断</option><option value="auth-only">仅凭据访问</option></select></label>
                                             <label><span>主机 / IP / 阻断 CIDR</span><input id="boundary-rule-host" type="text" maxlength="253" autocomplete="off" placeholder="example.com"></label>
-                                            <label><span>协议</span><input id="boundary-rule-schemes" type="text" autocomplete="off" placeholder="http, https"></label>
+                                            <label><span>协议</span><input id="boundary-rule-schemes" type="text" autocomplete="off" placeholder="http, https, tcp, udp"><small>留空表示不限协议</small></label>
                                             <label><span>端口</span><input id="boundary-rule-ports" type="text" inputmode="numeric" autocomplete="off" placeholder="80, 443"></label>
                                             <label><span>路径前缀</span><input id="boundary-rule-paths" type="text" autocomplete="off" placeholder="/api, /health"></label>
-                                            <label><span>HTTP 方法</span><input id="boundary-rule-methods" type="text" autocomplete="off" placeholder="GET, POST"></label>
+                                            <label><span>HTTP 方法</span><input id="boundary-rule-methods" type="text" autocomplete="off" placeholder="留空 = 任意方法"><small>仅对 HTTP/HTTPS 生效；TCP/UDP 忽略此项</small></label>
                                             <label><span>凭据档案（仅 auth-only）</span><select id="boundary-rule-auth-profile" data-unified-select="single" data-unified-search="true"><option value="">不注入凭据</option></select></label>
                                             <label><span>优先位置</span><input id="boundary-rule-position" type="number" min="0" max="100000" value="0"></label>
                                             <label><span>每秒请求数</span><input id="boundary-rule-rate" type="number" min="0" max="10000" step="0.1" value="0"></label>
@@ -5218,14 +5299,9 @@
                                         <div class="boundary-form-actions"><button class="btn-primary" type="submit">保存规则</button><button id="boundary-rule-cancel" class="btn-secondary" type="button">取消</button></div>
                                     </form>
                                 </div>
-                            </section>
-                            <section class="boundary-snapshot-viewer" aria-labelledby="boundary-snapshot-viewer-title"><div class="boundary-draft-heading"><div><span class="container-runtime-kicker">运行时证据</span><h3 id="boundary-snapshot-viewer-title">已绑定的不可变快照</h3><p>选择对话查看实际执行中的规则；此区域只读。</p></div></div></section>
-                            <section class="container-policy-control" aria-label="边界快照选择" data-i18n="containerManagement.boundaryControlsLabel" data-i18n-attr="aria-label">
-                                <label class="container-policy-conversation"><span data-i18n="containerManagement.boundaryConversation">对话容器</span><select id="boundary-rules-conversation" data-unified-select="single" data-unified-search="true"><option value="" data-i18n="containerManagement.boundarySelectConversation">选择已绑定快照的对话</option></select></label>
-                                <button id="boundary-rules-refresh" class="btn-secondary" type="button" data-i18n="containerManagement.refresh">刷新状态</button>
-                            </section>
-                            <div id="boundary-rules-load-state" class="container-policy-load-state" role="status" aria-live="polite"></div>
-                            <section id="boundary-rules-detail" class="container-policy-detail" aria-live="polite"></section>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -5287,7 +5363,7 @@
                                 </div>
                                 <div class="network-activity-filters" aria-label="网络活动筛选">
                                     <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.activityDomain">域名</span><input id="network-activity-domain" type="search" maxlength="253" autocomplete="off" data-i18n="containerManagement.activityDomainPlaceholder" data-i18n-attr="placeholder" placeholder="筛选域名或解析 IP…"></label>
-                                    <div class="container-runtime-filter-field"><label for="network-activity-type" data-i18n="containerManagement.activityRequestType">请求类型</label><select id="network-activity-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option></select></div>
+                                    <div class="container-runtime-filter-field"><label for="network-activity-type" data-i18n="containerManagement.activityRequestType">请求类型</label><select id="network-activity-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option></select></div>
                                     <div class="container-runtime-filter-field"><label for="network-activity-decision" data-i18n="containerManagement.activityDecision">策略判定</label><select id="network-activity-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option></select></div>
                                     <div class="container-runtime-filter-field"><label for="network-activity-agent" data-i18n="containerManagement.activityAgent">Agent</label><select id="network-activity-agent" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="container-agent" data-i18n="containerManagement.activityContainerAgent">容器 Agent</option></select></div>
                                     <div class="container-runtime-filter-field"><label for="network-activity-tool" data-i18n="containerManagement.activityToolFilter">工具</label><select id="network-activity-tool" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="unknown" data-i18n="containerManagement.activityToolUnknown">工具未知</option></select></div>
@@ -5319,21 +5395,28 @@
                                 <div class="egress-audit-filter-grid">
                                     <label class="egress-audit-field is-search"><span data-i18n="containerManagement.auditSearch">搜索</span><input id="egress-audit-search" type="search" maxlength="200" autocomplete="off" data-i18n="containerManagement.auditSearchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索对话、域名、IP、规则或出口…"></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditCategory">类别</span><select id="egress-audit-category" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="network" data-i18n="containerManagement.auditCategoryNetwork">网络</option><option value="lifecycle" data-i18n="containerManagement.auditCategoryLifecycle">生命周期</option></select></label>
-                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="health" data-i18n="containerManagement.auditHealth">出站健康</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">对账</option></select></label>
+                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="health" data-i18n="containerManagement.auditHealth">出站健康</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">对账</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditDecisionFilter">判定</span><select id="egress-audit-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option><option value="success" data-i18n="containerManagement.auditSuccess">成功</option><option value="failure" data-i18n="containerManagement.auditFailure">失败</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.rowsPerPage">每页</span><select id="egress-audit-page-size" data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
                                 </div>
-                                <div class="egress-audit-actions"><button id="egress-audit-refresh" class="btn-secondary" type="button" data-i18n="common.refresh">刷新</button><button id="egress-audit-export-json" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportJSON">导出 JSON</button><button id="egress-audit-export-csv" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportCSV">导出 CSV</button></div>
+                                <div class="egress-audit-actions"><button id="egress-audit-refresh" class="btn-secondary" type="button" data-i18n="common.refresh">刷新</button><button id="egress-audit-export-json" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportJSON">导出 JSON</button><button id="egress-audit-export-csv" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportCSV">导出 CSV</button><button id="egress-audit-delete-selected" class="btn-danger" type="button" data-require-permission="audit:delete" disabled>删除已选 (0)</button><button id="egress-audit-delete-filtered" class="btn-danger" type="button" data-require-permission="audit:delete" disabled>删除筛选结果</button></div>
                             </section>
                             <div id="egress-audit-summary" class="egress-audit-summary" aria-label="审计汇总" data-i18n="containerManagement.auditSummaryLabel" data-i18n-attr="aria-label"></div>
                             <section class="container-management-surface egress-audit-results" aria-labelledby="egress-audit-results-title">
                                 <div class="egress-audit-results-heading"><div><h3 id="egress-audit-results-title" data-i18n="containerManagement.auditResults">审计事件</h3><p id="egress-audit-load-state" role="status" aria-live="polite" data-i18n="containerManagement.auditLoading">正在加载审计事件…</p></div><div id="egress-audit-pagination-meta" class="egress-audit-pagination-meta"></div></div>
                                 <div class="egress-audit-table-wrap">
-                                    <table class="egress-audit-table"><thead><tr><th data-i18n="containerManagement.activityTime">时间</th><th data-i18n="containerManagement.auditEventType">事件</th><th data-i18n="containerManagement.activityConversation">对话</th><th data-i18n="containerManagement.activityTarget">目标</th><th data-i18n="containerManagement.auditPacket">报文摘要</th><th data-i18n="containerManagement.activityDecision">策略判定</th><th data-i18n="containerManagement.auditTrace">追溯</th><th data-i18n="containerManagement.activityResult">结果</th></tr></thead><tbody id="egress-audit-rows"></tbody></table>
+                                    <table class="egress-audit-table"><thead><tr><th class="is-select"><input id="egress-audit-select-page" type="checkbox" aria-label="选择当前页"></th><th data-i18n="containerManagement.activityTime">时间</th><th data-i18n="containerManagement.auditEventType">事件</th><th data-i18n="containerManagement.activityConversation">对话</th><th data-i18n="containerManagement.activityTarget">目标</th><th data-i18n="containerManagement.auditPacket">报文摘要</th><th data-i18n="containerManagement.activityDecision">策略判定</th><th data-i18n="containerManagement.auditTrace">追溯</th><th data-i18n="containerManagement.activityResult">结果</th></tr></thead><tbody id="egress-audit-rows"></tbody></table>
                                     <div id="egress-audit-empty" class="network-activity-empty"><span aria-hidden="true">≋</span><strong data-i18n="containerManagement.auditEmpty">暂无符合条件的审计事件</strong><p data-i18n="containerManagement.auditEmptyHint">运行容器并产生网络请求或生命周期操作后，事件会持久显示在这里。</p></div>
                                 </div>
                                 <div class="egress-audit-pagination"><button id="egress-audit-prev" class="btn-secondary" type="button" data-i18n="common.previous">上一页</button><button id="egress-audit-next" class="btn-secondary" type="button" data-i18n="common.next">下一页</button></div>
                             </section>
+                            <div id="egress-audit-packet-modal" class="egress-audit-packet-modal" hidden role="dialog" aria-modal="true" aria-labelledby="egress-audit-packet-title">
+                                <div class="egress-audit-packet-dialog">
+                                    <div class="egress-audit-packet-heading"><div><h3 id="egress-audit-packet-title">HTTP/HTTPS 完整报文</h3><p id="egress-audit-packet-meta"></p></div><button id="egress-audit-packet-close" type="button" class="modal-close" aria-label="关闭"></button></div>
+                                    <p class="egress-audit-packet-warning">审计报文按原文显示，可能包含 Authorization、Cookie、Token 和业务敏感数据；请求与响应正文各最多记录 32 KiB。</p>
+                                    <div class="egress-audit-packet-grid"><section><h4>请求</h4><pre id="egress-audit-packet-request"></pre></section><section><h4>响应</h4><pre id="egress-audit-packet-response"></pre></section></div>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -7212,7 +7295,7 @@
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
     <script src="/static/js/monitor.js?v=20260824-1"></script>
-    <script src="/static/js/chat.js?v=20260824-1"></script>
+    <script src="/static/js/chat.js?v=20260824-3"></script>
     <script src="/static/js/chat-plan-progress.js?v=20260815-1"></script>
     <script src="/static/js/hitl.js?v=20260819-1"></script>
     <script src="/static/js/settings.js?v=20260717-1"></script>
@@ -7221,12 +7304,13 @@
     <script src="/static/js/wechat-robot.js"></script>
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
-    <script src="/static/js/terminal.js"></script>
+    <script src="/static/js/terminal.js?v=20260824-1"></script>
+    <script src="/static/js/container-terminal.js?v=20260824-6"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260822-2"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260824-2"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>
@@ -7236,11 +7320,11 @@
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/network-activity.js?v=20260824-1"></script>
-    <script src="/static/js/egress-audit.js?v=20260824-1"></script>
-    <script src="/static/js/boundary-rules.js?v=20260823-3"></script>
+    <script src="/static/js/network-activity.js?v=20260824-2"></script>
+    <script src="/static/js/egress-audit.js?v=20260824-3"></script>
+    <script src="/static/js/boundary-rules.js?v=20260824-3"></script>
     <script src="/static/js/egress-management.js?v=20260823-2"></script>
-    <script src="/static/js/container-management.js?v=20260823-6"></script>
+    <script src="/static/js/container-management.js?v=20260824-8"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

@@ -44,6 +44,12 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, authorization: 'Bearer private-token' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, requestBody: 'private-body' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, responseHeaders: { cookie: 'private-cookie' } }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, httpPacket: {
+        requestLine: 'GET /safe?token=plain HTTP/1.1', requestHeaders: { Authorization: ['Bearer plain-token'] },
+        responseLine: 'HTTP/1.1 200 OK', responseHeaders: { 'Content-Type': ['text/plain'] },
+        responseBody: 'complete response', responseBodyEncoding: 'utf8', sensitiveDataRedacted: false,
+    } }), true);
+    assert.equal(audit.isSafeAuditEvent({ ...network, httpPacket: { requestLine: 'GET / HTTP/1.1', requestHeaders: {}, extra: 'unsafe' } }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, chainSequence: 0 }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, previousHash: 'not-a-hash' }), false);
     assert.equal(audit.isSafeAuditEvent({ ...network, eventHash: 'A'.repeat(64) }), false);
@@ -78,13 +84,17 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
         'egress-audit-page-size', 'egress-audit-refresh', 'egress-audit-export-json',
         'egress-audit-export-csv', 'egress-audit-summary', 'egress-audit-rows',
         'egress-audit-prev', 'egress-audit-next', 'egress-audit-pagination-meta', 'egress-audit-integrity',
+        'egress-audit-select-page', 'egress-audit-delete-selected', 'egress-audit-delete-filtered',
+        'egress-audit-packet-modal', 'egress-audit-packet-request', 'egress-audit-packet-response',
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260824-1/);
+    assert.match(template, /egress-audit\.js\?v=20260824-3/);
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
+    assert.match(source, /method: 'DELETE'/);
+    assert.match(source, /\/api\/egress-audit-events\/.*encodeURIComponent\(event\.id\)/);
     assert.match(source, /root\.apiFetch/);
     assert.match(source, /createObjectURL\(blob\)/);
     assert.match(source, /URL_KEYS = Object\.freeze/);
@@ -104,7 +114,7 @@ test('egress audit translations and responsive table/card layout are complete', 
         'auditTrace', 'auditEmpty', 'auditTotal', 'auditNetwork', 'auditLifecycle', 'auditBlocked',
         'auditFailures', 'auditPageMeta', 'auditPageMetaEmpty',
         'auditIntegrityChecking', 'auditIntegrityVerified', 'auditIntegrityFailed',
-		'auditPacket',
+		'auditPacket', 'auditPacketView', 'auditDeleteSelected', 'auditDeleteFiltered', 'auditDeleted',
 		'auditHealth', 'auditHealthCooldownStarted', 'auditHealthCooldownExpired', 'auditHealthPaused', 'auditHealthRecovered',
     ];
     for (const locale of [zh, en]) {
@@ -117,9 +127,11 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-table-wrap\s*\{[\s\S]*?overflow-x: auto/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-audit-table tr\s*\{[\s\S]*?display: grid/);
     assert.match(styles, /\.egress-audit-table td::before[\s\S]*?content: attr\(data-label\)/);
+    assert.match(styles, /\.egress-audit-packet-modal\s*\{/);
+    assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260824-1/);
+    assert.match(template, /style\.css\?v=20260824-12/);
     assert.match(template, /router\.js\?v=20260822-5/);
-    assert.match(template, /container-management\.js\?v=20260823-6/);
+    assert.match(template, /container-management\.js\?v=20260824-8/);
 });

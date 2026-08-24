@@ -1,28 +1,35 @@
 (function () {
     'use strict';
 
+    const PAGE_SIZES = [10, 20, 50];
+    const params = typeof URLSearchParams === 'undefined' ? null : new URLSearchParams(window.location.search || '');
+    const initialPage = Number.parseInt(params && params.get('boundary_page'), 10);
+    const initialPageSize = Number.parseInt(params && params.get('boundary_page_size'), 10);
     const state = {
         bound: false,
         loading: false,
         requestId: 0,
-        conversations: [],
-        selectedConversationId: '',
-        snapshot: null,
         policies: [],
-        selectedPolicyId: '',
+        page: Number.isInteger(initialPage) && initialPage > 0 ? initialPage : 1,
+        pageSize: PAGE_SIZES.includes(initialPageSize) ? initialPageSize : 10,
+        search: String(params && params.get('boundary_q') || '').slice(0, 200),
+        total: 0,
+        totalPages: 0,
+        selectedPolicyId: String(params && params.get('boundary_policy') || '').trim(),
         selectedPolicy: null,
+        selectedUsage: [],
         authProfiles: [],
         editingRuleId: '',
-        error: '',
+        searchTimer: null,
     };
 
     function t(key, fallback, values) {
         const fullKey = 'containerManagement.' + key;
-        const params = values || {};
-        let value = typeof window.t === 'function' ? window.t(fullKey, params) : fallback;
+        const replacements = values || {};
+        let value = typeof window.t === 'function' ? window.t(fullKey, replacements) : fallback;
         if (!value || value === fullKey) value = fallback;
-        return Object.keys(params).reduce(function (current, name) {
-            return String(current).replaceAll('{{' + name + '}}', String(params[name]));
+        return Object.keys(replacements).reduce(function (current, name) {
+            return String(current).replaceAll('{{' + name + '}}', String(replacements[name]));
         }, String(value));
     }
 
@@ -54,7 +61,7 @@
 
     function shortHash(raw) {
         const value = String(raw || '').trim();
-        return value.length > 30 ? value.slice(0, 18) + '…' + value.slice(-10) : (value || '—');
+        return value.length > 26 ? value.slice(0, 15) + '…' + value.slice(-8) : (value || '—');
     }
 
     async function requestJSON(path, options) {
@@ -78,16 +85,13 @@
         }
     }
 
-    function selectedFromURL(key) {
-        if (!window.location || typeof URLSearchParams === 'undefined') return '';
-        return String(new URLSearchParams(window.location.search || '').get(key) || '').trim();
-    }
-
     function writeURL() {
         if (!window.location || !window.history || typeof URL === 'undefined') return;
         const url = new URL(window.location.href);
-        if (state.selectedConversationId) url.searchParams.set('boundary_conversation', state.selectedConversationId);
-        else url.searchParams.delete('boundary_conversation');
+        url.searchParams.set('boundary_page', String(state.page));
+        url.searchParams.set('boundary_page_size', String(state.pageSize));
+        if (state.search) url.searchParams.set('boundary_q', state.search);
+        else url.searchParams.delete('boundary_q');
         if (state.selectedPolicyId) url.searchParams.set('boundary_policy', state.selectedPolicyId);
         else url.searchParams.delete('boundary_policy');
         window.history.replaceState(window.history.state, '', url.toString());
@@ -101,60 +105,234 @@
         }
         const phase = document.getElementById('boundary-rules-phase');
         if (phase) {
-            phase.textContent = mode === 'error'
-                ? t('boundaryLoadFailed', '边界配置加载失败')
-                : mode === 'ready'
-                    ? t('boundaryReady', '策略草案与快照已加载')
-                    : t('boundaryLoading', '正在加载边界配置…');
+            phase.textContent = mode === 'error' ? '加载失败' : mode === 'ready' ? '策略列表已更新' : '正在加载边界策略…';
             phase.classList.toggle('is-error', mode === 'error');
             phase.classList.toggle('is-ready', mode === 'ready');
         }
     }
 
-    function renderConversationOptions() {
-        const select = document.getElementById('boundary-rules-conversation');
-        if (!select) return;
-        const previous = state.selectedConversationId || selectedFromURL('boundary_conversation');
-        const placeholder = element('option', '', t('boundarySelectConversation', '选择已绑定快照的对话'));
-        placeholder.value = '';
-        const options = [placeholder];
-        state.conversations.forEach(function (record) {
-            const option = element('option', '', String(record.conversationTitle || record.conversationId));
-            option.value = String(record.conversationId || '');
-            options.push(option);
-        });
-        select.replaceChildren.apply(select, options);
-        if (previous && state.conversations.some(function (item) { return item.conversationId === previous; })) {
-            select.value = previous;
-        } else if (state.conversations.length) {
-            select.value = state.conversations[0].conversationId;
-        }
-        state.selectedConversationId = select.value;
-        refreshUnified(select);
-        writeURL();
+    function actionButton(label, className, handler) {
+        const button = element('button', className, label);
+        button.type = 'button';
+        button.addEventListener('click', handler);
+        return button;
     }
 
-    function renderPolicyOptions() {
-        const select = document.getElementById('boundary-policy-select');
-        if (!select) return;
-        const previous = state.selectedPolicyId || selectedFromURL('boundary_policy');
-        const placeholder = element('option', '', '选择或新建边界策略');
-        placeholder.value = '';
-        const options = [placeholder];
-        state.policies.forEach(function (policy) {
-            const option = element('option', '', String(policy.name || policy.id));
-            option.value = String(policy.id || '');
-            options.push(option);
-        });
-        select.replaceChildren.apply(select, options);
-        if (previous && state.policies.some(function (item) { return item.id === previous; })) {
-            select.value = previous;
-        } else if (state.policies.length) {
-            select.value = state.policies[0].id;
+    function effectLabel(effect) {
+        return ({
+            blocked: t('boundaryEffectBlocked', '显式阻断'),
+            'allow-visit': t('boundaryEffectVisit', '允许访问'),
+            'allow-attack': t('boundaryEffectAttack', '允许测试'),
+            'auth-only': t('boundaryEffectAuth', '仅凭据访问'),
+        })[String(effect || '')] || String(effect || '—');
+    }
+
+    function ruleMethodsLabel(rule) {
+        if (Array.isArray(rule.methods) && rule.methods.length) return rule.methods.join(', ');
+        return t('boundaryAnyMethod', '任意方法');
+    }
+
+    function detailField(label, value, full) {
+        const field = element('div', 'container-policy-field');
+        field.append(element('dt', '', label));
+        const content = element('dd', '', value || '—');
+        if (full) content.title = String(full);
+        field.append(content);
+        return field;
+    }
+
+    function renderRule(rule, index, editable) {
+        const card = element('article', 'container-policy-rule' + (editable && state.editingRuleId === rule.id ? ' is-editing' : ''));
+        const heading = element('div', 'container-policy-rule-heading');
+        heading.append(
+            element('span', 'container-policy-position', String(Number(rule.position || index + 1))),
+            element('strong', '', effectLabel(rule.effect)),
+            element('code', '', String(rule.id || '—')),
+        );
+        if (editable) {
+            const actions = element('div', 'boundary-rule-card-actions');
+            actions.append(
+                actionButton('编辑', 'btn-secondary btn-small', function () { editRule(rule); }),
+                actionButton('删除', 'btn-danger btn-small', function () { deleteRule(rule); }),
+            );
+            heading.append(actions);
         }
-        state.selectedPolicyId = select.value;
-        refreshUnified(select);
+        const grid = element('dl', 'container-policy-rule-grid');
+        grid.append(
+            detailField(t('host', '主机'), rule.host || '*'),
+            detailField(t('protocol', '协议'), Array.isArray(rule.schemes) && rule.schemes.length ? rule.schemes.join(', ') : '任意协议'),
+            detailField(t('port', '端口'), Array.isArray(rule.ports) && rule.ports.length ? rule.ports.join(', ') : '*'),
+            detailField(t('boundaryMethods', '方法'), ruleMethodsLabel(rule)),
+            detailField(t('boundaryPaths', '路径前缀'), Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length ? rule.pathPrefixes.join(', ') : '*'),
+            detailField(t('boundaryExpires', '过期时间'), rule.expiresAt ? formatDate(rule.expiresAt) : t('boundaryNeverExpires', '永不过期')),
+        );
+        const rate = rule.rateLimit || {};
+        const footer = element('div', 'container-policy-rule-footer');
+        footer.append(
+            element('span', '', t('boundaryRate', '速率 {{rate}}/秒 · 突发 {{burst}} · 并发 {{concurrent}}', {
+                rate: Number(rate.requestsPerSecond || 0), burst: Number(rate.burst || 0), concurrent: Number(rate.maxConcurrent || 0),
+            })),
+            element('span', '', rule.authProfileId ? '已绑定凭据档案' : '无凭据注入'),
+        );
+        card.append(heading, grid, footer);
+        return card;
+    }
+
+    function renderEmpty(root, title, description) {
+        if (!root) return;
+        const empty = element('div', 'container-policy-empty');
+        empty.append(element('span', '', '⌁'), element('strong', '', title));
+        if (description) empty.append(element('p', '', description));
+        root.replaceChildren(empty);
+    }
+
+    function protocolLabel(policy) {
+        const protocols = Array.isArray(policy.protocols) ? policy.protocols : [];
+        if (!protocols.length) return '暂无规则';
+        if (protocols.includes('any')) return '任意协议';
+        return protocols.map(function (item) { return String(item).toUpperCase(); }).join(' · ');
+    }
+
+    function renderPolicyList() {
+        const root = document.getElementById('boundary-policy-list');
+        if (!root) return;
+        root.replaceChildren();
+        if (!state.policies.length) {
+            renderEmpty(root, state.search ? '没有匹配的边界策略' : '还没有边界策略', state.search ? '请调整检索条件。' : '新建策略后，可以在对话容器中切换使用。');
+            return;
+        }
+        state.policies.forEach(function (policy) {
+            const row = element('article', 'boundary-policy-row');
+            row.setAttribute('role', 'listitem');
+            const identity = element('div', 'boundary-policy-row-identity');
+            identity.append(element('strong', '', policy.name || policy.id), element('p', '', policy.description || '未填写说明'));
+            const rules = element('div', 'boundary-policy-row-value');
+            rules.append(element('strong', '', String(Number(policy.ruleCount || 0)) + ' 条规则'), element('small', '', protocolLabel(policy)));
+            const usage = element('div', 'boundary-policy-row-value');
+            usage.append(element('strong', policy.usageCount ? 'is-used' : '', String(Number(policy.usageCount || 0)) + ' 个对话'), element('small', '', policy.usageCount ? '删除前需先切换' : '可安全删除'));
+            const updated = element('time', 'boundary-policy-row-time', formatDate(policy.updatedAt));
+            const actions = element('div', 'boundary-policy-row-actions');
+            actions.append(
+                actionButton('查看', 'btn-secondary btn-small', function () { openDetail(policy.id); }),
+                actionButton('修改', 'btn-secondary btn-small', function () { openEditor(policy.id); }),
+                actionButton('删除', 'btn-danger btn-small', function () { deletePolicy(policy); }),
+            );
+            row.append(identity, rules, usage, updated, actions);
+            root.append(row);
+        });
+    }
+
+    function renderPagination() {
+        const root = document.getElementById('boundary-policy-pagination');
+        if (!root) return;
+        root.replaceChildren();
+        const pageCount = Math.max(1, state.totalPages || 0);
+        const previous = actionButton('上一页', 'btn-secondary', function () { setPage(state.page - 1); });
+        previous.disabled = state.loading || state.page <= 1 || state.total === 0;
+        const label = element('span', 'container-runtime-page-summary', '第 ' + state.page + ' / ' + pageCount + ' 页，共 ' + state.total + ' 个策略');
+        const next = actionButton('下一页', 'btn-secondary', function () { setPage(state.page + 1); });
+        next.disabled = state.loading || state.page >= pageCount || state.total === 0;
+        root.append(previous, label, next);
+    }
+
+    function setPage(page) {
+        const pageCount = Math.max(1, state.totalPages || 0);
+        state.page = Math.min(Math.max(1, Number.parseInt(page, 10) || 1), pageCount);
         writeURL();
+        refresh();
+    }
+
+    function showDrawer() {
+        const drawer = document.getElementById('boundary-policy-detail-drawer');
+        const backdrop = document.getElementById('boundary-policy-detail-backdrop');
+        if (drawer) { drawer.hidden = false; drawer.setAttribute('aria-hidden', 'false'); }
+        if (backdrop) backdrop.hidden = false;
+        document.body.classList.add('boundary-policy-overlay-open');
+    }
+
+    function closeDrawer() {
+        const drawer = document.getElementById('boundary-policy-detail-drawer');
+        const backdrop = document.getElementById('boundary-policy-detail-backdrop');
+        if (drawer) { drawer.hidden = true; drawer.setAttribute('aria-hidden', 'true'); }
+        if (backdrop) backdrop.hidden = true;
+        if (document.getElementById('boundary-policy-editor-modal')?.hidden !== false) document.body.classList.remove('boundary-policy-overlay-open');
+    }
+
+    function renderUsageItem(item) {
+        const card = element('article', 'boundary-policy-usage-card');
+        const heading = element('div', 'boundary-policy-usage-heading');
+        heading.append(element('strong', '', item.conversationTitle || item.conversationId), element('span', 'container-runtime-badge is-' + (item.runtimeStatus === 'running' ? 'success' : 'neutral'), item.runtimeStatus || 'not_requested'));
+        const metadata = element('dl', 'boundary-policy-usage-grid');
+        metadata.append(
+            detailField('对话 ID', shortHash(item.conversationId), item.conversationId),
+            detailField('工作区', item.workspacePersistent ? '持久' : '临时'),
+            detailField('激活代次', item.runtimeGeneration ? String(item.runtimeGeneration) : '首次启动前'),
+            detailField('快照 Hash', shortHash(item.snapshotSha256), item.snapshotSha256),
+        );
+        card.append(heading, metadata);
+        return card;
+    }
+
+    function renderDetail() {
+        const root = document.getElementById('boundary-policy-detail-body');
+        const title = document.getElementById('boundary-policy-detail-title');
+        const remove = document.getElementById('boundary-policy-detail-delete');
+        if (!root || !state.selectedPolicy) return;
+        const policy = state.selectedPolicy;
+        if (title) title.textContent = policy.name || '策略详情';
+        root.replaceChildren();
+        const summary = element('section', 'boundary-policy-detail-section');
+        summary.append(element('p', 'boundary-policy-detail-description', policy.description || '未填写说明'));
+        const metadata = element('dl', 'boundary-policy-detail-metadata');
+        metadata.append(
+            detailField('HTTPS 完整审计', policy.tlsInspectionEnabled ? '已启用' : '未启用'),
+            detailField('规则数量', String(Array.isArray(policy.rules) ? policy.rules.length : 0)),
+            detailField('更新时间', formatDate(policy.updatedAt)),
+        );
+        summary.append(metadata);
+        root.append(summary);
+        const ruleSection = element('section', 'boundary-policy-detail-section');
+        const ruleHeading = element('div', 'boundary-policy-detail-section-heading');
+        ruleHeading.append(element('h4', '', '策略规则'), element('span', '', '未命中默认阻断'));
+        ruleSection.append(ruleHeading);
+        const rules = element('div', 'container-policy-rule-list');
+        if (Array.isArray(policy.rules) && policy.rules.length) policy.rules.forEach(function (rule, index) { rules.append(renderRule(rule, index, false)); });
+        else renderEmpty(rules, '当前为空策略', '所有网络目标默认拒绝。');
+        ruleSection.append(rules);
+        root.append(ruleSection);
+        const usageSection = element('section', 'boundary-policy-detail-section');
+        const usageHeading = element('div', 'boundary-policy-detail-section-heading');
+        usageHeading.append(element('h4', '', '正在使用此策略'), element('span', '', state.selectedUsage.length + ' 个对话容器'));
+        usageSection.append(usageHeading);
+        const usageList = element('div', 'boundary-policy-usage-list');
+        if (state.selectedUsage.length) state.selectedUsage.forEach(function (item) { usageList.append(renderUsageItem(item)); });
+        else renderEmpty(usageList, '当前没有对话使用此策略', '此策略可以直接删除。');
+        usageSection.append(usageList);
+        root.append(usageSection);
+        if (remove) {
+            remove.disabled = state.selectedUsage.length > 0;
+            remove.title = state.selectedUsage.length ? '请先在对话容器中切换策略' : '';
+        }
+    }
+
+    async function openDetail(policyId) {
+        state.selectedPolicyId = String(policyId || '');
+        writeURL();
+        showDrawer();
+        renderEmpty(document.getElementById('boundary-policy-detail-body'), '正在读取策略详情…');
+        const requestId = ++state.requestId;
+        try {
+            const results = await Promise.all([
+                requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId)),
+                requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId) + '/usage'),
+            ]);
+            if (requestId !== state.requestId) return;
+            state.selectedPolicy = results[0];
+            state.selectedUsage = Array.isArray(results[1].items) ? results[1].items : [];
+            renderDetail();
+        } catch (error) {
+            renderEmpty(document.getElementById('boundary-policy-detail-body'), '读取策略详情失败', error.message || '');
+        }
     }
 
     function renderAuthProfileOptions() {
@@ -174,143 +352,44 @@
         refreshUnified(select);
     }
 
-    function detailField(label, value, full) {
-        const wrapper = element('div', 'container-policy-field');
-        wrapper.append(element('dt', '', label));
-        const content = element('dd', '', value || '—');
-        if (full) content.title = String(full);
-        wrapper.append(content);
-        return wrapper;
-    }
-
-    function effectLabel(effect) {
-        const labels = {
-            'blocked': t('boundaryEffectBlocked', '显式阻断'),
-            'allow-visit': t('boundaryEffectVisit', '允许访问'),
-            'allow-attack': t('boundaryEffectAttack', '允许测试'),
-            'auth-only': t('boundaryEffectAuth', '仅凭据访问'),
-        };
-        return labels[String(effect || '')] || String(effect || '—');
-    }
-
-    function ruleMethodsLabel(rule) {
-        if (Array.isArray(rule.methods) && rule.methods.length) return rule.methods.join(', ');
-        if (rule.effect === 'allow-visit') {
-            return t('boundaryVisitDefaultMethods', 'GET, HEAD, OPTIONS（默认）');
-        }
-        return '*';
-    }
-
-    function actionButton(label, className, handler) {
-        const button = element('button', className, label);
-        button.type = 'button';
-        button.addEventListener('click', handler);
-        return button;
-    }
-
-    function renderRule(rule, index, editable) {
-        const card = element('article', 'container-policy-rule' + (editable && state.editingRuleId === rule.id ? ' is-editing' : ''));
-        const heading = element('div', 'container-policy-rule-heading');
-        heading.append(
-            element('span', 'container-policy-position', String(Number(rule.position || index + 1))),
-            element('strong', '', effectLabel(rule.effect)),
-            element('code', '', String(rule.id || '—')),
-        );
-        if (editable) {
-            const actions = element('div', 'boundary-rule-card-actions');
-            actions.append(
-                actionButton('编辑', 'btn-secondary btn-small', function () { editRule(rule); }),
-                actionButton('删除', 'btn-danger btn-small', function () { deleteRule(rule); }),
-            );
-            heading.append(actions);
-        }
-        const target = element('dl', 'container-policy-rule-grid');
-        target.append(
-            detailField(t('host', '主机'), rule.host || '*'),
-            detailField(t('protocol', '协议'), Array.isArray(rule.schemes) && rule.schemes.length ? rule.schemes.join(', ') : '*'),
-            detailField(t('port', '端口'), Array.isArray(rule.ports) && rule.ports.length ? rule.ports.join(', ') : '*'),
-            detailField(t('boundaryMethods', '方法'), ruleMethodsLabel(rule)),
-            detailField(t('boundaryPaths', '路径前缀'), Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length ? rule.pathPrefixes.join(', ') : '*'),
-            detailField(t('boundaryExpires', '过期时间'), rule.expiresAt ? formatDate(rule.expiresAt) : t('boundaryNeverExpires', '永不过期')),
-        );
-        const rate = rule.rateLimit || {};
-        const footer = element('div', 'container-policy-rule-footer');
-        footer.append(
-            element('span', '', t('boundaryRate', '速率 {{rate}}/秒 · 突发 {{burst}} · 并发 {{concurrent}}', {
-                rate: Number(rate.requestsPerSecond || 0),
-                burst: Number(rate.burst || 0),
-                concurrent: Number(rate.maxConcurrent || 0),
-            })),
-            element('span', '', rule.authProfileId
-                ? t('boundaryAuthProfile', '凭据档案 {{id}}', { id: rule.authProfileId })
-                : t('boundaryNoAuthProfile', '无凭据注入')),
-        );
-        card.append(heading, target, footer);
-        return card;
-    }
-
-    function renderEmpty(root, message, detail) {
-        if (!root) return;
-        const empty = element('div', 'container-policy-empty');
-        empty.append(element('span', '', '⌁'), element('strong', '', message));
-        if (detail) empty.append(element('p', '', detail));
-        root.replaceChildren(empty);
-    }
-
-    function renderSnapshot() {
-        const root = document.getElementById('boundary-rules-detail');
-        if (!root) return;
-        if (!state.selectedConversationId) {
-            renderEmpty(root, t('boundaryNoConversations', '暂无已绑定边界快照的对话'), t('boundaryNoConversationsHint', '创建并首次启动容器对话后，不可变快照会显示在这里。'));
-            return;
-        }
-        if (!state.snapshot) {
-            renderEmpty(root, t('boundarySnapshotMissing', '该对话尚未绑定不可变快照'));
-            return;
-        }
-        const snapshot = state.snapshot;
-        const summary = element('section', 'container-policy-snapshot');
-        const heading = element('div', 'container-policy-snapshot-heading');
-        const headingText = element('div');
-        headingText.append(element('span', 'container-runtime-kicker', t('boundarySnapshot', '不可变策略快照')), element('h3', '', String(snapshot.document && snapshot.document.policyId || snapshot.policyId || '—')));
-        heading.append(headingText, element('span', 'container-management-phase is-ready', t('boundaryVerified', 'SHA-256 已验证')));
-        const metadata = element('dl', 'container-policy-metadata');
-        metadata.append(
-            detailField(t('boundarySnapshotId', '快照 ID'), shortHash(snapshot.snapshotId), snapshot.snapshotId),
-            detailField(t('boundarySnapshotHash', '快照 Hash'), shortHash(snapshot.sha256), snapshot.sha256),
-            detailField(t('boundaryGeneration', '激活代次'), String(snapshot.runtimeGeneration || 0)),
-            detailField(t('boundaryBoundAt', '绑定时间'), formatDate(snapshot.boundAt)),
-            detailField(t('boundarySchemaVersion', '文档版本'), String(snapshot.document && snapshot.document.schemaVersion || 1)),
-            detailField(t('boundaryRuleCount', '规则数量'), String(snapshot.document && Array.isArray(snapshot.document.rules) ? snapshot.document.rules.length : 0)),
-        );
-        summary.append(heading, metadata);
-        const rulesSection = element('section', 'container-policy-rules');
-        const rulesHeading = element('div', 'container-policy-rules-heading');
-        rulesHeading.append(element('h3', '', t('boundaryRulesTitle', '按固定优先级执行的规则')), element('p', '', t('boundaryRulesHint', '显式阻断优先；未命中任何规则时默认拒绝。')));
-        rulesSection.append(rulesHeading);
-        const rules = snapshot.document && Array.isArray(snapshot.document.rules) ? snapshot.document.rules : [];
-        const list = element('div', 'container-policy-rule-list');
-        if (rules.length) rules.forEach(function (rule, index) { list.append(renderRule(rule, index, false)); });
-        else list.append(element('div', 'container-policy-empty is-compact', t('boundaryDefaultDeny', '空快照：所有目标均默认拒绝')));
-        rulesSection.append(list);
-        root.replaceChildren(summary, rulesSection);
-    }
-
     function populatePolicyForm() {
         const policy = state.selectedPolicy;
         document.getElementById('boundary-policy-id').value = policy ? policy.id : '';
         document.getElementById('boundary-policy-name').value = policy ? policy.name || '' : '';
         document.getElementById('boundary-policy-description').value = policy ? policy.description || '' : '';
-		const tlsEnabled = Boolean(policy && policy.tlsInspectionEnabled);
-		document.getElementById('boundary-policy-tls-enabled').checked = tlsEnabled;
-		document.getElementById('boundary-policy-tls-bypass').value = policy && Array.isArray(policy.tlsBypassDomains) ? policy.tlsBypassDomains.join(', ') : '';
-		syncPolicyTLS();
-        const editor = document.getElementById('boundary-policy-editor');
-        if (editor) editor.hidden = !policy;
-        const deleteButton = document.getElementById('boundary-policy-delete');
-        if (deleteButton) deleteButton.disabled = !policy;
+        document.getElementById('boundary-policy-tls-enabled').checked = Boolean(policy && policy.tlsInspectionEnabled);
+        document.getElementById('boundary-policy-tls-bypass').value = policy && Array.isArray(policy.tlsBypassDomains) ? policy.tlsBypassDomains.join(', ') : '';
+        document.getElementById('boundary-policy-editor').hidden = !policy;
+        document.getElementById('boundary-policy-editor-title').textContent = policy ? '修改边界策略' : '新建边界策略';
+        syncPolicyTLS();
         resetRuleForm();
         renderDraftRules();
+    }
+
+    function showEditor() {
+        const modal = document.getElementById('boundary-policy-editor-modal');
+        if (modal) modal.hidden = false;
+        document.body.classList.add('boundary-policy-overlay-open');
+    }
+
+    function closeEditor() {
+        resetRuleForm();
+        const modal = document.getElementById('boundary-policy-editor-modal');
+        if (modal) modal.hidden = true;
+        if (document.getElementById('boundary-policy-detail-drawer')?.hidden !== false) document.body.classList.remove('boundary-policy-overlay-open');
+    }
+
+    async function openEditor(policyId) {
+        state.selectedPolicyId = String(policyId || '');
+        state.selectedPolicy = null;
+        showEditor();
+        if (state.selectedPolicyId) {
+            try { state.selectedPolicy = await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId)); }
+            catch (error) { notify(error.message || '读取边界策略失败', 'error'); closeEditor(); return; }
+        }
+        populatePolicyForm();
+        writeURL();
+        document.getElementById('boundary-policy-name').focus();
     }
 
     function renderDraftRules() {
@@ -319,38 +398,10 @@
         root.replaceChildren();
         const rules = state.selectedPolicy && Array.isArray(state.selectedPolicy.rules) ? state.selectedPolicy.rules : [];
         if (!rules.length) {
-            const empty = element('div', 'container-policy-empty is-compact');
-            empty.append(element('span', '', '⌁'), element('p', '', '当前为空策略：所有网络目标默认拒绝。点击“新增规则”填写允许或阻断目标。'));
-            root.append(empty);
+            renderEmpty(root, '当前为空策略', '点击“新增规则”填写 HTTP、HTTPS、TCP 或 UDP 访问边界。');
             return;
         }
         rules.forEach(function (rule, index) { root.append(renderRule(rule, index, true)); });
-    }
-
-    async function loadPolicy(requestId) {
-        state.selectedPolicy = null;
-        populatePolicyForm();
-        if (!state.selectedPolicyId) return;
-        const payload = await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId));
-        if (requestId !== state.requestId) return;
-        state.selectedPolicy = payload;
-        populatePolicyForm();
-    }
-
-    async function loadSnapshot(requestId) {
-        state.snapshot = null;
-        renderSnapshot();
-        if (!state.selectedConversationId) return;
-        try {
-            const payload = await requestJSON('/api/conversations/' + encodeURIComponent(state.selectedConversationId) + '/boundary');
-            if (requestId !== state.requestId) return;
-            state.snapshot = payload;
-            renderSnapshot();
-        } catch (error) {
-            if (requestId !== state.requestId) return;
-            const root = document.getElementById('boundary-rules-detail');
-            renderEmpty(root, t('boundaryLoadFailed', '快照加载失败'), error && error.message ? error.message : '');
-        }
     }
 
     function splitValues(value, transform) {
@@ -400,13 +451,13 @@
         document.getElementById('boundary-rule-burst').value = '0';
         document.getElementById('boundary-rule-concurrent').value = '0';
         syncRuleAuth();
-        renderDraftRules();
     }
 
     function openNewRule() {
         resetRuleForm();
         const form = document.getElementById('boundary-rule-form');
         form.hidden = false;
+        document.getElementById('boundary-rule-form-title').textContent = '新增边界规则';
         const rules = state.selectedPolicy && Array.isArray(state.selectedPolicy.rules) ? state.selectedPolicy.rules : [];
         document.getElementById('boundary-rule-position').value = String(rules.length + 1);
         document.getElementById('boundary-rule-host').focus();
@@ -416,6 +467,7 @@
         state.editingRuleId = String(rule.id || '');
         const form = document.getElementById('boundary-rule-form');
         form.hidden = false;
+        document.getElementById('boundary-rule-form-title').textContent = '修改边界规则';
         document.getElementById('boundary-rule-id').value = state.editingRuleId;
         document.getElementById('boundary-rule-effect').value = rule.effect || 'allow-visit';
         document.getElementById('boundary-rule-host').value = rule.host || '';
@@ -432,7 +484,7 @@
         document.getElementById('boundary-rule-expires').value = dateTimeLocal(rule.expiresAt);
         syncRuleAuth();
         renderDraftRules();
-        form.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        document.getElementById('boundary-rule-host').focus();
     }
 
     function syncRuleAuth() {
@@ -446,15 +498,21 @@
         refreshUnified(select);
     }
 
-	function syncPolicyTLS() {
-		const enabled = document.getElementById('boundary-policy-tls-enabled');
-		const field = document.getElementById('boundary-policy-tls-bypass-field');
-		const input = document.getElementById('boundary-policy-tls-bypass');
-		if (!enabled || !field || !input) return;
-		field.hidden = !enabled.checked;
-		input.disabled = !enabled.checked;
-		if (!enabled.checked) input.value = '';
-	}
+    function syncPolicyTLS() {
+        const enabled = document.getElementById('boundary-policy-tls-enabled');
+        const field = document.getElementById('boundary-policy-tls-bypass-field');
+        const input = document.getElementById('boundary-policy-tls-bypass');
+        if (!enabled || !field || !input) return;
+        field.hidden = !enabled.checked;
+        input.disabled = !enabled.checked;
+        if (!enabled.checked) input.value = '';
+    }
+
+    async function reloadSelectedPolicy() {
+        if (!state.selectedPolicyId) return;
+        state.selectedPolicy = await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId));
+        populatePolicyForm();
+    }
 
     async function savePolicy(event) {
         event.preventDefault();
@@ -462,34 +520,33 @@
         const payload = {
             name: document.getElementById('boundary-policy-name').value.trim(),
             description: document.getElementById('boundary-policy-description').value.trim(),
-			tlsInspectionEnabled: document.getElementById('boundary-policy-tls-enabled').checked,
-			tlsBypassDomains: splitValues(document.getElementById('boundary-policy-tls-bypass').value),
+            tlsInspectionEnabled: document.getElementById('boundary-policy-tls-enabled').checked,
+            tlsBypassDomains: splitValues(document.getElementById('boundary-policy-tls-bypass').value),
         };
-        if (!payload.name) {
-            notify('请输入策略名称', 'error');
-            return;
-        }
+        if (!payload.name) { notify('请输入策略名称', 'error'); return; }
         try {
             const saved = await requestJSON('/api/boundary-policies' + (id ? '/' + encodeURIComponent(id) : ''), jsonOptions(id ? 'PUT' : 'POST', payload));
             state.selectedPolicyId = saved.id;
-            notify(id ? '边界策略已更新；已运行对话仍使用原不可变快照' : '边界策略已创建', 'success');
-            await refresh();
-        } catch (error) {
-            notify(error.message || '保存边界策略失败', 'error');
-        }
+            state.selectedPolicy = saved;
+            populatePolicyForm();
+            writeURL();
+            notify(id ? '边界策略已更新；运行中容器仍使用原快照' : '边界策略已创建，现在可以添加规则', 'success');
+            await refresh(false);
+        } catch (error) { notify(error.message || '保存边界策略失败', 'error'); }
     }
 
-    async function deletePolicy() {
-        if (!state.selectedPolicy) return;
-        if (!window.confirm('删除策略草案“' + state.selectedPolicy.name + '”？已绑定快照不会被修改；仍被对话选择的策略无法删除。')) return;
+    async function deletePolicy(policy) {
+        const target = policy || state.selectedPolicy;
+        if (!target) return;
+        const usageCount = Number(target.usageCount || (target.id === state.selectedPolicyId ? state.selectedUsage.length : 0));
+        if (usageCount > 0) { notify('此策略仍被对话容器使用，请先切换策略', 'error'); return; }
+        if (!window.confirm('删除边界策略“' + target.name + '”？此操作无法撤销。')) return;
         try {
-            await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicy.id), { method: 'DELETE' });
-            state.selectedPolicyId = '';
-            notify('边界策略草案已删除', 'success');
+            await requestJSON('/api/boundary-policies/' + encodeURIComponent(target.id), { method: 'DELETE' });
+            if (target.id === state.selectedPolicyId) { state.selectedPolicyId = ''; state.selectedPolicy = null; state.selectedUsage = []; closeDrawer(); closeEditor(); }
+            notify('边界策略已删除', 'success');
             await refresh();
-        } catch (error) {
-            notify(error.message || '删除边界策略失败', 'error');
-        }
+        } catch (error) { notify(error.message || '删除边界策略失败', 'error'); }
     }
 
     async function saveRule(event) {
@@ -497,115 +554,116 @@
         if (!state.selectedPolicyId) return;
         const ruleID = document.getElementById('boundary-rule-id').value.trim();
         try {
-            const payload = rulePayload();
             const path = '/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId) + '/rules' + (ruleID ? '/' + encodeURIComponent(ruleID) : '');
-            await requestJSON(path, jsonOptions(ruleID ? 'PUT' : 'POST', payload));
+            await requestJSON(path, jsonOptions(ruleID ? 'PUT' : 'POST', rulePayload()));
             notify(ruleID ? '边界规则已更新' : '边界规则已创建', 'success');
-            const requestId = ++state.requestId;
-            await loadPolicy(requestId);
-            writeURL();
-        } catch (error) {
-            notify(error.message || '保存边界规则失败', 'error');
-        }
+            await reloadSelectedPolicy();
+            await refresh(false);
+        } catch (error) { notify(error.message || '保存边界规则失败', 'error'); }
     }
 
     async function deleteRule(rule) {
-        if (!state.selectedPolicyId || !window.confirm('删除规则“' + String(rule.id || '') + '”？')) return;
+        if (!state.selectedPolicyId || !window.confirm('删除当前规则？')) return;
         try {
             await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId) + '/rules/' + encodeURIComponent(rule.id), { method: 'DELETE' });
             notify('边界规则已删除', 'success');
-            const requestId = ++state.requestId;
-            await loadPolicy(requestId);
-            writeURL();
-        } catch (error) {
-            notify(error.message || '删除边界规则失败', 'error');
-        }
+            await reloadSelectedPolicy();
+            await refresh(false);
+        } catch (error) { notify(error.message || '删除边界规则失败', 'error'); }
     }
 
-    async function refresh() {
+    async function refresh(resetSelection) {
         if (state.loading) return;
         state.loading = true;
         const requestId = ++state.requestId;
-        setStatus(t('boundaryLoading', '正在加载边界配置…'), 'loading');
-        const refreshButton = document.getElementById('boundary-rules-refresh');
-        if (refreshButton) refreshButton.disabled = true;
+        setStatus('正在加载边界策略…', 'loading');
+        renderPagination();
         try {
+            const query = new URLSearchParams({ page: String(state.page), page_size: String(state.pageSize) });
+            if (state.search) query.set('search', state.search);
             const results = await Promise.all([
-                requestJSON('/api/container-runtimes?page=1&page_size=100&status=all'),
-                requestJSON('/api/boundary-policies'),
-                // Credential profiles have their own egress:read permission.
-                // A boundary editor without that permission must still be able
-                // to manage non-auth rules instead of losing the whole page.
-                requestJSON('/api/egress-auth-profiles').catch(function () { return { items: [] }; }),
+                requestJSON('/api/boundary-policies?' + query.toString()),
+                state.authProfiles.length ? Promise.resolve({ items: state.authProfiles }) : requestJSON('/api/egress-auth-profiles').catch(function () { return { items: [] }; }),
             ]);
             if (requestId !== state.requestId) return;
-            const runtimes = Array.isArray(results[0].items) ? results[0].items : [];
-            state.conversations = runtimes.filter(function (record) {
-                return record && record.conversationId && record.desired && record.desired.boundarySnapshotSha256;
-            });
-            state.policies = Array.isArray(results[1].items) ? results[1].items : [];
-            state.authProfiles = Array.isArray(results[2].items) ? results[2].items : [];
-            renderConversationOptions();
-            renderPolicyOptions();
+            const payload = results[0];
+            state.policies = Array.isArray(payload.items) ? payload.items : [];
+            state.total = Number(payload.total || 0);
+            state.totalPages = Number(payload.totalPages || 0);
+            state.authProfiles = Array.isArray(results[1].items) ? results[1].items : [];
+            if (state.totalPages > 0 && state.page > state.totalPages) { state.page = state.totalPages; state.loading = false; writeURL(); await refresh(resetSelection); return; }
+            if (resetSelection !== false && state.selectedPolicyId && !state.policies.some(function (item) { return item.id === state.selectedPolicyId; })) state.selectedPolicyId = '';
+            renderPolicyList();
+            renderPagination();
             renderAuthProfileOptions();
-            await Promise.all([loadPolicy(requestId), loadSnapshot(requestId)]);
-            if (requestId !== state.requestId) return;
-            state.error = '';
-            setStatus('已加载 ' + state.policies.length + ' 个策略草案和 ' + state.conversations.length + ' 个运行时快照', 'ready');
+            writeURL();
+            setStatus('当前显示 ' + state.policies.length + ' 个，共 ' + state.total + ' 个边界策略', 'ready');
         } catch (error) {
             if (requestId !== state.requestId) return;
-            state.error = error && error.message ? error.message : t('boundaryLoadFailed', '边界配置加载失败');
-            setStatus(state.error, 'error');
+            state.policies = [];
+            state.total = 0;
+            state.totalPages = 0;
+            renderPolicyList();
+            setStatus(error.message || '加载边界策略失败', 'error');
         } finally {
             if (requestId === state.requestId) state.loading = false;
-            if (refreshButton) refreshButton.disabled = false;
+            renderPagination();
         }
     }
 
     function bind() {
         if (state.bound) return;
         state.bound = true;
-        const conversationSelect = document.getElementById('boundary-rules-conversation');
-        if (conversationSelect) conversationSelect.addEventListener('change', function () {
-            state.selectedConversationId = String(conversationSelect.value || '').trim();
-            writeURL();
-            loadSnapshot(++state.requestId);
-        });
-        const policySelect = document.getElementById('boundary-policy-select');
-        if (policySelect) policySelect.addEventListener('change', function () {
-            state.selectedPolicyId = String(policySelect.value || '').trim();
-            writeURL();
-            loadPolicy(++state.requestId).catch(function (error) { notify(error.message || '读取边界策略失败', 'error'); });
-        });
-        document.getElementById('boundary-rules-refresh')?.addEventListener('click', refresh);
-        document.getElementById('boundary-policy-new')?.addEventListener('click', function () {
-            state.selectedPolicyId = '';
-            state.selectedPolicy = null;
-            const select = document.getElementById('boundary-policy-select');
-            if (select) { select.value = ''; refreshUnified(select); }
-            populatePolicyForm();
-            document.getElementById('boundary-policy-name').focus();
-            writeURL();
-        });
-        document.getElementById('boundary-policy-delete')?.addEventListener('click', deletePolicy);
-        document.getElementById('boundary-policy-reset')?.addEventListener('click', populatePolicyForm);
+        const search = document.getElementById('boundary-policy-search');
+        if (search) {
+            search.value = state.search;
+            search.addEventListener('input', function () {
+                state.search = String(search.value || '').slice(0, 200);
+                state.page = 1;
+                writeURL();
+                if (state.searchTimer) clearTimeout(state.searchTimer);
+                state.searchTimer = setTimeout(function () { state.searchTimer = null; refresh(); }, 300);
+            });
+        }
+        const pageSize = document.getElementById('boundary-policy-page-size');
+        if (pageSize) {
+            pageSize.value = String(state.pageSize);
+            refreshUnified(pageSize);
+            pageSize.addEventListener('change', function () {
+                const value = Number.parseInt(pageSize.value, 10);
+                state.pageSize = PAGE_SIZES.includes(value) ? value : 10;
+                state.page = 1;
+                writeURL();
+                refresh();
+            });
+        }
+        document.getElementById('boundary-rules-refresh')?.addEventListener('click', function () { refresh(false); });
+        document.getElementById('boundary-policy-new')?.addEventListener('click', function () { openEditor(''); });
+        document.getElementById('boundary-policy-detail-close')?.addEventListener('click', closeDrawer);
+        document.getElementById('boundary-policy-detail-backdrop')?.addEventListener('click', closeDrawer);
+        document.getElementById('boundary-policy-detail-edit')?.addEventListener('click', function () { openEditor(state.selectedPolicyId); });
+        document.getElementById('boundary-policy-detail-delete')?.addEventListener('click', function () { deletePolicy(state.selectedPolicy); });
+        document.getElementById('boundary-policy-editor-close')?.addEventListener('click', closeEditor);
+        document.getElementById('boundary-policy-reset')?.addEventListener('click', closeEditor);
         document.getElementById('boundary-policy-form')?.addEventListener('submit', savePolicy);
         document.getElementById('boundary-rule-new')?.addEventListener('click', openNewRule);
+        document.getElementById('boundary-rule-close')?.addEventListener('click', resetRuleForm);
         document.getElementById('boundary-rule-cancel')?.addEventListener('click', resetRuleForm);
         document.getElementById('boundary-rule-form')?.addEventListener('submit', saveRule);
         document.getElementById('boundary-rule-effect')?.addEventListener('change', syncRuleAuth);
-		document.getElementById('boundary-policy-tls-enabled')?.addEventListener('change', syncPolicyTLS);
-        document.addEventListener('languagechange', function () {
-            renderConversationOptions();
-            renderPolicyOptions();
-            renderSnapshot();
-            renderDraftRules();
+        document.getElementById('boundary-policy-tls-enabled')?.addEventListener('change', syncPolicyTLS);
+        document.addEventListener('keydown', function (event) {
+            if (event.key !== 'Escape') return;
+            if (document.getElementById('boundary-rule-form')?.hidden === false) resetRuleForm();
+            else if (document.getElementById('boundary-policy-editor-modal')?.hidden === false) closeEditor();
+            else closeDrawer();
         });
+        document.addEventListener('languagechange', function () { renderPolicyList(); renderDetail(); renderDraftRules(); });
     }
 
     function init() {
         bind();
-        if (!state.loading) refresh();
+        if (!state.loading) refresh(false);
     }
 
     window.initBoundaryRulesPage = init;

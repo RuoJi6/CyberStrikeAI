@@ -124,6 +124,26 @@ func TestLoadSnapshotRejectsDigestSchemaAndFileDrift(t *testing.T) {
 	}
 }
 
+func TestLoadNoBoundarySnapshotDefaultsExternalTrafficToAllow(t *testing.T) {
+	content := `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}`
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	_, policy, err := LoadPolicySnapshot(path, testSnapshot(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpDecision, err := policy.Evaluate("https://example.com/write", http.MethodDelete, nil, time.Now().UTC())
+	if err != nil || !httpDecision.Allowed {
+		t.Fatalf("HTTP default decision = %#v, %v", httpDecision, err)
+	}
+	tcpDecision, err := policy.EvaluateNetwork("mysql.example", 3306, "tcp", nil, time.Now().UTC())
+	if err != nil || !tcpDecision.Allowed {
+		t.Fatalf("TCP default decision = %#v, %v", tcpDecision, err)
+	}
+}
+
 func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	content := `{"schemaVersion":1,"policyId":"","rules":[]}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")
@@ -135,7 +155,7 @@ func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	var output lockedBuffer
 	done := make(chan error, 1)
 	go func() {
-		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0"})
+		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0"})
 	}()
 	deadline := time.Now().Add(time.Second)
 	for !strings.Contains(output.String(), reference.SHA256) && time.Now().Before(deadline) {
@@ -168,7 +188,7 @@ func TestConfiguredGatewayStopsWhenSnapshotIntegrityDrifts(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- RunWithSnapshot(ctx, path, reference, &output, GatewayOptions{
-			ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
+			ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
 		})
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -215,7 +235,7 @@ func TestConfiguredGatewayReportsAndMonitorsImmutableUpstreamRoute(t *testing.T)
 	done := make(chan error, 1)
 	go func() {
 		done <- RunWithSnapshot(ctx, snapshotPath, snapshotReference, &output, GatewayOptions{
-			ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
+			ListenAddress: "127.0.0.1:0", SOCKS5ListenAddress: "127.0.0.1:0", DNSListenAddress: "127.0.0.1:0", SnapshotCheckInterval: 10 * time.Millisecond,
 			UpstreamRoutePath: routePath, UpstreamRoute: &routeReference,
 		})
 	}()

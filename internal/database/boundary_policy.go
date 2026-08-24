@@ -155,6 +155,19 @@ type BoundaryPolicyRule struct {
 	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
+// BoundaryPolicyUsage describes a live conversation/container that currently
+// selects a policy draft or runs an immutable snapshot created from it.
+type BoundaryPolicyUsage struct {
+	ConversationID      string    `json:"conversationId"`
+	ConversationTitle   string    `json:"conversationTitle"`
+	RuntimeStatus       string    `json:"runtimeStatus"`
+	WorkspacePersistent bool      `json:"workspacePersistent"`
+	SnapshotID          string    `json:"snapshotId,omitempty"`
+	SnapshotSHA256      string    `json:"snapshotSha256,omitempty"`
+	RuntimeGeneration   int       `json:"runtimeGeneration,omitempty"`
+	ActivatedAt         time.Time `json:"activatedAt,omitempty"`
+}
+
 func (db *DB) initBoundaryPolicyTables() error {
 	if _, err := db.Exec(createBoundaryPoliciesTable); err != nil {
 		return err
@@ -350,8 +363,22 @@ func (db *DB) DeleteBoundaryPolicy(ctx context.Context, policyID string) error {
 	}
 	var selections int
 	if err := db.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM conversation_boundary_policy_selections WHERE policy_id = ?
-	`, policyID).Scan(&selections); err != nil {
+		SELECT COUNT(DISTINCT conversation_id) FROM (
+			SELECT conversation_id
+			FROM conversation_boundary_policy_selections
+			WHERE policy_id = ?
+			UNION ALL
+			SELECT a.conversation_id
+			FROM conversation_boundary_activations a
+			JOIN boundary_policy_snapshots s ON s.id = a.snapshot_id
+			WHERE s.source_policy_id = ?
+			  AND a.runtime_generation = (
+				SELECT MAX(current.runtime_generation)
+				FROM conversation_boundary_activations current
+				WHERE current.conversation_id = a.conversation_id
+			  )
+		)
+	`, policyID, policyID).Scan(&selections); err != nil {
 		return fmt.Errorf("check boundary policy references: %w", err)
 	}
 	if selections != 0 {
@@ -365,6 +392,77 @@ func (db *DB) DeleteBoundaryPolicy(ctx context.Context, policyID string) error {
 		return ErrBoundaryPolicyNotFound
 	}
 	return nil
+}
+
+// GetConversationBoundaryPolicySelection returns the editable policy selected
+// for a container conversation before its first immutable snapshot is created.
+func (db *DB) GetConversationBoundaryPolicySelection(ctx context.Context, conversationID string) (string, error) {
+	var policyID string
+	err := db.QueryRowContext(ctx, `
+		SELECT policy_id FROM conversation_boundary_policy_selections WHERE conversation_id = ?
+	`, strings.TrimSpace(conversationID)).Scan(&policyID)
+	return strings.TrimSpace(policyID), err
+}
+
+// ListBoundaryPolicyUsage returns the current (not historical) conversations
+// that either selected a policy for first start or actively run a snapshot
+// generated from it. Conversation RBAC is enforced in the query.
+func (db *DB) ListBoundaryPolicyUsage(ctx context.Context, policyID, userID, scope string) ([]BoundaryPolicyUsage, error) {
+	policyID = strings.TrimSpace(policyID)
+	if policyID == "" {
+		return []BoundaryPolicyUsage{}, nil
+	}
+	where := ` WHERE refs.policy_id = ? AND c.runtime_mode = ?`
+	args := []interface{}{policyID, ConversationRuntimeModeContainer}
+	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
+	rows, err := db.QueryContext(ctx, `
+		WITH refs AS (
+			SELECT selection.conversation_id, selection.policy_id,
+				'' AS snapshot_id, '' AS snapshot_sha256, 0 AS runtime_generation,
+				selection.selected_at AS activated_at
+			FROM conversation_boundary_policy_selections selection
+			UNION ALL
+			SELECT activation.conversation_id, snapshot.source_policy_id,
+				snapshot.id, snapshot.sha256, activation.runtime_generation,
+				activation.activated_at
+			FROM conversation_boundary_activations activation
+			JOIN boundary_policy_snapshots snapshot ON snapshot.id = activation.snapshot_id
+			WHERE activation.runtime_generation = (
+				SELECT MAX(current.runtime_generation)
+				FROM conversation_boundary_activations current
+				WHERE current.conversation_id = activation.conversation_id
+			)
+		)
+		SELECT c.id, c.title,
+			COALESCE(NULLIF(r.runtime_status, ''), CASE WHEN r.conversation_id IS NULL THEN 'not_requested' ELSE 'pending' END),
+			c.workspace_persistent, refs.snapshot_id, refs.snapshot_sha256,
+			refs.runtime_generation, refs.activated_at
+		FROM refs
+		JOIN conversations c ON c.id = refs.conversation_id
+		LEFT JOIN conversation_container_runtimes r ON r.conversation_id = c.id`+where+`
+		ORDER BY refs.activated_at DESC, c.title COLLATE NOCASE, c.id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list boundary policy usage: %w", err)
+	}
+	defer rows.Close()
+	items := make([]BoundaryPolicyUsage, 0)
+	for rows.Next() {
+		var item BoundaryPolicyUsage
+		var activatedAt string
+		if err := rows.Scan(
+			&item.ConversationID, &item.ConversationTitle, &item.RuntimeStatus,
+			&item.WorkspacePersistent, &item.SnapshotID, &item.SnapshotSHA256,
+			&item.RuntimeGeneration, &activatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan boundary policy usage: %w", err)
+		}
+		item.ActivatedAt = parseDBTime(activatedAt)
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list boundary policy usage: %w", err)
+	}
+	return items, nil
 }
 
 // GetBoundaryPolicy returns one editable boundary policy draft. Callers must

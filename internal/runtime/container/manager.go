@@ -310,6 +310,42 @@ type RuntimeExecutor interface {
 	Exec(ctx context.Context, spec RuntimeSpec, request ExecRequest, sink ExecOutputSink) (ExecResult, error)
 }
 
+// WorkspaceInfo is the authenticated, read-only projection displayed by the
+// conversation UI. Temporary workspaces are Docker tmpfs mounts and therefore
+// intentionally have no host filesystem path.
+type WorkspaceInfo struct {
+	ContainerPath string `json:"containerPath"`
+	HostPath      string `json:"hostPath,omitempty"`
+	Storage       string `json:"storage"`
+	Persistent    bool   `json:"persistent"`
+}
+
+// RuntimeWorkspaceInspector resolves workspace paths from a trusted durable
+// spec. Implementations must not accept a request-provided provider ID.
+type RuntimeWorkspaceInspector interface {
+	WorkspaceInfo(ctx context.Context, spec RuntimeSpec) (WorkspaceInfo, error)
+}
+
+// InteractiveExecRequest contains only terminal geometry. The executable,
+// container identity, user, and working directory are fixed by the runtime.
+type InteractiveExecRequest struct {
+	Cols uint16
+	Rows uint16
+}
+
+// InteractiveExecSession is one bounded Docker exec TTY. Closing the session
+// also terminates its shell process and releases its exec concurrency permit.
+type InteractiveExecSession interface {
+	io.ReadWriteCloser
+	Resize(ctx context.Context, cols, rows uint16) error
+}
+
+// RuntimeInteractiveExecutor opens a shell only inside the verified running
+// conversation container. There is deliberately no host-shell fallback.
+type RuntimeInteractiveExecutor interface {
+	OpenInteractiveExec(ctx context.Context, spec RuntimeSpec, request InteractiveExecRequest) (InteractiveExecSession, error)
+}
+
 // ActivityStreamOptions bounds the historical gateway-log tail delivered
 // before following new events.
 type ActivityStreamOptions struct {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -59,7 +58,7 @@ func TestProxyForwardsOnlyAuthorizedAbsoluteHTTPAndStripsProxyHeaders(t *testing
 	}
 }
 
-func TestProxyAllowVisitWithoutMethodsRejectsApplicationWrites(t *testing.T) {
+func TestProxyAllowVisitWithoutMethodsAllowsApplicationWrites(t *testing.T) {
 	policy := testProxyPolicy(t, boundary.Rule{
 		ID: "read-only-default", Effect: boundary.EffectAllowVisit,
 		Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}},
@@ -84,13 +83,10 @@ func TestProxyAllowVisitWithoutMethodsRejectsApplicationWrites(t *testing.T) {
 		t.Fatalf("GET status/calls = %d/%d", allowed.Code, calls.Load())
 	}
 
-	blocked := httptest.NewRecorder()
-	proxy.ServeHTTP(blocked, httptest.NewRequest(http.MethodPost, "http://allowed.example/write", strings.NewReader("data")))
-	body := blocked.Body.String()
-	if blocked.Code != http.StatusForbidden || calls.Load() != 1 || blocked.Header().Get("X-CyberStrikeAI-Blocked") != "true" ||
-		!strings.Contains(body, "CyberStrikeAI network boundary blocked access") ||
-		!strings.Contains(body, "CyberStrikeAI 出站边界已禁止访问该网站") || strings.Contains(body, "data") {
-		t.Fatalf("POST status/calls/header/body = %d/%d/%q/%q", blocked.Code, calls.Load(), blocked.Header().Get("X-CyberStrikeAI-Blocked"), body)
+	write := httptest.NewRecorder()
+	proxy.ServeHTTP(write, httptest.NewRequest(http.MethodPost, "http://allowed.example/write", strings.NewReader("data")))
+	if write.Code != http.StatusOK || calls.Load() != 2 || write.Header().Get("X-CyberStrikeAI-Blocked") != "" || write.Body.String() != "ok" {
+		t.Fatalf("POST status/calls/header/body = %d/%d/%q/%q", write.Code, calls.Load(), write.Header().Get("X-CyberStrikeAI-Blocked"), write.Body.String())
 	}
 }
 
@@ -130,7 +126,8 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 		ID: "blocked-site", Effect: boundary.EffectBlocked,
 		Target: boundary.RuleTarget{Host: "blocked.example", Schemes: []string{"http", "https"}},
 	})
-	proxy, err := NewProxy(policy, ProxyOptions{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	var events []ActivityEvent
+	proxy, err := NewProxy(policy, ProxyOptions{ActivitySink: func(event ActivityEvent) { events = append(events, event) }, Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("blocked request reached transport")
 		return nil, nil
 	})})
@@ -149,6 +146,11 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 	if !strings.Contains(body, "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(body, "blocked.example") || strings.Contains(body, secret) || strings.Contains(body, "/private") || strings.Contains(body, "Authorization") {
 		t.Fatalf("unsafe or unclear blocked response = %q", body)
 	}
+	if len(events) != 1 || events[0].HTTPStatus != http.StatusForbidden || events[0].BytesDown != int64(len(body)) || events[0].HTTPPacket == nil ||
+		events[0].HTTPPacket.ResponseLine != "HTTP/1.1 403 Forbidden" || len(events[0].HTTPPacket.ResponseHeaders["X-Cyberstrikeai-Blocked"]) != 1 || events[0].HTTPPacket.ResponseHeaders["X-Cyberstrikeai-Blocked"][0] != "true" || events[0].HTTPPacket.ResponseBody != body ||
+		!strings.Contains(events[0].HTTPPacket.RequestLine, "token="+secret) || len(events[0].HTTPPacket.RequestHeaders["Authorization"]) != 1 || events[0].HTTPPacket.RequestHeaders["Authorization"][0] != "Bearer "+secret {
+		t.Fatalf("blocked packet audit = %#v", events)
+	}
 
 	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
 	connect.Host = "blocked.example:443"
@@ -160,7 +162,7 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 	}
 }
 
-func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndDoesNotPersistSecrets(t *testing.T) {
+func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t *testing.T) {
 	policy := testProxyPolicy(t,
 		boundary.Rule{ID: "allow-safe", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"GET"}, PathPrefixes: []string{"/safe"}}},
 		boundary.Rule{ID: "allow-upload", Effect: boundary.EffectAllowAttack, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"POST"}, PathPrefixes: []string{"/upload"}}},
@@ -220,18 +222,28 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndDoesNotPersistSecrets
 	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(string(deniedBody), "block-admin") {
 		t.Fatalf("denied inspected HTTPS response = %d %q", denied.StatusCode, deniedBody)
 	}
-	encoded, _ := json.Marshal(events)
-	if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "Authorization") || strings.Contains(string(encoded), "Cookie") || strings.Contains(string(encoded), "token=") || strings.Contains(string(encoded), "password=") {
-		t.Fatalf("TLS activity leaked request secrets: %s", encoded)
-	}
 	foundPathDecision := false
+	foundCompleteGet := false
+	foundCompleteUpload := false
 	for _, event := range events {
 		if event.Domain == "inspect.example" && event.Path == "/admin" && event.Decision == ActivityDecisionBlocked && event.RuleID == "block-admin" {
 			foundPathDecision = true
 		}
+		if event.RequestType == ActivityRequestHTTPS && event.Method == http.MethodGet && event.Path == "/safe/report" && event.HTTPPacket != nil &&
+			strings.Contains(event.HTTPPacket.RequestLine, "token="+secret) && len(event.HTTPPacket.RequestHeaders["Authorization"]) == 1 &&
+			strings.Contains(event.HTTPPacket.ResponseBody, "inspected-ok") {
+			foundCompleteGet = true
+		}
+		if event.RequestType == ActivityRequestHTTPS && event.Method == http.MethodPost && event.Path == "/upload" && event.HTTPPacket != nil &&
+			event.HTTPPacket.RequestBody == uploadBody && len(event.HTTPPacket.RequestHeaders["Cookie"]) == 1 && event.HTTPPacket.ResponseBodyEncoding == "base64" {
+			foundCompleteUpload = true
+		}
 	}
 	if !foundPathDecision {
 		t.Fatalf("missing decrypted path decision: %#v", events)
+	}
+	if !foundCompleteGet || !foundCompleteUpload {
+		t.Fatalf("missing complete HTTPS packet projections: %#v", events)
 	}
 }
 
@@ -320,7 +332,8 @@ func TestProxyAuthOnlyInjectsGatewayCredentialAndRejectsMissingOrExtraProfiles(t
 	document := NewAuthProfilesDocument(strings.Repeat("a", 64), []GatewayAuthProfile{{
 		ID: "profile-1", HeaderName: "Authorization", HeaderValue: "Bearer gateway-secret",
 	}})
-	authProxy, err := NewProxy(authPolicy, ProxyOptions{AuthProfiles: &document, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+	var audited ActivityEvent
+	authProxy, err := NewProxy(authPolicy, ProxyOptions{AuthProfiles: &document, ActivitySink: func(event ActivityEvent) { audited = event }, Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if got := request.Header.Values("Authorization"); len(got) != 1 || got[0] != "Bearer gateway-secret" {
 			t.Fatalf("gateway credential injection = %#v", got)
 		}
@@ -336,6 +349,9 @@ func TestProxyAuthOnlyInjectsGatewayCredentialAndRejectsMissingOrExtraProfiles(t
 	authProxy.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusNoContent {
 		t.Fatalf("auth-only status = %d", recorder.Code)
+	}
+	if audited.HTTPPacket == nil || len(audited.HTTPPacket.RequestHeaders["Authorization"]) != 1 || audited.HTTPPacket.RequestHeaders["Authorization"][0] != "Bearer gateway-secret" {
+		t.Fatalf("audited upstream credential = %#v", audited.HTTPPacket)
 	}
 	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
 	connect.Host = "auth.example:443"

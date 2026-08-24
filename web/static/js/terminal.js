@@ -50,7 +50,13 @@
         return s;
     }
 
-    function getWelcomeLine() {
+    function getWelcomeLine(tab) {
+        if (tab && tab.options && typeof tab.options.welcomeLine === 'function') {
+            return String(tab.options.welcomeLine()) + '\r\n';
+        }
+        if (tab && tab.options && tab.options.welcomeLine) {
+            return String(tab.options.welcomeLine) + '\r\n';
+        }
         return tr('settingsTerminal.welcomeLine') + '\r\n';
     }
 
@@ -61,7 +67,7 @@
     function redrawTabDisplay(t) {
         if (!t || !t.term) return;
         t.term.clear();
-        t.term.write(getWelcomeLine());
+        t.term.write(getWelcomeLine(t));
     }
 
     function writeln(tabOrS, s) {
@@ -120,16 +126,28 @@
         return url;
     }
 
+    function buildAuthenticatedWSURL(pathname) {
+        var proto = (window.location.protocol === 'https:') ? 'wss://' : 'ws://';
+        var url = proto + window.location.host + String(pathname || '');
+        var token = getStoredAuthToken();
+        if (token) url += (url.indexOf('?') >= 0 ? '&' : '?') + 'token=' + encodeURIComponent(token);
+        return url;
+    }
+
     function ensureTerminalWS(tab) {
         if (tab.ws && (tab.ws.readyState === WebSocket.OPEN || tab.ws.readyState === WebSocket.CONNECTING)) {
             return;
         }
         try {
-            var ws = new WebSocket(buildTerminalWSURL());
+            var wsURL = tab.options && typeof tab.options.buildWSURL === 'function'
+                ? tab.options.buildWSURL()
+                : buildTerminalWSURL();
+            var ws = new WebSocket(wsURL);
             tab.ws = ws;
             tab.running = true;
 
             ws.onopen = function () {
+                if (tab.options && typeof tab.options.onConnectionState === 'function') tab.options.onConnectionState('open');
                 if (tab.term) {
                     tab.term.focus();
                     // Send the actual terminal dimensions to the backend immediately
@@ -164,6 +182,7 @@
 
             ws.onclose = function () {
                 tab.running = false;
+                if (tab.options && typeof tab.options.onConnectionState === 'function') tab.options.onConnectionState('closed');
                 if (tab.term) {
                     tab.term.writeln('\r\n\x1b[2m' + tr('settingsTerminal.sessionClosed') + '\x1b[0m');
                 }
@@ -171,6 +190,7 @@
 
             ws.onerror = function () {
                 tab.running = false;
+                if (tab.options && typeof tab.options.onConnectionState === 'function') tab.options.onConnectionState('error');
                 if (tab.term) {
                     tab.term.writeln('\r\n\x1b[31m' + tr('settingsTerminal.connectionError') + '\x1b[0m');
                 }
@@ -229,9 +249,10 @@
             term.loadAddon(fitAddon);
         }
         term.open(container);
-        term.write(getWelcomeLine());
+        term.write(getWelcomeLine(tab));
         container.addEventListener('click', function () {
-            switchTerminalTab(tab.id);
+            if (tab.options && typeof tab.options.activate === 'function') tab.options.activate();
+            else switchTerminalTab(tab.id);
             if (term) term.focus();
         });
         container.setAttribute('tabindex', '0');
@@ -393,6 +414,10 @@
         var switchToIndex = deletingCurrent ? (idx > 0 ? idx - 1 : 0) : -1;
 
         var tab = terminals[idx];
+        if (tab.ws) {
+            try { tab.ws.close(); } catch (e) {}
+            tab.ws = null;
+        }
         if (tab.resizeObserver && tab.resizeObserver.disconnect) tab.resizeObserver.disconnect();
         if (tab.term && tab.term.dispose) tab.term.dispose();
         tab.term = null;
@@ -536,9 +561,175 @@
         t.term.focus();
     }
 
+    var embeddedTerminalWorkspaceCounter = 0;
+
+    // Shared xterm workspace used by the chat and container-management views.
+    // The caller supplies only a WebSocket URL builder; keyboard handling,
+    // sizing, theming, tabs, and lifecycle remain identical to Settings.
+    function createEmbeddedTerminal(root, options) {
+        if (!root) return null;
+        options = options || {};
+        embeddedTerminalWorkspaceCounter += 1;
+        var workspaceId = embeddedTerminalWorkspaceCounter;
+        var embeddedTabs = [];
+        var activeId = 0;
+        var nextId = 0;
+
+        root.replaceChildren();
+        var wrapper = document.createElement('div');
+        wrapper.className = 'terminal-wrapper embedded-terminal-wrapper';
+        var tabsBar = document.createElement('div');
+        tabsBar.className = 'terminal-tabs';
+        var addButton = document.createElement('button');
+        addButton.type = 'button';
+        addButton.className = 'terminal-tab-new';
+        addButton.textContent = '+';
+        addButton.title = options.newTabTitle || tr('settingsTerminal.newTerminal');
+        var panes = document.createElement('div');
+        panes.className = 'terminal-panes';
+        tabsBar.append(addButton);
+        wrapper.append(tabsBar, panes);
+        root.append(wrapper);
+
+        function labelFor(index) {
+            if (typeof options.tabLabel === 'function') return String(options.tabLabel(index));
+            return String(options.tabLabel || tr('settingsTerminal.terminalTab', { n: index }));
+        }
+
+        function updateCloseButtons() {
+            var show = embeddedTabs.length > 1;
+            embeddedTabs.forEach(function (tab) {
+                if (tab.closeButton) tab.closeButton.hidden = !show;
+            });
+        }
+
+        function activate(id) {
+            activeId = id;
+            embeddedTabs.forEach(function (tab) {
+                var selected = tab.id === id;
+                tab.tabElement.classList.toggle('active', selected);
+                tab.pane.classList.toggle('active', selected);
+                if (selected && tab.term) {
+                    requestAnimationFrame(function () {
+                        try {
+                            if (tab.fitAddon) tab.fitAddon.fit();
+                            tab.term.scrollToBottom();
+                            tab.term.focus();
+                        } catch (e) {}
+                    });
+                }
+            });
+        }
+
+        function destroyTab(tab) {
+            if (!tab) return;
+            if (tab.resizeObserver && tab.resizeObserver.disconnect) tab.resizeObserver.disconnect();
+            tab.resizeObserver = null;
+            if (tab.term && tab.term.dispose) tab.term.dispose();
+            tab.term = null;
+            tab.fitAddon = null;
+            if (tab.ws) {
+                try { tab.ws.close(); } catch (e) {}
+                tab.ws = null;
+            }
+            if (tab.tabElement && tab.tabElement.parentNode) tab.tabElement.parentNode.removeChild(tab.tabElement);
+            if (tab.pane && tab.pane.parentNode) tab.pane.parentNode.removeChild(tab.pane);
+        }
+
+        function remove(id) {
+            if (embeddedTabs.length <= 1) return;
+            var index = embeddedTabs.findIndex(function (tab) { return tab.id === id; });
+            if (index < 0) return;
+            var wasActive = activeId === id;
+            var tab = embeddedTabs[index];
+            embeddedTabs.splice(index, 1);
+            destroyTab(tab);
+            if (wasActive) activate(embeddedTabs[Math.max(0, index - 1)].id);
+            updateCloseButtons();
+        }
+
+        function add() {
+            nextId += 1;
+            var id = nextId;
+            var tabElement = document.createElement('div');
+            tabElement.className = 'terminal-tab';
+            tabElement.dataset.embeddedTerminalTab = String(workspaceId) + '-' + String(id);
+            var label = document.createElement('button');
+            label.type = 'button';
+            label.className = 'terminal-tab-label embedded-terminal-tab-label';
+            label.textContent = labelFor(embeddedTabs.length + 1);
+            label.addEventListener('click', function () { activate(id); });
+            var closeButton = document.createElement('button');
+            closeButton.type = 'button';
+            closeButton.className = 'terminal-tab-close';
+            closeButton.title = tr('settingsTerminal.closeTabTitle');
+            closeButton.textContent = '×';
+            closeButton.addEventListener('click', function (event) {
+                event.stopPropagation();
+                remove(id);
+            });
+            tabElement.append(label, closeButton);
+            tabsBar.insertBefore(tabElement, addButton);
+
+            var pane = document.createElement('div');
+            pane.className = 'terminal-pane';
+            var container = document.createElement('div');
+            container.className = 'terminal-container';
+            pane.append(container);
+            panes.append(pane);
+
+            var tab = {
+                id: id,
+                pane: pane,
+                tabElement: tabElement,
+                closeButton: closeButton,
+                running: false,
+                term: null,
+                fitAddon: null,
+                history: [],
+                historyIndex: -1,
+                options: {
+                    buildWSURL: options.buildWSURL,
+                    welcomeLine: options.welcomeLine,
+                    activate: function () { activate(id); },
+                    onConnectionState: function (state) {
+                        if (typeof options.onConnectionState === 'function') options.onConnectionState(state, id);
+                    }
+                }
+            };
+            embeddedTabs.push(tab);
+            createTerminalInContainer(container, tab);
+            activate(id);
+            updateCloseButtons();
+            return tab;
+        }
+
+        addButton.addEventListener('click', add);
+        add();
+
+        return {
+            addTab: add,
+            focus: function () { activate(activeId); },
+            fit: function () {
+                embeddedTabs.forEach(function (tab) {
+                    try { if (tab.fitAddon) tab.fitAddon.fit(); } catch (e) {}
+                });
+            },
+            dispose: function () {
+                embeddedTabs.slice().forEach(destroyTab);
+                embeddedTabs = [];
+                root.replaceChildren();
+            }
+        };
+    }
+
     window.initTerminal = initTerminal;
     window.terminalClear = terminalClear;
     window.switchTerminalTab = switchTerminalTab;
     window.addTerminalTab = addTerminalTab;
     window.removeTerminalTab = removeTerminalTab;
+    window.CyberStrikeTerminal = {
+        createEmbeddedTerminal: createEmbeddedTerminal,
+        buildAuthenticatedWSURL: buildAuthenticatedWSURL,
+    };
 })();

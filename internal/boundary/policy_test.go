@@ -70,7 +70,7 @@ func TestPolicyDefaultsToDenyAndUsesFixedPriority(t *testing.T) {
 	}
 }
 
-func TestPolicyAllowVisitDefaultsToReadOnlyMethods(t *testing.T) {
+func TestPolicyEmptyMethodsAllowEveryHTTPMethod(t *testing.T) {
 	policy, err := NewPolicy([]Rule{{
 		ID: "read-only-default", Effect: EffectAllowVisit,
 		Target: RuleTarget{Host: "docs.example", Schemes: []string{"http", "https"}},
@@ -79,19 +79,12 @@ func TestPolicyAllowVisitDefaultsToReadOnlyMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	for _, method := range []string{"GET", "HEAD", "OPTIONS", "CONNECT"} {
+	for _, method := range []string{"GET", "HEAD", "OPTIONS", "CONNECT", "POST", "PUT", "PATCH", "DELETE"} {
 		decision, err := policy.Evaluate("https://docs.example/guide", method, nil, now)
 		if err != nil || !decision.Allowed || decision.RuleID != "read-only-default" {
 			t.Fatalf("default %s decision = %#v, %v", method, decision, err)
 		}
 	}
-	for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
-		decision, err := policy.Evaluate("https://docs.example/guide", method, nil, now)
-		if err != nil || decision.Allowed || decision.RuleID != "" || decision.Reason != ReasonDefaultDeny {
-			t.Fatalf("unauthorized %s decision = %#v, %v", method, decision, err)
-		}
-	}
-
 	explicit, err := NewPolicy([]Rule{{
 		ID: "explicit-post", Effect: EffectAllowVisit,
 		Target: RuleTarget{Host: "docs.example", Schemes: []string{"https"}, Methods: []string{"POST"}},
@@ -102,6 +95,48 @@ func TestPolicyAllowVisitDefaultsToReadOnlyMethods(t *testing.T) {
 	decision, err := explicit.Evaluate("https://docs.example/submit", "POST", nil, now)
 	if err != nil || !decision.Allowed || decision.RuleID != "explicit-post" {
 		t.Fatalf("explicit POST decision = %#v, %v", decision, err)
+	}
+}
+
+func TestPolicyEvaluatesTCPAndUDPByProtocolAndPort(t *testing.T) {
+	policy, err := NewPolicy([]Rule{
+		{ID: "ssh", Effect: EffectAllowVisit, Target: RuleTarget{Host: "db.example", Schemes: []string{"tcp"}, Ports: []int{22}, PathPrefixes: []string{"/http-only"}, Methods: []string{"POST"}}},
+		{ID: "dns", Effect: EffectAllowVisit, Target: RuleTarget{Host: "db.example", Schemes: []string{"udp"}, Ports: []int{5353}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		protocol string
+		port     int
+		allow    bool
+	}{
+		{protocol: "tcp", port: 22, allow: true},
+		{protocol: "udp", port: 5353, allow: true},
+		{protocol: "tcp", port: 5353},
+		{protocol: "udp", port: 22},
+	} {
+		decision, evalErr := policy.EvaluateNetwork("db.example", test.port, test.protocol, nil, now)
+		if evalErr != nil || decision.Allowed != test.allow {
+			t.Fatalf("%#v = %#v, %v", test, decision, evalErr)
+		}
+	}
+}
+
+func TestPolicyExplicitDefaultAllowKeepsReservedTargetsBlocked(t *testing.T) {
+	policy, err := NewPolicyWithDefault(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	allowed, err := policy.Evaluate("https://example.com/write", "DELETE", []netip.Addr{netip.MustParseAddr("93.184.216.34")}, now)
+	if err != nil || !allowed.Allowed {
+		t.Fatalf("public default = %#v, %v", allowed, err)
+	}
+	blocked, err := policy.EvaluateNetwork("127.0.0.1", 3306, "tcp", nil, now)
+	if err != nil || blocked.Allowed || blocked.Reason != ReasonForbiddenAddress {
+		t.Fatalf("reserved default = %#v, %v", blocked, err)
 	}
 }
 

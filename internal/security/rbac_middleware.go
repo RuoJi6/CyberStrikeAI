@@ -140,6 +140,9 @@ func permissionForRequest(method, fullPath string) string {
 	case strings.HasPrefix(path, "/audit"):
 		return crudPermission(method, "audit")
 	case strings.HasPrefix(path, "/egress-audit-events"):
+		if method == http.MethodDelete {
+			return "audit:delete"
+		}
 		return "audit:read"
 	case path == "/mcp":
 		return "mcp:execute"

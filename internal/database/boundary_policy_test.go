@@ -272,3 +272,47 @@ func TestListBoundaryPoliciesHonorsOwnerAssignmentsAndStableOrder(t *testing.T) 
 		t.Fatalf("all policies = %#v", all)
 	}
 }
+
+func TestBoundaryPolicyUsageTracksSelectionAndActiveSnapshot(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-usage.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	policy, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "Used policy", OwnerUserID: "owner-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := db.CreateConversation("Uses policy", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer, BoundaryPolicyID: policy.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := db.ListBoundaryPolicyUsage(ctx, policy.ID, "admin", RBACScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].ConversationID != conversation.ID || usage[0].RuntimeStatus != "not_requested" || usage[0].SnapshotID != "" {
+		t.Fatalf("selected usage = %#v", usage)
+	}
+	if err := db.DeleteBoundaryPolicy(ctx, policy.ID); !errors.Is(err, ErrBoundaryPolicyInUse) {
+		t.Fatalf("delete selected policy error = %v", err)
+	}
+
+	snapshot, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err = db.ListBoundaryPolicyUsage(ctx, policy.ID, "admin", RBACScopeAll)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].SnapshotID != snapshot.SnapshotID || usage[0].SnapshotSHA256 != snapshot.SHA256 || usage[0].RuntimeGeneration != 1 {
+		t.Fatalf("active usage = %#v", usage)
+	}
+	if err := db.DeleteBoundaryPolicy(ctx, policy.ID); !errors.Is(err, ErrBoundaryPolicyInUse) {
+		t.Fatalf("delete active policy error = %v", err)
+	}
+}

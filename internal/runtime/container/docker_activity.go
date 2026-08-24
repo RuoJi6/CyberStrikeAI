@@ -23,7 +23,7 @@ import (
 const (
 	defaultActivityTail = 100
 	maxActivityTail     = 500
-	maxActivityLine     = 64 << 10
+	maxActivityLine     = 1024 << 10
 )
 
 var safeActivityCodePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
@@ -160,20 +160,20 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
+		if event.Domain == "" || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
 		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || !validActivityMethod(event.Method) || !validActivityPath(event.Path) ||
-			event.HTTPStatus < 0 || event.HTTPStatus > 999 {
+			event.HTTPStatus < 0 || event.HTTPStatus > 999 || egress.ValidateHTTPPacket(event.HTTPPacket) != nil {
 			return invalid()
 		}
-	case egress.ActivityRequestCONNECT:
-		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 {
+	case egress.ActivityRequestCONNECT, egress.ActivityRequestTCP, egress.ActivityRequestUDP:
+		if event.Domain == "" || event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHealth:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || !validGatewayHealthEvent(event) {
+		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || event.HTTPPacket != nil || !validGatewayHealthEvent(event) {
 			return invalid()
 		}
 	default:

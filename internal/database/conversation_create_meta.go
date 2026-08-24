@@ -13,6 +13,7 @@ type ConversationCreateMeta struct {
 	EgressMode           string
 	EgressProxyID        string
 	EgressProxyGroupID   string
+	EgressAuditEnabled   *bool
 	ClientIP             string
 	SessionHint          string
 }

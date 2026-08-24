@@ -212,15 +212,15 @@ func TestConversationBoundarySnapshotDoesNotFollowDraftEdits(t *testing.T) {
 	}
 }
 
-func TestConversationBoundarySnapshotDefaultDenyAndSelectionValidation(t *testing.T) {
+func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testing.T) {
 	db := newBoundarySnapshotTestDB(t)
 	conversation := createSnapshotTestConversation(t, db, "")
 	snapshot, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.CanonicalJSON != `{"schemaVersion":1,"policyId":"","rules":[]}` {
-		t.Fatalf("default-deny snapshot = %#v", snapshot)
+	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.Document.DefaultAction != "allow" || snapshot.CanonicalJSON != `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}` {
+		t.Fatalf("default-allow snapshot = %#v", snapshot)
 	}
 	host, err := db.CreateConversation("host", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeHost})
 	if err != nil {
@@ -429,6 +429,75 @@ func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testin
 	active, err = db.GetConversationBoundarySnapshot(ctx, conversation.ID)
 	if err != nil || active.SnapshotID != pending.SnapshotID || active.RuntimeGeneration != 3 {
 		t.Fatalf("maintenance snapshot = %#v, %v", active, err)
+	}
+}
+
+func TestConversationBoundaryRebuildAllowsGatewayRolloutAndTLSAuthorityReplacement(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy := createSnapshotTestPolicy(t, db)
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	ctx := context.Background()
+	initial, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.Security.NetworkMode = containerruntime.NetworkInternal
+	spec.EgressGateway = databaseGatewaySpec()
+	spec.EgressGateway.BoundarySnapshot = &containerruntime.EgressBoundarySnapshotSpec{ID: initial.SnapshotID, SHA256: initial.SHA256}
+	spec.EgressGateway.TLSAuthority = &containerruntime.EgressTLSAuthoritySpec{
+		ID: initial.SnapshotID, BoundarySnapshotID: initial.SnapshotID,
+		CertificateSHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PrivateKeySHA256:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-generation-1", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE boundary_policy_rules SET host = ? WHERE id = ?`, "rolled-out.example", "rule-a"); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebuildCtx := containerruntime.WithBoundaryRebuildSnapshot(ctx, pending.SnapshotID)
+	if _, err := db.BeginLifecycle(rebuildCtx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := spec
+	gateway := *spec.EgressGateway
+	gateway.Image.Digest = "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	gateway.BoundarySnapshot = &containerruntime.EgressBoundarySnapshotSpec{ID: pending.SnapshotID, SHA256: pending.SHA256}
+	gateway.TLSAuthority = &containerruntime.EgressTLSAuthoritySpec{
+		ID: pending.SnapshotID, BoundarySnapshotID: pending.SnapshotID,
+		CertificateSHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		PrivateKeySHA256:  "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+	replacement.EgressGateway = &gateway
+	observed := containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-generation-2", Status: containerruntime.StatusStopped,
+		Image: replacement.Image, SpecDigest: containerruntime.RuntimeSpecDigest(replacement),
+	}
+	rebuilt, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: observed, IncrementGeneration: true, ReplacementSpec: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.RuntimeGeneration != 2 || rebuilt.Spec.EgressGateway == nil ||
+		rebuilt.Spec.EgressGateway.Image.Digest != gateway.Image.Digest ||
+		rebuilt.Spec.EgressGateway.BoundarySnapshot == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot.ID != pending.SnapshotID ||
+		rebuilt.Spec.EgressGateway.TLSAuthority == nil || rebuilt.Spec.EgressGateway.TLSAuthority.BoundarySnapshotID != pending.SnapshotID {
+		t.Fatalf("gateway and boundary replacement = %#v", rebuilt)
 	}
 }
 

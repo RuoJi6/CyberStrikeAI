@@ -23,6 +23,8 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
     assert.match(template, /value="proxy"[^>]*disabled/);
     assert.match(template, /value="group"[^>]*disabled/);
     assert.match(template, /id="conversation-egress-target-select"/);
+    assert.match(template, /id="conversation-egress-audit-toggle"[^>]*checked/);
+    assert.match(template, /class="container-conversation-field is-runtime-editable"[\s\S]{0,1400}id="conversation-egress-audit-toggle"/);
     assert.match(template, /id="conversation-egress-preview"[^>]*aria-live|id="container-conversation-options-status"[^>]*aria-live/);
     assert.match(styles, /\.runtime-mode-panel \{[\s\S]*?overflow-y: auto/);
     assert.match(styles, /\.runtime-mode-panel > \.runtime-mode-options,[\s\S]*?\.runtime-mode-panel > \.workspace-persistence-option,[\s\S]*?flex: 0 0 auto/);
@@ -55,6 +57,7 @@ test('new conversation request sends exact immutable selection fields only for c
         'boundary-policy-select': { value: 'policy-1' },
         'conversation-egress-mode-select': { value: 'proxy' },
         'conversation-egress-target-select': { value: 'proxy-1' },
+        'conversation-egress-audit-toggle': { checked: true },
     };
     const document = {
         getElementById(id) { return elements[id] || null; },
@@ -66,18 +69,18 @@ test('new conversation request sends exact immutable selection fields only for c
 
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1' },
+        { egressAuditEnabled: true, boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1' },
     );
     elements['conversation-egress-mode-select'].value = 'group';
     elements['conversation-egress-target-select'].value = 'group-1';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1' },
+        { egressAuditEnabled: true, boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1' },
     );
     elements['conversation-egress-mode-select'].value = '';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { boundaryPolicyId: 'policy-1' },
+        { egressAuditEnabled: true, boundaryPolicyId: 'policy-1' },
     );
     assert.deepEqual(JSON.parse(JSON.stringify(window.readNewConversationContainerControls('host'))), {});
     assert.match(chat, /Object\.assign\(body, window\.readNewConversationContainerControls\(body\.runtimeMode\)\)/);
@@ -86,19 +89,20 @@ test('new conversation request sends exact immutable selection fields only for c
 test('container creation copy is bilingual and cache-busted', () => {
     for (const locale of [zh, en]) {
         for (const key of [
-            'containerSecurityOptionsTitle', 'boundaryPolicyLabel', 'boundaryPolicyDefaultDenyHint',
+            'containerSecurityOptionsTitle', 'boundaryPolicyLabel', 'boundaryPolicyDefaultAllow', 'boundaryPolicyDefaultAllowHint',
             'egressModeLabel', 'egressModeInherit', 'egressPreviewUnavailable',
             'egressInheritedPreview', 'egressExplicitPreview', 'egressTargetHint',
+            'egressAuditLabel', 'egressAuditHint', 'egressAuditDisabledHint',
         ]) {
             assert.equal(typeof locale.chat[key], 'string', key);
             assert.ok(locale.chat[key].trim(), key);
         }
     }
-    assert.match(zh.chat.boundaryPolicyDefaultDenyHint, /默认拒绝/);
+    assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /不限制/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260824-1/);
-    assert.match(template, /chat\.js\?v=20260824-1/);
+    assert.match(template, /style\.css\?v=20260824-12/);
+    assert.match(template, /chat\.js\?v=20260824-3/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-    assert.match(template, /conversation-container-settings\.js\?v=20260822-2/);
+    assert.match(template, /conversation-container-settings\.js\?v=20260824-2/);
 });

@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -32,6 +33,7 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 		Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
 		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-example", Reason: "allow-visit",
 		UpstreamRouteID: spec.EgressGateway.UpstreamRoute.ID, Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 12, BytesDown: 42,
+		HTTPPacket: &egress.HTTPPacket{RequestLine: "GET /safe?token=plain HTTP/1.1", RequestHeaders: map[string][]string{"Authorization": {"Bearer plain-token"}}, ResponseLine: "HTTP/1.1 200 OK", ResponseHeaders: map[string][]string{"Content-Type": {"text/plain"}}, ResponseBody: "complete", ResponseBodyEncoding: "utf8"},
 		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
 	}
 	inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], event)
@@ -97,6 +99,20 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 		if item.ChainSequence < 1 || !egressAuditHashPattern.MatchString(item.PreviousHash) || !egressAuditHashPattern.MatchString(item.EventHash) {
 			t.Fatalf("audit chain projection = %#v", item)
 		}
+		if item.HTTPPacket != nil {
+			t.Fatalf("list projection unexpectedly included packet = %#v", item.HTTPPacket)
+		}
+	}
+	var packetEventID string
+	for _, item := range items {
+		if item.EventType == "http" && item.Decision == egress.ActivityDecisionAllowed {
+			packetEventID = item.ID
+			break
+		}
+	}
+	detail, err := db.GetEgressAuditEvent(ctx, packetEventID, "owner-a", RBACScopeOwn)
+	if err != nil || detail.HTTPPacket == nil || detail.HTTPPacket.RequestLine != "GET /safe?token=plain HTTP/1.1" || detail.HTTPPacket.RequestHeaders["Authorization"][0] != "Bearer plain-token" || detail.HTTPPacket.ResponseBody != "complete" {
+		t.Fatalf("packet detail = %#v, %v", detail, err)
 	}
 
 	network := all
@@ -131,6 +147,114 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 	}
 }
 
+func TestPurgeEgressAuditEventsRebuildsAndVerifiesAffectedChains(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "audit purge")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	for index := 0; index < 2; index++ {
+		event := egress.ActivityEvent{
+			Event: egress.ActivityEventName, Timestamp: time.Now().UTC().Add(time.Duration(index+1) * time.Millisecond), RequestType: egress.ActivityRequestHTTP,
+			Domain: "purge.example", Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-purge", Reason: "allow-visit",
+			Method: "GET", Path: fmt.Sprintf("/item/%d", index), HTTPStatus: 200, Outcome: "completed",
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		}
+		if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], event); err != nil || !inserted {
+			t.Fatalf("append %d = %v, %v", index, inserted, err)
+		}
+	}
+	items, err := db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 3 {
+		t.Fatalf("items before purge = %#v, %v", items, err)
+	}
+	selectedID := items[0].ID
+	deleted, err := db.PurgeEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll}, []string{selectedID})
+	if err != nil || deleted != 1 {
+		t.Fatalf("selected purge = %d, %v", deleted, err)
+	}
+	items, err = db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 2 || items[0].ChainSequence != 2 || items[1].ChainSequence != 1 {
+		t.Fatalf("items after selected purge = %#v, %v", items, err)
+	}
+	if _, err := db.VerifyEgressAuditIntegrity(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll}); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err = db.PurgeEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Category: "network", Scope: RBACScopeAll}, nil)
+	if err != nil || deleted != 1 {
+		t.Fatalf("filtered purge = %d, %v", deleted, err)
+	}
+	items, err = db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 1 || items[0].Category != "lifecycle" || items[0].ChainSequence != 1 {
+		t.Fatalf("remaining lifecycle = %#v, %v", items, err)
+	}
+	if integrity, err := db.VerifyEgressAuditIntegrity(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll}); err != nil || integrity.Events != 1 {
+		t.Fatalf("integrity after purge = %#v, %v", integrity, err)
+	}
+}
+
+func TestConversationEgressAuditSettingControlsCollectorTargets(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "audit toggle")
+	if enabled, err := db.GetConversationEgressAuditEnabled(ctx, conversation.ID); err != nil || !enabled {
+		t.Fatalf("default audit setting = %v, %v", enabled, err)
+	}
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("default collector targets = %#v, %v", targets, err)
+	}
+	disabledEvent := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestHTTP,
+		Domain: "fuzz.example", Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-fuzz", Reason: "allow-visit",
+		Method: "GET", Path: "/disabled", HTTPStatus: 200, Outcome: "completed",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	if err := db.SetConversationEgressAuditEnabled(ctx, conversation.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := db.GetConversationEgressAuditEnabled(ctx, conversation.ID); err != nil || enabled {
+		t.Fatalf("disabled audit setting = %v, %v", enabled, err)
+	}
+	if targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx); err != nil || len(targets) != 0 {
+		t.Fatalf("disabled collector targets = %#v, %v", targets, err)
+	}
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], disabledEvent); err != nil || inserted {
+		t.Fatalf("disabled event persistence = %v, %v", inserted, err)
+	}
+	if err := db.SetConversationEgressAuditEnabled(ctx, conversation.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], disabledEvent); err != nil || inserted {
+		t.Fatalf("disabled log replay persistence = %v, %v", inserted, err)
+	}
+	liveEvent := disabledEvent
+	liveEvent.Timestamp = time.Now().UTC().Add(time.Second)
+	liveEvent.Path = "/enabled"
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], liveEvent); err != nil || !inserted {
+		t.Fatalf("re-enabled event persistence = %v, %v", inserted, err)
+	}
+	if targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx); err != nil || len(targets) != 1 || targets[0].Record.ConversationID != conversation.ID {
+		t.Fatalf("re-enabled collector targets = %#v, %v", targets, err)
+	}
+}
+
+func TestCreateContainerConversationPersistsInitialEgressAuditSetting(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	disabled := false
+	conversation, err := db.CreateConversation("audit disabled at creation", ConversationCreateMeta{
+		RuntimeMode: ConversationRuntimeModeContainer, EgressAuditEnabled: &disabled,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enabled, err := db.GetConversationEgressAuditEnabled(context.Background(), conversation.ID); err != nil || enabled {
+		t.Fatalf("initial audit setting = %v, %v", enabled, err)
+	}
+}
+
 func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -154,6 +278,17 @@ func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 					t.Fatal(err)
 				}
 				if _, err := db.Exec(`DELETE FROM egress_audit_events WHERE conversation_id = ? AND chain_sequence = 1`, conversationID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "modified HTTP packet",
+			tamper: func(t *testing.T, db *DB, conversationID string) {
+				if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE egress_audit_events SET http_packet_json = '{"requestLine":"GET /tampered HTTP/1.1","requestHeaders":{},"sensitiveDataRedacted":false}' WHERE conversation_id = ? AND category = 'network'`, conversationID); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -190,6 +325,7 @@ func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 				Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
 				Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-example", Reason: "allow-visit",
 				Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed",
+				HTTPPacket: &egress.HTTPPacket{RequestLine: "GET /safe HTTP/1.1", RequestHeaders: map[string][]string{}},
 				SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
 			}
 			if inserted, err := db.AppendEgressNetworkAuditEvent(context.Background(), targets[0], event); err != nil || !inserted {

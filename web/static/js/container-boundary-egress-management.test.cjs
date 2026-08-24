@@ -7,15 +7,22 @@ const root = path.resolve(__dirname, '..', '..', '..');
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
 const template = read('web', 'templates', 'index.html');
 const boundary = read('web', 'static', 'js', 'boundary-rules.js');
+const management = read('web', 'static', 'js', 'container-management.js');
 const egress = read('web', 'static', 'js', 'egress-management.js');
 const styles = read('web', 'static', 'css', 'style.css');
 const zh = JSON.parse(read('web', 'static', 'i18n', 'zh-CN.json'));
 const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
 
-test('边界规则页提供草案 CRUD 并读取已绑定对话的不可变快照', () => {
+test('边界规则页提供可检索分页的策略列表、使用关系和完整 CRUD', () => {
     for (const id of [
         'boundary-rules-phase',
-        'boundary-policy-select',
+        'boundary-policy-search',
+        'boundary-policy-page-size',
+        'boundary-policy-list',
+        'boundary-policy-pagination',
+        'boundary-policy-detail-drawer',
+        'boundary-policy-detail-body',
+        'boundary-policy-editor-modal',
         'boundary-policy-form',
         'boundary-policy-name',
         'boundary-policy-description',
@@ -23,29 +30,31 @@ test('边界规则页提供草案 CRUD 并读取已绑定对话的不可变快�
 		'boundary-policy-tls-bypass',
         'boundary-policy-rule-list',
         'boundary-rule-form',
+        'boundary-rule-form-title',
+        'boundary-rule-close',
         'boundary-rule-effect',
         'boundary-rule-host',
         'boundary-rule-schemes',
         'boundary-rule-ports',
         'boundary-rule-paths',
         'boundary-rule-methods',
-        'boundary-rules-conversation',
         'boundary-rules-refresh',
         'boundary-rules-load-state',
-        'boundary-rules-detail',
     ]) assert.match(template, new RegExp(`id="${id}"`));
 
-    assert.match(boundary, /\/api\/container-runtimes\?page=1&page_size=100&status=all/);
-    assert.match(boundary, /\/api\/boundary-policies/);
+    assert.doesNotMatch(template, /id="boundary-rules-focus-title"/);
+    assert.match(template, /class="boundary-policy-editor-body"/);
+    assert.match(boundary, /\/api\/boundary-policies\?' \+ query\.toString\(\)/);
+    assert.match(boundary, /\/usage/);
     assert.match(boundary, /\/rules['"]? \+ \(ruleID/);
     assert.match(boundary, /jsonOptions\(id \? 'PUT' : 'POST', payload\)/);
     assert.match(boundary, /\{ method: 'DELETE' \}/);
-    assert.match(boundary, /\/api\/conversations\/['"]? \+ encodeURIComponent\(state\.selectedConversationId\) \+ ['"]?\/boundary/);
-    assert.match(boundary, /boundarySnapshotSha256/);
+	assert.match(boundary, /boundary_page/);
+	assert.match(boundary, /boundary_page_size/);
+	assert.match(boundary, /boundary_q/);
 	assert.match(boundary, /tlsInspectionEnabled/);
 	assert.match(boundary, /tlsBypassDomains/);
-    assert.match(boundary, /snapshot\.document && Array\.isArray\(snapshot\.document\.rules\)/);
-    assert.match(boundary, /boundary_conversation/);
+    assert.match(boundary, /state\.selectedUsage/);
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
 });
 
@@ -95,7 +104,7 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     const keys = [
         'boundaryConversation', 'boundaryLoading', 'boundaryReady', 'boundarySnapshotHash',
         'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations', 'boundaryTLSEnabled',
-        'boundaryVisitDefaultMethods',
+        'boundaryAnyMethod', 'boundaryDefaultAllow',
         'boundaryTLSBypassDomains', 'boundaryTLSBypassHint', 'activityHTTPS',
         'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab', 'egressAuthTab',
         'createProxy', 'createGroup', 'createAuth', 'credentialsConfigured', 'clearCredentials',
@@ -104,8 +113,15 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     for (const locale of [zh, en]) {
         for (const key of keys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
-    assert.match(boundary, /rule\.effect === 'allow-visit'/);
-    assert.match(boundary, /boundaryVisitDefaultMethods/);
+    assert.match(boundary, /boundaryAnyMethod/);
+    assert.match(boundary, /usageCount/);
+    assert.match(boundary, /protocolLabel/);
+    assert.match(styles, /\.boundary-policy-row\s*\{/);
+    assert.match(styles, /\.boundary-policy-detail-drawer\s*\{/);
+    assert.match(styles, /\.boundary-policy-editor-modal\s*\{/);
+    assert.match(styles, /\.boundary-policy-editor-dialog\s*\{[\s\S]*?grid-template-rows: auto minmax\(0, 1fr\);[\s\S]*?max-height:[\s\S]*?overflow: hidden;/);
+    assert.match(styles, /\.boundary-policy-editor-body\s*\{[\s\S]*?overflow: auto;/);
+    assert.match(styles, /\.boundary-rule-form:not\(\[hidden\]\)\s*\{[\s\S]*?position: fixed;[\s\S]*?transform: translate\(-50%, -50%\)/);
     assert.match(styles, /\.container-policy-detail\s*\{/);
     assert.match(styles, /\.container-policy-rule-grid\s*\{/);
     assert.match(styles, /\.egress-management-view\s*\{/);
@@ -119,15 +135,24 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     assert.match(styles, /@media \(max-width: 480px\)[\s\S]*?\.container-policy-snapshot-heading,[\s\S]*?flex-direction: column/);
 });
 
-test('allow-visit 空方法显示为只读默认集而非通配符', () => {
+test('空方法对所有边界效果都显示为任意方法', () => {
     const source = boundary.match(/function ruleMethodsLabel\(rule\) \{[\s\S]*?\n    \}/);
     assert.ok(source, '应找到实际 ruleMethodsLabel 实现');
     const makeLabel = new Function('t', `${source[0]}; return ruleMethodsLabel;`);
-    const label = makeLabel((key, fallback) => key === 'boundaryVisitDefaultMethods'
-        ? 'GET、HEAD、OPTIONS（默认）'
+    const label = makeLabel((key, fallback) => key === 'boundaryAnyMethod'
+        ? '任意方法'
         : fallback);
 
-    assert.equal(label({ effect: 'allow-visit', methods: [] }), 'GET、HEAD、OPTIONS（默认）');
+    assert.equal(label({ effect: 'allow-visit', methods: [] }), '任意方法');
     assert.equal(label({ effect: 'allow-visit', methods: ['POST'] }), 'POST');
-    assert.equal(label({ effect: 'allow-attack', methods: [] }), '*');
+    assert.equal(label({ effect: 'allow-attack', methods: [] }), '任意方法');
+});
+
+test('对话容器详情可以切换边界策略并显式重建', () => {
+    assert.match(management, /container-boundary-policy-switch/);
+    assert.match(management, /\/api\/boundary-policies\?page=1&page_size=100/);
+    assert.match(management, /\/container\/rebuild/);
+    assert.match(management, /JSON\.stringify\(\{ boundaryPolicyId: policyId \}\)/);
+    assert.match(management, /record\.boundaryPolicyId/);
+    assert.match(styles, /\.container-boundary-policy-switch\s*\{/);
 });

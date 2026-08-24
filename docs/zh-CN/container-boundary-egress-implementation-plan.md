@@ -348,7 +348,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 实现 10/20/50/100 每页、服务端分页、搜索、状态筛选和 URL 状态保留。
 - [x] 实现对话出站网络活动实时流，页面可立即看到新的域名请求、解析 IP、允许/阻断和命中规则。
 - [x] 审计 DNS、HTTP、CONNECT、拒绝、限速、上游路由和生命周期事件，支持搜索与导出。
-- [x] 日志记录 `conversation_id`、`container_id`、`agent_id`、快照 hash、目标、判定、命中规则和上游；敏感 header/body 默认不保存。
+- [x] 日志记录 `conversation_id`、`container_id`、`agent_id`、快照 hash、目标、判定、命中规则和上游；对话可关闭网络审计以避免 fuzz 产生大量事件，显式开启时 HTTP/HTTPS 完整报文按原文保存。
 - [x] 对每个对话的审计事件增加前序 hash，可检测删除或篡改。
 - [x] 实现确定性限速、并发上限、429 冷却、连续登录失败、WAF/CAPTCHA 信号和手动恢复。
 - [x] 完成桌面和窄屏 UI 浏览器验收，无刷新卡死、空对话、错误页头或下拉框遮挡。
@@ -361,11 +361,11 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 
 - [x] 为每个对话生成独立短期 CA，只向对应 Agent 注入公开证书，私钥仅挂载到该对话网关。
 - [x] 增加不解密域名列表和证书固定兼容策略，精确匹配配置域名及其子域。
-- [x] 解密后按真实 HTTPS method/path 重新执行边界规则；header/body 只参与受控转发，不进入规则结果或审计持久化。
-- [x] 请求/响应正文始终不持久化；本阶段不提供正文持久化开关，避免以未完成的脱敏、加密、限量和清理能力扩大数据面。
-- [x] 对密码、Cookie、Authorization、Token、文件上传和二进制响应编写专门数据泄露测试。
+- [x] 解密后按真实 HTTPS method/path 重新执行边界规则；header/body 不作为规则输入，但在该对话开启出站审计时进入完整报文详情。
+- [x] HTTP/HTTPS 请求与响应按原文持久化，不脱敏 Authorization、Cookie、Token、query、header 或 body；请求/响应正文分别限制为 32 KiB，保存 UTF-8/base64 编码和截断标记，界面显示明确敏感数据警告。
+- [x] 对密码、Cookie、Authorization、Token、文件式正文和二进制响应编写完整性、长度上限、编码与审计链防篡改测试。
 
-验收门槛：启用完整审计的对话可检查 HTTPS URL 与方法；未启用的对话不信任任何相关 CA；证书和正文不跨对话泄露。
+验收门槛：启用 HTTPS 完整审计的对话可检查真实 URL、方法及完整报文；未启用 TLS 解密的对话不信任任何相关 CA；关闭出站审计后不写入网络事件且重开不回放关闭期间的旧日志；证书、私钥和完整报文不跨对话泄露。
 
 ### 阶段 7：安全加固、端到端验收与渐进发布
 
@@ -597,3 +597,39 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - API 与 UI：精确部署上的真实管理员登录、临时策略/规则 CRUD 及清理通过；同一条空 methods 规则的 API 模拟为 GET 命中、POST `default-deny`。规则卡显示 `GET、HEAD、OPTIONS（默认）`而不是 `*`，刷新后保持一致。1440×900 桌面和 390×844 移动验收均无水平溢出，移动自动折叠稳定宽度为侧栏 67px/页面 323px，console/page/5xx 为 0，截图 SHA-256 分别为 `a07b5da5…e4891e19b`、`c74bb9da…28626a18`。内置浏览器控制链路在现有页和新页均连续超时，已按前端验收流程记录原因并使用本机受控 Playwright 直连同一虚拟机，未把控制链路故障写成产品通过证据。
 - 精确部署：Linux ARM64 服务 SHA-256 为 `b27f2feedb4aa6250697ff5309c8c045fc45035275eb263389f931b673c9217a`，Egress 镜像为 `sha256:e0792e160d092c4466b7ab0261231e1ba9376c6939356462fecc727c5aae0dff`，OCI revision 为同一精确提交。活动进程与文件哈希一致，服务 `active/running`、`NRestarts=0`，虚拟机回环和宿主直连首页均 200；活动 Web 文件与 detached 源码逐字节一致，SQLite `quick_check=ok`、外键违规 0，本次启动 warning 及以上日志 0。
 - 全局矩阵结论：默认拒绝、blocked DNS+网关、allow-visit 只读默认、allow-attack 主机/端口/路径约束、auth-only 凭据隔离、IP/DNS/DoH/IPv6/跳转/Rebinding 绕过、移除代理 env、网关/快照/上游故障、Docker Socket/宿主/跨对话隔离、身份/快照/凭据复用拒绝以及决策审计追溯均有定向单元、集成和 ARM64 真实 Docker 证据，未解决高风险项为 0。
+
+### 阶段 8 审计可操作性补强（2026-08-24）
+
+- 范围变更：用户明确要求 HTTP/HTTPS 报文不脱敏，用于安全审计。因此本节取代 2026-08-23 验收记录中“正文零持久化”的旧范围；TLS 解密仍默认关闭，出站网络审计开关与 TLS 解密开关仍为两个独立控制。
+- [x] HTTP/HTTPS 完整报文：详情接口和 UI 按原文显示 request line、status line、query、headers 及 request/response body，不脱敏 Authorization、Cookie、Token 或业务字段；正文每个方向上限 32 KiB，非 UTF-8 使用 base64，超限显式标记截断。列表投影继续省略完整报文，只有打开单条详情才加载原文。
+- [x] 对话级审计开关：新建容器对话可直接设置，已有容器对话可重新打开锁定的容器设置，仅出站审计开关保持可编辑；关闭后 HTTP/HTTPS/DNS/CONNECT 不入库，生命周期事件继续保留，再次开启不回放 Docker 历史日志。
+- [x] 已绑定边界策略可修改：先保存策略草案，再从边界页面显式“应用到已选对话”；底层依然通过新不可变快照和受控重建生效，并原子替换与快照绑定的 TLS CA，不原地改写历史快照。
+- [x] 禁止访问反馈：HTTP 以及已解密 HTTPS 均返回 403、`X-CyberStrikeAI-Blocked: true`、原因/规则标识和中英文明确说明，Agent 可判断“被出站边界禁止”而不是普通网络故障。
+- [x] 定向删除：出站审计页支持逐条/当前页选择、删除已选及删除当前筛选结果；未带 ID 且无筛选条件的全局删除在服务端被拒绝。删除在同一事务中写入维护标记、重排受影响链并重算 hash，提交前再做完整性校验。
+- `访问baidu.com` 失败原因：旧对话不可变快照的规则数组为空，因此必然命中 `default-deny`；另外 `https://baidu.com` 会跳转到 `www.baidu.com`，精确 host 规则不自动授权跳转目标。将 `baidu.com` 和 `www.baidu.com` 同时纳入新草案并显式应用到对话后，真实 HTTPS 请求得到 301 和后续 200。
+- 安全与兼容：完整报文进入 hash-chain v2，修改报文会破坏完整性；不含报文的历史事件保持 v1 hash 兼容。所有报文内容只用 `textContent` 渲染，不将非受信 HTML 注入 DOM。
+
+#### 对话容器工作区与交互终端补充（2026-08-24）
+
+- [x] 对话页在“容器执行”旁增加工作区入口，在输入框下方显示容器 `/workspace`、宿主机路径、存储类型和交互式 Shell；对话容器管理页在右侧抽屉提供相同功能。
+- [x] 真正复用系统设置终端代码：`terminal.js` 对外暴露共享 `createEmbeddedTerminal`，系统终端、对话下方终端和容器侧栏共用同一套 xterm 初始化、主题、多标签、输入、窗口缩放、WebSocket 和关闭生命周期，容器页不再另写一套仿制终端。
+- [x] 已停止容器仍可查看持久工作区的容器/宿主机路径，但 Shell 明确禁用；临时 tmpfs 不伪造宿主机持久路径。
+- [x] Shell 只能进入当前对话所有且处于 running 的 Agent 容器，固定非特权 `/bin/sh`和 `/workspace`，复用执行并发限制，支持 PTY resize 和空闲超时，不会回退到宿主机终端。
+- [x] ARM64 虚拟机真实 Docker 验收：临时 tmpfs 和持久 named volume 路径投影均正确；WebSocket PTY 返回 `/workspace` 与 `aarch64`，关闭 3 秒后无残留 shell 进程；停止态 WebSocket 返回 409；文件在 stop/start 后仍存在。最终候选服务 SHA-256 为 `51a71705f5ac181b08c15aecae231dd2b7a3c2cff0261c2e50b02f4bfdfc30b3`，服务 `active/running`、`NRestarts=0`。
+
+#### 默认边界与 TCP/UDP 传输补充（2026-08-24）
+
+- [x] 默认不绑定边界策略：容器对话不选策略时生成 schema v3 不可变快照 `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}`，HTTP、HTTPS、TCP 和 UDP 外网请求默认放行；宿主私网、保留地址、云元数据、Docker API、外部 DNS 和加密 DNS 等强制隔离仍始终失败关闭。显式绑定的边界策略仍对未命中目标默认拒绝。
+- [x] 请求方法默认不限制：规则 `methods: []` 对 GET、POST、PUT、PATCH、DELETE 等任意 HTTP 方法匹配，界面明确显示“任意请求方式”；只有显式填写 methods 时才按列表限制。本节取代上文“空 methods 默认只读”的旧范围。
+- [x] TCP/UDP 规则与审计：目标 scheme 新增 `tcp` 和 `udp`，复用精确 host/port、过期、限速/并发、私网禁止、DNS Rebinding 与不可变快照判定；网络活动和出站审计支持 TCP/UDP 类别、命中规则、连接 IP、结果和字节数。
+- [x] 真实传输通道：每对 Agent/网关增加内网限定 SOCKS5 `1080/tcp`，支持 CONNECT 和 UDP ASSOCIATE，Agent 注入 `ALL_PROXY=socks5h://<gateway>:1080`。通用 SOCKS 客户端可直接访问 SSH、MySQL 和其他 TCP/UDP 协议；不自动读取 `ALL_PROXY` 的原生命令需使用自身 SOCKS/ProxyCommand 选项，不伪装成透明代理。
+- [x] ARM64 虚拟机真实验收：无边界对话验证 HTTP POST、HTTPS、GitHub SSH 22/TCP、3306/TCP 判定和 123/UDP；显式策略对同一组目标命中正确 rule ID，未配置 HTTP/TCP 精确拒绝。Docker 集成矩阵同时验证 HTTP/HTTPS/TCP/UDP 默认放行与私网/保留地址继续阻断；全量 Go、`go vet`、相关 race、前端 168/168、JS/翻译/集成脚本语法及 `git diff --check` 通过。候选 ARM64 服务 SHA-256 为 `3f14f61b2c1e96cd3e79bd7bb27591b032ca2aa2a524d5f675ea1a0c60e4946`，出站网关摘要为 `sha256:967939268aed7e4a58db54f470652dbb1fd90f6ee413b51f8d8f6290dba51b06`，服务 `active/running`、`NRestarts=0`。
+
+#### 边界策略目录与容器切换补充（2026-08-24）
+
+- [x] 删除旧的状态横幅和页面内草案堆叠，改为一行一个策略的目录；提供策略名/说明搜索、10/20/50 每页、服务端分页和 URL 状态恢复。
+- [x] 策略详情使用右侧抽屉，展示完整规则以及当前仍在使用该策略的对话、容器状态、工作区类型、快照 hash、运行代次和激活时间。
+- [x] 新建/修改策略使用内容自适应的居中悬浮弹窗，内部独立滚动；新增/修改规则使用第二层悬浮弹窗，标题和操作栏固定，输入框与自定义下拉统一 42px 高度并按两列基线对齐。
+- [x] 已使用策略在前后端双重禁止删除；未使用策略可删除。策略、规则均具备完整新建、查看、编辑和删除链路。
+- [x] 对话容器详情可从“默认不设置边界”与现有策略之间切换，确认后通过受控容器重建生成并原子激活新快照；列表投影同步返回当前策略、名称和快照 ID。
+- [x] ARM64 虚拟机实机验收：策略 CRUD、HTTP/TCP 规则、检索分页、使用关系、使用中删除 409、已停止测试容器切换策略并恢复默认均通过，测试策略/对话/容器已清理。内置浏览器验证新建策略弹窗高度自适应、新增规则独立悬浮、成对字段位置和高度一致、控制台 warning/error 为 0；前端 172/172、全量 Go、定向 race、`go vet` 和 `git diff --check` 通过。

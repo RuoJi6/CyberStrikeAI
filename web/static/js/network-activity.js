@@ -23,7 +23,7 @@
         tool: 'activity_tool',
         route: 'activity_route',
     });
-    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'https', 'connect']);
+    const REQUEST_TYPES = new Set(['all', 'dns', 'http', 'https', 'connect', 'tcp', 'udp']);
     const DECISIONS = new Set(['all', 'allowed', 'blocked']);
     const AGENTS = new Set(['all', 'container-agent']);
     const TOOLS = new Set(['all', 'unknown']);
@@ -138,7 +138,7 @@
 
     function isSafeActivityEvent(value) {
         if (!value || typeof value !== 'object') return false;
-        if (!['dns', 'http', 'https', 'connect'].includes(value.requestType)) return false;
+        if (!['dns', 'http', 'https', 'connect', 'tcp', 'udp'].includes(value.requestType)) return false;
         if (!['allowed', 'blocked'].includes(value.decision)) return false;
         if (typeof value.domain !== 'string' || value.domain.length < 1 || value.domain.length > 253) return false;
         if (typeof value.timestamp !== 'string' || Number.isNaN(new Date(value.timestamp).getTime())) return false;
@@ -324,7 +324,7 @@
         const requestType = String(event.requestType || '').toUpperCase();
         const requestDetail = event.requestType === 'http' || event.requestType === 'https'
             ? [event.method, event.path].filter(Boolean).join(' ')
-            : (event.requestType === 'connect' ? `:${event.port || 443}` : '');
+            : (['connect', 'tcp', 'udp'].includes(event.requestType) ? `:${event.port || 0}` : '');
         const target = event.port ? `${event.domain}:${event.port}` : event.domain;
         const resolved = Array.isArray(event.resolvedIps) && event.resolvedIps.length ? event.resolvedIps.join(', ') : '—';
         const connected = event.connectedIp ? `${t('activityConnected', '连接')} ${event.connectedIp}` : '';

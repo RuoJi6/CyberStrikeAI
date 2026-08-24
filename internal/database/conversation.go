@@ -100,7 +100,6 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 			return nil, fmt.Errorf("selected upstream egress does not exist: %w", err)
 		}
 	}
-
 	wsID := strings.TrimSpace(webshellConnectionID)
 	tx, err := db.Begin()
 	if err != nil {
@@ -131,6 +130,18 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	}
 	if err != nil {
 		return nil, fmt.Errorf("创建对话失败: %w", err)
+	}
+	if runtimeMode == ConversationRuntimeModeContainer {
+		auditEnabled := true
+		if meta.EgressAuditEnabled != nil {
+			auditEnabled = *meta.EgressAuditEnabled
+		}
+		if _, err = tx.Exec(`
+			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, updated_at)
+			VALUES (?, ?, ?)
+		`, id, auditEnabled, formatSQLiteUTC(now)); err != nil {
+			return nil, fmt.Errorf("保存对话出站审计设置失败: %w", err)
+		}
 	}
 	if boundaryPolicyID != "" {
 		if _, err = tx.Exec(`

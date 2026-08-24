@@ -62,6 +62,7 @@ func boundarySimulationRouter(db *database.DB, session security.Session) *gin.En
 	router.GET("/api/boundary-policies", handler.List)
 	router.POST("/api/boundary-policies", handler.Create)
 	router.GET("/api/boundary-policies/:id", handler.Get)
+	router.GET("/api/boundary-policies/:id/usage", handler.Usage)
 	router.PUT("/api/boundary-policies/:id", handler.Update)
 	router.DELETE("/api/boundary-policies/:id", handler.Delete)
 	router.POST("/api/boundary-policies/:id/rules", handler.CreateRule)
@@ -198,6 +199,45 @@ func TestBoundaryPolicyListIsScopedAndUsesSafeProjection(t *testing.T) {
 	})
 	if admin.Code != http.StatusOK || !strings.Contains(admin.Body.String(), foreign.ID) {
 		t.Fatalf("admin status/body = %d: %s", admin.Code, admin.Body.String())
+	}
+}
+
+func TestBoundaryPolicyListSupportsSearchPaginationAndUsageProjection(t *testing.T) {
+	db, policy := newBoundaryPolicyHandlerTestDB(t)
+	for _, name := range []string{"Alpha policy", "Beta policy", "Gamma policy"} {
+		if _, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{Name: name, OwnerUserID: "owner-1"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true, "chat:read": true},
+	})
+	response := performBoundaryJSON(router, http.MethodGet, "/api/boundary-policies?page=1&page_size=2&search=policy", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("list status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items      []boundaryPolicySummary `json:"items"`
+		Page       int                     `json:"page"`
+		PageSize   int                     `json:"pageSize"`
+		Total      int                     `json:"total"`
+		TotalPages int                     `json:"totalPages"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Page != 1 || payload.PageSize != 2 || payload.Total != 3 || payload.TotalPages != 2 || len(payload.Items) != 2 {
+		t.Fatalf("payload = %#v", payload)
+	}
+	for _, item := range payload.Items {
+		if item.Protocols == nil {
+			t.Fatalf("protocol projection is nil: %#v", item)
+		}
+	}
+	usage := performBoundaryJSON(router, http.MethodGet, "/api/boundary-policies/"+policy.ID+"/usage", nil)
+	if usage.Code != http.StatusOK || !strings.Contains(usage.Body.String(), `"total":0`) {
+		t.Fatalf("usage status = %d: %s", usage.Code, usage.Body.String())
 	}
 }
 

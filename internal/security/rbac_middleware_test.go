@@ -192,6 +192,9 @@ func TestPersistentEgressAuditRoutesUseAuditReadPermission(t *testing.T) {
 	if got := permissionForRequest(http.MethodPost, "/api/egress-audit-events"); got != "audit:read" {
 		t.Fatalf("non-GET persistent audit permission = %q, want audit:read", got)
 	}
+	if got := permissionForRequest(http.MethodDelete, "/api/egress-audit-events"); got != "audit:delete" {
+		t.Fatalf("persistent audit delete permission = %q, want audit:delete", got)
+	}
 }
 
 func TestEgressDefaultRoutesUseSelectionPermissions(t *testing.T) {
@@ -211,6 +214,17 @@ func TestEgressDefaultRoutesUseSelectionPermissions(t *testing.T) {
 	} {
 		if got := permissionForRequest(tc.method, tc.path); got != tc.want {
 			t.Fatalf("%s %s permission = %q, want %q", tc.method, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestConversationContainerWorkspaceRoutesUseConversationReadPermission(t *testing.T) {
+	for _, path := range []string{
+		"/api/conversations/:id/container/workspace",
+		"/api/conversations/:id/container/terminal/ws",
+	} {
+		if got := permissionForRequest(http.MethodGet, path); got != "chat:read" {
+			t.Fatalf("GET %s permission = %q, want chat:read", path, got)
 		}
 	}
 }

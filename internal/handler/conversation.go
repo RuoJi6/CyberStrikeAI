@@ -40,6 +40,14 @@ type ConversationContainerRuntimeObserver interface {
 	Observe(ctx context.Context, spec containerruntime.RuntimeSpec) (containerruntime.RuntimeObservation, error)
 }
 
+type ConversationContainerWorkspaceInspector interface {
+	WorkspaceInfo(ctx context.Context, spec containerruntime.RuntimeSpec) (containerruntime.WorkspaceInfo, error)
+}
+
+type ConversationContainerInteractiveExecutor interface {
+	OpenInteractiveExec(ctx context.Context, spec containerruntime.RuntimeSpec, request containerruntime.InteractiveExecRequest) (containerruntime.InteractiveExecSession, error)
+}
+
 type ConversationEgressActivityStreamer interface {
 	StreamEgressActivity(context.Context, containerruntime.RuntimeSpec, containerruntime.ActivityStreamOptions, containerruntime.RuntimeActivitySink) error
 }
@@ -69,6 +77,8 @@ type ConversationHandler struct {
 	taskState                ConversationTaskStateProvider
 	containerInitializations ConversationContainerInitializationProvider
 	containerObserver        ConversationContainerRuntimeObserver
+	containerWorkspace       ConversationContainerWorkspaceInspector
+	containerInteractive     ConversationContainerInteractiveExecutor
 	egressActivityStreamer   ConversationEgressActivityStreamer
 	egressHealthController   ConversationEgressHealthController
 	containerLifecycle       ConversationContainerLifecycleController
@@ -98,6 +108,14 @@ func (h *ConversationHandler) SetContainerInitializationProvider(provider Conver
 
 func (h *ConversationHandler) SetContainerRuntimeObserver(observer ConversationContainerRuntimeObserver) {
 	h.containerObserver = observer
+}
+
+func (h *ConversationHandler) SetContainerWorkspaceInspector(inspector ConversationContainerWorkspaceInspector) {
+	h.containerWorkspace = inspector
+}
+
+func (h *ConversationHandler) SetContainerInteractiveExecutor(executor ConversationContainerInteractiveExecutor) {
+	h.containerInteractive = executor
 }
 
 func (h *ConversationHandler) SetEgressActivityStreamer(streamer ConversationEgressActivityStreamer) {
@@ -138,6 +156,7 @@ type CreateConversationRequest struct {
 	EgressMode          string `json:"egressMode,omitempty"`
 	EgressProxyID       string `json:"egressProxyId,omitempty"`
 	EgressProxyGroupID  string `json:"egressProxyGroupId,omitempty"`
+	EgressAuditEnabled  *bool  `json:"egressAuditEnabled,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -171,6 +190,11 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.WorkspacePersistent = req.WorkspacePersistent
+	if req.EgressAuditEnabled != nil && runtimeMode != database.ConversationRuntimeModeContainer {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "egressAuditEnabled 只能用于 container 对话"})
+		return
+	}
+	meta.EgressAuditEnabled = req.EgressAuditEnabled
 	meta.BoundaryPolicyID = strings.TrimSpace(req.BoundaryPolicyID)
 	if meta.BoundaryPolicyID != "" {
 		if runtimeMode != database.ConversationRuntimeModeContainer {
@@ -443,6 +467,17 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 			item.Status = "unavailable"
 			item.ObservationError = "status_unavailable"
 		}
+		if snapshot, snapshotErr := h.db.GetConversationBoundarySnapshot(c.Request.Context(), conversation.ID); snapshotErr == nil {
+			item.BoundaryPolicyID = snapshot.PolicyID
+			item.BoundarySnapshotID = snapshot.SnapshotID
+		} else if selectedPolicyID, selectionErr := h.db.GetConversationBoundaryPolicySelection(c.Request.Context(), conversation.ID); selectionErr == nil {
+			item.BoundaryPolicyID = selectedPolicyID
+		}
+		if item.BoundaryPolicyID != "" {
+			if policy, policyErr := h.db.GetBoundaryPolicy(c.Request.Context(), item.BoundaryPolicyID); policyErr == nil {
+				item.BoundaryPolicyName = policy.Name
+			}
+		}
 		items = append(items, item)
 	}
 	totalPages := 0
@@ -478,6 +513,9 @@ type containerRuntimeListItemView struct {
 	Desired             *conversationContainerDesiredView   `json:"desired,omitempty"`
 	ObservationError    string                              `json:"observationError,omitempty"`
 	EgressHealth        *database.EgressHealthState         `json:"egressHealth,omitempty"`
+	BoundaryPolicyID    string                              `json:"boundaryPolicyId"`
+	BoundaryPolicyName  string                              `json:"boundaryPolicyName"`
+	BoundarySnapshotID  string                              `json:"boundarySnapshotId,omitempty"`
 }
 
 func (item *containerRuntimeListItemView) apply(record containerruntime.InitializationRecord) {

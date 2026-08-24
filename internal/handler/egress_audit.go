@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/security"
 
@@ -20,7 +22,50 @@ import (
 const maxEgressAuditExport = 5000
 
 type EgressAuditHandler struct {
-	db *database.DB
+	db    *database.DB
+	audit *audit.Service
+}
+
+func (h *EgressAuditHandler) SetAudit(service *audit.Service) { h.audit = service }
+
+type deleteEgressAuditRequest struct {
+	IDs []string `json:"ids"`
+}
+
+func (h *EgressAuditHandler) Delete(c *gin.Context) {
+	setEgressAuditResponseHeaders(c)
+	filter, _, _, ok := egressAuditFilterFromRequest(c)
+	if !ok {
+		return
+	}
+	var request deleteEgressAuditRequest
+	if err := c.ShouldBindJSON(&request); err != nil && !errors.Is(err, io.EOF) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "删除请求必须是有效 JSON"})
+		return
+	}
+	if len(request.IDs) == 0 && filter.ConversationID == "" && filter.Query == "" &&
+		filter.Category == "all" && filter.EventType == "all" && filter.Decision == "all" && filter.Since == nil && filter.Until == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "删除筛选结果时至少需要一个筛选条件"})
+		return
+	}
+	if _, err := h.db.VerifyEgressAuditIntegrity(c.Request.Context(), database.EgressAuditFilter{
+		ConversationID: filter.ConversationID, UserID: filter.UserID, Scope: filter.Scope,
+	}); err != nil {
+		writeEgressAuditIntegrityError(c, err)
+		return
+	}
+	deleted, err := h.db.PurgeEgressAuditEvents(c.Request.Context(), filter, request.IDs)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除出站审计事件失败"})
+		return
+	}
+	if h.audit != nil {
+		h.audit.RecordOK(c, "audit", "egress-events-delete", "删除出站审计事件", "egress_audit_event", "", map[string]interface{}{
+			"deleted": deleted, "selected": len(request.IDs), "conversation_id": filter.ConversationID,
+			"category": filter.Category, "event_type": filter.EventType, "decision": filter.Decision,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": deleted})
 }
 
 func NewEgressAuditHandler(db *database.DB) *EgressAuditHandler {

@@ -10,6 +10,7 @@
         groups: [],
         preview: null,
         errors: Object.create(null),
+        auditSettingRequestId: 0,
     };
 
     function translate(key, fallback, params) {
@@ -79,7 +80,7 @@
         const select = selectElement('boundary-policy-select');
         if (!select) return;
         const selected = select.value;
-        const options = [createOption('', translate('chat.boundaryPolicyDefaultDeny', '默认拒绝（空策略）'))];
+        const options = [createOption('', translate('chat.boundaryPolicyDefaultAllow', '不设置边界（允许全部外部访问）'))];
         state.policies.forEach(function (policy) {
             if (!policy || !policy.id) return;
             const option = createOption(String(policy.id), String(policy.name || policy.id));
@@ -164,7 +165,7 @@
         if (!select || !hint) return;
         const selected = select.selectedOptions[0];
         if (!select.value) {
-            hint.textContent = translate('chat.boundaryPolicyDefaultDenyHint', '不选择草案时生成默认拒绝快照；容器无法访问任何目标。');
+            hint.textContent = translate('chat.boundaryPolicyDefaultAllowHint', '不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；Docker、宿主机与保留地址仍保持隔离。');
             return;
         }
         const description = selected ? String(selected.dataset.description || '').trim() : '';
@@ -228,6 +229,81 @@
         return response.json();
     }
 
+    function notify(message, type) {
+        if (typeof window.showNotification === 'function') window.showNotification(message, type || 'info');
+    }
+
+    function updateAuditHint(enabled, saving) {
+        const hint = selectElement('conversation-egress-audit-hint');
+        if (!hint) return;
+        if (saving) {
+            hint.textContent = translate('chat.egressAuditSaving', '正在保存出站网络审计设置…');
+            return;
+        }
+        hint.textContent = enabled
+            ? translate('chat.egressAuditHint', '记录 HTTP、HTTPS、DNS 和 CONNECT；关闭后仍保留容器生命周期事件，适合高流量 fuzz。')
+            : translate('chat.egressAuditDisabledHint', '已停止记录网络事件；容器生命周期事件仍会保留。');
+    }
+
+    async function loadConversationEgressAuditSetting() {
+        const toggle = selectElement('conversation-egress-audit-toggle');
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!toggle || !conversationId) return;
+        const requestId = ++state.auditSettingRequestId;
+        toggle.disabled = true;
+        updateAuditHint(toggle.checked, true);
+        try {
+            const payload = await fetchJSON('/api/conversations/' + encodeURIComponent(conversationId) + '/egress-audit');
+            if (requestId !== state.auditSettingRequestId || conversationId !== String(window.currentConversationId || '').trim()) return;
+            toggle.checked = payload.enabled !== false;
+            updateAuditHint(toggle.checked, false);
+        } catch (error) {
+            if (requestId === state.auditSettingRequestId) {
+                updateAuditHint(toggle.checked, false);
+                notify(translate('chat.egressAuditLoadFailed', '读取出站网络审计设置失败。'), 'error');
+            }
+        } finally {
+            if (requestId === state.auditSettingRequestId) toggle.disabled = false;
+        }
+    }
+
+    async function syncConversationEgressAudit(enabled) {
+        const toggle = selectElement('conversation-egress-audit-toggle');
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!toggle) return;
+        toggle.checked = !!enabled;
+        if (!conversationId) {
+            updateAuditHint(toggle.checked, false);
+            return;
+        }
+        const requestId = ++state.auditSettingRequestId;
+        toggle.disabled = true;
+        updateAuditHint(toggle.checked, true);
+        try {
+            const response = await window.apiFetch('/api/conversations/' + encodeURIComponent(conversationId) + '/egress-audit', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: toggle.checked }),
+            });
+            if (!response.ok) throw new Error('HTTP ' + response.status);
+            const payload = await response.json();
+            if (requestId !== state.auditSettingRequestId) return;
+            toggle.checked = payload.enabled !== false;
+            updateAuditHint(toggle.checked, false);
+            notify(toggle.checked
+                ? translate('chat.egressAuditEnabled', '已开启出站网络审计。')
+                : translate('chat.egressAuditDisabled', '已关闭出站网络审计。'), 'success');
+        } catch (error) {
+            if (requestId === state.auditSettingRequestId) {
+                toggle.checked = !toggle.checked;
+                updateAuditHint(toggle.checked, false);
+                notify(translate('chat.egressAuditSaveFailed', '保存出站网络审计设置失败。'), 'error');
+            }
+        } finally {
+            if (requestId === state.auditSettingRequestId) toggle.disabled = false;
+        }
+    }
+
     async function loadConversationContainerChoices(force) {
         const projectId = activeProjectId();
         const key = projectId || '__none__';
@@ -274,7 +350,10 @@
         if (!container) return;
         const visible = String(runtimeMode || '').trim().toLowerCase() === 'container';
         container.hidden = !visible;
-        if (visible) loadConversationContainerChoices(false);
+        if (visible) {
+            loadConversationContainerChoices(false);
+            if (String(window.currentConversationId || '').trim()) loadConversationEgressAuditSetting();
+        }
     }
 
     function setConversationContainerControlsLocked(locked) {
@@ -287,22 +366,28 @@
                 refreshEnhancedSelect(control);
             }
         });
+        if (locked && container && !container.hidden) loadConversationEgressAuditSetting();
     }
 
     function resetNewConversationContainerControls() {
         const boundary = selectElement('boundary-policy-select');
         const mode = selectElement('conversation-egress-mode-select');
+        const auditToggle = selectElement('conversation-egress-audit-toggle');
         if (boundary) boundary.value = '';
         if (mode) mode.value = '';
+        if (auditToggle) auditToggle.checked = true;
         refreshEnhancedSelect(boundary);
         refreshEnhancedSelect(mode);
         syncConversationBoundarySelection();
         syncConversationEgressMode();
+        updateAuditHint(true, false);
     }
 
     function readNewConversationContainerControls(runtimeMode) {
         if (String(runtimeMode || '').trim().toLowerCase() !== 'container') return {};
         const result = {};
+        const auditToggle = selectElement('conversation-egress-audit-toggle');
+        result.egressAuditEnabled = !auditToggle || auditToggle.checked;
         const boundary = selectElement('boundary-policy-select');
         const boundaryPolicyId = boundary ? String(boundary.value || '').trim() : '';
         if (boundaryPolicyId) result.boundaryPolicyId = boundaryPolicyId;
@@ -328,6 +413,7 @@
     window.syncConversationBoundarySelection = syncConversationBoundarySelection;
     window.syncConversationEgressMode = syncConversationEgressMode;
     window.syncConversationEgressTarget = syncConversationEgressTarget;
+    window.syncConversationEgressAudit = syncConversationEgressAudit;
     window.loadConversationContainerChoices = loadConversationContainerChoices;
     window.syncConversationContainerControlsVisibility = syncConversationContainerControlsVisibility;
     window.setConversationContainerControlsLocked = setConversationContainerControlsLocked;

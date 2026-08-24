@@ -6,6 +6,8 @@ import (
 	"errors"
 	"net/http"
 	"net/netip"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -30,6 +32,9 @@ type boundaryPolicySummary struct {
 	Name                 string    `json:"name"`
 	Description          string    `json:"description"`
 	TLSInspectionEnabled bool      `json:"tlsInspectionEnabled"`
+	RuleCount            int       `json:"ruleCount"`
+	Protocols            []string  `json:"protocols"`
+	UsageCount           int       `json:"usageCount"`
 	UpdatedAt            time.Time `json:"updatedAt"`
 }
 
@@ -86,14 +91,117 @@ func (h *BoundaryPolicyHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界策略"})
 		return
 	}
-	items := make([]boundaryPolicySummary, 0, len(policies))
+	search := strings.ToLower(strings.TrimSpace(c.Query("search")))
+	filtered := make([]database.BoundaryPolicy, 0, len(policies))
 	for _, policy := range policies {
+		if search != "" && !strings.Contains(strings.ToLower(policy.Name), search) && !strings.Contains(strings.ToLower(policy.Description), search) {
+			continue
+		}
+		filtered = append(filtered, policy)
+	}
+	page := 1
+	if raw := strings.TrimSpace(c.Query("page")); raw != "" {
+		value, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || value < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "page 必须为正整数"})
+			return
+		}
+		page = value
+	}
+	pageSize := 100
+	if raw := strings.TrimSpace(c.Query("page_size")); raw != "" {
+		value, parseErr := strconv.Atoi(raw)
+		if parseErr != nil || value < 1 || value > 100 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "page_size 必须在 1 到 100 之间"})
+			return
+		}
+		pageSize = value
+	}
+	total := len(filtered)
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	items := make([]boundaryPolicySummary, 0, end-start)
+	for _, policy := range filtered[start:end] {
+		rules, ruleErr := h.db.ListBoundaryPolicyRules(c.Request.Context(), policy.ID)
+		if ruleErr != nil {
+			h.logger.Error("统计边界策略规则失败", zap.String("policy_id", policy.ID), zap.Error(ruleErr))
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界策略"})
+			return
+		}
+		protocolSet := make(map[string]struct{})
+		for _, rule := range rules {
+			if len(rule.Schemes) == 0 {
+				protocolSet["any"] = struct{}{}
+			}
+			for _, protocol := range rule.Schemes {
+				protocolSet[strings.ToLower(strings.TrimSpace(protocol))] = struct{}{}
+			}
+		}
+		protocols := make([]string, 0, len(protocolSet))
+		for protocol := range protocolSet {
+			if protocol != "" {
+				protocols = append(protocols, protocol)
+			}
+		}
+		sort.Strings(protocols)
+		usageCount := 0
+		if session.Permissions["chat:read"] {
+			usage, usageErr := h.db.ListBoundaryPolicyUsage(c.Request.Context(), policy.ID, session.UserID, session.ScopeFor("chat:read"))
+			if usageErr != nil {
+				h.logger.Error("统计边界策略使用关系失败", zap.String("policy_id", policy.ID), zap.Error(usageErr))
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取边界策略"})
+				return
+			}
+			usageCount = len(usage)
+		}
 		items = append(items, boundaryPolicySummary{
 			ID: policy.ID, Name: policy.Name, Description: policy.Description,
-			TLSInspectionEnabled: policy.TLSInspectionEnabled, UpdatedAt: policy.UpdatedAt,
+			TLSInspectionEnabled: policy.TLSInspectionEnabled, RuleCount: len(rules),
+			Protocols: protocols, UsageCount: usageCount, UpdatedAt: policy.UpdatedAt,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"items": items})
+	c.JSON(http.StatusOK, gin.H{
+		"items": items, "page": page, "pageSize": pageSize, "total": total,
+		"totalPages": totalPages, "search": strings.TrimSpace(c.Query("search")),
+	})
+}
+
+// Usage returns RBAC-filtered conversations and containers currently using a
+// policy. Historical snapshots are intentionally excluded.
+func (h *BoundaryPolicyHandler) Usage(c *gin.Context) {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	if !session.Permissions["chat:read"] {
+		c.JSON(http.StatusForbidden, gin.H{"error": "缺少 chat:read 权限"})
+		return
+	}
+	policyID := strings.TrimSpace(c.Param("id"))
+	if _, err := h.db.GetBoundaryPolicy(c.Request.Context(), policyID); errors.Is(err, sql.ErrNoRows) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})
+		return
+	} else if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "读取边界策略失败", err)
+		return
+	}
+	items, err := h.db.ListBoundaryPolicyUsage(c.Request.Context(), policyID, session.UserID, session.ScopeFor("chat:read"))
+	if err != nil {
+		writeBoundaryPolicyStorageError(c, h.logger, "读取边界策略使用关系失败", err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items, "total": len(items)})
 }
 
 // Get returns one editable source draft with its current rules. It never

@@ -770,11 +770,12 @@ func validateLifecycleSpecReplacement(
 		changed = true
 	}
 	if current.EgressGateway != nil && current.EgressGateway.BoundarySnapshot != nil && replacement.EgressGateway != nil &&
-		sameEgressBoundarySnapshot(current.EgressGateway.BoundarySnapshot, replacement.EgressGateway.BoundarySnapshot) &&
 		(current.EgressGateway.Image != replacement.EgressGateway.Image || current.EgressGateway.Resources != replacement.EgressGateway.Resources) {
 		// An explicit maintenance rebuild may roll out a newer trusted gateway
 		// binary or resource envelope. Start from the durable gateway so the
-		// immutable snapshot, route, and auth references cannot drift here.
+		// immutable snapshot, route, and auth references cannot drift here. A
+		// separately authorized snapshot replacement below may happen in the
+		// same rebuild, which is common immediately after a gateway rollout.
 		gateway := *current.EgressGateway
 		gateway.Image = replacement.EgressGateway.Image
 		gateway.Resources = replacement.EgressGateway.Resources
@@ -804,6 +805,16 @@ func validateLifecycleSpecReplacement(
 			}
 			snapshot := *requestedSnapshot
 			gateway.BoundarySnapshot = &snapshot
+			// TLS inspection authorities are scoped to one immutable snapshot.
+			// Replacing the authorized snapshot must therefore atomically replace
+			// (or remove) its authority instead of retaining a reference bound to
+			// the previous snapshot.
+			if replacement.EgressGateway.TLSAuthority == nil {
+				gateway.TLSAuthority = nil
+			} else {
+				tlsAuthority := *replacement.EgressGateway.TLSAuthority
+				gateway.TLSAuthority = &tlsAuthority
+			}
 			expected.EgressGateway = &gateway
 			changed = true
 		}

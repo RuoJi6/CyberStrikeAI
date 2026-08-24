@@ -12,7 +12,7 @@
 
     const PAGE_SIZES = new Set([10, 20, 50, 100]);
     const CATEGORIES = new Set(['all', 'network', 'lifecycle']);
-    const NETWORK_TYPES = new Set(['dns', 'http', 'https', 'connect']);
+    const NETWORK_TYPES = new Set(['dns', 'http', 'https', 'connect', 'tcp', 'udp']);
     const LIFECYCLE_TYPES = new Set(['create', 'start', 'stop', 'rebuild', 'delete', 'reconcile', 'health']);
     const TYPES = new Set(['all', ...NETWORK_TYPES, ...LIFECYCLE_TYPES]);
     const DECISIONS = new Set(['all', 'allowed', 'blocked', 'success', 'failure']);
@@ -20,7 +20,7 @@
         'id', 'chainSequence', 'previousHash', 'eventHash', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
         'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'resolvedIps',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
-        'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message',
+        'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket',
     ]);
     const URL_KEYS = Object.freeze({
         page: 'audit_page', pageSize: 'audit_page_size', query: 'audit_q',
@@ -30,7 +30,7 @@
         active: false, bound: false, loading: false, generation: 0, searchTimer: null,
         page: 1, pageSize: 20, query: '', category: 'all', type: 'all', decision: 'all',
         total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
-        integrity: null, error: '',
+        integrity: null, error: '', selected: new Set(),
     };
 
     function t(key, fallback, values) {
@@ -122,11 +122,15 @@
         return params;
     }
 
-    async function requestJSON(url) {
-        const response = typeof root.apiFetch === 'function' ? await root.apiFetch(url) : await root.fetch(url);
+    async function requestJSON(url, options) {
+        const response = typeof root.apiFetch === 'function' ? await root.apiFetch(url, options || {}) : await root.fetch(url, options || {});
         const payload = await response.json().catch(function () { return {}; });
         if (!response.ok) throw new Error(payload.error || t('auditLoadFailed', '加载出站审计失败'));
         return payload;
+    }
+
+    function notify(message, type) {
+        if (typeof root.showNotification === 'function') root.showNotification(message, type || 'info');
     }
 
     function safeString(value, maximum) {
@@ -168,6 +172,28 @@
         }
         if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
         if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
+        if (event.httpPacket !== undefined && !isSafeHTTPPacket(event.httpPacket)) return false;
+        return true;
+    }
+
+    function isSafeHTTPPacket(packet) {
+        if (!packet || typeof packet !== 'object') return false;
+        const fields = new Set(['requestLine', 'requestHeaders', 'requestBody', 'requestBodyEncoding', 'requestBodyTruncated', 'responseLine', 'responseHeaders', 'responseBody', 'responseBodyEncoding', 'responseBodyTruncated', 'sensitiveDataRedacted']);
+        if (Object.keys(packet).some((key) => !fields.has(key))) return false;
+        if (typeof packet.requestLine !== 'string' || packet.requestLine.length > 65536) return false;
+        if (typeof packet.responseLine !== 'string' || packet.responseLine.length > 65536) return false;
+        for (const headers of [packet.requestHeaders || {}, packet.responseHeaders || {}]) {
+            if (!headers || typeof headers !== 'object' || Array.isArray(headers) || Object.keys(headers).length > 128) return false;
+            for (const [name, values] of Object.entries(headers)) {
+                if (!name || name.length > 256 || !Array.isArray(values) || values.length > 128) return false;
+                if (values.some((value) => typeof value !== 'string' || value.length > 65536)) return false;
+            }
+        }
+        for (const direction of ['request', 'response']) {
+            const body = packet[direction + 'Body'] || '';
+            const encoding = packet[direction + 'BodyEncoding'] || '';
+            if (typeof body !== 'string' || body.length > 45000 || !['', 'utf8', 'base64'].includes(encoding)) return false;
+        }
         return true;
     }
 
@@ -203,7 +229,7 @@
         let primary = eventTypeLabel(event.eventType);
         if (event.eventType === 'http' || event.eventType === 'https') {
             primary = [event.method || eventTypeLabel(event.eventType), event.path || '/'].filter(Boolean).join(' ');
-        } else if (event.eventType === 'connect') {
+        } else if (event.eventType === 'connect' || event.eventType === 'tcp' || event.eventType === 'udp') {
             primary = `CONNECT ${event.domain || '—'}${event.port ? `:${event.port}` : ''}`;
         } else if (event.eventType === 'dns') {
             primary = `DNS ${event.domain || '—'}`;
@@ -216,7 +242,7 @@
 
     function eventTypeLabel(value) {
         const labels = {
-            dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT',
+            dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT', tcp: 'TCP', udp: 'UDP',
             create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
 			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
 			health: t('auditHealth', '出站健康'),
@@ -262,6 +288,33 @@
         return td;
     }
 
+    function selectionCell(event) {
+        const td = create('td', 'is-select');
+        td.dataset.label = t('auditSelect', '选择');
+        const checkbox = create('input', 'egress-audit-row-select');
+        checkbox.type = 'checkbox';
+        checkbox.checked = state.selected.has(event.id);
+        checkbox.setAttribute('aria-label', t('auditSelectEvent', '选择审计事件'));
+        checkbox.addEventListener('change', function () {
+            if (checkbox.checked) state.selected.add(event.id);
+            else state.selected.delete(event.id);
+            renderSelectionControls();
+        });
+        td.append(checkbox);
+        return td;
+    }
+
+    function packetCell(event, packet) {
+        const td = cell(t('auditPacket', '报文摘要'), packet.primary, packet.secondary, 'is-packet');
+        if (event.category === 'network' && (event.eventType === 'http' || event.eventType === 'https')) {
+            const button = create('button', 'egress-audit-packet-open', t('auditPacketView', '查看完整报文'));
+            button.type = 'button';
+            button.addEventListener('click', function () { openPacket(event); });
+            td.append(button);
+        }
+        return td;
+    }
+
     function eventRow(event) {
         const row = create('tr', `is-${event.category}`);
         const target = event.category === 'network'
@@ -281,16 +334,84 @@
             ? `${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
             : t(`status.${event.lifecycleState}`, event.lifecycleState);
         row.append(
+            selectionCell(event),
             cell(t('activityTime', '时间'), formatDate(event.occurredAt), '', 'is-time'),
             cell(t('auditEventType', '事件'), eventTypeLabel(event.eventType), event.category === 'network' ? t('auditCategoryNetwork', '网络') : t('auditCategoryLifecycle', '生命周期'), 'is-event'),
             cell(t('activityConversation', '对话'), event.conversationTitle || event.conversationId, event.conversationId, 'is-conversation'),
             cell(t('activityTarget', '目标'), target, resolution, 'is-target'),
-            cell(t('auditPacket', '报文摘要'), packet.primary, packet.secondary, 'is-packet'),
+            packetCell(event, packet),
             cell(t('activityDecision', '策略判定'), verdictLabel(verdict), rule, `is-decision is-${verdict}`),
             cell(t('auditTrace', '追溯'), tracePrimary, traceSecondary, 'is-trace'),
             cell(t('activityResult', '结果'), outcome, resultDetail, 'is-result'),
         );
         return row;
+    }
+
+    function packetHeadersText(headers) {
+        return Object.keys(headers || {}).sort().flatMap(function (name) {
+            return (headers[name] || []).map(function (value) { return name + ': ' + value; });
+        }).join('\n');
+    }
+
+    function packetDirectionText(packet, direction) {
+        const line = packet[direction + 'Line'] || '';
+        const headers = packetHeadersText(packet[direction + 'Headers']);
+        const body = packet[direction + 'Body'] || '';
+        const encoding = packet[direction + 'BodyEncoding'] || '';
+        const truncated = packet[direction + 'BodyTruncated'] === true;
+        const bodyLabel = body ? (encoding === 'base64' ? '[base64]\n' : '') + body : '';
+        return [line, headers, bodyLabel, truncated ? '[正文已在 32 KiB 处截断]' : ''].filter(Boolean).join('\n\n');
+    }
+
+    async function openPacket(event) {
+        const modal = element('egress-audit-packet-modal');
+        const request = element('egress-audit-packet-request');
+        const response = element('egress-audit-packet-response');
+        const meta = element('egress-audit-packet-meta');
+        if (!modal || !request || !response || !meta) return;
+        modal.hidden = false;
+        request.textContent = t('auditPacketLoading', '正在读取报文…');
+        response.textContent = '';
+        meta.textContent = `${event.eventType.toUpperCase()} · ${event.domain || '—'} · ${formatDate(event.occurredAt)}`;
+        try {
+            const payload = await requestJSON('/api/egress-audit-events/' + encodeURIComponent(event.id));
+            if (!payload.event || !isSafeAuditEvent(payload.event) || !isSafeHTTPPacket(payload.event.httpPacket)) throw new Error(t('auditPacketInvalid', '报文内容无效'));
+            request.textContent = packetDirectionText(payload.event.httpPacket, 'request') || '—';
+            response.textContent = packetDirectionText(payload.event.httpPacket, 'response') || '—';
+        } catch (error) {
+            request.textContent = error && error.message ? error.message : t('auditPacketLoadFailed', '读取完整报文失败');
+            response.textContent = '';
+        }
+    }
+
+    function closePacket() {
+        const modal = element('egress-audit-packet-modal');
+        if (modal) modal.hidden = true;
+    }
+
+    function hasActiveFilter() {
+        return Boolean(state.query || state.category !== 'all' || state.type !== 'all' || state.decision !== 'all');
+    }
+
+    function renderSelectionControls() {
+        const currentIDs = state.items.map((item) => item.id);
+        const selectedCurrent = currentIDs.filter((id) => state.selected.has(id)).length;
+        const selectPage = element('egress-audit-select-page');
+        if (selectPage) {
+            selectPage.checked = currentIDs.length > 0 && selectedCurrent === currentIDs.length;
+            selectPage.indeterminate = selectedCurrent > 0 && selectedCurrent < currentIDs.length;
+            selectPage.disabled = state.loading || currentIDs.length === 0;
+        }
+        const selectedButton = element('egress-audit-delete-selected');
+        if (selectedButton) {
+            selectedButton.textContent = t('auditDeleteSelected', '删除已选 ({{count}})', { count: state.selected.size });
+            selectedButton.disabled = state.loading || state.selected.size === 0;
+        }
+        const filteredButton = element('egress-audit-delete-filtered');
+        if (filteredButton) {
+            filteredButton.textContent = t('auditDeleteFiltered', '删除筛选结果 ({{count}})', { count: state.total });
+            filteredButton.disabled = state.loading || state.total === 0 || !hasActiveFilter();
+        }
     }
 
     function summaryCard(label, value, tone) {
@@ -343,6 +464,32 @@
             integrity.classList.toggle('is-ready', Boolean(state.integrity) && !state.loading);
             integrity.classList.toggle('is-error', !state.integrity && !state.loading);
         }
+        renderSelectionControls();
+    }
+
+    async function deleteEvents(selectedOnly) {
+        const ids = selectedOnly ? Array.from(state.selected) : [];
+        const count = selectedOnly ? ids.length : state.total;
+        if (!count || (!selectedOnly && !hasActiveFilter())) return;
+        const message = selectedOnly
+            ? t('auditDeleteSelectedConfirm', '永久删除已选的 {{count}} 条出站审计事件？删除后将重建并校验受影响的审计链。', { count })
+            : t('auditDeleteFilteredConfirm', '永久删除当前筛选命中的 {{count}} 条出站审计事件？删除后将重建并校验受影响的审计链。', { count });
+        if (!root.confirm(message)) return;
+        state.loading = true;
+        render();
+        try {
+            const params = selectedOnly ? new URLSearchParams() : queryParams(false);
+            const payload = await requestJSON('/api/egress-audit-events?' + params.toString(), {
+                method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ids }),
+            });
+            state.selected.clear();
+            notify(t('auditDeleted', '已删除 {{count}} 条出站审计事件', { count: Number(payload.deleted || 0) }), 'success');
+        } catch (error) {
+            notify(error && error.message ? error.message : t('auditDeleteFailed', '删除出站审计事件失败'), 'error');
+        } finally {
+            state.loading = false;
+        }
+        await refresh();
     }
 
     async function refresh() {
@@ -456,6 +603,17 @@
         });
         element('egress-audit-export-json')?.addEventListener('click', function () { exportEvents('json'); });
         element('egress-audit-export-csv')?.addEventListener('click', function () { exportEvents('csv'); });
+        element('egress-audit-select-page')?.addEventListener('change', function (event) {
+            state.items.forEach(function (item) {
+                if (event.target.checked) state.selected.add(item.id);
+                else state.selected.delete(item.id);
+            });
+            render();
+        });
+        element('egress-audit-delete-selected')?.addEventListener('click', function () { deleteEvents(true); });
+        element('egress-audit-delete-filtered')?.addEventListener('click', function () { deleteEvents(false); });
+        element('egress-audit-packet-close')?.addEventListener('click', closePacket);
+        element('egress-audit-packet-modal')?.addEventListener('click', function (event) { if (event.target === event.currentTarget) closePacket(); });
         if (root.document && typeof root.document.addEventListener === 'function') {
             root.document.addEventListener('languagechange', function () { if (state.active) render(); });
         }

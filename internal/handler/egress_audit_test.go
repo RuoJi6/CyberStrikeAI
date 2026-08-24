@@ -65,6 +65,11 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), eventID) {
 		t.Fatalf("get status/body = %d %s", getRecorder.Code, getRecorder.Body.String())
 	}
+	for _, expected := range []string{"httpPacket", "token=plain", "Authorization", "Bearer plain-token", "responseBody", "complete response"} {
+		if !strings.Contains(getRecorder.Body.String(), expected) {
+			t.Fatalf("get omitted full packet value %q: %s", expected, getRecorder.Body.String())
+		}
+	}
 	if getRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("get cache policy = %#v", getRecorder.Header())
 	}
@@ -92,6 +97,36 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	handler.Integrity(integrityContext)
 	if integrityRecorder.Code != http.StatusOK || !strings.Contains(integrityRecorder.Body.String(), `"status":"verified"`) || integrityRecorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("integrity = %d %#v %s", integrityRecorder.Code, integrityRecorder.Header(), integrityRecorder.Body.String())
+	}
+}
+
+func TestEgressAuditHandlerDeletesSelectedEventsAndRejectsUnfilteredPurge(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, eventID := newEgressAuditHandlerFixture(t)
+	handler := NewEgressAuditHandler(db)
+
+	unfilteredRecorder := httptest.NewRecorder()
+	unfiltered := egressAuditTestContext(unfilteredRecorder, http.MethodDelete, "/api/egress-audit-events")
+	unfiltered.Request = httptest.NewRequest(http.MethodDelete, "/api/egress-audit-events", strings.NewReader(`{}`))
+	unfiltered.Request.Header.Set("Content-Type", "application/json")
+	unfiltered.Set(security.ContextSessionKey, security.Session{UserID: "admin", Username: "admin", Scope: database.RBACScopeAll})
+	handler.Delete(unfiltered)
+	if unfilteredRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("unfiltered purge = %d %s", unfilteredRecorder.Code, unfilteredRecorder.Body.String())
+	}
+
+	deleteRecorder := httptest.NewRecorder()
+	requestBody := `{"ids":["` + eventID + `"]}`
+	request := egressAuditTestContext(deleteRecorder, http.MethodDelete, "/api/egress-audit-events")
+	request.Request = httptest.NewRequest(http.MethodDelete, "/api/egress-audit-events", strings.NewReader(requestBody))
+	request.Request.Header.Set("Content-Type", "application/json")
+	request.Set(security.ContextSessionKey, security.Session{UserID: "admin", Username: "admin", Scope: database.RBACScopeAll})
+	handler.Delete(request)
+	if deleteRecorder.Code != http.StatusOK || !strings.Contains(deleteRecorder.Body.String(), `"deleted":1`) {
+		t.Fatalf("selected purge = %d %s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	if total, err := db.CountEgressAuditEvents(context.Background(), database.EgressAuditFilter{Scope: database.RBACScopeAll}); err != nil || total != 0 {
+		t.Fatalf("events after purge = %d, %v", total, err)
 	}
 }
 
@@ -174,7 +209,7 @@ func TestSafeAuditCSVCellDefendsFormulaPrefixesAndControls(t *testing.T) {
 	}
 }
 
-func TestOpenAPIEgressAuditProjectionIsClosedAndCredentialFree(t *testing.T) {
+func TestOpenAPIEgressAuditProjectionDocumentsFullPacketAndControlledDeletion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(recorder)
@@ -194,7 +229,7 @@ func TestOpenAPIEgressAuditProjectionIsClosedAndCredentialFree(t *testing.T) {
 		t.Fatalf("audit schema is not closed: %#v", auditSchema)
 	}
 	properties := auditSchema["properties"].(map[string]interface{})
-	for _, required := range []string{"chainSequence", "previousHash", "eventHash", "conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId"} {
+	for _, required := range []string{"chainSequence", "previousHash", "eventHash", "conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId", "httpPacket"} {
 		if _, ok := properties[required]; !ok {
 			t.Fatalf("audit schema missing safe trace field %q", required)
 		}
@@ -207,16 +242,11 @@ func TestOpenAPIEgressAuditProjectionIsClosedAndCredentialFree(t *testing.T) {
 	if _, ok := paths["/api/egress-audit-events/integrity"]; !ok {
 		t.Fatal("egress audit integrity path is missing")
 	}
-	for key := range properties {
-		lower := strings.ToLower(key)
-		for _, forbidden := range []string{"header", "body", "query", "cookie", "authorization", "credential", "secret"} {
-			if strings.Contains(lower, forbidden) {
-				t.Fatalf("audit OpenAPI schema contains forbidden field %q", key)
-			}
-		}
+	if _, ok := paths["/api/egress-audit-events"].(map[string]interface{})["delete"]; !ok {
+		t.Fatal("egress audit controlled delete operation is missing")
 	}
 	encoded := strings.ToLower(recorder.Body.String())
-	for _, statement := range []string{"header", "body", "query", "authorization", "additionalproperties"} {
+	for _, statement := range []string{"httppacket", "requestheaders", "requestbody", "audit:delete", "additionalproperties"} {
 		if !strings.Contains(encoded, statement) {
 			t.Fatalf("openapi is missing safety statement %q", statement)
 		}
@@ -249,6 +279,7 @@ func newEgressAuditHandlerFixture(t *testing.T) (*database.DB, string) {
 		RequestType: egress.ActivityRequestHTTP, Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
 		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "=formula-rule", Reason: "allow-visit",
 		Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 8, BytesDown: 42,
+		HTTPPacket: &egress.HTTPPacket{RequestLine: "GET /safe?token=plain HTTP/1.1", RequestHeaders: map[string][]string{"Authorization": {"Bearer plain-token"}}, ResponseLine: "HTTP/1.1 200 OK", ResponseHeaders: map[string][]string{"Content-Type": {"text/plain"}}, ResponseBody: "complete response", ResponseBodyEncoding: "utf8"},
 		SnapshotID: snapshot.ID, SnapshotSHA256: snapshot.SHA256,
 	}
 	inserted, err := db.AppendEgressNetworkAuditEvent(context.Background(), target, event)

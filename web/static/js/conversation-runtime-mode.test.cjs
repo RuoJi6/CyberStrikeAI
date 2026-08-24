@@ -24,7 +24,8 @@ test('仅首条消息携带创建时执行位置', () => {
     assert.match(chat, /body\.workspacePersistent = body\.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER/);
     assert.match(chat, /workspacePersistenceEnabledFromConversation\(conversation\)/);
     assert.match(chat, /applyConversationRuntimeMode\(conversationId, conversation\)/);
-    assert.match(chat, /button\.disabled = !!locked/);
+    assert.match(chat, /lockedContainerSettings[\s\S]{0,400}button\.disabled = !!locked && !lockedContainerSettings/);
+    assert.match(chat, /runtime-mode-option[\s\S]{0,220}option\.disabled = !!locked/);
     assert.match(chat, /syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\);[\s\S]{0,320}resetNewConversationContainerControls[\s\S]{0,160}setChatRuntimeModeLocked\(false\)/);
 });
 
@@ -45,6 +46,7 @@ test('中英文文案明确区分执行位置与 Agent 编排', () => {
         assert.equal(typeof locale.chat.runtimeModeHost, 'string');
         assert.equal(typeof locale.chat.runtimeModeContainer, 'string');
         assert.equal(typeof locale.chat.runtimeModeLockedHint, 'string');
+        assert.equal(typeof locale.chat.runtimeContainerSettingsAria, 'string');
         assert.equal(typeof locale.chat.workspacePersistenceLabel, 'string');
         assert.equal(typeof locale.chat.workspacePersistenceHintEphemeral, 'string');
         assert.equal(typeof locale.chat.workspacePersistenceHintPersistent, 'string');
@@ -55,6 +57,8 @@ test('中英文文案明确区分执行位置与 Agent 编排', () => {
     assert.equal(zh.chat.runtimeModeContainer, '容器执行');
     assert.match(zh.chat.runtimeModeContainerHint, /每对话隔离容器/);
     assert.match(zh.chat.runtimeModeContainerHint, /失败关闭/);
+    assert.match(zh.chat.runtimeContainerSettingsAria, /出站网络审计可随时开关/);
+    assert.match(en.chat.runtimeContainerSettingsAria, /auditing can be toggled at any time/i);
     assert.doesNotMatch(zh.chat.runtimeModeContainer + zh.chat.runtimeModeContainerHint, /待接入|后端未接入/);
     assert.doesNotMatch(en.chat.runtimeModeContainer + en.chat.runtimeModeContainerHint, /pending|not wired/i);
     assert.match(zh.chat.workspacePersistenceHintEphemeral, /删除容器会永久删除/);

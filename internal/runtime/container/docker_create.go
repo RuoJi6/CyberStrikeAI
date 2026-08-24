@@ -72,6 +72,7 @@ const (
 	defaultGlobalQueuedExec        = 128
 	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
 	egressGatewayProxyPort         = 3128
+	egressGatewaySOCKS5Port        = 1080
 	runtimeKeepaliveScript         = "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 	runtimeTLSKeepaliveScript      = "umask 077; cat /etc/ssl/certs/ca-certificates.crt " + egress.TLSAuthorityCertificateContainerPath + " > " + egress.TLSAgentCABundlePath + " || exit 70; " + runtimeKeepaliveScript
 )
@@ -790,29 +791,31 @@ func (m *DockerManager) runtimeContainerHostConfig(spec RuntimeSpec, policyDNSAd
 }
 
 func runtimeProxyEnvironment(spec RuntimeSpec, gatewayAddress string) []string {
-	if !requiresPolicyDNS(spec) {
-		return nil
+	// Docker merges image environment variables into the container config.
+	// Explicitly override every control-plane-managed proxy and CA variable so
+	// an image cannot silently retain a baked proxy or CA setting when the
+	// corresponding boundary capability is disabled.
+	values := make(map[string]string, len(runtimeProxyEnvironmentKeys))
+	for _, key := range runtimeProxyEnvironmentKeys {
+		values[key] = ""
 	}
-	proxyURL := "http://" + gatewayAddress + ":" + strconv.Itoa(egressGatewayProxyPort)
-	environment := []string{
-		"HTTP_PROXY=" + proxyURL,
-		"HTTPS_PROXY=" + proxyURL,
-		"ALL_PROXY=" + proxyURL,
-		"NO_PROXY=",
-		"http_proxy=" + proxyURL,
-		"https_proxy=" + proxyURL,
-		"all_proxy=" + proxyURL,
-		"no_proxy=",
+	if requiresPolicyDNS(spec) {
+		proxyURL := "http://" + gatewayAddress + ":" + strconv.Itoa(egressGatewayProxyPort)
+		for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			values[key] = proxyURL
+		}
+		socksURL := "socks5h://" + gatewayAddress + ":" + strconv.Itoa(egressGatewaySOCKS5Port)
+		values["ALL_PROXY"], values["all_proxy"] = socksURL, socksURL
+		if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
+			for _, key := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "GIT_SSL_CAINFO"} {
+				values[key] = egress.TLSAgentCABundlePath
+			}
+			values["NODE_EXTRA_CA_CERTS"] = egress.TLSAuthorityCertificateContainerPath
+		}
 	}
-	if spec.EgressGateway != nil && spec.EgressGateway.TLSAuthority != nil {
-		environment = append(environment,
-			"SSL_CERT_FILE="+egress.TLSAgentCABundlePath,
-			"CURL_CA_BUNDLE="+egress.TLSAgentCABundlePath,
-			"REQUESTS_CA_BUNDLE="+egress.TLSAgentCABundlePath,
-			"PIP_CERT="+egress.TLSAgentCABundlePath,
-			"GIT_SSL_CAINFO="+egress.TLSAgentCABundlePath,
-			"NODE_EXTRA_CA_CERTS="+egress.TLSAuthorityCertificateContainerPath,
-		)
+	environment := make([]string, 0, len(runtimeProxyEnvironmentKeys))
+	for _, key := range runtimeProxyEnvironmentKeys {
+		environment = append(environment, key+"="+values[key])
 	}
 	return environment
 }

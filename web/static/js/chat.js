@@ -960,14 +960,25 @@ function setChatRuntimeModeLocked(locked) {
     const button = document.getElementById('runtime-mode-btn');
     const panel = document.getElementById('runtime-mode-panel');
     if (!button) return;
-    button.disabled = !!locked;
-    button.setAttribute('aria-disabled', locked ? 'true' : 'false');
-    const titleKey = locked ? 'chat.runtimeModeLockedHint' : 'chat.runtimeModeSelectAria';
-    const fallback = locked ? '执行位置在对话创建后锁定' : '选择新对话执行位置';
+    const runtimeInput = document.getElementById('runtime-mode-select');
+    const lockedContainerSettings = !!locked
+        && normalizeConversationRuntimeModeForUI(runtimeInput && runtimeInput.value) === CHAT_RUNTIME_MODE_CONTAINER;
+    button.disabled = !!locked && !lockedContainerSettings;
+    button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
+    const titleKey = lockedContainerSettings
+        ? 'chat.runtimeContainerSettingsAria'
+        : (locked ? 'chat.runtimeModeLockedHint' : 'chat.runtimeModeSelectAria');
+    const fallback = lockedContainerSettings
+        ? '打开容器设置；执行位置、工作区、边界和出口已锁定，出站网络审计可随时开关'
+        : (locked ? '执行位置在对话创建后锁定' : '选择新对话执行位置');
     const title = typeof window.t === 'function' ? window.t(titleKey) : fallback;
     button.title = title;
     button.setAttribute('aria-label', title);
     if (locked && panel) closeRuntimeModePanel();
+    document.querySelectorAll('.runtime-mode-option').forEach(function (option) {
+        option.disabled = !!locked;
+        option.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    });
     const persistence = document.getElementById('workspace-persistence-toggle');
     if (persistence) persistence.disabled = !!locked;
     const persistenceOption = document.getElementById('workspace-persistence-option');
@@ -994,6 +1005,9 @@ function syncRuntimeModeFromValue(mode) {
     if (typeof window.syncConversationContainerControlsVisibility === 'function') {
         window.syncConversationContainerControlsVisibility(normalized);
     }
+    if (typeof window.syncChatContainerWorkspaceButton === 'function') {
+        window.syncChatContainerWorkspaceButton();
+    }
 }
 
 function applyConversationRuntimeMode(conversationId, conversation) {
@@ -1001,6 +1015,9 @@ function applyConversationRuntimeMode(conversationId, conversation) {
     syncRuntimeModeFromValue(fromServer || CHAT_RUNTIME_MODE_HOST);
     syncWorkspacePersistenceFromValue(workspacePersistenceEnabledFromConversation(conversation));
     setChatRuntimeModeLocked(!!conversationId);
+    if (typeof window.syncChatContainerWorkspaceButton === 'function') {
+        window.syncChatContainerWorkspaceButton();
+    }
 }
 
 if (typeof window !== 'undefined') {

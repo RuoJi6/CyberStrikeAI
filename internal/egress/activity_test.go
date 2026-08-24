@@ -2,7 +2,6 @@ package egress
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -47,7 +46,7 @@ func TestPolicyDNSActivitySeparatesPolicyDecisionFromResolutionOutcome(t *testin
 	}
 }
 
-func TestProxyHTTPActivityOmitsQueryHeadersBodiesAndRawErrors(t *testing.T) {
+func TestProxyHTTPActivityCapturesCompleteBoundedPacket(t *testing.T) {
 	policy := testProxyPolicy(t, boundary.Rule{ID: "visit-1", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{
 		Host: "allowed.example", Schemes: []string{"http"}, Methods: []string{http.MethodPost},
 	}})
@@ -55,8 +54,12 @@ func TestProxyHTTPActivityOmitsQueryHeadersBodiesAndRawErrors(t *testing.T) {
 	proxy, err := NewProxy(policy, ProxyOptions{
 		Now:          func() time.Time { return time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC) },
 		ActivitySink: func(event ActivityEvent) { events = append(events, event) },
-		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("safe"))}, nil
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			body, readErr := io.ReadAll(request.Body)
+			if readErr != nil || string(body) != "private-body" {
+				t.Fatalf("request body = %q err=%v", body, readErr)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", Header: http.Header{"Content-Type": {"text/plain"}}, Body: io.NopCloser(strings.NewReader("safe"))}, nil
 		}),
 	})
 	if err != nil {
@@ -73,19 +76,9 @@ func TestProxyHTTPActivityOmitsQueryHeadersBodiesAndRawErrors(t *testing.T) {
 	if event.Path != "/safe" || event.Method != http.MethodPost || event.HTTPStatus != http.StatusOK || event.Decision != ActivityDecisionAllowed || event.Outcome != "completed" || event.BytesDown != 4 {
 		t.Fatalf("event = %#v", event)
 	}
-	encoded := strings.ToLower(string(mustJSON(t, event)))
-	for _, secret := range []string{"top-secret", "private-body", "private-token", "authorization", "token="} {
-		if strings.Contains(encoded, secret) {
-			t.Fatalf("activity event leaked %q: %s", secret, encoded)
-		}
+	if event.HTTPPacket == nil || event.HTTPPacket.RequestLine != "POST /safe?token=top-secret HTTP/1.1" ||
+		len(event.HTTPPacket.RequestHeaders["Authorization"]) != 1 || event.HTTPPacket.RequestHeaders["Authorization"][0] != "Bearer private-token" || event.HTTPPacket.RequestBody == "" ||
+		event.HTTPPacket.ResponseLine != "HTTP/1.1 200 OK" || event.HTTPPacket.ResponseBody != "safe" {
+		t.Fatalf("HTTP packet = %#v", event.HTTPPacket)
 	}
-}
-
-func mustJSON(t *testing.T, value interface{}) []byte {
-	t.Helper()
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return encoded
 }

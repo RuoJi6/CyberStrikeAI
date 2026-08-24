@@ -1,9 +1,12 @@
 package egress
 
 import (
+	"encoding/base64"
+	"errors"
 	"net/netip"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -13,37 +16,126 @@ const (
 	ActivityRequestHTTP    = "http"
 	ActivityRequestHTTPS   = "https"
 	ActivityRequestCONNECT = "connect"
+	ActivityRequestTCP     = "tcp"
+	ActivityRequestUDP     = "udp"
 	ActivityRequestHealth  = "health"
 
 	ActivityDecisionAllowed = "allowed"
 	ActivityDecisionBlocked = "blocked"
 )
 
-// ActivityEvent is the credential-free event emitted by a conversation
-// gateway. It deliberately excludes headers, request/response bodies, query
-// strings, userinfo and raw provider errors.
+const MaxHTTPPacketBodyBytes = 32 << 10
+
+// HTTPPacket is the bounded HTTP transaction captured by a conversation
+// gateway. Request and response bodies are preserved up to
+// MaxHTTPPacketBodyBytes per direction and carry an explicit
+// encoding/truncation marker.
+type HTTPPacket struct {
+	RequestLine           string              `json:"requestLine"`
+	RequestHeaders        map[string][]string `json:"requestHeaders"`
+	RequestBody           string              `json:"requestBody,omitempty"`
+	RequestBodyEncoding   string              `json:"requestBodyEncoding,omitempty"`
+	RequestBodyTruncated  bool                `json:"requestBodyTruncated,omitempty"`
+	ResponseLine          string              `json:"responseLine,omitempty"`
+	ResponseHeaders       map[string][]string `json:"responseHeaders,omitempty"`
+	ResponseBody          string              `json:"responseBody,omitempty"`
+	ResponseBodyEncoding  string              `json:"responseBodyEncoding,omitempty"`
+	ResponseBodyTruncated bool                `json:"responseBodyTruncated,omitempty"`
+	SensitiveDataRedacted bool                `json:"sensitiveDataRedacted"`
+}
+
+func validHTTPPacketLine(value string, required bool) bool {
+	if value == "" {
+		return !required
+	}
+	if len(value) > 65536 || !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n") {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+func validHTTPPacketHeaders(headers map[string][]string) bool {
+	if len(headers) > 128 {
+		return false
+	}
+	for name, values := range headers {
+		if name == "" || len(name) > 256 || len(values) > 128 || strings.TrimSpace(name) != name {
+			return false
+		}
+		for _, character := range name {
+			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') || character == '-') {
+				return false
+			}
+		}
+		for _, value := range values {
+			if len(value) > 65536 || !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n") {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func validHTTPPacketBody(body, encoding string) bool {
+	if body == "" {
+		return encoding == ""
+	}
+	switch encoding {
+	case "utf8":
+		return len(body) <= MaxHTTPPacketBodyBytes && utf8.ValidString(body)
+	case "base64":
+		decoded, err := base64.StdEncoding.DecodeString(body)
+		return err == nil && len(decoded) <= MaxHTTPPacketBodyBytes
+	default:
+		return false
+	}
+}
+
+func ValidateHTTPPacket(packet *HTTPPacket) error {
+	if packet == nil {
+		return nil
+	}
+	if !validHTTPPacketLine(packet.RequestLine, true) || !validHTTPPacketLine(packet.ResponseLine, false) ||
+		!validHTTPPacketHeaders(packet.RequestHeaders) || !validHTTPPacketHeaders(packet.ResponseHeaders) ||
+		!validHTTPPacketBody(packet.RequestBody, packet.RequestBodyEncoding) ||
+		!validHTTPPacketBody(packet.ResponseBody, packet.ResponseBodyEncoding) {
+		return errors.New("invalid bounded HTTP packet")
+	}
+	return nil
+}
+
+// ActivityEvent is the bounded event emitted by a conversation gateway.
+// HTTP/HTTPS events may include a bounded packet projection for on-demand
+// audit inspection. Raw provider errors and environment values remain excluded.
 type ActivityEvent struct {
-	Event           string    `json:"event"`
-	Timestamp       time.Time `json:"timestamp"`
-	RequestType     string    `json:"requestType"`
-	Domain          string    `json:"domain"`
-	ResolvedIPs     []string  `json:"resolvedIps,omitempty"`
-	ConnectedIP     string    `json:"connectedIp,omitempty"`
-	Port            int       `json:"port,omitempty"`
-	Decision        string    `json:"decision"`
-	RuleID          string    `json:"ruleId,omitempty"`
-	Reason          string    `json:"reason,omitempty"`
-	UpstreamRouteID string    `json:"upstreamRouteId,omitempty"`
-	Method          string    `json:"method,omitempty"`
-	Path            string    `json:"path,omitempty"`
-	HTTPStatus      int       `json:"httpStatus,omitempty"`
-	Outcome         string    `json:"outcome"`
-	LatencyMS       int64     `json:"latencyMs"`
-	BytesUp         int64     `json:"bytesUp,omitempty"`
-	BytesDown       int64     `json:"bytesDown,omitempty"`
-	RetryAfterMS    int64     `json:"retryAfterMs,omitempty"`
-	SnapshotID      string    `json:"snapshotId"`
-	SnapshotSHA256  string    `json:"snapshotSha256"`
+	Event           string      `json:"event"`
+	Timestamp       time.Time   `json:"timestamp"`
+	RequestType     string      `json:"requestType"`
+	Domain          string      `json:"domain"`
+	ResolvedIPs     []string    `json:"resolvedIps,omitempty"`
+	ConnectedIP     string      `json:"connectedIp,omitempty"`
+	Port            int         `json:"port,omitempty"`
+	Decision        string      `json:"decision"`
+	RuleID          string      `json:"ruleId,omitempty"`
+	Reason          string      `json:"reason,omitempty"`
+	UpstreamRouteID string      `json:"upstreamRouteId,omitempty"`
+	Method          string      `json:"method,omitempty"`
+	Path            string      `json:"path,omitempty"`
+	HTTPStatus      int         `json:"httpStatus,omitempty"`
+	Outcome         string      `json:"outcome"`
+	LatencyMS       int64       `json:"latencyMs"`
+	BytesUp         int64       `json:"bytesUp,omitempty"`
+	BytesDown       int64       `json:"bytesDown,omitempty"`
+	HTTPPacket      *HTTPPacket `json:"httpPacket,omitempty"`
+	RetryAfterMS    int64       `json:"retryAfterMs,omitempty"`
+	SnapshotID      string      `json:"snapshotId"`
+	SnapshotSHA256  string      `json:"snapshotSha256"`
 }
 
 // ActivitySink is best-effort observability. Enforcement must never depend on

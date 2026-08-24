@@ -124,3 +124,35 @@ func TestContainerRuntimeListOpenAPIContract(t *testing.T) {
 		t.Fatal("container rollout OpenAPI path is missing")
 	}
 }
+
+func TestContainerRuntimeListIncludesCurrentBoundaryPolicyForSwitching(t *testing.T) {
+	db, user := setupConversationRBACTest(t)
+	policy, err := db.CreateBoundaryPolicy(t.Context(), database.BoundaryPolicy{Name: "Switchable policy", OwnerUserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := db.CreateConversation("policy container", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, BoundaryPolicyID: policy.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(user.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerInitializationProvider(db)
+	response := performConversationRequest(user, http.MethodGet, "/api/container-runtimes?page=1&page_size=10", nil, handler.ListContainerRuntimes)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items []containerRuntimeListItemView `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].BoundaryPolicyID != policy.ID || payload.Items[0].BoundaryPolicyName != policy.Name {
+		t.Fatalf("items = %#v", payload.Items)
+	}
+}

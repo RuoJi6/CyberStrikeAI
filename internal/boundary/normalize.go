@@ -57,6 +57,9 @@ func NormalizeRequestTarget(rawURL, rawMethod string) (RequestTarget, error) {
 	if err != nil {
 		return RequestTarget{}, err
 	}
+	if scheme != "http" && scheme != "https" {
+		return RequestTarget{}, fmt.Errorf("%w: absolute HTTP(S) URL is required", ErrInvalidTarget)
+	}
 	host, err := NormalizeHost(parsed.Hostname())
 	if err != nil {
 		return RequestTarget{}, err
@@ -212,7 +215,7 @@ func NormalizeHost(raw string) (string, error) {
 
 func NormalizeScheme(raw string) (string, error) {
 	scheme := strings.ToLower(strings.TrimSpace(raw))
-	if scheme != "http" && scheme != "https" {
+	if scheme != "http" && scheme != "https" && scheme != "tcp" && scheme != "udp" {
 		return "", fmt.Errorf("%w: unsupported scheme %q", ErrInvalidTarget, raw)
 	}
 	return scheme, nil
@@ -228,7 +231,10 @@ func NormalizePort(scheme string, port int) (int, error) {
 		if canonicalScheme == "https" {
 			return 443, nil
 		}
-		return 80, nil
+		if canonicalScheme == "http" {
+			return 80, nil
+		}
+		return 0, fmt.Errorf("%w: %s requires an explicit port", ErrInvalidTarget, canonicalScheme)
 	}
 	if port < 1 || port > 65535 {
 		return 0, fmt.Errorf("%w: port %d is outside 1..65535", ErrInvalidTarget, port)

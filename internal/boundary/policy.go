@@ -3,7 +3,6 @@ package boundary
 import (
 	"fmt"
 	"math"
-	"net/http"
 	"net/netip"
 	"sort"
 	"strings"
@@ -67,7 +66,8 @@ type DNSDecision struct {
 }
 
 type Policy struct {
-	rules []compiledRule
+	rules        []compiledRule
+	defaultAllow bool
 }
 
 type compiledRule struct {
@@ -76,6 +76,13 @@ type compiledRule struct {
 }
 
 func NewPolicy(rules []Rule) (*Policy, error) {
+	return NewPolicyWithDefault(rules, false)
+}
+
+// NewPolicyWithDefault compiles an immutable policy with an explicit fallback.
+// Existing policy documents remain fail-closed; only the canonical no-boundary
+// snapshot opts into defaultAllow.
+func NewPolicyWithDefault(rules []Rule, defaultAllow bool) (*Policy, error) {
 	compiled := make([]compiledRule, 0, len(rules))
 	seenIDs := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
@@ -122,7 +129,7 @@ func NewPolicy(rules []Rule) (*Policy, error) {
 		}
 		compiled = append(compiled, compiledRule{Rule: rule, prefix: prefix})
 	}
-	return &Policy{rules: compiled}, nil
+	return &Policy{rules: compiled, defaultAllow: defaultAllow}, nil
 }
 
 // Evaluate normalizes every request independently, so redirects must call it
@@ -132,32 +139,86 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 	if err != nil {
 		return Decision{}, err
 	}
-	decision := Decision{Target: target, Reason: ReasonDefaultDeny}
+	decision := p.defaultDecision(target)
 	if reason := forbiddenHostnameReason(target.Host); reason != "" {
-		decision.Reason = reason
+		decision.Allowed, decision.Reason = false, reason
 		return decision, nil
 	}
 	if target.Port == 2375 || target.Port == 2376 {
-		decision.Reason = ReasonDockerAPIPort
+		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
 		return decision, nil
 	}
 	if forbiddenDNSServicePort(target.Port) {
-		decision.Reason = ReasonDNSServicePort
+		decision.Allowed, decision.Reason = false, ReasonDNSServicePort
 		return decision, nil
 	}
 	if address, err := netip.ParseAddr(target.Host); err == nil {
 		if forbiddenAddress(address) {
-			decision.Reason = ReasonForbiddenAddress
+			decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
 			return decision, nil
 		}
 	}
 	for _, address := range resolvedIPs {
 		if !address.IsValid() || forbiddenAddress(address.Unmap()) {
-			decision.Reason = ReasonDNSRebinding
+			decision.Allowed, decision.Reason = false, ReasonDNSRebinding
 			return decision, nil
 		}
 	}
+	return p.evaluateTarget(target, decision, now), nil
+}
 
+// EvaluateNetwork applies the same immutable rules to a raw TCP or UDP target.
+// HTTP-only path and method constraints do not apply to transport connections.
+func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, resolvedIPs []netip.Addr, now time.Time) (Decision, error) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	if protocol != "tcp" && protocol != "udp" {
+		return Decision{}, fmt.Errorf("unsupported network protocol %q", protocol)
+	}
+	host, err := NormalizeHost(rawHost)
+	if err != nil {
+		return Decision{}, err
+	}
+	if port < 1 || port > 65535 {
+		return Decision{}, fmt.Errorf("%w: port %d is outside 1..65535", ErrInvalidTarget, port)
+	}
+	target := RequestTarget{Scheme: protocol, Host: host, Port: port, Path: "/"}
+	decision := p.defaultDecision(target)
+	if reason := forbiddenHostnameReason(host); reason != "" {
+		decision.Allowed, decision.Reason = false, reason
+		return decision, nil
+	}
+	if port == 2375 || port == 2376 {
+		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
+		return decision, nil
+	}
+	if forbiddenDNSServicePort(port) {
+		decision.Allowed, decision.Reason = false, ReasonDNSServicePort
+		return decision, nil
+	}
+	if address, parseErr := netip.ParseAddr(host); parseErr == nil && forbiddenAddress(address) {
+		decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
+		return decision, nil
+	}
+	for _, address := range resolvedIPs {
+		if !address.IsValid() || forbiddenAddress(address.Unmap()) {
+			decision.Allowed, decision.Reason = false, ReasonDNSRebinding
+			return decision, nil
+		}
+	}
+	return p.evaluateTarget(target, decision, now), nil
+}
+
+func (p *Policy) defaultDecision(target RequestTarget) Decision {
+	decision := Decision{Target: target, Reason: ReasonDefaultDeny}
+	if p != nil && p.defaultAllow {
+		decision.Allowed = true
+		decision.Effect = EffectAllowVisit
+		decision.Reason = ReasonAllowVisit
+	}
+	return decision
+}
+
+func (p *Policy) evaluateTarget(target RequestTarget, decision Decision, now time.Time) Decision {
 	matches := make([]compiledRule, 0)
 	for _, rule := range p.rules {
 		if rule.ExpiresAt != nil && !now.Before(*rule.ExpiresAt) {
@@ -168,7 +229,7 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		}
 	}
 	if len(matches) == 0 {
-		return decision, nil
+		return decision
 	}
 	sort.Slice(matches, func(i, j int) bool {
 		left, right := ruleRank(matches[i]), ruleRank(matches[j])
@@ -182,28 +243,26 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		return matches[i].ID < matches[j].ID
 	})
 	winner := matches[0]
+	decision.Allowed = false
 	decision.Effect = winner.Effect
 	decision.RuleID = winner.ID
 	decision.AuthProfileID = winner.AuthProfileID
 	decision.RateLimit = winner.RateLimit
 	switch winner.Effect {
 	case EffectBlocked:
-		if len(winner.Target.PathPrefixes) > 0 {
+		if len(winner.Target.PathPrefixes) > 0 && (target.Scheme == "http" || target.Scheme == "https") {
 			decision.Reason = ReasonBlockedPath
 		} else {
 			decision.Reason = ReasonBlockedTarget
 		}
 	case EffectAllowAttack:
-		decision.Allowed = true
-		decision.Reason = ReasonAllowAttack
+		decision.Allowed, decision.Reason = true, ReasonAllowAttack
 	case EffectAuthOnly:
-		decision.Allowed = true
-		decision.Reason = ReasonAuthOnly
+		decision.Allowed, decision.Reason = true, ReasonAuthOnly
 	case EffectAllowVisit:
-		decision.Allowed = true
-		decision.Reason = ReasonAllowVisit
+		decision.Allowed, decision.Reason = true, ReasonAllowVisit
 	}
-	return decision, nil
+	return decision
 }
 
 // ValidateRateLimit rejects unbounded or non-finite attacker-controlled
@@ -248,6 +307,11 @@ func (p *Policy) EvaluateDNS(rawHost string, resolvedIPs []netip.Addr, now time.
 		return DNSDecision{}, err
 	}
 	decision := DNSDecision{Host: host, Reason: ReasonDefaultDeny}
+	if p != nil && p.defaultAllow {
+		decision.Allowed = true
+		decision.Effect = EffectAllowVisit
+		decision.Reason = ReasonAllowVisit
+	}
 	if reason := forbiddenHostnameReason(host); reason != "" {
 		decision.Reason = reason
 		return decision, nil
@@ -343,7 +407,15 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	} else if rule.Target.Host != target.Host {
 		return false
 	}
-	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) || !ruleMethodMatches(rule, target.Method) {
+	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) {
+		return false
+	}
+	if target.Scheme == "tcp" || target.Scheme == "udp" {
+		// Transport connections have no HTTP path or method. Explicitly selected
+		// TCP/UDP schemes therefore ignore those HTTP-only dimensions.
+		return rule.Effect != EffectAuthOnly
+	}
+	if !ruleMethodMatches(rule, target.Method) {
 		return false
 	}
 	if len(rule.Target.PathPrefixes) == 0 {
@@ -357,24 +429,8 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	return false
 }
 
-// ruleMethodMatches applies the frozen allow-visit contract: omitting methods
-// means ordinary read-only browsing, not every HTTP method. CONNECT is the
-// transport handshake for an HTTPS visit and remains eligible for the later
-// SNI and resolved-address checks; it does not authorize an application-level
-// write method inside an inspected TLS session.
 func ruleMethodMatches(rule compiledRule, method string) bool {
-	if len(rule.Target.Methods) != 0 {
-		return containsStringOrAny(rule.Target.Methods, method)
-	}
-	if rule.Effect != EffectAllowVisit {
-		return true
-	}
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodConnect:
-		return true
-	default:
-		return false
-	}
+	return containsStringOrAny(rule.Target.Methods, method)
 }
 
 func ruleRank(rule compiledRule) int {

@@ -107,6 +107,14 @@ func TestGatewayActivityParserRejectsLeaksAndSnapshotDrift(t *testing.T) {
 	if _, activity, err := parseGatewayActivityLine(encoded, spec); err != nil || !activity {
 		t.Fatalf("valid event rejected: activity=%v err=%v", activity, err)
 	}
+	for _, requestType := range []string{egress.ActivityRequestTCP, egress.ActivityRequestUDP} {
+		transport := valid
+		transport.RequestType = requestType
+		line, _ := json.Marshal(transport)
+		if _, activity, err := parseGatewayActivityLine(line, spec); err != nil || !activity {
+			t.Fatalf("valid %s event rejected: activity=%v err=%v", requestType, activity, err)
+		}
+	}
 	for name, mutate := range map[string]func(*egress.ActivityEvent){
 		"snapshot drift": func(event *egress.ActivityEvent) { event.SnapshotID = "00000000-0000-0000-0000-000000000000" },
 		"route drift":    func(event *egress.ActivityEvent) { event.UpstreamRouteID = "other-route" },

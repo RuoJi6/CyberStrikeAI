@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	boundaryPolicySnapshotSchemaVersion    = 1
-	boundaryPolicyTLSSnapshotSchemaVersion = 2
+	boundaryPolicySnapshotSchemaVersion     = 1
+	boundaryPolicyTLSSnapshotSchemaVersion  = 2
+	boundaryPolicyOpenSnapshotSchemaVersion = 3
 )
 
 var (
@@ -38,6 +39,7 @@ type BoundaryPolicySnapshotDocument struct {
 	PolicyID      string                               `json:"policyId"`
 	Rules         []BoundaryPolicySnapshotRule         `json:"rules"`
 	TLSInspection *BoundaryPolicyTLSInspectionSnapshot `json:"tlsInspection,omitempty"`
+	DefaultAction string                               `json:"defaultAction,omitempty"`
 }
 
 type BoundaryPolicyTLSInspectionSnapshot struct {
@@ -461,6 +463,8 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 		Rules:         []BoundaryPolicySnapshotRule{},
 	}
 	if document.PolicyID == "" {
+		document.SchemaVersion = boundaryPolicyOpenSnapshotSchemaVersion
+		document.DefaultAction = "allow"
 		return document, nil
 	}
 	var tlsEnabled bool
@@ -585,11 +589,20 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) error {
-	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion {
+	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion {
 		return fmt.Errorf("unsupported boundary snapshot schema version %d", document.SchemaVersion)
 	}
+	if document.SchemaVersion == boundaryPolicyOpenSnapshotSchemaVersion {
+		if document.PolicyID != "" || len(document.Rules) != 0 || document.TLSInspection != nil || document.DefaultAction != "allow" {
+			return fmt.Errorf("no-boundary snapshot settings are inconsistent")
+		}
+	} else if document.DefaultAction != "" {
+		return fmt.Errorf("policy boundary snapshot cannot declare a default action")
+	}
 	if document.TLSInspection == nil && document.SchemaVersion != boundaryPolicySnapshotSchemaVersion {
-		return fmt.Errorf("TLS boundary snapshot must include TLS inspection settings")
+		if document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion {
+			return fmt.Errorf("TLS boundary snapshot must include TLS inspection settings")
+		}
 	}
 	if document.TLSInspection != nil {
 		if document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion || !document.TLSInspection.Enabled {
@@ -607,7 +620,7 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 		return fmt.Errorf("boundary snapshot rules must be an array")
 	}
 	if document.PolicyID == "" && len(document.Rules) != 0 {
-		return fmt.Errorf("default-deny boundary snapshot must not contain rules")
+		return fmt.Errorf("no-boundary snapshot must not contain rules")
 	}
 	compiled := make([]boundary.Rule, 0, len(document.Rules))
 	for index, rule := range document.Rules {

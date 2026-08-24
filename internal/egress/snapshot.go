@@ -56,6 +56,7 @@ type snapshotEnvelope struct {
 	PolicyID      string               `json:"policyId"`
 	Rules         []json.RawMessage    `json:"rules"`
 	TLSInspection *TLSInspectionPolicy `json:"tlsInspection,omitempty"`
+	DefaultAction string               `json:"defaultAction,omitempty"`
 }
 
 type TLSInspectionPolicy struct {
@@ -65,6 +66,7 @@ type TLSInspectionPolicy struct {
 
 type GatewayOptions struct {
 	ListenAddress         string
+	SOCKS5ListenAddress   string
 	DNSListenAddress      string
 	SnapshotCheckInterval time.Duration
 	ManualRecovery        <-chan struct{}
@@ -249,13 +251,20 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
 	}
-	if (document.SchemaVersion != 1 && document.SchemaVersion != 2) || document.Rules == nil {
+	if (document.SchemaVersion != 1 && document.SchemaVersion != 2 && document.SchemaVersion != 3) || document.Rules == nil {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
 	}
-	if document.PolicyID == "" && len(document.Rules) != 0 {
-		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: default-deny snapshot contains rules", ErrSnapshotIntegrity)
+	defaultAllow := document.SchemaVersion == 3 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection == nil && document.DefaultAction == "allow"
+	if document.SchemaVersion == 3 && !defaultAllow {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: no-boundary snapshot settings are inconsistent", ErrSnapshotIntegrity)
 	}
-	if (document.SchemaVersion == 1 && document.TLSInspection != nil) || (document.SchemaVersion == 2 && document.TLSInspection == nil) {
+	if document.SchemaVersion != 3 && document.DefaultAction != "" {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: policy snapshot declares a default action", ErrSnapshotIntegrity)
+	}
+	if document.PolicyID == "" && len(document.Rules) != 0 {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: no-boundary snapshot contains rules", ErrSnapshotIntegrity)
+	}
+	if (document.SchemaVersion == 1 && document.TLSInspection != nil) || (document.SchemaVersion == 2 && document.TLSInspection == nil) || (document.SchemaVersion == 3 && document.TLSInspection != nil) {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: TLS snapshot settings are inconsistent", ErrSnapshotIntegrity)
 	}
 	if document.TLSInspection != nil {
@@ -263,7 +272,7 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 			return SnapshotReport{}, nil, nil, fmt.Errorf("%w: %v", ErrSnapshotIntegrity, err)
 		}
 	}
-	policy, err := compileSnapshotPolicy(document.Rules)
+	policy, err := compileSnapshotPolicy(document.Rules, defaultAllow)
 	if err != nil {
 		return SnapshotReport{}, nil, nil, err
 	}
@@ -388,6 +397,10 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if err != nil {
 		return err
 	}
+	socksProxy, err := NewSOCKS5Proxy(proxy, options.Proxy.UpstreamRoute != nil)
+	if err != nil {
+		return err
+	}
 	dnsHandler, err := NewPolicyDNS(policy, options.DNS)
 	if err != nil {
 		return err
@@ -403,9 +416,19 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	if err != nil {
 		return fmt.Errorf("listen for egress proxy: %w", err)
 	}
+	socksAddress := strings.TrimSpace(options.SOCKS5ListenAddress)
+	if socksAddress == "" {
+		socksAddress = DefaultSOCKS5ListenAddress
+	}
+	socksListener, err := net.Listen("tcp", socksAddress)
+	if err != nil {
+		_ = listener.Close()
+		return fmt.Errorf("listen for egress SOCKS5 proxy: %w", err)
+	}
 	dnsPacket, dnsTCP, err := listenPolicyDNS(normalizedDNSListenAddress(options.DNSListenAddress))
 	if err != nil {
 		_ = listener.Close()
+		_ = socksListener.Close()
 		return err
 	}
 	server := &http.Server{
@@ -419,6 +442,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		outputMu.Unlock()
 		if err != nil {
 			closeGatewayListeners(listener, dnsPacket, dnsTCP)
+			_ = socksListener.Close()
 			return fmt.Errorf("report loaded boundary snapshot: %w", err)
 		}
 	}
@@ -428,8 +452,9 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	results := make(chan serverResult, 5)
+	results := make(chan serverResult, 6)
 	go func() { results <- serverResult{name: "HTTP proxy", err: server.Serve(listener)} }()
+	go func() { results <- serverResult{name: "SOCKS5 proxy", err: socksProxy.Serve(runCtx, socksListener)} }()
 	go func() {
 		results <- serverResult{name: "UDP policy DNS", err: servePolicyDNSUDP(runCtx, dnsPacket, dnsHandler)}
 	}()
@@ -473,7 +498,8 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	cancel()
 	_ = server.Close()
 	closeGatewayListeners(listener, dnsPacket, dnsTCP)
-	for completed < 5 {
+	_ = socksListener.Close()
+	for completed < 6 {
 		result := <-results
 		completed++
 		if first.name == "" && result.err != nil && !errors.Is(result.err, http.ErrServerClosed) && !errors.Is(result.err, net.ErrClosed) {

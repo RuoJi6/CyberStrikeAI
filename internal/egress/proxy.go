@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"cyberstrike-ai/internal/boundary"
 )
@@ -60,6 +62,92 @@ type Proxy struct {
 	guard              *requestGuard
 	tlsInspection      *TLSInspectionPolicy
 	tlsAuthority       *TLSAuthority
+}
+
+type boundedPacketCapture struct {
+	content bytes.Buffer
+	total   int64
+}
+
+func (capture *boundedPacketCapture) Write(content []byte) (int, error) {
+	capture.total += int64(len(content))
+	remaining := MaxHTTPPacketBodyBytes - capture.content.Len()
+	if remaining > 0 {
+		if remaining > len(content) {
+			remaining = len(content)
+		}
+		_, _ = capture.content.Write(content[:remaining])
+	}
+	return len(content), nil
+}
+
+func (capture *boundedPacketCapture) snapshot(contentType string) (body, encoding string, truncated bool) {
+	content := capture.content.Bytes()
+	truncated = capture.total > int64(len(content))
+	if len(content) == 0 {
+		return "", "", truncated
+	}
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	textual := mediaType == "" || strings.HasPrefix(mediaType, "text/") || strings.Contains(mediaType, "json") ||
+		strings.Contains(mediaType, "xml") || strings.Contains(mediaType, "javascript") ||
+		mediaType == "application/x-www-form-urlencoded"
+	if textual && utf8.Valid(content) {
+		return string(content), "utf8", truncated
+	}
+	return base64.StdEncoding.EncodeToString(content), "base64", truncated
+}
+
+type packetCaptureReadCloser struct {
+	io.Reader
+	io.Closer
+}
+
+func packetHeaders(headers http.Header) map[string][]string {
+	result := make(map[string][]string, len(headers))
+	for rawName, rawValues := range headers {
+		name := http.CanonicalHeaderKey(rawName)
+		values := make([]string, len(rawValues))
+		for index, value := range rawValues {
+			values[index] = value
+		}
+		result[name] = values
+	}
+	return result
+}
+
+func packetRequestTarget(request *http.Request, fallbackPath string) string {
+	target := fallbackPath
+	if request != nil && request.URL != nil {
+		if escaped := request.URL.EscapedPath(); escaped != "" {
+			target = escaped
+		}
+		if request.URL.RawQuery != "" {
+			target += "?" + request.URL.RawQuery
+		}
+	}
+	return target
+}
+
+func newHTTPPacket(request *http.Request, path string) HTTPPacket {
+	method := http.MethodGet
+	proto := "HTTP/1.1"
+	headers := map[string][]string{}
+	if request != nil {
+		if request.Method != "" {
+			method = request.Method
+		}
+		if request.Proto != "" {
+			proto = request.Proto
+		}
+		headers = packetHeaders(request.Header)
+		if request.Host != "" {
+			headers["Host"] = []string{request.Host}
+		}
+	}
+	return HTTPPacket{
+		RequestLine:    method + " " + packetRequestTarget(request, path) + " " + proto,
+		RequestHeaders: headers, SensitiveDataRedacted: false,
+	}
 }
 
 func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
@@ -197,6 +285,8 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		Decision: ActivityDecisionBlocked, RuleID: decision.RuleID, Reason: decision.Reason,
 		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected",
 	}
+	packet := newHTTPPacket(request, event.Path)
+	event.HTTPPacket = &packet
 	if request.ContentLength > 0 {
 		event.BytesUp = request.ContentLength
 	}
@@ -213,7 +303,9 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	}
 	if isDNSOverHTTP(request, decision.Target.Path) {
 		event.Outcome = "encrypted_dns_denied"
-		writeBoundaryDeniedResponse(writer, decision.Target.Host, "encrypted-dns-denied", decision.RuleID)
+		headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, "encrypted-dns-denied", decision.RuleID)
+		captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
+		event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
 		return
 	}
 	var authProfile *GatewayAuthProfile
@@ -221,13 +313,17 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		profile, ok := p.authProfiles[decision.AuthProfileID]
 		if !decision.Allowed || !ok {
 			event.Outcome = "auth_profile_unavailable"
-			writeBoundaryDeniedResponse(writer, decision.Target.Host, "auth-profile-unavailable", decision.RuleID)
+			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, "auth-profile-unavailable", decision.RuleID)
+			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
+			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
 			return
 		}
 		authProfile = &profile
 	} else if !proxyDecisionAllowed(decision) {
 		event.Outcome = "policy_denied"
-		writeBoundaryDeniedResponse(writer, decision.Target.Host, decision.Reason, decision.RuleID)
+		headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, decision.Reason, decision.RuleID)
+		captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
+		event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
 		return
 	}
 	event.Decision = ActivityDecisionAllowed
@@ -267,8 +363,20 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	if authProfile != nil {
 		applyAuthProfile(outbound.Header, *authProfile)
 	}
+	// From this point the packet projection mirrors the actual request sent to
+	// the upstream, including any configured authentication profile and after
+	// removing proxy-only/hop-by-hop headers.
+	packet = newHTTPPacket(outbound, event.Path)
+	requestCapture := &boundedPacketCapture{}
+	if outbound.Body != nil {
+		outbound.Body = &packetCaptureReadCloser{Reader: io.TeeReader(outbound.Body, requestCapture), Closer: outbound.Body}
+	}
 
 	response, err := p.transport.RoundTrip(outbound)
+	packet.RequestBody, packet.RequestBodyEncoding, packet.RequestBodyTruncated = requestCapture.snapshot(request.Header.Get("Content-Type"))
+	if requestCapture.total > event.BytesUp {
+		event.BytesUp = requestCapture.total
+	}
 	if err != nil {
 		http.Error(writer, "upstream HTTP request failed", http.StatusBadGateway)
 		return
@@ -276,14 +384,26 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	defer response.Body.Close()
 	event.HTTPStatus = response.StatusCode
 	event.Outcome = "completed"
+	responseProtocol := response.Proto
+	if responseProtocol == "" {
+		responseProtocol = "HTTP/1.1"
+	}
+	responseStatus := strings.TrimSpace(response.Status)
+	if responseStatus == "" {
+		responseStatus = strconv.Itoa(response.StatusCode) + " " + http.StatusText(response.StatusCode)
+	}
+	packet.ResponseLine = responseProtocol + " " + responseStatus
+	packet.ResponseHeaders = packetHeaders(response.Header)
 	observedAt := p.now().UTC()
 	p.emitHealthTransition(decision, p.guard.observeResponse(decision, outbound, response, observedAt), observedAt)
 	responseHeaders := response.Header.Clone()
 	removeHopByHopHeaders(responseHeaders)
 	copyHeaders(writer.Header(), responseHeaders)
 	writer.WriteHeader(response.StatusCode)
-	written, copyErr := io.Copy(writer, response.Body)
+	responseCapture := &boundedPacketCapture{}
+	written, copyErr := io.Copy(writer, io.TeeReader(response.Body, responseCapture))
 	event.BytesDown = written
+	packet.ResponseBody, packet.ResponseBodyEncoding, packet.ResponseBodyTruncated = responseCapture.snapshot(response.Header.Get("Content-Type"))
 	if copyErr != nil {
 		event.Outcome = "response_interrupted"
 	}
@@ -659,22 +779,37 @@ func writeRateLimitResponse(writer http.ResponseWriter, retryAfterMS int64) {
 // explicit explanation instead of an ambiguous transport failure. It only
 // includes the normalized host and policy metadata; paths, queries, headers,
 // request bodies and credentials are deliberately excluded.
-func writeBoundaryDeniedResponse(writer http.ResponseWriter, host, reason, ruleID string) {
+func writeBoundaryDeniedResponse(writer http.ResponseWriter, host, reason, ruleID string) (http.Header, string) {
 	host = safeBoundaryResponseValue(host, "the requested website")
 	reason = safeBoundaryResponseValue(reason, boundary.ReasonDefaultDeny)
 	ruleID = safeBoundaryResponseValue(ruleID, "default-deny")
 	body := fmt.Sprintf(
 		"CyberStrikeAI network boundary blocked access to %s (reason: %s; rule: %s). The request was not sent to the website.\nCyberStrikeAI 出站边界已禁止访问该网站（目标：%s；原因：%s；规则：%s），请求未发送到目标站点。\n",
 		host, reason, ruleID, host, reason, ruleID)
-	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	writer.Header().Set("Content-Length", strconv.Itoa(len(body)))
-	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("X-CyberStrikeAI-Blocked", "true")
-	writer.Header().Set("X-CyberStrikeAI-Block-Reason", reason)
-	writer.Header().Set("X-CyberStrikeAI-Block-Rule", ruleID)
-	writer.Header().Set("Proxy-Status", `CyberStrikeAI; error="policy_denied"`)
+	headers := http.Header{
+		"Content-Type":                 {"text/plain; charset=utf-8"},
+		"Content-Length":               {strconv.Itoa(len(body))},
+		"Cache-Control":                {"no-store"},
+		"X-CyberStrikeAI-Blocked":      {"true"},
+		"X-CyberStrikeAI-Block-Reason": {reason},
+		"X-CyberStrikeAI-Block-Rule":   {ruleID},
+		"Proxy-Status":                 {`CyberStrikeAI; error="policy_denied"`},
+	}
+	copyHeaders(writer.Header(), headers)
 	writer.WriteHeader(http.StatusForbidden)
 	_, _ = io.WriteString(writer, body)
+	return headers, body
+}
+
+func captureSyntheticHTTPResponse(packet *HTTPPacket, status int, headers http.Header, body string) {
+	if packet == nil {
+		return
+	}
+	packet.ResponseLine = "HTTP/1.1 " + strconv.Itoa(status) + " " + http.StatusText(status)
+	packet.ResponseHeaders = packetHeaders(headers)
+	capture := &boundedPacketCapture{}
+	_, _ = capture.Write([]byte(body))
+	packet.ResponseBody, packet.ResponseBodyEncoding, packet.ResponseBodyTruncated = capture.snapshot(headers.Get("Content-Type"))
 }
 
 func safeBoundaryResponseValue(value, fallback string) string {

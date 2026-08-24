@@ -102,17 +102,20 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	}
 	boundaryPolicyRequestSchema := map[string]interface{}{
 		"type":        "string",
-		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示默认拒绝空策略。",
+		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许。",
 	}
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
-		"description": "新建容器对话可选择的安全边界策略摘要；不包含规则正文或所有者标识。",
-		"required":    []string{"id", "name", "description", "tlsInspectionEnabled", "updatedAt"},
+		"description": "边界策略列表的安全摘要；不包含规则正文或所有者标识。",
+		"required":    []string{"id", "name", "description", "tlsInspectionEnabled", "ruleCount", "protocols", "usageCount", "updatedAt"},
 		"properties": map[string]interface{}{
 			"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
 			"name":                 map[string]interface{}{"type": "string", "maxLength": 128},
 			"description":          map[string]interface{}{"type": "string", "maxLength": 2048},
 			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
+			"ruleCount":            map[string]interface{}{"type": "integer", "minimum": 0},
+			"protocols":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"any", "http", "https", "tcp", "udp"}}},
+			"usageCount":           map[string]interface{}{"type": "integer", "minimum": 0, "description": "当前用户可见的使用中对话数"},
 			"updatedAt":            map[string]interface{}{"type": "string", "format": "date-time"},
 		},
 	}
@@ -129,10 +132,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"properties": map[string]interface{}{
 			"effect":        map[string]interface{}{"type": "string", "enum": []string{"allow-visit", "allow-attack", "blocked", "auth-only"}},
 			"host":          map[string]interface{}{"type": "string", "maxLength": 253},
-			"schemes":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"http", "https"}}},
+			"schemes":       map[string]interface{}{"type": "array", "description": "留空表示不限协议", "items": map[string]interface{}{"type": "string", "enum": []string{"http", "https", "tcp", "udp"}}},
 			"ports":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}},
 			"pathPrefixes":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-			"methods":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"methods":       map[string]interface{}{"type": "array", "description": "仅用于 HTTP/HTTPS；留空表示任意 HTTP 方法", "items": map[string]interface{}{"type": "string"}},
 			"authProfileId": map[string]interface{}{"type": "string", "format": "uuid", "nullable": true},
 			"rateLimit":     boundaryRateLimitSchema,
 			"expiresAt":     map[string]interface{}{"type": "string", "format": "date-time", "nullable": true},
@@ -355,10 +358,22 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"updatedAt":  map[string]interface{}{"type": "string", "format": "date-time"},
 		},
 	}
+	httpPacketSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false,
+		"description": "HTTP/HTTPS 原文审计报文。可能包含认证头、Cookie、查询参数与业务敏感数据；每方向正文最多 32 KiB。",
+		"required":    []string{"requestLine", "requestHeaders", "sensitiveDataRedacted"},
+		"properties": map[string]interface{}{
+			"requestLine": map[string]interface{}{"type": "string", "maxLength": 65536}, "requestHeaders": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "maxLength": 65536}}},
+			"requestBody": map[string]interface{}{"type": "string", "maxLength": 45000}, "requestBodyEncoding": map[string]interface{}{"type": "string", "enum": []string{"utf8", "base64"}}, "requestBodyTruncated": map[string]interface{}{"type": "boolean"},
+			"responseLine": map[string]interface{}{"type": "string", "maxLength": 65536}, "responseHeaders": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "maxLength": 65536}}},
+			"responseBody": map[string]interface{}{"type": "string", "maxLength": 45000}, "responseBodyEncoding": map[string]interface{}{"type": "string", "enum": []string{"utf8", "base64"}}, "responseBodyTruncated": map[string]interface{}{"type": "boolean"},
+			"sensitiveDataRedacted": map[string]interface{}{"type": "boolean", "enum": []bool{false}},
+		},
+	}
 	egressAuditEventSchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
-		"description":          "持久出站审计的封闭安全投影。明确不包含请求/响应 header、body、query、Cookie、Authorization、凭据、环境变量或原始 provider 错误。",
+		"description":          "持久出站审计投影。列表不携带完整报文；单事件详情可包含 HTTPPacket 原文审计报文。",
 		"required":             []string{"id", "chainSequence", "previousHash", "eventHash", "recordedAt", "occurredAt", "category", "eventType", "conversationId", "conversationTitle", "runtimeGeneration", "latencyMs"},
 		"properties": map[string]interface{}{
 			"id":                 map[string]interface{}{"type": "string", "maxLength": 128},
@@ -368,7 +383,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"recordedAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"occurredAt":         map[string]interface{}{"type": "string", "format": "date-time"},
 			"category":           map[string]interface{}{"type": "string", "enum": []string{"network", "lifecycle"}},
-			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "https", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
+			"eventType":          map[string]interface{}{"type": "string", "enum": []string{"dns", "http", "https", "connect", "tcp", "udp", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}},
 			"conversationId":     map[string]interface{}{"type": "string", "maxLength": 128},
 			"conversationTitle":  map[string]interface{}{"type": "string", "maxLength": 512},
 			"containerId":        map[string]interface{}{"type": "string", "maxLength": 128},
@@ -395,6 +410,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"lifecycleOperation": map[string]interface{}{"type": "string", "maxLength": 128},
 			"lifecycleState":     map[string]interface{}{"type": "string", "maxLength": 128},
 			"message":            map[string]interface{}{"type": "string", "maxLength": 1024},
+			"httpPacket":         map[string]interface{}{"$ref": "#/components/schemas/HTTPPacket"},
 		},
 	}
 	egressHealthStateSchema := map[string]interface{}{
@@ -500,6 +516,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"ConversationEgressBinding":           conversationEgressBindingSchema,
 				"ConversationEgressWrite":             conversationEgressWriteSchema,
 				"EgressDefaultView":                   egressDefaultViewSchema,
+				"HTTPPacket":                          httpPacketSchema,
 				"EgressAuditEvent":                    egressAuditEventSchema,
 				"EgressAuditIntegrity":                egressAuditIntegritySchema,
 				"EgressAuditSummary":                  egressAuditSummarySchema,
@@ -528,6 +545,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"egressMode":          conversationEgressModeRequestSchema,
 						"egressProxyId":       conversationEgressProxyIDRequestSchema,
 						"egressProxyGroupId":  conversationEgressProxyGroupIDRequestSchema,
+						"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "description": "仅 container 对话有效；关闭后不再采集 HTTP/HTTPS/DNS/CONNECT，生命周期事件仍保留。"},
 					},
 				},
 				"SetConversationProjectRequest": map[string]interface{}{
@@ -648,7 +666,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"properties": map[string]interface{}{
 						"snapshotId":     map[string]interface{}{"type": "string"},
 						"conversationId": map[string]interface{}{"type": "string"},
-						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示默认拒绝空策略"},
+						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示未设置边界：默认允许外部目标，但仍隔离 Docker、宿主机与保留地址"},
 						"sha256":         map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
 						"canonicalJson":  map[string]interface{}{"type": "string"},
 						"runtimeGeneration": map[string]interface{}{
@@ -659,9 +677,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":     "object",
 							"required": []string{"schemaVersion", "policyId", "rules"},
 							"properties": map[string]interface{}{
-								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1}},
+								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3}},
 								"policyId":      map[string]interface{}{"type": "string"},
 								"rules":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
+								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3 的无边界快照为 allow"},
 							},
 						},
 						"createdAt": map[string]interface{}{"type": "string", "format": "date-time"},
@@ -726,6 +745,22 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"gatewayResources": map[string]interface{}{"type": "object", "additionalProperties": map[string]interface{}{"type": "integer"}},
 					},
 					"required": []string{"specDigest", "imageDigest", "imagePlatform", "workspace", "resources"},
+				},
+				"ConversationContainerWorkspace": map[string]interface{}{
+					"type":        "object",
+					"description": "已授权对话的容器工作区信息。停止的容器仍可查看路径，但不可打开交互式终端。",
+					"properties": map[string]interface{}{
+						"conversationId":       map[string]interface{}{"type": "string"},
+						"runtimeId":            map[string]interface{}{"type": "string"},
+						"runtimeStatus":        map[string]interface{}{"type": "string", "enum": []string{"creating", "starting", "running", "stopping", "stopped", "failed"}},
+						"containerPath":        map[string]interface{}{"type": "string", "description": "容器内工作区路径，固定为受信任运行时规格中的挂载点。"},
+						"hostPath":             map[string]interface{}{"type": "string", "description": "持久工作区对应的 Docker volume 宿主机挂载路径；tmpfs 工作区不返回此字段。"},
+						"storage":              map[string]interface{}{"type": "string", "enum": []string{"named_volume", "tmpfs"}},
+						"persistent":           map[string]interface{}{"type": "boolean"},
+						"interactiveAvailable": map[string]interface{}{"type": "boolean"},
+						"interactiveReason":    map[string]interface{}{"type": "string", "enum": []string{"container_not_running"}},
+					},
+					"required": []string{"conversationId", "runtimeId", "runtimeStatus", "containerPath", "storage", "persistent", "interactiveAvailable"},
 				},
 				"ContainerInitialization": map[string]interface{}{
 					"type":        "object",
@@ -1872,15 +1907,22 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"/api/boundary-policies": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"边界策略"},
-					"summary":     "列出可用于新建对话的边界策略",
-					"description": "按调用者 boundary:read 的 RBAC 资源范围返回安全摘要。",
+					"summary":     "检索并分页列出边界策略",
+					"description": "按调用者 boundary:read 的 RBAC 资源范围返回安全摘要。不传分页参数时默认返回最多 100 条，以兼容对话创建选择器。",
 					"operationId": "listBoundaryPolicies",
+					"parameters": []map[string]interface{}{
+						{"name": "page", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 1, "minimum": 1}},
+						{"name": "page_size", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 100, "minimum": 1, "maximum": 100}},
+						{"name": "search", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 200}},
+					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{
 							"description": "可访问的策略摘要",
 							"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
-								"type": "object", "required": []string{"items"}, "properties": map[string]interface{}{
+								"type": "object", "required": []string{"items", "page", "pageSize", "total", "totalPages"}, "properties": map[string]interface{}{
 									"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicySummary"}},
+									"page":  map[string]interface{}{"type": "integer"}, "pageSize": map[string]interface{}{"type": "integer"},
+									"total": map[string]interface{}{"type": "integer"}, "totalPages": map[string]interface{}{"type": "integer"}, "search": map[string]interface{}{"type": "string"},
 								},
 							}}},
 						},
@@ -1905,6 +1947,24 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"tags": []string{"边界策略"}, "summary": "删除未被对话选择的草案", "operationId": "deleteBoundaryPolicy",
 					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
 					"responses":  map[string]interface{}{"204": map[string]interface{}{"description": "已删除"}, "403": map[string]interface{}{"description": "缺少权限或不在资源范围"}, "404": map[string]interface{}{"description": "草案不存在"}, "409": map[string]interface{}{"description": "草案仍被对话选择"}},
+				},
+			},
+			"/api/boundary-policies/{id}/usage": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"边界策略"}, "summary": "查看当前使用策略的对话容器", "operationId": "listBoundaryPolicyUsage",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string", "format": "uuid"}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "RBAC 可见的当前使用关系", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+							"type": "object", "required": []string{"items", "total"}, "properties": map[string]interface{}{
+								"total": map[string]interface{}{"type": "integer"}, "items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+									"conversationId": map[string]interface{}{"type": "string"}, "conversationTitle": map[string]interface{}{"type": "string"}, "runtimeStatus": map[string]interface{}{"type": "string"},
+									"workspacePersistent": map[string]interface{}{"type": "boolean"}, "snapshotId": map[string]interface{}{"type": "string"}, "snapshotSha256": map[string]interface{}{"type": "string"},
+									"runtimeGeneration": map[string]interface{}{"type": "integer"}, "activatedAt": map[string]interface{}{"type": "string", "format": "date-time"},
+								}}},
+							},
+						}}}},
+						"403": map[string]interface{}{"description": "缺少 boundary:read 或 chat:read 权限"}, "404": map[string]interface{}{"description": "策略不存在"},
+					},
 				},
 			},
 			"/api/boundary-policies/{id}/rules": map[string]interface{}{
@@ -2406,7 +2466,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"/api/egress-audit-events": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags": []string{"出站审计"}, "summary": "搜索持久出站与生命周期审计事件",
-					"description": "按审计权限和对话资源范围返回不含请求头、正文、查询参数或凭据的持久安全投影。",
+					"description": "按审计权限和对话资源范围返回持久摘要；完整 HTTP/HTTPS 报文仅由单事件详情按需返回。",
 					"operationId": "listEgressAuditEvents",
 					"parameters": []map[string]interface{}{
 						{"name": "page", "in": "query", "schema": map[string]interface{}{"type": "integer", "default": 1, "minimum": 1}},
@@ -2414,7 +2474,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						{"name": "conversation_id", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 128}},
 						{"name": "q", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 200}},
 						{"name": "category", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "network", "lifecycle"}}},
-						{"name": "event_type", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "dns", "http", "https", "connect", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}}},
+						{"name": "event_type", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "dns", "http", "https", "connect", "tcp", "udp", "health", "create", "start", "stop", "rebuild", "delete", "reconcile"}}},
 						{"name": "decision", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "allowed", "blocked", "success", "failure"}}},
 						{"name": "since", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
 						{"name": "until", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
@@ -2422,6 +2482,16 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{"description": "持久审计事件分页结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditList"}}}},
 						"400": map[string]interface{}{"description": "筛选或分页参数无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"},
+					},
+				},
+				"delete": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "删除指定或筛选命中的出站审计事件", "operationId": "deleteEgressAuditEvents",
+					"description": "需要 audit:delete。删除后在同一事务中重建受影响对话的 hash 链并验证完整性；未提供 ids 时至少需要一个筛选条件。",
+					"requestBody": map[string]interface{}{"required": false, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+						"type": "object", "additionalProperties": false, "properties": map[string]interface{}{"ids": map[string]interface{}{"type": "array", "maxItems": 500, "items": map[string]interface{}{"type": "string", "maxLength": 128}}},
+					}}}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "删除及链重建成功"}, "400": map[string]interface{}{"description": "请求或筛选无效"}, "403": map[string]interface{}{"description": "缺少 audit:delete 权限"}, "409": map[string]interface{}{"description": "删除前审计链完整性校验失败"},
 					},
 				},
 			},
@@ -2465,7 +2535,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"tags": []string{"出站审计"}, "summary": "查看一条持久出站审计事件", "operationId": "getEgressAuditEvent",
 					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
 					"responses": map[string]interface{}{
-						"200": map[string]interface{}{"description": "安全审计事件", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+						"200": map[string]interface{}{"description": "审计事件；HTTP/HTTPS 事件包含完整原文 HTTPPacket", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
 							"type": "object", "additionalProperties": false, "required": []string{"event"}, "properties": map[string]interface{}{"event": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditEvent"}},
 						}}}},
 						"401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"}, "404": map[string]interface{}{"description": "事件不存在或不可访问"},
@@ -2684,6 +2754,20 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/conversations/{id}/egress-audit": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计", "对话管理"}, "summary": "查看对话出站网络审计开关", "operationId": "getConversationEgressAuditSetting",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":  map[string]interface{}{"200": map[string]interface{}{"description": "当前设置"}, "403": map[string]interface{}{"description": "无权访问该对话"}},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"出站审计", "对话管理"}, "summary": "开启或关闭对话出站网络审计", "operationId": "updateConversationEgressAuditSetting",
+					"description": "关闭后采集器停止记录 HTTP/HTTPS/DNS/CONNECT；容器生命周期事件仍保留。",
+					"parameters":  []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"type": "object", "additionalProperties": false, "required": []string{"enabled"}, "properties": map[string]interface{}{"enabled": map[string]interface{}{"type": "boolean"}}}}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "设置已更新"}, "403": map[string]interface{}{"description": "无权修改该对话"}},
+				},
+			},
 			"/api/egress-defaults/user": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags": []string{"出站代理"}, "summary": "查看当前用户出口默认值", "operationId": "getUserEgressDefault",
@@ -2757,6 +2841,44 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"403": map[string]interface{}{"description": "无权访问该对话"},
 						"404": map[string]interface{}{"description": "对话不存在"},
 						"500": map[string]interface{}{"description": "状态存储查询失败"},
+					},
+				},
+			},
+			"/api/conversations/{id}/container/workspace": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"对话管理", "终端"},
+					"summary":     "查看对话容器工作区路径",
+					"description": "仅返回已授权对话的逻辑运行时状态及容器/宿主机工作区路径。停止状态仍可查看路径。",
+					"operationId": "getConversationContainerWorkspace",
+					"parameters": []map[string]interface{}{{
+						"name": "id", "in": "path", "required": true, "description": "对话ID", "schema": map[string]interface{}{"type": "string"},
+					}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "工作区信息", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/ConversationContainerWorkspace"}}}},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权访问该对话"},
+						"404": map[string]interface{}{"description": "对话、容器或工作区不存在"},
+						"409": map[string]interface{}{"description": "容器状态与持久化记录不一致"},
+						"503": map[string]interface{}{"description": "容器工作区信息服务不可用"},
+					},
+				},
+			},
+			"/api/conversations/{id}/container/terminal/ws": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags":        []string{"对话管理", "终端"},
+					"summary":     "打开对话容器交互式终端",
+					"description": "对所有权与 terminal:execute 权限验证通过且正在运行的对话容器建立 WebSocket TTY。只执行固定的非特权 /bin/sh，工作目录固定为 /workspace，不会回退到宿主机终端。客户端可发送 JSON {\"type\":\"resize\",\"cols\":80,\"rows\":24} 调整尺寸。",
+					"operationId": "conversationContainerTerminalWS",
+					"parameters": []map[string]interface{}{{
+						"name": "id", "in": "path", "required": true, "description": "对话ID", "schema": map[string]interface{}{"type": "string"},
+					}},
+					"responses": map[string]interface{}{
+						"101": map[string]interface{}{"description": "WebSocket TTY 已建立"},
+						"401": map[string]interface{}{"description": "未授权"},
+						"403": map[string]interface{}{"description": "无权访问对话或缺少 terminal:execute 权限"},
+						"404": map[string]interface{}{"description": "对话或容器不存在"},
+						"409": map[string]interface{}{"description": "容器未运行"},
+						"503": map[string]interface{}{"description": "容器交互式终端服务不可用"},
 					},
 				},
 			},
@@ -2861,6 +2983,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "description": "仅新建 container 对话时有效；关闭后不采集网络出站事件。"},
 										"egressMode":           conversationEgressModeRequestSchema,
 										"egressProxyId":        conversationEgressProxyIDRequestSchema,
 										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
@@ -2918,6 +3041,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "description": "仅新建 container 对话时有效；关闭后不采集网络出站事件。"},
 										"egressMode":           conversationEgressModeRequestSchema,
 										"egressProxyId":        conversationEgressProxyIDRequestSchema,
 										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
@@ -2970,6 +3094,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":         runtimeModeRequestSchema,
 										"workspacePersistent": workspacePersistenceRequestSchema,
 										"boundaryPolicyId":    boundaryPolicyRequestSchema,
+										"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "description": "仅新建 container 对话时有效；关闭后不采集网络出站事件。"},
 										"egressMode":          conversationEgressModeRequestSchema,
 										"egressProxyId":       conversationEgressProxyIDRequestSchema,
 										"egressProxyGroupId":  conversationEgressProxyGroupIDRequestSchema,
@@ -3039,6 +3164,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"runtimeMode":          runtimeModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "description": "仅新建 container 对话时有效；关闭后不采集网络出站事件。"},
 										"egressMode":           conversationEgressModeRequestSchema,
 										"egressProxyId":        conversationEgressProxyIDRequestSchema,
 										"egressProxyGroupId":   conversationEgressProxyGroupIDRequestSchema,
@@ -8109,7 +8235,7 @@ func conversationContainerRebuildOpenAPIOperation() map[string]interface{} {
 					"properties": map[string]interface{}{
 						"boundaryPolicyId": map[string]interface{}{
 							"type":        "string",
-							"description": "新边界策略草案 ID；显式空字符串表示创建默认拒绝空快照。需要 boundary:read 权限和资源作用域。",
+							"description": "新边界策略草案 ID；显式空字符串表示创建无边界、默认允许外部访问的快照。需要 boundary:read 权限和资源作用域。",
 						},
 					},
 				},

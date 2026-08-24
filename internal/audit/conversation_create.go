@@ -33,6 +33,9 @@ func RegisterConversationCreateHook(s *Service) {
 		if meta.EgressProxyGroupID != "" {
 			detail["egress_proxy_group_id"] = meta.EgressProxyGroupID
 		}
+		if meta.EgressAuditEnabled != nil {
+			detail["egress_audit_enabled"] = *meta.EgressAuditEnabled
+		}
 		s.Record(nil, Entry{
 			Category:     "conversation",
 			Action:       "create",

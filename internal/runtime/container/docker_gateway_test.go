@@ -69,8 +69,8 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	if len(agentOptions.HostConfig.DNS) != 0 {
 		t.Fatalf("legacy snapshot-less gateway unexpectedly became policy DNS: %#v", agentOptions.HostConfig.DNS)
 	}
-	if len(agentOptions.Config.Env) != 0 {
-		t.Fatalf("legacy snapshot-less gateway unexpectedly configured a proxy: %#v", agentOptions.Config.Env)
+	if expected := runtimeProxyEnvironment(spec, ""); !equalStrings(agentOptions.Config.Env, expected) {
+		t.Fatalf("legacy snapshot-less gateway did not neutralize inherited proxy settings: %#v", agentOptions.Config.Env)
 	}
 	if len(agentOptions.NetworkingConfig.EndpointsConfig) != 1 || agentOptions.NetworkingConfig.EndpointsConfig[internalName] == nil || agentOptions.NetworkingConfig.EndpointsConfig[egressName] != nil {
 		t.Fatalf("agent network endpoints = %#v", agentOptions.NetworkingConfig)
@@ -612,6 +612,47 @@ func TestDockerManagerRejectsProxyEnvironmentWithoutSnapshotGateway(t *testing.T
 	}
 	if _, err := manager.Create(context.Background(), spec); !errors.Is(err, ErrRuntimeStateConflict) {
 		t.Fatalf("unexpected proxy environment error = %v", err)
+	}
+}
+
+func TestRuntimeProxyEnvironmentNeutralizesInheritedImageValues(t *testing.T) {
+	spec := creationSpec()
+	environment := runtimeProxyEnvironment(spec, "")
+	if len(environment) != len(runtimeProxyEnvironmentKeys) {
+		t.Fatalf("managed environment entries = %d, want %d: %#v", len(environment), len(runtimeProxyEnvironmentKeys), environment)
+	}
+	for index, key := range runtimeProxyEnvironmentKeys {
+		if environment[index] != key+"=" {
+			t.Fatalf("managed environment[%d] = %q, want %q", index, environment[index], key+"=")
+		}
+	}
+	if err := verifyRuntimeProxyEnvironment(environment, spec, ""); err != nil {
+		t.Fatalf("verify neutralized environment: %v", err)
+	}
+}
+
+func TestRuntimeProxyEnvironmentNeutralizesInheritedCAWithoutTLSInterception(t *testing.T) {
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{
+		ID:     "12345678-1234-1234-1234-123456789abc",
+		SHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+	}
+	environment := runtimeProxyEnvironment(spec, "172.30.0.2")
+	observed := make(map[string]string, len(environment))
+	for _, entry := range environment {
+		key, value, _ := strings.Cut(entry, "=")
+		observed[key] = value
+	}
+	if observed["HTTP_PROXY"] != "http://172.30.0.2:3128" || observed["http_proxy"] != "http://172.30.0.2:3128" {
+		t.Fatalf("proxy environment = %#v", observed)
+	}
+	if observed["ALL_PROXY"] != "socks5h://172.30.0.2:1080" || observed["all_proxy"] != "socks5h://172.30.0.2:1080" {
+		t.Fatalf("SOCKS5 proxy environment = %#v", observed)
+	}
+	for _, key := range []string{"SSL_CERT_FILE", "CURL_CA_BUNDLE", "REQUESTS_CA_BUNDLE", "PIP_CERT", "GIT_SSL_CAINFO", "NODE_EXTRA_CA_CERTS"} {
+		if observed[key] != "" {
+			t.Fatalf("inherited CA variable %s was not neutralized: %#v", key, observed)
+		}
 	}
 }
 

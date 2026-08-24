@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	latency_ms INTEGER NOT NULL DEFAULT 0,
 	bytes_up INTEGER NOT NULL DEFAULT 0,
 	bytes_down INTEGER NOT NULL DEFAULT 0,
+	http_packet_json TEXT NOT NULL DEFAULT '' CHECK (http_packet_json = '' OR json_valid(http_packet_json)),
 	lifecycle_operation TEXT NOT NULL DEFAULT '',
 	lifecycle_state TEXT NOT NULL DEFAULT '',
 	message TEXT NOT NULL DEFAULT '',
@@ -74,6 +75,14 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	CHECK (latency_ms >= 0 AND bytes_up >= 0 AND bytes_down >= 0),
 	CHECK ((chain_sequence = 0 AND previous_hash = '' AND event_hash = '') OR
 		(chain_sequence > 0 AND length(previous_hash) = 64 AND length(event_hash) = 64))
+);`
+
+const createConversationEgressAuditSettingsTable = `
+CREATE TABLE IF NOT EXISTS conversation_egress_audit_settings (
+	conversation_id TEXT PRIMARY KEY,
+	enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+	updated_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );`
 
 const createEgressAuditChainHeadsTable = `
@@ -88,6 +97,12 @@ CREATE TABLE IF NOT EXISTS egress_audit_chain_heads (
 	CHECK (length(last_hash) = 64)
 );`
 
+const createEgressAuditMaintenanceTable = `
+CREATE TABLE IF NOT EXISTS egress_audit_chain_maintenance (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	reason TEXT NOT NULL
+);`
+
 const createEgressAuditRejectPresealedInsertTrigger = `
 CREATE TRIGGER IF NOT EXISTS trg_egress_audit_reject_presealed_insert
 BEFORE INSERT ON egress_audit_events
@@ -99,7 +114,7 @@ END;`
 const createEgressAuditAppendOnlyUpdateTrigger = `
 CREATE TRIGGER IF NOT EXISTS trg_egress_audit_append_only_update
 BEFORE UPDATE ON egress_audit_events
-WHEN OLD.event_hash <> ''
+WHEN OLD.event_hash <> '' AND NOT EXISTS (SELECT 1 FROM egress_audit_chain_maintenance WHERE id = 1)
 BEGIN
 	SELECT RAISE(ABORT, 'egress audit events are append-only');
 END;`
@@ -107,6 +122,7 @@ END;`
 const createEgressAuditAppendOnlyDeleteTrigger = `
 CREATE TRIGGER IF NOT EXISTS trg_egress_audit_append_only_delete
 BEFORE DELETE ON egress_audit_events
+WHEN NOT EXISTS (SELECT 1 FROM egress_audit_chain_maintenance WHERE id = 1)
 BEGIN
 	SELECT RAISE(ABORT, 'egress audit events are append-only');
 END;`
@@ -120,7 +136,7 @@ BEGIN
 	UPDATE egress_audit_events
 	SET chain_sequence = COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1,
 		previous_hash = COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
-		event_hash = cyberstrike_egress_audit_hash(
+		event_hash = cyberstrike_egress_audit_hash_packet(
 			COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 			CAST(COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1 AS TEXT),
 			CAST(NEW.id AS TEXT), CAST(NEW.event_key AS TEXT), CAST(NEW.recorded_at AS TEXT), CAST(NEW.occurred_at AS TEXT),
@@ -130,7 +146,8 @@ BEGIN
 			CAST(NEW.port AS TEXT), CAST(NEW.decision AS TEXT), CAST(NEW.result AS TEXT), CAST(NEW.rule_id AS TEXT),
 			CAST(NEW.reason AS TEXT), CAST(NEW.upstream_route_id AS TEXT), CAST(NEW.method AS TEXT), CAST(NEW.path AS TEXT),
 			CAST(NEW.http_status AS TEXT), CAST(NEW.outcome AS TEXT), CAST(NEW.latency_ms AS TEXT), CAST(NEW.bytes_up AS TEXT),
-			CAST(NEW.bytes_down AS TEXT), CAST(NEW.lifecycle_operation AS TEXT), CAST(NEW.lifecycle_state AS TEXT), CAST(NEW.message AS TEXT)
+			CAST(NEW.bytes_down AS TEXT), CAST(NEW.lifecycle_operation AS TEXT), CAST(NEW.lifecycle_state AS TEXT), CAST(NEW.message AS TEXT),
+			CAST(NEW.http_packet_json AS TEXT)
 		)
 	WHERE id = NEW.id;
 	INSERT INTO egress_audit_chain_heads (conversation_id, last_sequence, last_hash, event_count, updated_at)
@@ -260,44 +277,45 @@ WHERE r.initialization_status IN ('created', 'failed')
 		WHERE existing.conversation_id = r.conversation_id AND existing.category = 'lifecycle'
 	);`
 
-// EgressAuditEvent is the credential-free persistent projection shown by the
-// container audit page and export APIs. It intentionally has no raw headers,
-// bodies, query strings, environment, command, mount, or provider error field.
+// EgressAuditEvent is the persistent projection shown by the container audit
+// page and export APIs. HTTPPacket is returned only by the single-event detail
+// endpoint so list responses remain bounded.
 type EgressAuditEvent struct {
-	ID                 string    `json:"id"`
-	ChainSequence      int64     `json:"chainSequence"`
-	PreviousHash       string    `json:"previousHash"`
-	EventHash          string    `json:"eventHash"`
-	RecordedAt         time.Time `json:"recordedAt"`
-	OccurredAt         time.Time `json:"occurredAt"`
-	Category           string    `json:"category"`
-	EventType          string    `json:"eventType"`
-	ConversationID     string    `json:"conversationId"`
-	ConversationTitle  string    `json:"conversationTitle"`
-	ContainerID        string    `json:"containerId,omitempty"`
-	AgentID            string    `json:"agentId,omitempty"`
-	RuntimeGeneration  int       `json:"runtimeGeneration"`
-	SnapshotID         string    `json:"snapshotId,omitempty"`
-	SnapshotSHA256     string    `json:"snapshotSha256,omitempty"`
-	Domain             string    `json:"domain,omitempty"`
-	ResolvedIPs        []string  `json:"resolvedIps,omitempty"`
-	ConnectedIP        string    `json:"connectedIp,omitempty"`
-	Port               int       `json:"port,omitempty"`
-	Decision           string    `json:"decision,omitempty"`
-	Result             string    `json:"result,omitempty"`
-	RuleID             string    `json:"ruleId,omitempty"`
-	Reason             string    `json:"reason,omitempty"`
-	UpstreamRouteID    string    `json:"upstreamRouteId,omitempty"`
-	Method             string    `json:"method,omitempty"`
-	Path               string    `json:"path,omitempty"`
-	HTTPStatus         int       `json:"httpStatus,omitempty"`
-	Outcome            string    `json:"outcome,omitempty"`
-	LatencyMS          int64     `json:"latencyMs"`
-	BytesUp            int64     `json:"bytesUp,omitempty"`
-	BytesDown          int64     `json:"bytesDown,omitempty"`
-	LifecycleOperation string    `json:"lifecycleOperation,omitempty"`
-	LifecycleState     string    `json:"lifecycleState,omitempty"`
-	Message            string    `json:"message,omitempty"`
+	ID                 string             `json:"id"`
+	ChainSequence      int64              `json:"chainSequence"`
+	PreviousHash       string             `json:"previousHash"`
+	EventHash          string             `json:"eventHash"`
+	RecordedAt         time.Time          `json:"recordedAt"`
+	OccurredAt         time.Time          `json:"occurredAt"`
+	Category           string             `json:"category"`
+	EventType          string             `json:"eventType"`
+	ConversationID     string             `json:"conversationId"`
+	ConversationTitle  string             `json:"conversationTitle"`
+	ContainerID        string             `json:"containerId,omitempty"`
+	AgentID            string             `json:"agentId,omitempty"`
+	RuntimeGeneration  int                `json:"runtimeGeneration"`
+	SnapshotID         string             `json:"snapshotId,omitempty"`
+	SnapshotSHA256     string             `json:"snapshotSha256,omitempty"`
+	Domain             string             `json:"domain,omitempty"`
+	ResolvedIPs        []string           `json:"resolvedIps,omitempty"`
+	ConnectedIP        string             `json:"connectedIp,omitempty"`
+	Port               int                `json:"port,omitempty"`
+	Decision           string             `json:"decision,omitempty"`
+	Result             string             `json:"result,omitempty"`
+	RuleID             string             `json:"ruleId,omitempty"`
+	Reason             string             `json:"reason,omitempty"`
+	UpstreamRouteID    string             `json:"upstreamRouteId,omitempty"`
+	Method             string             `json:"method,omitempty"`
+	Path               string             `json:"path,omitempty"`
+	HTTPStatus         int                `json:"httpStatus,omitempty"`
+	Outcome            string             `json:"outcome,omitempty"`
+	LatencyMS          int64              `json:"latencyMs"`
+	BytesUp            int64              `json:"bytesUp,omitempty"`
+	BytesDown          int64              `json:"bytesDown,omitempty"`
+	HTTPPacket         *egress.HTTPPacket `json:"httpPacket,omitempty"`
+	LifecycleOperation string             `json:"lifecycleOperation,omitempty"`
+	LifecycleState     string             `json:"lifecycleState,omitempty"`
+	Message            string             `json:"message,omitempty"`
 }
 
 type EgressAuditFilter struct {
@@ -336,7 +354,7 @@ type EgressAuditRuntimeTarget struct {
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
 var egressAuditEventTypes = map[string]struct{}{
-	"all": {}, "dns": {}, "http": {}, "https": {}, "connect": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
+	"all": {}, "dns": {}, "http": {}, "https": {}, "connect": {}, "tcp": {}, "udp": {}, "health": {}, "create": {}, "start": {}, "stop": {}, "rebuild": {}, "delete": {}, "reconcile": {},
 }
 var egressAuditDecisions = map[string]struct{}{"all": {}, "allowed": {}, "blocked": {}, "success": {}, "failure": {}}
 
@@ -350,8 +368,22 @@ func normalizeEgressAuditFilterValue(raw string, allowed map[string]struct{}) (s
 }
 
 func egressAuditHashValues(values ...interface{}) string {
+	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v1\x00", values...)
+}
+
+func egressAuditHashValuesWithPacket(values ...interface{}) string {
+	if len(values) == 0 {
+		return egressAuditHashValues()
+	}
+	if fmt.Sprint(values[len(values)-1]) == "" {
+		return egressAuditHashValues(values[:len(values)-1]...)
+	}
+	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v2-packet\x00", values...)
+}
+
+func egressAuditHashWithDomain(domain string, values ...interface{}) string {
 	hasher := sha256.New()
-	_, _ = hasher.Write([]byte("cyberstrike-egress-audit-chain-v1\x00"))
+	_, _ = hasher.Write([]byte(domain))
 	for _, value := range values {
 		var text string
 		switch typed := value.(type) {
@@ -401,14 +433,17 @@ func (db *DB) initEgressAuditTables() error {
 		{"chain_sequence", "ALTER TABLE egress_audit_events ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0"},
 		{"previous_hash", "ALTER TABLE egress_audit_events ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''"},
 		{"event_hash", "ALTER TABLE egress_audit_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"},
+		{"http_packet_json", "ALTER TABLE egress_audit_events ADD COLUMN http_packet_json TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("egress_audit_events", column.name, column.statement); err != nil {
 			return fmt.Errorf("initialize egress audit chain column %s: %w", column.name, err)
 		}
 	}
 	statements := []string{
+		createConversationEgressAuditSettingsTable,
 		createConversationEgressHealthTable,
 		createEgressAuditChainHeadsTable,
+		createEgressAuditMaintenanceTable,
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_conversation_time ON egress_audit_events(conversation_id, occurred_at DESC)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_egress_audit_conversation_sequence ON egress_audit_events(conversation_id, chain_sequence) WHERE chain_sequence > 0`,
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_category_type_time ON egress_audit_events(category, event_type, occurred_at DESC)`,
@@ -422,6 +457,11 @@ func (db *DB) initEgressAuditTables() error {
 	}
 	if err := db.initializeEgressAuditChains(context.Background()); err != nil {
 		return fmt.Errorf("initialize egress audit chains: %w", err)
+	}
+	for _, trigger := range []string{"trg_egress_audit_seal_insert", "trg_egress_audit_append_only_update", "trg_egress_audit_append_only_delete"} {
+		if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+			return fmt.Errorf("refresh egress audit maintenance trigger: %w", err)
+		}
 	}
 	for _, statement := range []string{
 		createEgressAuditSealInsertTrigger(),
@@ -448,10 +488,25 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	if err := validateEgressNetworkAuditEvent(target, event); err != nil {
 		return false, err
 	}
+	accepted, err := db.conversationEgressAuditAcceptsEvent(ctx, target.Record.ConversationID, event.Timestamp)
+	if err != nil {
+		return false, err
+	}
+	if !accepted {
+		return false, nil
+	}
 	record := target.Record
 	resolvedJSON, err := json.Marshal(event.ResolvedIPs)
 	if err != nil {
 		return false, fmt.Errorf("encode egress audit resolved addresses: %w", err)
+	}
+	packetJSON := ""
+	if event.HTTPPacket != nil {
+		encodedPacket, encodeErr := json.Marshal(event.HTTPPacket)
+		if encodeErr != nil {
+			return false, fmt.Errorf("encode egress HTTP packet: %w", encodeErr)
+		}
+		packetJSON = string(encodedPacket)
 	}
 	keyPayload := struct {
 		ConversationID    string
@@ -473,18 +528,41 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 			conversation_id, conversation_title, container_id, agent_id, runtime_generation,
 			snapshot_id, snapshot_sha256, domain, resolved_ips_json, connected_ip, port,
 			decision, rule_id, reason, upstream_route_id, method, path, http_status,
-			outcome, latency_ms, bytes_up, bytes_down, message
-		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			outcome, latency_ms, bytes_up, bytes_down, http_packet_json, message
+		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, eventKey, formatSQLiteUTC(now), formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType,
 		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
 		event.SnapshotID, event.SnapshotSHA256, event.Domain, string(resolvedJSON), event.ConnectedIP, event.Port,
 		event.Decision, event.RuleID, event.Reason, event.UpstreamRouteID, event.Method, event.Path, event.HTTPStatus,
-		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, "gateway network decision")
+		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, packetJSON, "gateway network decision")
 	if err != nil {
 		return false, fmt.Errorf("append egress network audit event: %w", err)
 	}
 	rows, _ := result.RowsAffected()
 	return rows == 1, nil
+}
+
+func (db *DB) conversationEgressAuditAcceptsEvent(ctx context.Context, conversationID string, occurredAt time.Time) (bool, error) {
+	var enabled bool
+	var updatedAt time.Time
+	err := db.QueryRowContext(ctx, `
+		SELECT enabled, updated_at
+		FROM conversation_egress_audit_settings
+		WHERE conversation_id = ?
+	`, strings.TrimSpace(conversationID)).Scan(&enabled, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("load conversation egress audit setting: %w", err)
+	}
+	if !enabled {
+		return false, nil
+	}
+	// Gateway streams replay their bounded Docker log when the collector is
+	// reattached. Events emitted while recording was disabled must never be
+	// backfilled after the user enables it again.
+	return !occurredAt.UTC().Before(updatedAt.UTC()), nil
 }
 
 func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egress.ActivityEvent) error {
@@ -527,16 +605,16 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 	}
 	switch event.RequestType {
 	case egress.ActivityRequestDNS:
-		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 {
+		if event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || event.RetryAfterMS != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS:
 		if event.Port < 1 || event.Port > 65535 || !validEgressAuditMethod(event.Method) ||
-			!validEgressAuditPath(event.Path) || event.HTTPStatus < 0 || event.HTTPStatus > 999 {
+			!validEgressAuditPath(event.Path) || event.HTTPStatus < 0 || event.HTTPStatus > 999 || egress.ValidateHTTPPacket(event.HTTPPacket) != nil {
 			return invalid()
 		}
-	case egress.ActivityRequestCONNECT:
-		if event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 {
+	case egress.ActivityRequestCONNECT, egress.ActivityRequestTCP, egress.ActivityRequestUDP:
+		if event.Port < 1 || event.Port > 65535 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
 	default:
@@ -644,6 +722,7 @@ type egressAuditChainRow struct {
 	LifecycleOperation string
 	LifecycleState     string
 	Message            string
+	HTTPPacketJSON     string
 	ChainSequence      int64
 	PreviousHash       string
 	EventHash          string
@@ -654,7 +733,7 @@ const egressAuditChainSelect = `
 		conversation_id, conversation_title, container_id, agent_id, runtime_generation,
 		snapshot_id, snapshot_sha256, domain, resolved_ips_json, connected_ip, port,
 		decision, result, rule_id, reason, upstream_route_id, method, path, http_status,
-		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message,
+		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json,
 		chain_sequence, previous_hash, event_hash
 	FROM egress_audit_events`
 
@@ -665,21 +744,21 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 		&row.ConversationID, &row.ConversationTitle, &row.ContainerID, &row.AgentID, &row.RuntimeGeneration,
 		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
 		&row.Decision, &row.Result, &row.RuleID, &row.Reason, &row.UpstreamRouteID, &row.Method, &row.Path, &row.HTTPStatus,
-		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message,
+		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON,
 		&row.ChainSequence, &row.PreviousHash, &row.EventHash,
 	)
 	return row, err
 }
 
 func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int64) string {
-	return egressAuditHashValues(
+	return egressAuditHashValuesWithPacket(
 		previousHash, strconv.FormatInt(sequence, 10), row.ID, row.EventKey, row.RecordedAt, row.OccurredAt,
 		row.Category, row.EventType, row.ConversationID, row.ConversationTitle, row.ContainerID, row.AgentID,
 		strconv.FormatInt(row.RuntimeGeneration, 10), row.SnapshotID, row.SnapshotSHA256, row.Domain,
 		row.ResolvedIPsJSON, row.ConnectedIP, strconv.FormatInt(row.Port, 10), row.Decision, row.Result,
 		row.RuleID, row.Reason, row.UpstreamRouteID, row.Method, row.Path, strconv.FormatInt(row.HTTPStatus, 10),
 		row.Outcome, strconv.FormatInt(row.LatencyMS, 10), strconv.FormatInt(row.BytesUp, 10), strconv.FormatInt(row.BytesDown, 10),
-		row.LifecycleOperation, row.LifecycleState, row.Message,
+		row.LifecycleOperation, row.LifecycleState, row.Message, row.HTTPPacketJSON,
 	)
 }
 
@@ -876,7 +955,9 @@ func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]Egres
 		SELECT r.conversation_id, COALESCE(c.title, '')
 		FROM conversation_container_runtimes r
 		JOIN conversations c ON c.id = r.conversation_id
+		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = r.conversation_id
 		WHERE r.initialization_status = ? AND r.runtime_status = ?
+			AND COALESCE(s.enabled, 1) = 1
 			AND json_type(r.spec_json, '$.EgressGateway') IS NOT NULL
 			AND json_type(r.spec_json, '$.EgressGateway') <> 'null'
 		ORDER BY r.conversation_id
@@ -898,6 +979,45 @@ func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]Egres
 		targets = append(targets, EgressAuditRuntimeTarget{Record: record, ConversationTitle: title})
 	}
 	return targets, rows.Err()
+}
+
+func (db *DB) GetConversationEgressAuditEnabled(ctx context.Context, conversationID string) (bool, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	var runtimeMode string
+	var enabled sql.NullBool
+	err := db.QueryRowContext(ctx, `
+		SELECT c.runtime_mode, s.enabled
+		FROM conversations c
+		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = c.id
+		WHERE c.id = ?
+	`, conversationID).Scan(&runtimeMode, &enabled)
+	if err != nil {
+		return false, err
+	}
+	if runtimeMode != ConversationRuntimeModeContainer {
+		return false, fmt.Errorf("egress audit settings require a container conversation")
+	}
+	if !enabled.Valid {
+		return true, nil
+	}
+	return enabled.Bool, nil
+}
+
+func (db *DB) SetConversationEgressAuditEnabled(ctx context.Context, conversationID string, enabled bool) error {
+	conversationID = strings.TrimSpace(conversationID)
+	var runtimeMode string
+	if err := db.QueryRowContext(ctx, `SELECT runtime_mode FROM conversations WHERE id = ?`, conversationID).Scan(&runtimeMode); err != nil {
+		return err
+	}
+	if runtimeMode != ConversationRuntimeModeContainer {
+		return fmt.Errorf("egress audit settings require a container conversation")
+	}
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, updated_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at
+	`, conversationID, enabled, formatSQLiteUTC(time.Now().UTC()))
+	return err
 }
 
 func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, error) {
@@ -961,6 +1081,16 @@ const egressAuditSelect = `
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
 		e.lifecycle_operation, e.lifecycle_state, e.message
+	FROM egress_audit_events e
+	LEFT JOIN conversations c ON c.id = e.conversation_id`
+
+const egressAuditDetailSelect = `
+	SELECT e.id, e.chain_sequence, e.previous_hash, e.event_hash, e.recorded_at, e.occurred_at, e.category, e.event_type,
+		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
+		e.snapshot_id, e.snapshot_sha256, e.domain, e.resolved_ips_json, e.connected_ip, e.port,
+		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
+		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
+		e.lifecycle_operation, e.lifecycle_state, e.message, e.http_packet_json
 	FROM egress_audit_events e
 	LEFT JOIN conversations c ON c.id = e.conversation_id`
 
@@ -1028,16 +1158,24 @@ func (db *DB) SummarizeEgressAuditEvents(ctx context.Context, filter EgressAudit
 type egressAuditScanner interface{ Scan(...interface{}) error }
 
 func scanEgressAuditEvent(scanner egressAuditScanner) (EgressAuditEvent, error) {
+	return scanEgressAuditEventProjection(scanner, false)
+}
+
+func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bool) (EgressAuditEvent, error) {
 	var event EgressAuditEvent
-	var recordedAt, occurredAt, resolvedJSON string
-	err := scanner.Scan(
+	var recordedAt, occurredAt, resolvedJSON, packetJSON string
+	destinations := []interface{}{
 		&event.ID, &event.ChainSequence, &event.PreviousHash, &event.EventHash, &recordedAt, &occurredAt, &event.Category, &event.EventType,
 		&event.ConversationID, &event.ConversationTitle, &event.ContainerID, &event.AgentID, &event.RuntimeGeneration,
 		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &resolvedJSON, &event.ConnectedIP, &event.Port,
 		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &event.UpstreamRouteID, &event.Method, &event.Path,
 		&event.HTTPStatus, &event.Outcome, &event.LatencyMS, &event.BytesUp, &event.BytesDown,
 		&event.LifecycleOperation, &event.LifecycleState, &event.Message,
-	)
+	}
+	if includePacket {
+		destinations = append(destinations, &packetJSON)
+	}
+	err := scanner.Scan(destinations...)
 	if err != nil {
 		return event, err
 	}
@@ -1054,6 +1192,13 @@ func scanEgressAuditEvent(scanner egressAuditScanner) (EgressAuditEvent, error) 
 			return event, fmt.Errorf("decode egress audit resolved addresses: %w", err)
 		}
 	}
+	if packetJSON != "" {
+		var packet egress.HTTPPacket
+		if err := json.Unmarshal([]byte(packetJSON), &packet); err != nil || egress.ValidateHTTPPacket(&packet) != nil {
+			return event, fmt.Errorf("decode egress HTTP packet")
+		}
+		event.HTTPPacket = &packet
+	}
 	return event, nil
 }
 
@@ -1065,9 +1210,129 @@ func (db *DB) GetEgressAuditEvent(ctx context.Context, id string, userID string,
 	}
 	where += " AND e.id = ?"
 	args = append(args, strings.TrimSpace(id))
-	event, err := scanEgressAuditEvent(db.QueryRowContext(ctx, egressAuditSelect+where, args...))
+	event, err := scanEgressAuditEventProjection(db.QueryRowContext(ctx, egressAuditDetailSelect+where, args...), true)
 	if errors.Is(err, sql.ErrNoRows) {
 		return EgressAuditEvent{}, sql.ErrNoRows
 	}
 	return event, err
+}
+
+// PurgeEgressAuditEvents performs an explicitly authorized maintenance purge.
+// It preserves the relative order of all remaining events, rebuilds every
+// affected conversation hash chain, and verifies integrity before commit.
+func (db *DB) PurgeEgressAuditEvents(ctx context.Context, filter EgressAuditFilter, ids []string) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("egress audit context is required")
+	}
+	where, args, err := buildEgressAuditWhere(filter)
+	if err != nil {
+		return 0, err
+	}
+	if len(ids) > 500 {
+		return 0, errors.New("too many egress audit event ids")
+	}
+	if len(ids) > 0 {
+		placeholders := make([]string, 0, len(ids))
+		seen := make(map[string]struct{}, len(ids))
+		for _, rawID := range ids {
+			id := strings.TrimSpace(rawID)
+			if id == "" || len(id) > 128 || !utf8.ValidString(id) {
+				return 0, errors.New("invalid egress audit event id")
+			}
+			if _, exists := seen[id]; exists {
+				continue
+			}
+			seen[id] = struct{}{}
+			placeholders = append(placeholders, "?")
+			args = append(args, id)
+		}
+		if len(placeholders) == 0 {
+			return 0, errors.New("egress audit event ids are required")
+		}
+		where += " AND e.id IN (" + strings.Join(placeholders, ",") + ")"
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT e.id, e.conversation_id FROM egress_audit_events e LEFT JOIN conversations c ON c.id = e.conversation_id`+where+` ORDER BY e.conversation_id, e.chain_sequence`, args...)
+	if err != nil {
+		return 0, err
+	}
+	eventIDs := make([]string, 0)
+	conversationSet := make(map[string]struct{})
+	for rows.Next() {
+		var eventID, conversationID string
+		if err := rows.Scan(&eventID, &conversationID); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		eventIDs = append(eventIDs, eventID)
+		conversationSet[conversationID] = struct{}{}
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(eventIDs) == 0 {
+		return 0, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO egress_audit_chain_maintenance (id, reason) VALUES (1, 'authorized-purge')`); err != nil {
+		return 0, err
+	}
+	deletePlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(eventIDs)), ",")
+	deleteArgs := make([]interface{}, len(eventIDs))
+	for index, id := range eventIDs {
+		deleteArgs[index] = id
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM egress_audit_events WHERE id IN (`+deletePlaceholders+`)`, deleteArgs...); err != nil {
+		return 0, err
+	}
+	conversationIDs := make([]string, 0, len(conversationSet))
+	for conversationID := range conversationSet {
+		conversationIDs = append(conversationIDs, conversationID)
+	}
+	slices.Sort(conversationIDs)
+	for _, conversationID := range conversationIDs {
+		chainRows, err := loadEgressAuditChainRows(ctx, tx, conversationID, "chain_sequence ASC")
+		if err != nil {
+			return 0, err
+		}
+		previousHash := egressAuditGenesisHash
+		for index, row := range chainRows {
+			sequence := int64(index + 1)
+			eventHash := row.calculatedHash(previousHash, sequence)
+			if _, err := tx.ExecContext(ctx, `UPDATE egress_audit_events SET chain_sequence = ?, previous_hash = ?, event_hash = ? WHERE id = ?`, sequence, previousHash, eventHash, row.ID); err != nil {
+				return 0, err
+			}
+			previousHash = eventHash
+		}
+		if len(chainRows) == 0 {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM egress_audit_chain_heads WHERE conversation_id = ?`, conversationID); err != nil {
+				return 0, err
+			}
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO egress_audit_chain_heads (conversation_id, last_sequence, last_hash, event_count, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+			ON CONFLICT(conversation_id) DO UPDATE SET last_sequence = excluded.last_sequence,
+				last_hash = excluded.last_hash, event_count = excluded.event_count, updated_at = excluded.updated_at
+		`, conversationID, len(chainRows), previousHash, len(chainRows), formatSQLiteUTC(time.Now().UTC())); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM egress_audit_chain_maintenance WHERE id = 1`); err != nil {
+		return 0, err
+	}
+	for _, conversationID := range conversationIDs {
+		if _, err := verifyEgressAuditIntegrity(ctx, tx, EgressAuditFilter{ConversationID: conversationID, Scope: RBACScopeAll}); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return len(eventIDs), nil
 }

@@ -314,15 +314,27 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatalf("AgentTask status enum does not include %q: %#v", containerGateInitializing, statusEnum)
 	}
 	for path, method := range map[string]string{
-		"/api/conversations/{id}/container/start":     "post",
-		"/api/conversations/{id}/container/stop":      "post",
-		"/api/conversations/{id}/container/rebuild":   "post",
-		"/api/conversations/{id}/container/reconcile": "post",
-		"/api/conversations/{id}/container":           "delete",
+		"/api/conversations/{id}/container/start":       "post",
+		"/api/conversations/{id}/container/stop":        "post",
+		"/api/conversations/{id}/container/rebuild":     "post",
+		"/api/conversations/{id}/container/reconcile":   "post",
+		"/api/conversations/{id}/container":             "delete",
+		"/api/conversations/{id}/container/workspace":   "get",
+		"/api/conversations/{id}/container/terminal/ws": "get",
 	} {
 		item, ok := paths[path].(map[string]interface{})
 		if !ok || item[method] == nil {
 			t.Fatalf("container lifecycle path %s %s = %#v", method, path, item)
+		}
+	}
+	workspaceSchema, ok := schemas["ConversationContainerWorkspace"].(map[string]interface{})
+	if !ok {
+		t.Fatal("ConversationContainerWorkspace schema is missing")
+	}
+	workspaceProperties := workspaceSchema["properties"].(map[string]interface{})
+	for _, field := range []string{"containerPath", "hostPath", "storage", "persistent", "interactiveAvailable", "interactiveReason"} {
+		if workspaceProperties[field] == nil {
+			t.Fatalf("ConversationContainerWorkspace.%s is missing", field)
 		}
 	}
 }

@@ -49,6 +49,7 @@ const initialContainerRuntimeURLState = readContainerRuntimeURLState();
 
 const containerManagementState = {
     rows: [],
+    boundaryPolicies: [],
     summary: { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 },
     selectedConversationId: '',
     requestGeneration: 0,
@@ -401,11 +402,91 @@ function renderConversationContainerDetail() {
     );
     root.append(metadata);
 
+    const policySwitch = containerRuntimeElement('section', 'container-boundary-policy-switch');
+    const policyCopy = containerRuntimeElement('div', 'container-boundary-policy-switch-copy');
+    policyCopy.append(
+        containerRuntimeElement('strong', '', containerManagementT('activeBoundaryPolicy', '边界策略')),
+        containerRuntimeElement('p', '', containerManagementT('boundaryPolicySwitchHint', '切换会重建当前容器、中断运行中任务，并为所选策略生成新的不可变快照。')),
+    );
+    const policyControls = containerRuntimeElement('div', 'container-boundary-policy-switch-controls');
+    const policySelect = containerRuntimeElement('select', 'container-boundary-policy-select');
+    policySelect.setAttribute('aria-label', containerManagementT('activeBoundaryPolicy', '边界策略'));
+    policySelect.dataset.unifiedSelect = 'single';
+    policySelect.dataset.unifiedSearch = 'true';
+    const defaultOption = containerRuntimeElement('option', '', containerManagementT('noBoundaryPolicy', '不设置边界（允许全部外部访问）'));
+    defaultOption.value = '';
+    policySelect.append(defaultOption);
+    containerManagementState.boundaryPolicies.forEach((policy) => {
+        const option = containerRuntimeElement('option', '', policy.name || policy.id);
+        option.value = String(policy.id || '');
+        policySelect.append(option);
+    });
+    if (record.boundaryPolicyId && !containerManagementState.boundaryPolicies.some((policy) => policy.id === record.boundaryPolicyId)) {
+        const currentOption = containerRuntimeElement('option', '', record.boundaryPolicyName || record.boundaryPolicyId);
+        currentOption.value = String(record.boundaryPolicyId);
+        policySelect.append(currentOption);
+    }
+    policySelect.value = String(record.boundaryPolicyId || '');
+    const policyButton = containerRuntimeElement('button', 'btn-primary', containerManagementT('switchBoundaryPolicy', '切换策略并重建'));
+    policyButton.type = 'button';
+    policyButton.disabled = policySelect.value === String(record.boundaryPolicyId || '') || record.lifecycleState === 'in_progress';
+    policySelect.addEventListener('change', () => {
+        policyButton.disabled = policySelect.value === String(record.boundaryPolicyId || '') || record.lifecycleState === 'in_progress';
+    });
+    policyButton.addEventListener('click', () => switchConversationBoundaryPolicy(record, policySelect, policyButton));
+    policyControls.append(policySelect, policyButton);
+    policySwitch.append(policyCopy, policyControls);
+    root.append(policySwitch);
+    if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(policySelect);
+
+    if (record.status === 'created') {
+        const workspaceActions = containerRuntimeElement('div', 'container-runtime-workspace-actions');
+        const workspaceCopy = containerRuntimeElement('div');
+        workspaceCopy.append(
+            containerRuntimeElement('strong', '', containerManagementT('workspaceAndTerminal', '工作目录与交互式终端')),
+            containerRuntimeElement('p', '', record.runtimeStatus === 'running'
+                ? containerManagementT('workspaceTerminalReadyHint', '查看容器与宿主机工作目录，并进入当前容器执行交互式命令。')
+                : containerManagementT('workspaceTerminalStoppedHint', '已停止的容器仍可查看工作目录，但不能打开交互式终端。')),
+        );
+        const workspaceButton = containerRuntimeElement('button', 'btn-secondary', containerManagementT('openWorkspaceTerminal', '查看工作区'));
+        workspaceButton.type = 'button';
+        workspaceButton.addEventListener('click', () => {
+            if (typeof window.openConversationContainerTerminalDrawer === 'function') {
+                window.openConversationContainerTerminalDrawer(record.conversationId);
+            }
+        });
+        workspaceActions.append(workspaceCopy, workspaceButton);
+        root.append(workspaceActions);
+    }
+
     const latestError = containerRuntimeLatestError(record);
     if (latestError) {
         const error = containerRuntimeElement('div', 'container-runtime-error');
         error.append(containerRuntimeElement('strong', '', containerManagementT('latestError', '最后错误')), containerRuntimeElement('p', '', latestError));
         root.append(error);
+    }
+}
+
+async function switchConversationBoundaryPolicy(record, select, button) {
+    if (!record || !select || !button || button.disabled) return;
+    const policyId = String(select.value || '');
+    const selectedPolicy = containerManagementState.boundaryPolicies.find((policy) => policy.id === policyId);
+    const policyName = selectedPolicy ? selectedPolicy.name : containerManagementT('noBoundaryPolicy', '不设置边界（允许全部外部访问）');
+    if (!window.confirm(containerManagementT('boundaryPolicySwitchConfirm', '将对话“{{conversation}}”切换为“{{policy}}”？容器会重建，当前运行任务将被中断。', {
+        conversation: containerRuntimeRowTitle(record), policy: policyName,
+    }))) return;
+    button.disabled = true;
+    button.textContent = containerManagementT('switchingBoundaryPolicy', '正在切换…');
+    try {
+        await containerRuntimeRequestJSON(`/api/conversations/${encodeURIComponent(record.conversationId)}/container/rebuild`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boundaryPolicyId: policyId }),
+        });
+        if (typeof window.showNotification === 'function') window.showNotification(containerManagementT('boundaryPolicySwitched', '边界策略已切换，容器已重建'), 'success');
+        await refreshContainerManagementData();
+    } catch (error) {
+        button.disabled = false;
+        button.textContent = containerManagementT('switchBoundaryPolicy', '切换策略并重建');
+        if (typeof window.showNotification === 'function') window.showNotification(error.message || '切换边界策略失败', 'error');
     }
 }
 
@@ -605,7 +686,11 @@ async function refreshContainerManagementData() {
             status: containerManagementState.status,
         });
         if (containerManagementState.search) params.set('search', containerManagementState.search);
-        const payload = await containerRuntimeRequestJSON(`/api/container-runtimes?${params.toString()}`);
+        const results = await Promise.all([
+            containerRuntimeRequestJSON(`/api/container-runtimes?${params.toString()}`),
+            containerRuntimeRequestJSON('/api/boundary-policies?page=1&page_size=100').catch(() => ({ items: [] })),
+        ]);
+        const payload = results[0];
         if (generation !== containerManagementState.requestGeneration) return;
         const totalPages = Math.max(0, Number(payload.totalPages || 0));
         if (totalPages > 0 && containerManagementState.page > totalPages) {
@@ -616,6 +701,7 @@ async function refreshContainerManagementData() {
         }
         const rows = Array.isArray(payload.items) ? payload.items : [];
         containerManagementState.rows = rows;
+        containerManagementState.boundaryPolicies = Array.isArray(results[1].items) ? results[1].items : [];
         containerManagementState.summary = payload.summary || { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 };
         containerManagementState.total = Math.max(0, Number(payload.total || 0));
         containerManagementState.totalPages = totalPages;

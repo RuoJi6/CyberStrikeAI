@@ -125,7 +125,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 
 type RebuildConversationContainerRequest struct {
 	// nil means a maintenance rebuild using the active snapshot. An explicit
-	// empty JSON string creates and activates a new default-deny snapshot.
+	// empty JSON string creates and activates a new no-boundary/default-allow snapshot.
 	BoundaryPolicyID json.RawMessage `json:"boundaryPolicyId,omitempty"`
 }
 

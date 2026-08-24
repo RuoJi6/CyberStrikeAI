@@ -32,7 +32,10 @@ var registerCyberStrikeSQLiteDriver sync.Once
 func ensureCyberStrikeSQLiteDriver() {
 	registerCyberStrikeSQLiteDriver.Do(func() {
 		sql.Register(cyberStrikeSQLiteDriverName, &sqlite3.SQLiteDriver{ConnectHook: func(connection *sqlite3.SQLiteConn) error {
-			return connection.RegisterFunc("cyberstrike_egress_audit_hash", egressAuditHashValues, true)
+			if err := connection.RegisterFunc("cyberstrike_egress_audit_hash", egressAuditHashValues, true); err != nil {
+				return err
+			}
+			return connection.RegisterFunc("cyberstrike_egress_audit_hash_packet", egressAuditHashValuesWithPacket, true)
 		}})
 	})
 }

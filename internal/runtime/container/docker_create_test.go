@@ -964,6 +964,7 @@ func newSuccessfulCreationAPI(spec RuntimeSpec, ownerID, providerID, pinned stri
 				WorkingDir:      spec.Workspace.MountPath,
 				Entrypoint:      append([]string(nil), runtimeKeepaliveEntrypoint...),
 				Cmd:             []string{runtimeKeepaliveScript},
+				Env:             runtimeProxyEnvironment(spec, ""),
 				Labels:          runtimeLabels(ownerID, spec),
 			},
 			HostConfig:      runtimeHostConfig(spec),
