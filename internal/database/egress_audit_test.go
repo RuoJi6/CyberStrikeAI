@@ -137,10 +137,17 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 	if total, err := db.CountEgressAuditEvents(ctx, owner); err != nil || total != 5 {
 		t.Fatalf("owner scoped count = %d, %v", total, err)
 	}
+	ownerConversations, err := db.ListEgressAuditConversations(ctx, owner.UserID, owner.Scope)
+	if err != nil || len(ownerConversations) != 1 || ownerConversations[0].ConversationID != items[0].ConversationID {
+		t.Fatalf("owner audit conversations = %#v, %v", ownerConversations, err)
+	}
 	other := all
 	other.UserID, other.Scope = "owner-b", RBACScopeOwn
 	if total, err := db.CountEgressAuditEvents(ctx, other); err != nil || total != 0 {
 		t.Fatalf("other scoped count = %d, %v", total, err)
+	}
+	if conversations, err := db.ListEgressAuditConversations(ctx, other.UserID, other.Scope); err != nil || len(conversations) != 0 {
+		t.Fatalf("other audit conversations = %#v, %v", conversations, err)
 	}
 	if _, err := db.GetEgressAuditEvent(ctx, items[0].ID, "owner-b", RBACScopeOwn); err == nil {
 		t.Fatal("other owner resolved a protected audit event")

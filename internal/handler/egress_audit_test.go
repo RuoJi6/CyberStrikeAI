@@ -35,18 +35,19 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 		t.Fatalf("list security headers = %#v", listRecorder.Header())
 	}
 	var payload struct {
-		Items      []database.EgressAuditEvent   `json:"items"`
-		Total      int                           `json:"total"`
-		Page       int                           `json:"page"`
-		PageSize   int                           `json:"pageSize"`
-		TotalPages int                           `json:"totalPages"`
-		Summary    database.EgressAuditSummary   `json:"summary"`
-		Integrity  database.EgressAuditIntegrity `json:"integrity"`
+		Items         []database.EgressAuditEvent        `json:"items"`
+		Conversations []database.EgressAuditConversation `json:"conversations"`
+		Total         int                                `json:"total"`
+		Page          int                                `json:"page"`
+		PageSize      int                                `json:"pageSize"`
+		TotalPages    int                                `json:"totalPages"`
+		Summary       database.EgressAuditSummary        `json:"summary"`
+		Integrity     database.EgressAuditIntegrity      `json:"integrity"`
 	}
 	if err := json.Unmarshal(listRecorder.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Total != 1 || payload.Page != 1 || payload.PageSize != 10 || payload.TotalPages != 1 || len(payload.Items) != 1 || payload.Items[0].ID != eventID || payload.Summary.Network != 1 || payload.Integrity.Status != "verified" || payload.Integrity.Events != 1 {
+	if payload.Total != 1 || payload.Page != 1 || payload.PageSize != 10 || payload.TotalPages != 1 || len(payload.Items) != 1 || payload.Items[0].ID != eventID || len(payload.Conversations) != 1 || payload.Conversations[0].ConversationID != payload.Items[0].ConversationID || payload.Summary.Network != 1 || payload.Integrity.Status != "verified" || payload.Integrity.Events != 1 {
 		t.Fatalf("list payload = %#v", payload)
 	}
 	if payload.Items[0].ChainSequence != 1 || len(payload.Items[0].PreviousHash) != 64 || len(payload.Items[0].EventHash) != 64 {

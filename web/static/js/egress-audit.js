@@ -24,13 +24,13 @@
     ]);
     const URL_KEYS = Object.freeze({
         page: 'audit_page', pageSize: 'audit_page_size', query: 'audit_q',
-        category: 'audit_category', type: 'audit_type', decision: 'audit_decision',
+        conversation: 'audit_conversation', category: 'audit_category', type: 'audit_type', decision: 'audit_decision',
     });
     const state = {
         active: false, bound: false, loading: false, generation: 0, searchTimer: null,
-        page: 1, pageSize: 20, query: '', category: 'all', type: 'all', decision: 'all',
+        page: 1, pageSize: 20, query: '', conversation: '', category: 'all', type: 'all', decision: 'all',
         total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
-        integrity: null, error: '', selected: new Set(),
+        conversations: [], integrity: null, error: '', selected: new Set(),
     };
 
     function t(key, fallback, values) {
@@ -69,6 +69,7 @@
         state.page = Number.isInteger(page) && page > 0 ? page : 1;
         state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
         state.query = Array.from(String(params.get(URL_KEYS.query) || '')).slice(0, 200).join('');
+        state.conversation = Array.from(String(params.get(URL_KEYS.conversation) || '')).slice(0, 128).join('');
         state.category = closedValue(params.get(URL_KEYS.category), CATEGORIES, 'all');
         state.type = closedValue(params.get(URL_KEYS.type), TYPES, 'all');
         state.decision = closedValue(params.get(URL_KEYS.decision), DECISIONS, 'all');
@@ -84,6 +85,7 @@
         setOrDelete(URL_KEYS.page, state.page, 1);
         setOrDelete(URL_KEYS.pageSize, state.pageSize, 20);
         setOrDelete(URL_KEYS.query, state.query, '');
+        setOrDelete(URL_KEYS.conversation, state.conversation, '');
         setOrDelete(URL_KEYS.category, state.category, 'all');
         setOrDelete(URL_KEYS.type, state.type, 'all');
         setOrDelete(URL_KEYS.decision, state.decision, 'all');
@@ -93,6 +95,7 @@
     function syncControls() {
         const values = {
             'egress-audit-search': state.query,
+            'egress-audit-conversation': state.conversation,
             'egress-audit-category': state.category,
             'egress-audit-type': state.type,
             'egress-audit-decision': state.decision,
@@ -116,6 +119,7 @@
             params.set('page_size', String(state.pageSize));
         }
         if (state.query) params.set('q', state.query);
+        if (state.conversation) params.set('conversation_id', state.conversation);
         if (state.category !== 'all') params.set('category', state.category);
         if (state.type !== 'all') params.set('event_type', state.type);
         if (state.decision !== 'all') params.set('decision', state.decision);
@@ -205,6 +209,37 @@
         if (!Number.isSafeInteger(Number(integrity.conversations)) || Number(integrity.conversations) < 0) return false;
         if (!Number.isSafeInteger(Number(integrity.events)) || Number(integrity.events) < 0) return false;
         return !Number.isNaN(Date.parse(integrity.verifiedAt));
+    }
+
+    function isSafeAuditConversation(item) {
+        if (!item || typeof item !== 'object') return false;
+        if (Object.keys(item).some((key) => !['conversationId', 'conversationTitle'].includes(key))) return false;
+        return Boolean(safeString(item.conversationId, 128)) && safeString(item.conversationTitle, 512) !== null;
+    }
+
+    function syncConversationOptions() {
+        const select = element('egress-audit-conversation');
+        if (!select) return;
+        const current = state.conversation;
+        const options = [create('option', '', t('auditAllConversations', '全部对话'))];
+        options[0].value = '';
+        state.conversations.forEach((item) => {
+            const option = create('option', '', item.conversationTitle || item.conversationId);
+            option.value = item.conversationId;
+            option.title = item.conversationId;
+            options.push(option);
+        });
+        if (current && !state.conversations.some((item) => item.conversationId === current)) {
+            const option = create('option', '', current);
+            option.value = current;
+            options.push(option);
+        }
+        select.replaceChildren(...options);
+        select.value = current;
+        if (root.CyberStrikeSelect) {
+            root.CyberStrikeSelect.enhance(select);
+            root.CyberStrikeSelect.refresh(select);
+        }
     }
 
     function shortHash(value) {
@@ -396,7 +431,7 @@
     }
 
     function hasActiveFilter() {
-        return Boolean(state.query || state.category !== 'all' || state.type !== 'all' || state.decision !== 'all');
+        return Boolean(state.query || state.conversation || state.category !== 'all' || state.type !== 'all' || state.decision !== 'all');
     }
 
     function renderSelectionControls() {
@@ -510,10 +545,12 @@
             if (!isSafeIntegrity(payload.integrity)) throw new Error(t('auditIntegrityFailed', '审计链校验失败'));
             const items = Array.isArray(payload.items) ? payload.items.filter(isSafeAuditEvent) : [];
             state.items = items;
+            state.conversations = Array.isArray(payload.conversations) ? payload.conversations.filter(isSafeAuditConversation) : [];
             state.total = Math.max(0, Number(payload.total || 0));
             state.totalPages = Math.max(0, Number(payload.totalPages || 0));
             state.summary = payload.summary || { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
             state.integrity = payload.integrity;
+            syncConversationOptions();
             if (state.totalPages > 0 && state.page > state.totalPages) {
                 state.page = state.totalPages;
                 writeURLState();
@@ -572,6 +609,7 @@
 
     function applyFilters() {
         state.query = Array.from(element('egress-audit-search')?.value || '').slice(0, 200).join('');
+        state.conversation = Array.from(element('egress-audit-conversation')?.value || '').slice(0, 128).join('');
         state.category = closedValue(element('egress-audit-category')?.value, CATEGORIES, 'all');
         state.type = closedValue(element('egress-audit-type')?.value, TYPES, 'all');
         state.decision = closedValue(element('egress-audit-decision')?.value, DECISIONS, 'all');
@@ -590,7 +628,7 @@
             if (state.searchTimer) root.clearTimeout(state.searchTimer);
             state.searchTimer = root.setTimeout(applyFilters, 300);
         });
-        ['egress-audit-category', 'egress-audit-type', 'egress-audit-decision', 'egress-audit-page-size'].forEach((id) => {
+        ['egress-audit-conversation', 'egress-audit-category', 'egress-audit-type', 'egress-audit-decision', 'egress-audit-page-size'].forEach((id) => {
             const control = element(id);
             if (control) control.addEventListener('change', applyFilters);
         });
@@ -646,11 +684,11 @@
     }
 
     return {
-        init, stop, refresh, isSafeAuditEvent, isSafeIntegrity,
+        init, stop, refresh, isSafeAuditEvent, isSafeIntegrity, isSafeAuditConversation,
         packetSummaryForTest: packetSummary,
         readURLStateForTest: function (search) {
             readURLState(search || '');
-            return { page: state.page, pageSize: state.pageSize, query: state.query, category: state.category, type: state.type, decision: state.decision };
+            return { page: state.page, pageSize: state.pageSize, query: state.query, conversation: state.conversation, category: state.category, type: state.type, decision: state.decision };
         },
     };
 }));

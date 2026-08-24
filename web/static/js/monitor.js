@@ -4096,6 +4096,11 @@ function handleStreamEvent(event, progressElement, progressId,
         case 'container_initialization': {
             const initializationData = event.data || {};
             const initializationState = String(initializationData.state || 'initializing');
+            window.dispatchEvent(new CustomEvent('conversation-container-state-changed', { detail: {
+                conversationId: initializationData.conversationId || eventConversationId || currentConversationId || '',
+                state: initializationState,
+                runtimeStatus: initializationData.runtimeStatus || '',
+            } }));
             const initializationIsActive = initializationState === 'initializing' || initializationState === 'ready';
             let initializationTitle = typeof window.t === 'function'
                 ? window.t('chat.containerInitializingTitle')

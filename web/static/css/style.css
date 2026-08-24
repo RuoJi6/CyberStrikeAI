@@ -48610,6 +48610,34 @@ html[data-theme="dark"] .chat-composer-surface > .chat-session-settings-popover 
     white-space: nowrap;
 }
 
+.chat-container-workspace-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.72;
+}
+
+.chat-container-runtime-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.chat-container-runtime-state-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    border-radius: 999px;
+    background: currentColor;
+}
+
+.chat-container-runtime-state.is-starting { color: #d98c12; }
+.chat-container-runtime-state.is-running { color: #19a75a; }
+.chat-container-runtime-state.is-failed { color: #df3d4c; }
+.chat-container-runtime-state.is-stopped,
+.chat-container-runtime-state.is-idle { color: var(--text-secondary); }
+
 .container-terminal-panel-header {
     display: flex;
     align-items: flex-start;

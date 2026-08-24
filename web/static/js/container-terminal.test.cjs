@@ -17,6 +17,7 @@ const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
 test('对话执行栏提供工作区入口并在右侧抽屉承载共享终端', () => {
     assert.match(template, /id="runtime-mode-wrapper"[\s\S]*?id="chat-container-workspace-btn"/);
     assert.match(template, /id="chat-container-workspace-panel"/);
+    assert.match(template, /id="chat-container-runtime-state"[\s\S]*?id="chat-container-runtime-state-label"[\s\S]*?chat\.containerWorkspaceShort/);
     assert.match(template, /id="chat-container-path"/);
     assert.match(template, /id="chat-container-host-path"/);
     assert.match(template, /id="chat-container-terminal-root"/);
@@ -29,6 +30,19 @@ test('对话执行栏提供工作区入口并在右侧抽屉承载共享终端',
     assert.match(styles, /\.container-terminal-root \.terminal-panes/);
 });
 
+test('新建容器对话无需刷新即可显示工作区入口和实时容器状态', () => {
+    assert.match(containerTerminal, /const visible = mode === 'container'/);
+    assert.match(containerTerminal, /button\.disabled = !actionable/);
+    assert.match(containerTerminal, /renderChatContainerState\('idle'\)/);
+    assert.match(containerTerminal, /window\.addEventListener\('conversation-changed', syncChatContainerWorkspaceButton\)/);
+    assert.match(containerTerminal, /\/container-initialization/);
+    assert.match(containerTerminal, /conversation-container-state-changed/);
+    assert.match(containerTerminal, /containerStateStarting/);
+    assert.match(containerTerminal, /containerStateRunning/);
+    assert.match(styles, /\.chat-container-runtime-state\.is-starting/);
+    assert.match(styles, /\.chat-container-runtime-state\.is-running/);
+});
+
 test('系统设置终端与容器终端复用同一 xterm 会话和多标签代码', () => {
     assert.match(terminal, /function createTerminalInContainer\(container, tab\)/);
     assert.match(terminal, /function createEmbeddedTerminal\(root, options\)/);
@@ -36,7 +50,7 @@ test('系统设置终端与容器终端复用同一 xterm 会话和多标签代�
     assert.match(terminal, /window\.CyberStrikeTerminal/);
     assert.match(containerTerminal, /CyberStrikeTerminal\.createEmbeddedTerminal/);
     assert.match(template, /terminal\.js\?v=20260824-1/);
-    assert.match(template, /container-terminal\.js\?v=20260824-6/);
+    assert.match(template, /container-terminal\.js\?v=20260824-7/);
 });
 
 test('容器终端只连接会话容器端点且不会回退宿主机终端', () => {
@@ -96,6 +110,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         'containerWorkspaceButton', 'containerWorkspacePath', 'hostWorkspacePath', 'hostWorkspaceTmpfs',
         'containerWorkspaceLoading', 'openContainerShell', 'containerShellUnavailableButton', 'focusContainerShell', 'reconnectContainerShell', 'containerShellReady', 'containerShellStopped',
         'containerTerminalWelcome', 'containerTerminalConnected', 'containerTerminalConnectionFailed',
+        'containerStateStarting', 'containerStateRunning', 'containerStateStopped', 'containerStateFailed', 'containerStateNotStarted',
     ];
     const managementKeys = [
         'workspaceAndTerminal', 'workspaceTerminalReadyHint', 'workspaceTerminalStoppedHint', 'openWorkspaceTerminal',
@@ -104,7 +119,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         for (const key of chatKeys) assert.equal(typeof locale.chat[key], 'string', key);
         for (const key of managementKeys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
-    assert.match(template, /style\.css\?v=20260824-12/);
+    assert.match(template, /style\.css\?v=20260824-13/);
     assert.match(template, /chat\.js\?v=20260824-3/);
     assert.match(template, /container-management\.js\?v=20260824-8/);
 });

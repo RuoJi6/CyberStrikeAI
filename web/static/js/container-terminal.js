@@ -5,6 +5,9 @@
         chat: { conversationId: '', info: null, terminal: null, connectionFailed: false },
         conversation: { conversationId: '', info: null, terminal: null, connectionFailed: false },
     };
+    let chatStatusGeneration = 0;
+    let chatStatusTimer = null;
+    let chatStatusPollAttempts = 0;
 
     function translate(key, fallback, values) {
         let value = typeof window.t === 'function' ? window.t(key, values || {}) : fallback;
@@ -118,11 +121,90 @@
             hostPath.title = hostPath.textContent;
         }
         const available = !!(info && info.interactiveAvailable);
+        if (viewName === 'chat' && info && info.runtimeStatus) {
+            renderChatContainerState(String(info.runtimeStatus));
+        }
         renderShellButton(viewName, available);
         setStatus(viewName, available
             ? translate('chat.containerShellReady', '容器运行中，可以打开交互式 Shell。')
             : translate('chat.containerShellStopped', '容器未运行；仍可查看工作目录，但不能打开交互式 Shell。'),
         available ? 'success' : 'neutral');
+    }
+
+    function chatContainerStatePresentation(rawState) {
+        const state = String(rawState || '').trim().toLowerCase();
+        if (state === 'running' || state === 'ready') {
+            return { state: 'running', key: 'chat.containerStateRunning', fallback: '运行中' };
+        }
+        if (state === 'failed' || state === 'unavailable' || state === 'error') {
+            return { state: 'failed', key: 'chat.containerStateFailed', fallback: '启动失败' };
+        }
+        if (state === 'stopped' || state === 'exited') {
+            return { state: 'stopped', key: 'chat.containerStateStopped', fallback: '已停止' };
+        }
+        if (state === 'not_requested' || state === 'idle') {
+            return { state: 'idle', key: 'chat.containerStateNotStarted', fallback: '未启动' };
+        }
+        return { state: 'starting', key: 'chat.containerStateStarting', fallback: '启动中' };
+    }
+
+    function renderChatContainerState(rawState) {
+        const badge = element('chat-container-runtime-state');
+        const label = element('chat-container-runtime-state-label');
+        if (!badge || !label) return;
+        const presentation = chatContainerStatePresentation(rawState);
+        badge.className = `chat-container-runtime-state is-${presentation.state}`;
+        badge.dataset.state = presentation.state;
+        label.textContent = translate(presentation.key, presentation.fallback);
+    }
+
+    function clearChatContainerStatusPoll() {
+        if (chatStatusTimer) window.clearTimeout(chatStatusTimer);
+        chatStatusTimer = null;
+    }
+
+    function initializationState(payload, conversationId) {
+        const initStatus = String(payload && payload.status || '').trim().toLowerCase();
+        const readiness = String(payload && payload.readinessStatus || '').trim().toLowerCase();
+        const runtimeStatus = String(payload && payload.runtimeStatus || '').trim().toLowerCase();
+        const taskStatus = typeof window.getConversationExecutionStatus === 'function'
+            ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
+            : '';
+        if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed') return 'failed';
+        if (runtimeStatus === 'running') return 'running';
+        if (initStatus === 'queued' || initStatus === 'creating' || readiness === 'pending' || readiness === 'validating' || taskStatus === 'initializing') return 'starting';
+        if (runtimeStatus === 'stopped') return taskStatus === 'running' ? 'starting' : 'stopped';
+    return 'starting';
+    }
+
+    async function refreshChatContainerState(conversationId, generation) {
+        const id = String(conversationId || '').trim();
+        if (!id || generation !== chatStatusGeneration) return;
+        try {
+            const response = await window.apiFetch(`/api/conversations/${encodeURIComponent(id)}/container-initialization`);
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(payload && payload.error ? String(payload.error) : `HTTP ${response.status}`);
+            if (generation !== chatStatusGeneration || id !== String(window.currentConversationId || '').trim()) return;
+            const nextState = initializationState(payload, id);
+            renderChatContainerState(nextState);
+            if (nextState === 'starting' && chatStatusPollAttempts < 120) {
+                chatStatusPollAttempts += 1;
+                clearChatContainerStatusPoll();
+                chatStatusTimer = window.setTimeout(() => refreshChatContainerState(id, generation), 1000);
+            }
+        } catch (error) {
+            // Keep the last known state. A transient status request must not
+            // make a running/stopped badge flash back to "starting".
+        }
+    }
+
+    function startChatContainerStatusSync(conversationId, showStarting) {
+        clearChatContainerStatusPoll();
+        chatStatusGeneration += 1;
+        chatStatusPollAttempts = 0;
+        const generation = chatStatusGeneration;
+        if (showStarting !== false) renderChatContainerState('starting');
+        refreshChatContainerState(conversationId, generation);
     }
 
     async function fetchWorkspaceInfo(conversationId) {
@@ -374,12 +456,27 @@
         if (!button) return;
         const conversationId = String(window.currentConversationId || '').trim();
         const mode = String((element('runtime-mode-select') || {}).value || '').trim().toLowerCase();
-        const visible = !!conversationId && mode === 'container';
+        const visible = mode === 'container';
+        const actionable = visible && !!conversationId;
+        const conversationChanged = views.chat.conversationId !== conversationId;
         button.hidden = !visible;
-        if (!visible || (views.chat.conversationId && views.chat.conversationId !== conversationId)) {
+        button.disabled = !actionable;
+        button.setAttribute('aria-disabled', actionable ? 'false' : 'true');
+        if (!visible || !actionable || (views.chat.conversationId && conversationChanged)) {
             closeChatContainerWorkspacePanel();
             views.chat.conversationId = conversationId;
             views.chat.info = null;
+        }
+        if (!visible) {
+            clearChatContainerStatusPoll();
+            chatStatusGeneration += 1;
+        } else if (!actionable) {
+            clearChatContainerStatusPoll();
+            chatStatusGeneration += 1;
+            renderChatContainerState('idle');
+        } else if (conversationChanged || !views.chat.conversationId) {
+            views.chat.conversationId = conversationId;
+            startChatContainerStatusSync(conversationId, true);
         }
     }
 
@@ -414,9 +511,30 @@
     document.addEventListener('languagechange', () => {
         if (views.chat.info) renderWorkspaceInfo('chat', views.chat.info);
         if (views.conversation.info) renderWorkspaceInfo('conversation', views.conversation.info);
+        const badge = element('chat-container-runtime-state');
+        if (badge) renderChatContainerState(badge.dataset.state || 'starting');
+    });
+    window.addEventListener('conversation-changed', syncChatContainerWorkspaceButton);
+    window.addEventListener('conversation-task-state-changed', () => {
+        const id = String(window.currentConversationId || '').trim();
+        if (id && String((element('runtime-mode-select') || {}).value || '').trim().toLowerCase() === 'container') {
+            startChatContainerStatusSync(id, false);
+        }
+    });
+    window.addEventListener('conversation-container-state-changed', (event) => {
+        const detail = event && event.detail || {};
+        const id = String(detail.conversationId || '').trim();
+        if (!id || id !== String(window.currentConversationId || '').trim()) return;
+        const state = String(detail.state || detail.runtimeStatus || '').trim().toLowerCase();
+        renderChatContainerState(state === 'ready' ? 'running' : state);
+        if (state === 'ready' || state === 'running' || state === 'failed' || state === 'unavailable') {
+            clearChatContainerStatusPoll();
+            chatStatusGeneration += 1;
+        }
     });
 
     window.syncChatContainerWorkspaceButton = syncChatContainerWorkspaceButton;
+    window.renderChatContainerState = renderChatContainerState;
     window.toggleChatContainerWorkspacePanel = toggleChatContainerWorkspacePanel;
     window.closeChatContainerWorkspacePanel = closeChatContainerWorkspacePanel;
     window.openChatContainerShell = function () { openShell('chat'); };

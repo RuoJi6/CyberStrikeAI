@@ -102,6 +102,11 @@ func (h *EgressAuditHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法汇总出站审计事件"})
 		return
 	}
+	conversations, err := h.db.ListEgressAuditConversations(c.Request.Context(), filter.UserID, filter.Scope)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取出站审计对话"})
+		return
+	}
 	totalPages := 0
 	if total > 0 {
 		totalPages = (total + pageSize - 1) / pageSize
@@ -109,6 +114,7 @@ func (h *EgressAuditHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"items": items, "total": total, "page": page, "pageSize": pageSize,
 		"totalPages": totalPages, "summary": summary, "integrity": integrity,
+		"conversations": conversations,
 	})
 }
 

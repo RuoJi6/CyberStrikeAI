@@ -456,9 +456,13 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	egressAuditListSchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"items", "total", "page", "pageSize", "totalPages", "summary", "integrity"},
+		"required":             []string{"items", "conversations", "total", "page", "pageSize", "totalPages", "summary", "integrity"},
 		"properties": map[string]interface{}{
 			"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditEvent"}},
+			"conversations": map[string]interface{}{"type": "array", "maxItems": 5000, "items": map[string]interface{}{
+				"type": "object", "additionalProperties": false, "required": []string{"conversationId", "conversationTitle"},
+				"properties": map[string]interface{}{"conversationId": map[string]interface{}{"type": "string", "maxLength": 128}, "conversationTitle": map[string]interface{}{"type": "string", "maxLength": 512}},
+			}},
 			"total": map[string]interface{}{"type": "integer", "minimum": 0}, "page": map[string]interface{}{"type": "integer", "minimum": 1},
 			"pageSize": map[string]interface{}{"type": "integer", "enum": []int{10, 20, 50, 100}}, "totalPages": map[string]interface{}{"type": "integer", "minimum": 0},
 			"summary":   map[string]interface{}{"$ref": "#/components/schemas/EgressAuditSummary"},

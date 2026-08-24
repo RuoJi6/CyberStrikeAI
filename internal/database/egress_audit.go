@@ -344,6 +344,11 @@ type EgressAuditSummary struct {
 	Failures  int `json:"failures"`
 }
 
+type EgressAuditConversation struct {
+	ConversationID    string `json:"conversationId"`
+	ConversationTitle string `json:"conversationTitle"`
+}
+
 type EgressAuditIntegrity struct {
 	Status        string    `json:"status"`
 	Conversations int       `json:"conversations"`
@@ -1202,6 +1207,34 @@ func (db *DB) CountEgressAuditEvents(ctx context.Context, filter EgressAuditFilt
 	var count int
 	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM egress_audit_events e LEFT JOIN conversations c ON c.id = e.conversation_id`+where, args...).Scan(&count)
 	return count, err
+}
+
+// ListEgressAuditConversations returns the conversations represented in the
+// persistent audit log. It intentionally applies only the caller's RBAC scope,
+// so changing another audit filter never makes options disappear from the
+// conversation picker.
+func (db *DB) ListEgressAuditConversations(ctx context.Context, userID, scope string) ([]EgressAuditConversation, error) {
+	where, args := appendConversationAccessFilter(" WHERE 1=1", nil, userID, scope, "c")
+	rows, err := db.QueryContext(ctx, `
+		SELECT e.conversation_id, COALESCE(NULLIF(MAX(c.title), ''), NULLIF(MAX(e.conversation_title), ''), e.conversation_id)
+		FROM egress_audit_events e
+		LEFT JOIN conversations c ON c.id = e.conversation_id`+where+`
+		GROUP BY e.conversation_id
+		ORDER BY MAX(e.occurred_at) DESC, e.conversation_id DESC
+		LIMIT 5000`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list egress audit conversations: %w", err)
+	}
+	defer rows.Close()
+	result := make([]EgressAuditConversation, 0)
+	for rows.Next() {
+		var item EgressAuditConversation
+		if err := rows.Scan(&item.ConversationID, &item.ConversationTitle); err != nil {
+			return nil, fmt.Errorf("scan egress audit conversation: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (db *DB) SummarizeEgressAuditEvents(ctx context.Context, filter EgressAuditFilter) (EgressAuditSummary, error) {

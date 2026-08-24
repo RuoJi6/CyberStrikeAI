@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260824-12">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260824-13">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1304,6 +1304,7 @@
                                     <span class="role-selector-icon" aria-hidden="true">
                                         <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="4.5" width="17" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="m7.5 9 2.5 2.5L7.5 14M12.5 14h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
                                     </span>
+                                    <span id="chat-container-runtime-state" class="chat-container-runtime-state is-starting" role="status" aria-live="polite"><span class="chat-container-runtime-state-dot" aria-hidden="true"></span><span id="chat-container-runtime-state-label">启动中</span></span>
                                     <span class="role-selector-text" data-i18n="chat.containerWorkspaceShort">工作区</span>
                                 </button>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
@@ -5394,6 +5395,7 @@
                             <section class="container-management-surface egress-audit-controls" aria-label="出站审计筛选" data-i18n="containerManagement.auditFiltersLabel" data-i18n-attr="aria-label">
                                 <div class="egress-audit-filter-grid">
                                     <label class="egress-audit-field is-search"><span data-i18n="containerManagement.auditSearch">搜索</span><input id="egress-audit-search" type="search" maxlength="200" autocomplete="off" data-i18n="containerManagement.auditSearchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索对话、域名、IP、规则或出口…"></label>
+                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditConversationFilter">对话</span><select id="egress-audit-conversation" data-unified-select="single" data-unified-search="true"><option value="" data-i18n="containerManagement.auditAllConversations">全部对话</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditCategory">类别</span><select id="egress-audit-category" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="network" data-i18n="containerManagement.auditCategoryNetwork">网络</option><option value="lifecycle" data-i18n="containerManagement.auditCategoryLifecycle">生命周期</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="health" data-i18n="containerManagement.auditHealth">出站健康</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">对账</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditDecisionFilter">判定</span><select id="egress-audit-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option><option value="success" data-i18n="containerManagement.auditSuccess">成功</option><option value="failure" data-i18n="containerManagement.auditFailure">失败</option></select></label>
@@ -7294,7 +7296,7 @@
     <script src="/static/js/agents.js"></script>
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
-    <script src="/static/js/monitor.js?v=20260824-1"></script>
+    <script src="/static/js/monitor.js?v=20260824-2"></script>
     <script src="/static/js/chat.js?v=20260824-3"></script>
     <script src="/static/js/chat-plan-progress.js?v=20260815-1"></script>
     <script src="/static/js/hitl.js?v=20260819-1"></script>
@@ -7305,7 +7307,7 @@
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/js/terminal.js?v=20260824-1"></script>
-    <script src="/static/js/container-terminal.js?v=20260824-6"></script>
+    <script src="/static/js/container-terminal.js?v=20260824-7"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
@@ -7321,7 +7323,7 @@
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260824-6"></script>
-    <script src="/static/js/egress-audit.js?v=20260824-4"></script>
+    <script src="/static/js/egress-audit.js?v=20260824-5"></script>
     <script src="/static/js/boundary-rules.js?v=20260824-3"></script>
     <script src="/static/js/egress-management.js?v=20260823-2"></script>
     <script src="/static/js/container-management.js?v=20260824-8"></script>

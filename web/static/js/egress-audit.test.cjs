@@ -76,18 +76,24 @@ test('egress audit validates a closed integrity proof', () => {
 });
 
 test('egress audit URL state accepts only closed filters and supported page sizes', () => {
-    assert.deepEqual(audit.readURLStateForTest('?audit_page=3&audit_page_size=50&audit_q=needle&audit_category=network&audit_type=dns&audit_decision=blocked'), {
-        page: 3, pageSize: 50, query: 'needle', category: 'network', type: 'dns', decision: 'blocked',
+    assert.deepEqual(audit.readURLStateForTest('?audit_page=3&audit_page_size=50&audit_q=needle&audit_conversation=conversation-a&audit_category=network&audit_type=dns&audit_decision=blocked'), {
+        page: 3, pageSize: 50, query: 'needle', conversation: 'conversation-a', category: 'network', type: 'dns', decision: 'blocked',
     });
 	assert.equal(audit.readURLStateForTest('?audit_type=health').type, 'health');
     assert.deepEqual(audit.readURLStateForTest('?audit_page=-2&audit_page_size=25&audit_category=secret&audit_type=socket&audit_decision=maybe'), {
-        page: 1, pageSize: 20, query: '', category: 'all', type: 'all', decision: 'all',
+        page: 1, pageSize: 20, query: '', conversation: '', category: 'all', type: 'all', decision: 'all',
     });
+});
+
+test('egress audit accepts only a closed conversation option projection', () => {
+    assert.equal(audit.isSafeAuditConversation({ conversationId: 'conversation-a', conversationTitle: 'Title' }), true);
+    assert.equal(audit.isSafeAuditConversation({ conversationId: 'conversation-a', conversationTitle: 'line\nTitle' }), false);
+    assert.equal(audit.isSafeAuditConversation({ conversationId: 'conversation-a', conversationTitle: 'Title', owner: 'secret' }), false);
 });
 
 test('egress audit page is authenticated, searchable, pageable, exportable, and permission gated', () => {
     for (const id of [
-        'egress-audit-search', 'egress-audit-category', 'egress-audit-type', 'egress-audit-decision',
+        'egress-audit-search', 'egress-audit-conversation', 'egress-audit-category', 'egress-audit-type', 'egress-audit-decision',
         'egress-audit-page-size', 'egress-audit-refresh', 'egress-audit-export-json',
         'egress-audit-export-csv', 'egress-audit-summary', 'egress-audit-rows',
         'egress-audit-prev', 'egress-audit-next', 'egress-audit-pagination-meta', 'egress-audit-integrity',
@@ -96,7 +102,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260824-4/);
+    assert.match(template, /egress-audit\.js\?v=20260824-5/);
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
     assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
@@ -106,6 +112,8 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     assert.match(source, /createObjectURL\(blob\)/);
     assert.match(source, /URL_KEYS = Object\.freeze/);
     assert.match(source, /setTimeout\(applyFilters, 300\)/);
+    assert.match(source, /params\.set\('conversation_id', state\.conversation\)/);
+    assert.match(source, /payload\.conversations\.filter\(isSafeAuditConversation\)/);
     assert.match(source, /textContent/);
     assert.match(source, /isSafeIntegrity\(payload\.integrity\)/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
@@ -115,7 +123,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
 
 test('egress audit translations and responsive table/card layout are complete', () => {
     const keys = [
-        'auditPersistent', 'auditSearch', 'auditSearchPlaceholder', 'auditCategory', 'auditCategoryNetwork',
+        'auditPersistent', 'auditSearch', 'auditSearchPlaceholder', 'auditConversationFilter', 'auditAllConversations', 'auditCategory', 'auditCategoryNetwork',
         'auditCategoryLifecycle', 'auditEventType', 'auditDecisionFilter', 'auditSuccess', 'auditFailure',
         'auditExportJSON', 'auditExportCSV', 'auditResults', 'auditLoading', 'auditLoaded', 'auditLoadFailed',
         'auditTrace', 'auditEmpty', 'auditTotal', 'auditNetwork', 'auditLifecycle', 'auditBlocked',
@@ -138,7 +146,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260824-12/);
+    assert.match(template, /style\.css\?v=20260824-13/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260824-8/);
 });
