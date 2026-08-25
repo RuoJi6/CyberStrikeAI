@@ -7,7 +7,8 @@ usage: verify-container-release.sh \
   --agent REPOSITORY@sha256:DIGEST \
   --egress REPOSITORY@sha256:DIGEST \
   --source SOURCE_URL \
-  --revision GIT_SHA \
+  [--revision SHARED_GIT_SHA | \
+   --agent-revision AGENT_GIT_SHA --egress-revision EGRESS_GIT_SHA] \
   --inventory FILE \
   --artifacts DIRECTORY \
   [--smoke]
@@ -23,6 +24,8 @@ agent_ref=
 egress_ref=
 source_url=
 revision=
+agent_revision=
+egress_revision=
 inventory=
 artifacts=
 smoke=false
@@ -32,6 +35,8 @@ while [[ $# -gt 0 ]]; do
     --egress) egress_ref=${2:-}; shift 2 ;;
     --source) source_url=${2:-}; shift 2 ;;
     --revision) revision=${2:-}; shift 2 ;;
+    --agent-revision) agent_revision=${2:-}; shift 2 ;;
+    --egress-revision) egress_revision=${2:-}; shift 2 ;;
     --inventory) inventory=${2:-}; shift 2 ;;
     --artifacts) artifacts=${2:-}; shift 2 ;;
     --smoke) smoke=true; shift ;;
@@ -42,7 +47,11 @@ done
 digest_ref_pattern='^[a-z0-9.-]+(:[0-9]+)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$'
 revision_pattern='^[a-f0-9]{40}$'
 [[ "$agent_ref" =~ $digest_ref_pattern && "$egress_ref" =~ $digest_ref_pattern ]] || usage
-[[ "$source_url" =~ ^https:// && "$revision" =~ $revision_pattern ]] || usage
+if [[ -n "$revision" ]]; then
+  [[ -z "$agent_revision" ]] && agent_revision=$revision
+  [[ -z "$egress_revision" ]] && egress_revision=$revision
+fi
+[[ "$source_url" =~ ^https:// && "$agent_revision" =~ $revision_pattern && "$egress_revision" =~ $revision_pattern ]] || usage
 [[ -f "$inventory" && -n "$artifacts" ]] || usage
 
 for command_name in docker jq; do
@@ -79,17 +88,33 @@ inspect_image() {
   local ref=$2
   local expected_user=$3
   local expected_entrypoint=$4
+  local expected_revision=$5
+  local expected_cmd0=${6:-}
+  local expected_cmd1=${7:-}
   local raw="$work_root/$name-inspect.json"
 
   docker image inspect "$ref" >"$raw"
-  jq -e --arg source "$source_url" --arg revision "$revision" \
-    --arg user "$expected_user" --arg entrypoint "$expected_entrypoint" '
+  jq -e --arg source "$source_url" --arg revision "$expected_revision" \
+    --arg user "$expected_user" --arg entrypoint "$expected_entrypoint" \
+    --arg cmd0 "$expected_cmd0" --arg cmd1 "$expected_cmd1" '
       length == 1 and
       .[0].Os == "linux" and .[0].Architecture == "arm64" and
       .[0].Config.Labels["org.opencontainers.image.source"] == $source and
       .[0].Config.Labels["org.opencontainers.image.revision"] == $revision and
       .[0].Config.User == $user and
-      .[0].Config.Entrypoint[0] == $entrypoint
+      (
+        if $entrypoint == "" then
+          ((.[0].Config.Entrypoint // []) | length) == 0
+        else
+          .[0].Config.Entrypoint[0] == $entrypoint
+        end
+      ) and
+      (
+        if $cmd0 == "" then true else .[0].Config.Cmd[0] == $cmd0 end
+      ) and
+      (
+        if $cmd1 == "" then true else .[0].Config.Cmd[1] == $cmd1 end
+      )
     ' "$raw" >/dev/null
 
   local expected_digest=${ref##*@}
@@ -107,8 +132,8 @@ inspect_image() {
   }' "$raw" >"$artifacts/$name-image.json"
 }
 
-inspect_image agent "$agent_ref" "pentester" "docker-entrypoint.sh"
-inspect_image egress "$egress_ref" "0:0" "/cyberstrike-egress"
+inspect_image agent "$agent_ref" "pentester" "" "$agent_revision" "sleep" "infinity"
+inspect_image egress "$egress_ref" "0:0" "/cyberstrike-egress" "$egress_revision"
 
 scanner_version=$(docker run --rm --network none \
   --entrypoint /usr/local/bin/trivy "$agent_ref" version | \
@@ -120,11 +145,12 @@ scanner_version=$(docker run --rm --network none \
 jq -n --arg name trivy --arg version "$scanner_version" \
   --arg image "$agent_ref" --arg network none \
   '{name: $name, version: $version, scannerImage: $image, network: $network,
-    mode: "offline-rootfs"}' >"$artifacts/sbom-scanner.json"
+    mode: "offline-rootfs-os-packages"}' >"$artifacts/sbom-scanner.json"
 
 docker run --rm --network none \
   --entrypoint /usr/local/bin/trivy "$agent_ref" rootfs \
-  --quiet --format spdx-json --skip-db-update --offline-scan \
+  --quiet --format spdx-json --skip-db-update --skip-java-db-update --offline-scan \
+  --pkg-types os \
   --cache-dir /tmp/trivy-cache / >"$artifacts/agent-sbom.spdx.json"
 
 egress_rootfs="$work_root/egress-rootfs"
@@ -136,7 +162,8 @@ export_container=
 docker run --rm --network none \
   --mount "type=bind,source=$egress_rootfs,target=/scan,readonly" \
   --entrypoint /usr/local/bin/trivy "$agent_ref" rootfs \
-  --quiet --format spdx-json --skip-db-update --offline-scan \
+  --quiet --format spdx-json --skip-db-update --skip-java-db-update --offline-scan \
+  --pkg-types os \
   --cache-dir /tmp/trivy-cache /scan >"$artifacts/egress-sbom.spdx.json"
 
 for sbom in agent-sbom.spdx.json egress-sbom.spdx.json; do
@@ -159,12 +186,14 @@ jq -e --arg digest "$agent_digest" '
 cp "$inventory" "$artifacts/agent-tool-inventory-linux-arm64.json"
 
 jq -n \
-  --arg revision "$revision" \
+  --arg agentRevision "$agent_revision" \
+  --arg egressRevision "$egress_revision" \
   --arg source "$source_url" \
   --arg platform "linux/arm64" \
   --arg agent "$agent_ref" \
   --arg egress "$egress_ref" \
-  '{schemaVersion: 1, revision: $revision, source: $source,
+  '{schemaVersion: 2,
+    revisions: {agent: $agentRevision, egress: $egressRevision}, source: $source,
     platform: $platform, agent: $agent, egress: $egress,
     verification: "offline-sha256"}' >"$artifacts/images.json"
 

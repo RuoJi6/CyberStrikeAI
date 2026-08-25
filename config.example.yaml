@@ -137,10 +137,10 @@ container:
   rollout_project_ids: [] # 灰度项目 ID；任一用户或项目命中即可使用容器执行
   owner_id: "" # 启用时必填；每个 CyberStrikeAI 部署唯一，用于 Docker 所有者标签
   image_repository: ruoji6/cyberstrikeai-agent
-  image_digest: sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb # full-tools-slim1-20260825 / latest 的多架构 index digest；生产仍按 digest 拉取
+  image_digest: sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50 # full-tools-slim2-20260825 / latest 的多架构 index digest；生产仍按 digest 拉取
   image_platform: linux/arm64 # ARM 主机用 linux/arm64，AMD/Intel 主机用 linux/amd64
-  egress_image_repository: ghcr.io/example/cyberstrike-egress # 自建并发布 container/egress/Dockerfile 生成的最小网关镜像
-  egress_image_digest: "" # 启用时必填 sha256:... 不可变 digest
+  egress_image_repository: ruoji6/cyberstrikeai-egress # Docker Hub 多架构最小出站网关镜像
+  egress_image_digest: sha256:5e9c03756eea3ca22a0fb3a6235d8fdf9ee0a992af36c64f367e664d9423c3d5 # fast-reject-20260825 / latest 的多架构 index digest；生产仍按 digest 拉取
   egress_image_platform: linux/arm64
   egress_snapshot_dir: data/egress-snapshots # 控制面生成的不可变快照文件；仅网关以只读 bind mount 加载
   egress_credential_key_file: data/egress-credentials.key # 自动生成的服务端 AES-256 密钥；必须持久化、权限 0600，禁止提交或共享
@@ -169,7 +169,7 @@ container:
   egress_log_max_bytes: 2097152 # 网关每个日志文件 2 MiB
   egress_log_max_files: 2
   tool_inventory_path: container/agent-tool-inventory-linux-arm64.json # ARM64 验收清单；AMD64 部署必须使用对应平台清单
-  tool_inventory_digest: sha256:a0da4e891f68f16edb8cd1294340314c5af61e19e6f2aa7fc905c4084a2e21f8 # 清单文件内容摘要
+  tool_inventory_digest: sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4 # 清单文件内容摘要
 # 人机协同（HITL）全局白名单：此处列出的工具始终免审批，与对话页「白名单工具（免审批，逗号分隔）」合并为并集；侧栏「应用」可合并写入本列表并立即生效。
 # 非白名单工具在审批方=审计 Agent 时，按会话 HITL 模式选用提示词：
 #   approval → audit_agent_prompt

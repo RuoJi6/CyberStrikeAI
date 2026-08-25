@@ -1,8 +1,8 @@
 # 全工具 Agent 镜像构建、发布与验收计划
 
-> 状态：进行中
-> 当前阶段：源码修复和控制面验收已完成；等待云端重建并发布包含 Amass wrapper 的新 `latest`
-> 最后更新：2026-08-25
+> 状态：后端与 ARM64 运行态通过，UI 验收阻断
+> 当前阶段：Agent 与 Egress 新 digest 已切换生产并通过容器、网络和持久审计验收；内置浏览器新建页面在导航前超时，UI 待浏览器连接恢复后复验
+> 最后更新：2026-08-26
 > 工作分支：`codex/docker-agent-runtime`
 > ARM64 验收环境：`10.211.55.16`（凭据不写入本文档或仓库）
 
@@ -74,8 +74,8 @@ internal/runtime/container
   512 MiB 容器限制下稳定 OOM，已从发布范围移除并改为禁用。
 - 候选 `container/agent/tool-inventory.entries.json` 已扩展到 83 个命令/运行时条目，
   并由平台映射过滤；实际镜像可用性仍须由镜像内探针证明。
-- 当前 ARM64 虚拟机已直接从 Docker Hub 拉取 index digest `sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb`，生产配置已指向该 repository/digest。该发布物可启动且 77/77 映射、75/77 ARM64 存在性探针通过，但功能探针发现镜像缺少源码中已实现的 `/usr/local/bin/amass` wrapper：实际命中 Kali `/usr/bin/amass`，其 `sudo` 调用被 `no-new-privileges` 拒绝。因此该 digest 只能作为待替换候选，不能作为最终验收版本。
-- 当前 81 项 ARM64 inventory 内容摘要为 `sha256:a0da4e891f68f16edb8cd1294340314c5af61e19e6f2aa7fc905c4084a2e21f8`；旧 Agent/Strix 镜像须等端到端验收通过且无容器引用后再删除。
+- 当前 ARM64 虚拟机已直接从 Docker Hub 拉取 index digest `sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50`，生产配置已指向该 repository/digest。发布物来自干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb`，版本为 `full-tools-slim2-20260825`；77/77 配置映射、75/77 ARM64 平台支持、全工具功能探针和无网络安全冒烟均通过，`amass` 实际命中 `/usr/local/bin/amass` 并可正常执行。
+- 当前 81 项 ARM64 inventory 内容摘要为 `sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4`；旧 Agent/Strix 镜像须等新建对话端到端验收通过且无容器引用后再删除。
 
 ## 3. 工具范围
 
@@ -175,8 +175,8 @@ internal/runtime/container
 - [x] 在 ARM64 虚拟机直接从 Docker Hub 拉取用户提供的多架构镜像。
 - [x] 运行安全基线冒烟、全工具存在性和平台过滤探针。
 - [x] 生成并校验 ARM64 inventory、镜像元数据和内容摘要。
-- [ ] 对新 digest 重跑全工具功能探针；当前 digest 的 `amass -version` 因缺少 wrapper 失败。
-- [ ] 对新 digest 重复无网络冒烟，确认对话启动阶段不下载工具。
+- [x] 对新 digest 重跑全工具功能探针；`amass -version` 和其余 ARM64 声明支持工具均通过。
+- [x] 对新 digest 重复无网络冒烟，确认对话启动阶段不下载工具。
 
 门禁：ARM64 构建成功，当前平台声明支持的工具自动探针 100% 通过，
 平台不支持项必须与锁文件一致且单独报告，证据包可重算。
@@ -197,7 +197,7 @@ internal/runtime/container
 - [x] 从 Docker Hub 回读 manifest digest、平台 digest、OCI 标签和平台列表。
 - [x] 确认版本标签与 `latest` 当前解析到同一个 index digest。
 - [x] 在 ARM64 VM 使用精确 repository/index digest 拉取并重跑冒烟。
-- [ ] 新 `latest` 必须由当前干净提交重建，并包含 `container/agent/amass-wrapper.sh`。
+- [x] 新 `latest` 由干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb` 重建，并包含 `container/agent/amass-wrapper.sh`。
 
 门禁：Hub 上内容与本地候选一致，按 digest 可在无本地 tag 依赖时拉取和执行。
 
@@ -214,12 +214,12 @@ internal/runtime/container
 
 ### 阶段 6：端到端功能验收
 
-- [x] 新建容器对话，观察初始化、启动和工作区状态；停止/恢复留待新 digest 复验。
-- [x] 从容器内 exec 和交互式 Shell 验证命令位于同一对话容器；Agent 全工具功能门禁仍因当前镜像 Amass 失败而未通过。
-- [ ] 在授权面向自有靶场测试 HTTP、HTTPS、TCP、UDP 以及 DNS `A/AAAA/NS/MX/TXT/SRV`。
-- [ ] 验证允许、显式阻断、默认策略、对话筛选和完整出站审计。
+- [x] 新建容器对话，观察初始化、启动和工作区状态，并验证停止/恢复。
+- [ ] 从容器内 exec 和交互式 Shell 验证命令位于同一对话容器。
+- [x] 在授权面向自有靶场测试 HTTP、HTTPS、TCP、UDP 以及 DNS `A/AAAA/NS/MX/TXT/SRV`。
+- [x] 验证允许、显式阻断、默认策略、对话筛选和完整出站审计。
 - [ ] 验证完整报文显示、审计关闭开关和大量流量下的页面响应。
-- [x] 用内置浏览器新开页面验收容器状态、工作区和交互式终端 UI；页面无 console 错误。
+- [ ] 用内置浏览器新开页面验收容器状态、工作区和交互式终端 UI；页面无 console 错误。
 
 门禁：容器、工具、网络、审计和 UI 全部通过，无宿主机回退或未经授权的实际攻击。
 
@@ -366,12 +366,12 @@ release-evidence/
 | --- | --- | --- | --- |
 | 0. 加载链路和范围 | 通过 | YAML → MCP → backend → digest/inventory 链路已核对 | 2026-08-25 |
 | 1. 镜像实现 | 源码通过 | 77/77 配置覆盖；ARM64 75/77、AMD64 77/77；Amass wrapper 与稳定 PATH 修复已进入源码 | 2026-08-25 |
-| 2. ARM64 拉取/镜像内验收 | 阻断，待新 digest | 当前 Hub digest 的安全基线和存在性通过；`amass -version` 命中 Kali sudo wrapper 并被 `no-new-privileges` 拒绝 | 2026-08-25 |
+| 2. ARM64 拉取/镜像内验收 | 通过 | 新 Hub digest 的安全基线、全工具功能和无网络冒烟通过；`amass` 命中 `/usr/local/bin/amass`，版本 `v5.1.1` | 2026-08-25 |
 | 3. AMD64/多架构 | 部分通过 | 双平台 index 已回读；AMD64 77/77 映射，按用户要求不做 AMD64 实机运行验收 | 2026-08-25 |
-| 4. Docker Hub | 待替换 | `latest` 仍为 index `sha256:524788…afebb`，未包含当前源码的 Amass wrapper，OCI revision 也标记为 dirty 构建 | 2026-08-25 |
-| 5. 系统切换 | 候选运行通过 | VM 配置、inventory、systemd/HTTP、新建对话、非 root 和容器安全参数均通过；保留旧镜像回滚 | 2026-08-25 |
-| 6. 端到端功能 | 部分通过 | 新浏览器页面的容器状态、工作区、侧边交互式终端和 console 通过；全工具门禁被当前镜像 Amass 阻断 | 2026-08-25 |
-| 7. 清理、提交和推送 | 进行中 | Go 全包、race、vet、脚本/JSON/JS/覆盖率检查通过；仅清理测试制品，旧镜像等待新 digest 验收后删除 | 2026-08-25 |
+| 4. Docker Hub | 通过 | `latest` 与 `full-tools-slim2-20260825` 指向 index `sha256:a535bbe3…974f50`，OCI revision 为干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb` | 2026-08-25 |
+| 5. 系统切换 | 通过 | VM 配置、inventory、systemd/HTTP、新建对话实际镜像、ARM64、`pentester`、只读根文件系统和容器安全参数均通过；旧 Agent 镜像仅因仍被现存对话容器引用而保留 | 2026-08-26 |
+| 6. 端到端功能 | 部分通过 | 容器初始化、状态/工作区、停止恢复、HTTP、TCP/UDP 混合放行与立即阻断、默认开放策略、按对话持久审计及完整性校验通过；内置浏览器可连接，但新建页面在导航前超时，交互终端和页面 UI 未验收 | 2026-08-26 |
+| 7. 清理、提交和推送 | 通过 | QA 对话、策略、审计、候选/旧 Egress 镜像及本轮临时文件已精准清理；Go 全包、vet、tidy、174 项前端测试和 diff 门禁通过；ARM64 禁网 SPDX（Agent 859 包、Egress 112 包）及 SHA256 回读通过；旧 Agent 镜像因仍被现存容器引用而保留 | 2026-08-26 |
 
 ## 8. 停止条件
 
@@ -388,7 +388,6 @@ release-evidence/
 
 ## 9. 当前下一步
 
-1. 提交并推送当前源码修复，由 Docker Build Cloud 基于该干净提交重建双架构镜像并更新 `latest`。
-2. 等待 `latest` index digest 发生变化后，在 ARM64 虚拟机直接拉取新 digest，首先执行 `scripts/verify-agent-toolset.sh --image ... --platform linux/arm64`，重点确认 `/usr/local/bin/amass` 与 `amass -version`。
-3. 新 digest 的安全、工具、容器、UI 与必要网络回归全部通过后，再修改固定 digest/inventory 并提交发布固定值。
-4. 最终验收通过且确认无容器引用后，删除旧 Agent/Strix 镜像和剩余临时制品；当前不提前删除回滚镜像。
+1. 浏览器连接恢复后，用内置浏览器新建页面验收容器状态、工作区、交互式终端、审计筛选和页面 console；当前创建/导航在取得 DOM 前超时，不得记为通过。
+2. 在页面 UI 中复验完整 HTTP/HTTPS 审计报文和审计关闭开关；后端的默认允许、显式阻断、TCP/UDP、DNS 和按对话审计链已通过。
+3. 现存对话容器删除或切换到新 digest 后，再删除其仍引用的旧 Agent 镜像；不得为释放空间强制破坏运行中/已停止的用户容器。

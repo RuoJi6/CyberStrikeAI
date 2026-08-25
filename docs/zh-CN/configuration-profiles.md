@@ -194,18 +194,18 @@ container:
   rollout_project_ids: []
   owner_id: cyberstrike-production-01
   image_repository: ruoji6/cyberstrikeai-agent
-  image_digest: sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb
+  image_digest: sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50
   image_platform: linux/arm64
-  egress_image_repository: cyberstrike/egress
-  egress_image_digest: sha256:<egress-arm64-digest>
+  egress_image_repository: ruoji6/cyberstrikeai-egress
+  egress_image_digest: sha256:5e9c03756eea3ca22a0fb3a6235d8fdf9ee0a992af36c64f367e664d9423c3d5
   egress_image_platform: linux/arm64
   tool_inventory_path: container/agent-tool-inventory-linux-arm64.json
-  tool_inventory_digest: sha256:a0da4e891f68f16edb8cd1294340314c5af61e19e6f2aa7fc905c4084a2e21f8
+  tool_inventory_digest: sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4
 ```
 
 - `rollout_user_ids` 与 `rollout_project_ids` 是“或”关系；两者都为空时表示对全部已登录用户开放。
 - 任一灰度检查失败或接口不可用时，前端保持 host 模式，不应猜测放行。
-- Agent 镜像、工具清单和出站网关必须固定 digest；当前已部署的 Agent index digest 同时包含 `linux/arm64` 与 `linux/amd64`，本次运行态验收范围为 `linux/arm64`。
+- Agent 镜像、工具清单和出站网关必须固定 digest；当前 Agent 和 Egress index digest 均同时包含 `linux/arm64` 与 `linux/amd64`，本次运行态验收范围为 `linux/arm64`。
 
 | 需求 | 选择 |
 | --- | --- |

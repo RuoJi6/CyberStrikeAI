@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "imageDigest": "sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb",
+  "imageDigest": "sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50",
   "imagePlatform": "linux/arm64",
   "tools": [
     {
