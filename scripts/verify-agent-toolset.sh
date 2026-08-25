@@ -134,8 +134,15 @@ grep -q 'Masscan version' /tmp/masscan-version.txt
 
 smbmap_status=0
 smbmap --help >/tmp/smbmap-help.txt 2>&1 || smbmap_status=$?
-test "$smbmap_status" -eq 1
+test "$smbmap_status" -eq 0
 grep -q 'usage: smbmap' /tmp/smbmap-help.txt
+netexec --help >/tmp/netexec-help.txt 2>&1
+grep -qi 'usage:' /tmp/netexec-help.txt
+msfconsole --version >/tmp/msfconsole-version.txt 2>&1
+grep -q 'Framework Version' /tmp/msfconsole-version.txt
+nmap --version >/tmp/nmap-version.txt 2>&1
+grep -q 'Nmap version' /tmp/nmap-version.txt
+! command -v prowler
 ROPgadget --help >/tmp/ropgadget-help.txt
 grep -q 'usage: ROPgadget' /tmp/ropgadget-help.txt
 scout --help >/tmp/scout-help.txt

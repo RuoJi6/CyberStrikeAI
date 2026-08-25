@@ -56,31 +56,12 @@ RUN set -eux; \
 FROM ${KALI_IMAGE}
 
 ARG TARGETARCH
-ARG BUILD_DATE="unknown"
-ARG SOURCE_URL="https://github.com/RuoJi6/CyberStrikeAI"
-ARG VCS_REF="unknown"
-ARG VERSION="development"
-ARG KALI_INDEX_DIGEST="sha256:ef7a551400b01dc501ff97f192c5b2b1ec629576dab5032822190cd2684ca4e1"
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PATH=/opt/tools-venv/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
-
-LABEL org.opencontainers.image.created="${BUILD_DATE}" \
-      org.opencontainers.image.description="Digest-pinned CyberStrikeAI full-agent runtime on Kali Rolling" \
-      org.opencontainers.image.documentation="${SOURCE_URL}/blob/${VCS_REF}/docs/zh-CN/full-agent-image-build-acceptance-plan.md" \
-      org.opencontainers.image.licenses="Apache-2.0" \
-      org.opencontainers.image.revision="${VCS_REF}" \
-      org.opencontainers.image.source="${SOURCE_URL}" \
-      org.opencontainers.image.title="CyberStrikeAI Agent runtime" \
-      org.opencontainers.image.vendor="CyberStrikeAI" \
-      org.opencontainers.image.version="${VERSION}" \
-      com.cyberstrike.base.name="kalilinux/kali-rolling" \
-      com.cyberstrike.base.digest="${KALI_INDEX_DIGEST}" \
-      com.cyberstrike.base.index-digest="${KALI_INDEX_DIGEST}" \
-      com.cyberstrike.agent.toolset="configured-77-platform-aware"
 
 # Create non-root user early; no passwordless sudo.
 RUN set -eux; \
@@ -116,7 +97,7 @@ RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/
     apt-get -o Acquire::Retries=5 update; \
     apt-get -o Acquire::Retries=5 install -y --no-install-recommends jq findutils; \
     jq -e '.apt_packages | length > 0' /tmp/toolchain.lock >/dev/null; \
-    jq -r '.apt_packages[]' /tmp/toolchain.lock \
+    jq -r '.apt_packages[] | select(. != "ghidra")' /tmp/toolchain.lock \
       | xargs -r -n 8 sh -ec '\
           attempt=1; \
           until apt-get -o Acquire::Retries=5 install -y --no-install-recommends "$@"; do \
@@ -127,6 +108,44 @@ RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/
             attempt=$((attempt + 1)); \
             apt-get -o Acquire::Retries=5 update; \
           done' sh; \
+    ghidra_filename=$(apt-cache show ghidra | awk -F': ' '$1 == "Filename" {print $2; exit}'); \
+    ghidra_sha256=$(apt-cache show ghidra | awk -F': ' '$1 == "SHA256" {print $2; exit}'); \
+    ghidra_size=$(apt-cache show ghidra | awk -F': ' '$1 == "Size" {print $2; exit}'); \
+    test -n "$ghidra_filename"; \
+    test -n "$ghidra_sha256"; \
+    test -n "$ghidra_size"; \
+    case "$ghidra_size" in *[!0-9]*) exit 1 ;; esac; \
+    ghidra_deb="/var/cache/apt/archives/$(basename "$ghidra_filename")"; \
+    if ! test -f "$ghidra_deb" || ! printf '%s  %s\n' "$ghidra_sha256" "$ghidra_deb" | sha256sum -c -; then \
+      ghidra_url="http://kali.download/kali/$ghidra_filename"; \
+      ghidra_parts="${ghidra_deb}.parts"; \
+      ghidra_chunk_size=8388608; \
+      ghidra_chunks=$(((ghidra_size + ghidra_chunk_size - 1) / ghidra_chunk_size)); \
+      mkdir -p "$ghidra_parts"; \
+      export ghidra_url ghidra_parts ghidra_size ghidra_chunk_size; \
+      seq 0 $((ghidra_chunks - 1)) \
+        | xargs -P 8 -n 1 sh -ec '\
+            index=$1; \
+            start=$((index * ghidra_chunk_size)); \
+            end=$((start + ghidra_chunk_size - 1)); \
+            if [ "$end" -ge "$ghidra_size" ]; then end=$((ghidra_size - 1)); fi; \
+            expected=$((end - start + 1)); \
+            part=$(printf "%s/%06d.part" "$ghidra_parts" "$index"); \
+            if [ -f "$part" ] && [ "$(wc -c < "$part")" -eq "$expected" ]; then exit 0; fi; \
+            tmp="${part}.tmp"; \
+            rm -f "$tmp"; \
+            curl --fail --location --retry 10 --retry-all-errors \
+              --range "${start}-${end}" --speed-limit 1024 --speed-time 300 \
+              --output "$tmp" "$ghidra_url"; \
+            test "$(wc -c < "$tmp")" -eq "$expected"; \
+            mv -f "$tmp" "$part"' sh; \
+      : >"$ghidra_deb"; \
+      for part in "$ghidra_parts"/*.part; do cat "$part" >>"$ghidra_deb"; done; \
+      test "$(wc -c < "$ghidra_deb")" -eq "$ghidra_size"; \
+      rm -rf "$ghidra_parts"; \
+    fi; \
+    printf '%s  %s\n' "$ghidra_sha256" "$ghidra_deb" | sha256sum -c -; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends "$ghidra_deb"; \
     rm -rf \
       /var/cache/debconf/*-old \
       /var/log/apt/*
@@ -134,9 +153,10 @@ RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/
 # Python tools (pinned). The venv can reuse compatible Kali packages without
 # attempting to uninstall or duplicate them, while direct pins remain isolated.
 COPY requirements-tools.txt /tmp/requirements-tools.txt
-RUN set -eux; \
+RUN --mount=type=cache,id=cyberstrike-agent-pip-tools-${TARGETARCH},target=/root/.cache/pip,sharing=locked \
+    set -eux; \
     /usr/bin/python3 -m venv --system-site-packages /opt/tools-venv; \
-    /opt/tools-venv/bin/python -m pip install --no-cache-dir --no-compile -r /tmp/requirements-tools.txt; \
+    /opt/tools-venv/bin/python -m pip install --no-compile -r /tmp/requirements-tools.txt; \
     for entrypoint in ROPgadget bloodhound-python kube-hunter scout; do \
       test -x "/opt/tools-venv/bin/$entrypoint"; \
       ln -sfn "/opt/tools-venv/bin/$entrypoint" "/usr/local/bin/$entrypoint"; \
@@ -151,9 +171,10 @@ RUN set -eux; \
 # Checkov's older transitive urllib3/termcolor constraints are intentionally
 # isolated from the other Python tools.
 COPY requirements-checkov.txt /tmp/requirements-checkov.txt
-RUN set -eux; \
+RUN --mount=type=cache,id=cyberstrike-agent-pip-checkov-${TARGETARCH},target=/root/.cache/pip,sharing=locked \
+    set -eux; \
     /usr/bin/python3 -m venv /opt/checkov-venv; \
-    /opt/checkov-venv/bin/python -m pip install --no-cache-dir --no-compile -r /tmp/requirements-checkov.txt; \
+    /opt/checkov-venv/bin/python -m pip install --no-compile -r /tmp/requirements-checkov.txt; \
     ln -sfn /opt/checkov-venv/bin/checkov /usr/local/bin/checkov; \
     checkov --version; \
     find /opt/checkov-venv -type d -name __pycache__ -prune -exec rm -rf '{}' +; \
@@ -195,11 +216,20 @@ RUN chmod 0755 /usr/local/bin/amass
 # smbmap 1.10.7 unconditionally raises RLIMIT_NOFILE to 4096. Python 3.14
 # rejects that when the container hard limit is lower, so clamp the requested
 # soft limit to the actual hard limit while preserving an unlimited hard cap.
+# Kali also grants Nmap file capabilities that make execve fail under the
+# control plane's no-new-privileges + cap-drop=ALL policy. Nmap remains useful
+# as an unprivileged user (for example with TCP connect scans), so remove them.
 RUN set -eux; \
     smbmap_module=/usr/lib/python3/dist-packages/smbmap/smbmap.py; \
     grep -Fq 'resource.setrlimit(resource.RLIMIT_NOFILE, (4096, rlimit[1]))' "$smbmap_module"; \
     sed -i 's/resource\.setrlimit(resource\.RLIMIT_NOFILE, (4096, rlimit\[1\]))/resource.setrlimit(resource.RLIMIT_NOFILE, (4096 if rlimit[1] == resource.RLIM_INFINITY else min(4096, rlimit[1]), rlimit[1]))/' "$smbmap_module"; \
-    python3 -m py_compile "$smbmap_module"
+    python3 -m py_compile "$smbmap_module"; \
+    getcap /usr/lib/nmap/nmap | grep -q 'cap_net_'; \
+    setcap -r /usr/lib/nmap/nmap; \
+    test -z "$(getcap /usr/lib/nmap/nmap)"; \
+    nmap --version >/tmp/nmap-version.txt; \
+    grep -q 'Nmap version' /tmp/nmap-version.txt; \
+    rm -f /tmp/nmap-version.txt
 
 # Fail the build if a tool declared for this platform is absent. Tools explicitly
 # limited to another platform are reported as skipped, never counted as present.
@@ -231,7 +261,7 @@ RUN set -eux; \
     for entrypoint in ROPgadget bloodhound-python kube-hunter scout; do \
       test "$(readlink -f "/usr/local/bin/$entrypoint")" = "/opt/tools-venv/bin/$entrypoint"; \
     done; \
-    amass -version >/tmp/amass-version.txt; \
+    amass -version >/tmp/amass-version.txt 2>&1; \
     grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+' /tmp/amass-version.txt; \
     masscan_status=0; \
     masscan --version >/tmp/masscan-version.txt 2>&1 || masscan_status=$?; \
@@ -239,8 +269,16 @@ RUN set -eux; \
     grep -q 'Masscan version' /tmp/masscan-version.txt; \
     smbmap_status=0; \
     smbmap --help >/tmp/smbmap-help.txt 2>&1 || smbmap_status=$?; \
-    test "$smbmap_status" -eq 1; \
+    test "$smbmap_status" -eq 0; \
     grep -q 'usage: smbmap' /tmp/smbmap-help.txt; \
+    mkdir -p /tmp/cyberstrike-probe-home; \
+    HOME=/tmp/cyberstrike-probe-home XDG_CONFIG_HOME=/tmp/cyberstrike-probe-home/.config netexec --help >/tmp/netexec-help.txt 2>&1; \
+    grep -qi 'usage:' /tmp/netexec-help.txt; \
+    msfconsole --version >/tmp/msfconsole-version.txt 2>&1; \
+    grep -q 'Framework Version' /tmp/msfconsole-version.txt; \
+    nmap --version >/tmp/nmap-version.txt 2>&1; \
+    grep -q 'Nmap version' /tmp/nmap-version.txt; \
+    ! command -v prowler; \
     ROPgadget --help >/tmp/ropgadget-help.txt; \
     grep -q 'usage: ROPgadget' /tmp/ropgadget-help.txt; \
     scout --help >/tmp/scout-help.txt; \
@@ -267,7 +305,8 @@ RUN set -eux; \
       '[.tools[] | select(((.supported_platforms // ["linux/amd64", "linux/arm64"]) | index($platform)) != null)] | length' \
       /tmp/tool-mapping.json); \
     printf 'platform tool gate passed: %s expected entries on %s\n' "$expected" "$platform"; \
-    rm -f /tmp/tool-probes.tsv /tmp/tool-mapping.json /tmp/java-version.txt /tmp/spectral-version.txt /tmp/amass-version.txt /tmp/masscan-version.txt /tmp/smbmap-help.txt /tmp/ropgadget-help.txt /tmp/scout-help.txt /tmp/kube-hunter-help.txt /tmp/cloudmapper-help.txt /tmp/graphqlmap-help.txt /tmp/jwt-tool-help.txt /tmp/hashpump-help.txt /tmp/rustscan-version.txt /tmp/volatility3-help.txt /tmp/paramspider-help.txt
+    rm -rf /tmp/cyberstrike-probe-home; \
+    rm -f /tmp/tool-probes.tsv /tmp/tool-mapping.json /tmp/java-version.txt /tmp/spectral-version.txt /tmp/amass-version.txt /tmp/masscan-version.txt /tmp/smbmap-help.txt /tmp/netexec-help.txt /tmp/msfconsole-version.txt /tmp/nmap-version.txt /tmp/ropgadget-help.txt /tmp/scout-help.txt /tmp/kube-hunter-help.txt /tmp/cloudmapper-help.txt /tmp/graphqlmap-help.txt /tmp/jwt-tool-help.txt /tmp/hashpump-help.txt /tmp/rustscan-version.txt /tmp/volatility3-help.txt /tmp/paramspider-help.txt
 
 # Remove transient build inputs after the final platform probe.
 RUN set -eux; \
@@ -277,6 +316,27 @@ RUN set -eux; \
     fi; \
     rm -rf /etc/sudoers.d/* 2>/dev/null || true; \
     test ! -e /app/certs
+
+# Keep volatile build metadata after expensive filesystem layers so a new build
+# timestamp does not invalidate package installation caches.
+ARG BUILD_DATE="unknown"
+ARG SOURCE_URL="https://github.com/RuoJi6/CyberStrikeAI"
+ARG VCS_REF="unknown"
+ARG VERSION="development"
+ARG KALI_INDEX_DIGEST="sha256:ef7a551400b01dc501ff97f192c5b2b1ec629576dab5032822190cd2684ca4e1"
+LABEL org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.description="Digest-pinned CyberStrikeAI full-agent runtime on Kali Rolling" \
+      org.opencontainers.image.documentation="${SOURCE_URL}/blob/${VCS_REF}/docs/zh-CN/full-agent-image-build-acceptance-plan.md" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.title="CyberStrikeAI Agent runtime" \
+      org.opencontainers.image.vendor="CyberStrikeAI" \
+      org.opencontainers.image.version="${VERSION}" \
+      com.cyberstrike.base.name="kalilinux/kali-rolling" \
+      com.cyberstrike.base.digest="${KALI_INDEX_DIGEST}" \
+      com.cyberstrike.base.index-digest="${KALI_INDEX_DIGEST}" \
+      com.cyberstrike.agent.toolset="configured-77-platform-aware"
 
 USER pentester
 WORKDIR /workspace
