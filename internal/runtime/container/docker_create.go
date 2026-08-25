@@ -853,7 +853,7 @@ func runtimeWorkspaceEnvironment() []string {
 		"PIP_CACHE_DIR=/workspace/.cache/pip",
 		"PYTHONUSERBASE=/workspace/.local",
 		"VIRTUAL_ENV=/workspace/.venv",
-		"PATH=/workspace/.venv/bin:/workspace/.local/bin:/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"PATH=/workspace/.venv/bin:/workspace/.local/bin:/opt/tools-venv/bin:/home/pentester/go/bin:/home/pentester/.local/bin:/home/pentester/.npm-global/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 	}
 }
 

@@ -1,8 +1,11 @@
 {
+  "schemaVersion": 1,
+  "imageDigest": "sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb",
+  "imagePlatform": "linux/arm64",
   "tools": [
     {
       "name": "ROPgadget",
-      "path": "/usr/local/bin/ROPgadget",
+      "path": "/opt/tools-venv/bin/ROPgadget",
       "version": "kali-full-tools",
       "category": "binary"
     },
@@ -44,7 +47,7 @@
     },
     {
       "name": "bloodhound-python",
-      "path": "/usr/local/bin/bloodhound-python",
+      "path": "/opt/tools-venv/bin/bloodhound-python",
       "version": "kali-full-tools",
       "category": "ad"
     },
@@ -224,7 +227,7 @@
     },
     {
       "name": "kube-hunter",
-      "path": "/usr/local/bin/kube-hunter",
+      "path": "/opt/tools-venv/bin/kube-hunter",
       "version": "kali-full-tools",
       "category": "cloud"
     },
@@ -331,12 +334,6 @@
       "category": "runtime"
     },
     {
-      "name": "pwninit",
-      "path": "/usr/local/bin/pwninit",
-      "version": "kali-full-tools",
-      "category": "binary"
-    },
-    {
       "name": "python3",
       "path": "/usr/bin/python3",
       "version": "kali-full-tools",
@@ -380,7 +377,7 @@
     },
     {
       "name": "scout",
-      "path": "/usr/local/bin/scout",
+      "path": "/opt/tools-venv/bin/scout",
       "version": "kali-full-tools",
       "category": "cloud"
     },
@@ -471,12 +468,6 @@
     {
       "name": "wpscan",
       "path": "/usr/bin/wpscan",
-      "version": "kali-full-tools",
-      "category": "recon"
-    },
-    {
-      "name": "x8",
-      "path": "/usr/local/bin/x8",
       "version": "kali-full-tools",
       "category": "recon"
     },

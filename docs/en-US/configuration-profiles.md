@@ -167,16 +167,16 @@ container:
   rollout_user_ids: [admin]
   rollout_project_ids: []
   owner_id: cyberstrike-production-01
-  image_repository: cyberstrike/agent
-  image_digest: sha256:<agent-arm64-digest>
+  image_repository: ruoji6/cyberstrikeai-agent
+  image_digest: sha256:524788d05d4b5a66b569efe1f57a6ae49ad792eddfa7e44ce67a798c918afebb
   image_platform: linux/arm64
   egress_image_repository: cyberstrike/egress
   egress_image_digest: sha256:<egress-arm64-digest>
   egress_image_platform: linux/arm64
-  tool_inventory_path: container/tool-inventory-linux-arm64.json
-  tool_inventory_digest: sha256:<inventory-digest>
+  tool_inventory_path: container/agent-tool-inventory-linux-arm64.json
+  tool_inventory_digest: sha256:a0da4e891f68f16edb8cd1294340314c5af61e19e6f2aa7fc905c4084a2e21f8
 ```
 
 - User and project allowlists use OR semantics; both empty means all authenticated users.
 - A failed or unavailable rollout check keeps the UI in host mode.
-- Publish the Agent image, gateway image, and inventory as one digest-pinned set. The current deployment and acceptance scope is `linux/arm64` only.
+- Pin the Agent image, gateway image, and inventory by digest. The deployed Agent index contains both `linux/arm64` and `linux/amd64`; this rollout's runtime acceptance scope is `linux/arm64`.

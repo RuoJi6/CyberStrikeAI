@@ -173,7 +173,7 @@ CyberStrikeAI ships with 100+ curated tools covering the whole kill chain:
 - **Network Space Search Engines** – fofa_search, zoomeye_search, quake_search, shodan_search
 - **API Security** – graphql-scanner, arjun, api-fuzzer, api-schema-analyzer
 - **Container Security** – trivy, clair, docker-bench-security, kube-bench, kube-hunter
-- **Cloud Security** – prowler, scout-suite, cloudmapper, pacu, terrascan, checkov
+- **Cloud Security** – scout-suite, cloudmapper, pacu, terrascan, checkov
 - **Binary Analysis** – gdb, radare2, ghidra, objdump, strings, binwalk
 - **Exploitation** – metasploit, msfvenom, pwntools, ropper, ropgadget
 - **Password Cracking** – hashcat, john, hashpump

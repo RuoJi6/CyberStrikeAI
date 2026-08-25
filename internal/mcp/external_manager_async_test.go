@@ -67,12 +67,20 @@ func (c *failingExternalMCPClient) Close() error      { return nil }
 func (c *failingExternalMCPClient) IsConnected() bool { return true }
 func (c *failingExternalMCPClient) GetStatus() string { return "connected" }
 
+func attachExternalMCPTestClient(t *testing.T, manager *ExternalMCPManager, name string, client ExternalMCPClient) {
+	t.Helper()
+	manager.mu.Lock()
+	manager.clients[name] = client
+	manager.mu.Unlock()
+	t.Cleanup(manager.StopAll)
+}
+
 func TestExternalMCPManager_CallToolBoundedWaitThenContinue(t *testing.T) {
 	manager := NewExternalMCPManager(zap.NewNop())
 	manager.ConfigureToolWaitTimeoutSeconds(1)
 	manager.toolWaitTimeout = 10 * time.Millisecond
 	client := newBlockingExternalMCPClient("slow result ready")
-	manager.clients["lab"] = client
+	attachExternalMCPTestClient(t, manager, "lab", client)
 
 	callCtx, callCancel := context.WithCancel(context.Background())
 	result, executionID, err := manager.CallTool(callCtx, "lab::slow_tool", map[string]interface{}{"target": "example"})
@@ -117,7 +125,7 @@ func TestExecutionControlWaitToolReturnsCompletedResult(t *testing.T) {
 	manager := NewExternalMCPManager(zap.NewNop())
 	manager.toolWaitTimeout = 10 * time.Millisecond
 	client := newBlockingExternalMCPClient("control wait result")
-	manager.clients["lab"] = client
+	attachExternalMCPTestClient(t, manager, "lab", client)
 
 	result, executionID, err := manager.CallTool(context.Background(), "lab::slow_tool", nil)
 	if err != nil {
@@ -157,7 +165,7 @@ func TestExternalMCPManager_PerServerConcurrencyLimitsWorkers(t *testing.T) {
 		CircuitCooldown:         time.Second,
 	})
 	client := newBlockingExternalMCPClient("ok")
-	manager.clients["lab"] = client
+	attachExternalMCPTestClient(t, manager, "lab", client)
 
 	done1 := make(chan struct{})
 	go func() {
@@ -217,7 +225,7 @@ func TestExternalMCPManager_CircuitBreakerOpensAfterFailures(t *testing.T) {
 		CircuitFailureThreshold: 1,
 		CircuitCooldown:         time.Minute,
 	})
-	manager.clients["lab"] = &failingExternalMCPClient{}
+	attachExternalMCPTestClient(t, manager, "lab", &failingExternalMCPClient{})
 
 	_, _, err := manager.CallTool(context.Background(), "lab::fail_tool", nil)
 	if err == nil || !strings.Contains(err.Error(), "boom") {

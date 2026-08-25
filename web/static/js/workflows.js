@@ -79,7 +79,7 @@
         { keywords: ['漏洞', 'vuln', '漏洞扫描', 'nuclei', 'nikto', 'zap'], tools: ['nuclei', 'nikto', 'zap'], label: '漏洞扫描' },
         { keywords: ['目录', '路径', '暴露页面', 'dir', 'ffuf', 'gobuster', 'feroxbuster'], tools: ['ffuf', 'gobuster', 'feroxbuster', 'dirsearch'], label: '暴露面探测' },
         { keywords: ['证书', 'certificate', 'crt'], tools: ['subfinder'], label: '证书与域名线索收集' },
-        { keywords: ['云', 'cloud', '配置审计', 'prowler', 'scout'], tools: ['prowler', 'scout-suite'], label: '云配置审计' },
+        { keywords: ['云', 'cloud', '配置审计', 'scout'], tools: ['scout-suite'], label: '云配置审计' },
         { keywords: ['容器', '镜像', 'k8s', 'kubernetes', 'trivy', 'kube'], tools: ['trivy', 'kube-bench', 'kube-hunter'], label: '容器安全检查' },
         { keywords: ['情报', '威胁情报', 'threat', 'ioc', 'virustotal', 'shodan', 'fofa'], tools: ['virustotal_search', 'shodan_search', 'fofa_search'], label: '威胁情报收集' }
     ];

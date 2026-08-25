@@ -1026,3 +1026,27 @@ func creationSpec() RuntimeSpec {
 		},
 	}
 }
+
+func TestRuntimeWorkspaceEnvironmentIncludesImageToolVenv(t *testing.T) {
+	var path string
+	for _, entry := range runtimeWorkspaceEnvironment() {
+		if strings.HasPrefix(entry, "PATH=") {
+			path = strings.TrimPrefix(entry, "PATH=")
+			break
+		}
+	}
+	if path == "" {
+		t.Fatal("runtime workspace PATH is missing")
+	}
+	parts := strings.Split(path, ":")
+	found := false
+	for _, part := range parts {
+		if part == "/opt/tools-venv/bin" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("runtime workspace PATH does not expose image tool venv: %s", path)
+	}
+}

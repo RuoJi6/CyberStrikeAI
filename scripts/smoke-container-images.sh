@@ -26,6 +26,7 @@ command -v jq >/dev/null
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/cyberstrike-image-smoke.XXXXXX")
 snapshot_path="$test_root/boundary.json"
+platform_entries="$test_root/tool-inventory.entries.json"
 snapshot_id=12345678-1234-4234-8234-123456789abc
 agent_name="cyberstrike-agent-smoke-${RANDOM}-$$"
 egress_name="cyberstrike-egress-smoke-${RANDOM}-$$"
@@ -35,6 +36,19 @@ cleanup() {
   rm -rf -- "$test_root"
 }
 trap cleanup EXIT INT TERM
+
+script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+mapping_file="$script_root/../container/agent/tool-mapping.json"
+[[ -f "$mapping_file" ]] || {
+  printf 'missing platform mapping: %s\n' "$mapping_file" >&2
+  exit 1
+}
+jq --arg platform "$platform" --slurpfile mapping "$mapping_file" '
+  ($mapping[0].tools
+    | map(select(((.supported_platforms // ["linux/amd64", "linux/arm64"]) | index($platform)) == null))
+    | map(.probe_bin)) as $unsupported
+  | .tools |= map(.name as $name | select(($unsupported | index($name)) == null))
+' "$entries_file" >"$platform_entries"
 
 printf '%s' '{"schemaVersion":1,"policyId":"","rules":[]}' >"$snapshot_path"
 chmod 0444 "$snapshot_path"
@@ -58,7 +72,7 @@ docker run --name "$agent_name" --platform "$platform" --network none \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,mode=1777,size=16777216 \
   --tmpfs /workspace:rw,nosuid,nodev,mode=1777,size=67108864 \
-  --mount "type=bind,source=$(cd "$(dirname "$entries_file")" && pwd)/$(basename "$entries_file"),target=/tool-inventory.entries.json,readonly" \
+  --mount "type=bind,source=$platform_entries,target=/tool-inventory.entries.json,readonly" \
   --entrypoint /bin/sh "$agent_image" -ceu '
     test "$(id -u)" -ne 0
     test "$(id -un)" = pentester

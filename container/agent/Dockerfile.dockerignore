@@ -1,2 +1,15 @@
 **
-!container/agent/Dockerfile
+!Dockerfile
+!toolchain.lock
+!tool-mapping.json
+!tool-inventory.entries.json
+!requirements-tools.txt
+!requirements-checkov.txt
+!install-locked-artifacts.sh
+!amass-wrapper.sh
+!cloudmapper-wrapper.sh
+!cloudmapper-pyjq-compat.py
+!graphqlmap-wrapper.sh
+!jwt-tool-wrapper.sh
+!paramspider-wrapper.sh
+!responder-wrapper.sh

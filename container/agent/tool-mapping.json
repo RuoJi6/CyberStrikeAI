@@ -1,0 +1,628 @@
+{
+  "version": 1,
+  "count": 77,
+  "tools": [
+    {
+      "yaml_name": "amass",
+      "probe_bin": "amass",
+      "install_method": "apt",
+      "package": "amass",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "angr",
+      "probe_bin": "angr",
+      "install_method": "pip",
+      "package": "angr",
+      "category": "binary",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "api-schema-analyzer",
+      "probe_bin": "spectral",
+      "install_method": "npm",
+      "package": "@stoplight/spectral-cli",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "arjun",
+      "probe_bin": "arjun",
+      "install_method": "apt",
+      "package": "arjun",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "arp-scan",
+      "probe_bin": "arp-scan",
+      "install_method": "apt",
+      "package": "arp-scan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "binwalk",
+      "probe_bin": "binwalk",
+      "install_method": "apt",
+      "package": "binwalk",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "bloodhound",
+      "probe_bin": "bloodhound-python",
+      "install_method": "pip",
+      "package": "bloodhound",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "checkov",
+      "probe_bin": "checkov",
+      "install_method": "pip_venv",
+      "package": "checkov@3.2.472/python3.14",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "checksec",
+      "probe_bin": "checksec",
+      "install_method": "apt",
+      "package": "checksec",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "cloudmapper",
+      "probe_bin": "cloudmapper",
+      "install_method": "github",
+      "package": "cloudmapper",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dalfox",
+      "probe_bin": "dalfox",
+      "install_method": "github",
+      "package": "dalfox",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dirsearch",
+      "probe_bin": "dirsearch",
+      "install_method": "apt",
+      "package": "dirsearch",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dnsenum",
+      "probe_bin": "dnsenum",
+      "install_method": "apt",
+      "package": "dnsenum",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dnslog",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dotdotpwn",
+      "probe_bin": "dotdotpwn",
+      "install_method": "apt",
+      "package": "dotdotpwn",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "enum4linux-ng",
+      "probe_bin": "enum4linux-ng",
+      "install_method": "apt",
+      "package": "enum4linux-ng",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "exec",
+      "probe_bin": "sh",
+      "install_method": "runtime_builtin",
+      "package": "bash",
+      "category": "runtime",
+      "probe_kind": "bash"
+    },
+    {
+      "yaml_name": "execute-python-script",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "exiftool",
+      "probe_bin": "exiftool",
+      "install_method": "apt",
+      "package": "libimage-exiftool-perl",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "falco",
+      "probe_bin": "falco",
+      "install_method": "github",
+      "package": "falco",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ffuf",
+      "probe_bin": "ffuf",
+      "install_method": "apt",
+      "package": "ffuf",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "fierce",
+      "probe_bin": "fierce",
+      "install_method": "apt",
+      "package": "fierce",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "foremost",
+      "probe_bin": "foremost",
+      "install_method": "apt",
+      "package": "foremost",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "gau",
+      "probe_bin": "gau",
+      "install_method": "github",
+      "package": "gau",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "gdb",
+      "probe_bin": "gdb",
+      "install_method": "apt",
+      "package": "gdb",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ghidra",
+      "probe_bin": "analyzeHeadless",
+      "install_method": "apt",
+      "package": "ghidra",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "graphql-scanner",
+      "probe_bin": "graphqlmap",
+      "install_method": "github",
+      "package": "swisskyrepo/GraphQLmap@59305d7570c8fbbb04a324e869ec9a196c150936",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hashcat",
+      "probe_bin": "hashcat",
+      "install_method": "apt",
+      "package": "hashcat",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hashpump",
+      "probe_bin": "hashpump",
+      "install_method": "github",
+      "package": "hashpump",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "http-framework-test",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hydra",
+      "probe_bin": "hydra",
+      "install_method": "apt",
+      "package": "hydra",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "impacket",
+      "probe_bin": "impacket",
+      "install_method": "apt",
+      "package": "python3-impacket",
+      "category": "ad",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "install-python-package",
+      "probe_bin": "pip3",
+      "install_method": "runtime_builtin",
+      "package": "python3-pip",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "jaeles",
+      "probe_bin": "jaeles",
+      "install_method": "go",
+      "package": "github.com/jaeles-project/jaeles",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "john",
+      "probe_bin": "john",
+      "install_method": "apt",
+      "package": "john",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "jwt-analyzer",
+      "probe_bin": "jwt_tool",
+      "install_method": "github",
+      "package": "ticarpi/jwt_tool@v2.2.7",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "katana",
+      "probe_bin": "katana",
+      "install_method": "github",
+      "package": "katana",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "kube-bench",
+      "probe_bin": "kube-bench",
+      "install_method": "github",
+      "package": "kube-bench",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "kube-hunter",
+      "probe_bin": "kube-hunter",
+      "install_method": "pip",
+      "package": "kube-hunter",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "libc-database",
+      "probe_bin": "libc-database",
+      "install_method": "bash_script",
+      "package": "libc-database",
+      "category": "binary",
+      "probe_kind": "bash"
+    },
+    {
+      "yaml_name": "linpeas",
+      "probe_bin": "linpeas.sh",
+      "install_method": "github",
+      "package": "linpeas",
+      "category": "post",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "masscan",
+      "probe_bin": "masscan",
+      "install_method": "apt",
+      "package": "masscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "metasploit",
+      "probe_bin": "msfconsole",
+      "install_method": "apt",
+      "package": "metasploit-framework",
+      "category": "exploit",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "msfvenom",
+      "probe_bin": "msfvenom",
+      "install_method": "apt",
+      "package": "metasploit-framework",
+      "category": "exploit",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nbtscan",
+      "probe_bin": "nbtscan",
+      "install_method": "apt",
+      "package": "nbtscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "netexec",
+      "probe_bin": "netexec",
+      "install_method": "apt",
+      "package": "netexec",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nikto",
+      "probe_bin": "nikto",
+      "install_method": "apt",
+      "package": "nikto",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nmap",
+      "probe_bin": "nmap",
+      "install_method": "apt",
+      "package": "nmap",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nuclei",
+      "probe_bin": "nuclei",
+      "install_method": "apt",
+      "package": "nuclei",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "objdump",
+      "probe_bin": "objdump",
+      "install_method": "apt",
+      "package": "binutils",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "one-gadget",
+      "probe_bin": "one_gadget",
+      "install_method": "gem",
+      "package": "one_gadget",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "paramspider",
+      "probe_bin": "paramspider",
+      "install_method": "github",
+      "package": "devanshbatham/ParamSpider@v1.0.1",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "pwninit",
+      "probe_bin": "pwninit",
+      "install_method": "github",
+      "package": "pwninit",
+      "category": "binary",
+      "probe_kind": "bin",
+      "supported_platforms": [
+        "linux/amd64"
+      ]
+    },
+    {
+      "yaml_name": "pwntools",
+      "probe_bin": "pwn",
+      "install_method": "pip",
+      "package": "pwntools",
+      "category": "binary",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "query_execution_result",
+      "probe_bin": "internal:query_execution_result",
+      "install_method": "control_plane",
+      "package": "none",
+      "category": "control_plane",
+      "probe_kind": "control_plane"
+    },
+    {
+      "yaml_name": "radare2",
+      "probe_bin": "r2",
+      "install_method": "apt",
+      "package": "radare2",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "responder",
+      "probe_bin": "responder",
+      "install_method": "apt",
+      "package": "responder",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ropgadget",
+      "probe_bin": "ROPgadget",
+      "install_method": "pip",
+      "package": "ropgadget",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ropper",
+      "probe_bin": "ropper",
+      "install_method": "apt",
+      "package": "ropper",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "rpcclient",
+      "probe_bin": "rpcclient",
+      "install_method": "apt",
+      "package": "samba-common-bin",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "rustscan",
+      "probe_bin": "rustscan",
+      "install_method": "github",
+      "package": "rustscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "scout-suite",
+      "probe_bin": "scout",
+      "install_method": "pip",
+      "package": "scoutsuite",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "smbmap",
+      "probe_bin": "smbmap",
+      "install_method": "apt",
+      "package": "smbmap",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "sqlmap",
+      "probe_bin": "sqlmap",
+      "install_method": "apt",
+      "package": "sqlmap",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "steghide",
+      "probe_bin": "steghide",
+      "install_method": "apt",
+      "package": "steghide",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "strings",
+      "probe_bin": "strings",
+      "install_method": "apt",
+      "package": "binutils",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "subfinder",
+      "probe_bin": "subfinder",
+      "install_method": "apt",
+      "package": "subfinder",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "terrascan",
+      "probe_bin": "terrascan",
+      "install_method": "github",
+      "package": "terrascan",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "trivy",
+      "probe_bin": "trivy",
+      "install_method": "github",
+      "package": "trivy",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "volatility3",
+      "probe_bin": "volatility3",
+      "install_method": "pip",
+      "package": "volatility3",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "wafw00f",
+      "probe_bin": "wafw00f",
+      "install_method": "apt",
+      "package": "wafw00f",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "waybackurls",
+      "probe_bin": "waybackurls",
+      "install_method": "go",
+      "package": "github.com/tomnomnom/waybackurls",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "wpscan",
+      "probe_bin": "wpscan",
+      "install_method": "apt",
+      "package": "wpscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "x8",
+      "probe_bin": "x8",
+      "install_method": "github",
+      "package": "x8",
+      "category": "recon",
+      "probe_kind": "bin",
+      "supported_platforms": [
+        "linux/amd64"
+      ]
+    },
+    {
+      "yaml_name": "xsser",
+      "probe_bin": "xsser",
+      "install_method": "apt",
+      "package": "xsser",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "xxd",
+      "probe_bin": "xxd",
+      "install_method": "apt",
+      "package": "xxd",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "zsteg",
+      "probe_bin": "zsteg",
+      "install_method": "gem",
+      "package": "zsteg",
+      "category": "forensics",
+      "probe_kind": "bin"
+    }
+  ]
+}

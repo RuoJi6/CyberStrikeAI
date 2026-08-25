@@ -111,9 +111,12 @@ func TestNonInteractiveStdinReadBlocksWithoutRedirect(t *testing.T) {
 
 	cmd := exec.Command("sh", "-c", `read x; echo done`)
 	cmd.Stdin = r
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start shell: %v", err)
+	}
 
 	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
+	go func() { done <- cmd.Wait() }()
 
 	select {
 	case err := <-done:

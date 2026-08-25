@@ -1,0 +1,19 @@
+# Pinned pip requirements for CyberStrikeAI full-agent Kali image
+# Generated for Stage-1; versions locked in toolchain.lock
+angr==9.2.154
+# angr 9.2.154 mutates pycparser internals that changed in pycparser 3.0.
+pycparser==2.22
+bloodhound==1.8.0
+colorama==0.4.6
+cprint==1.2.2
+kube-hunter==0.6.8
+parliament==1.6.4
+policyuniverse==1.5.1.20231109
+pycryptodomex==3.23.0
+pwntools==4.14.1
+ropgadget==7.6
+scoutsuite==5.14.0
+termcolor==2.3.0
+requests==2.32.4
+urllib3==2.5.0
+volatility3==2.28.0

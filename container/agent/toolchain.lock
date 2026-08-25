@@ -1,0 +1,994 @@
+{
+  "kali_index_digest": "sha256:ef7a551400b01dc501ff97f192c5b2b1ec629576dab5032822190cd2684ca4e1",
+  "kali_platform_digests": {
+    "arm64": "sha256:32715b3c5bda564e3dcffe9f9a58f2d52e80e139356bf21bb295a99f34b2eed6",
+    "amd64": "sha256:cea825cbcf94baf6f4381db58a2e723846b510febd0a3e7d6d3a0d07ebc85783"
+  },
+  "apt_packages": [
+    "amass",
+    "arjun",
+    "arp-scan",
+    "bash",
+    "binutils",
+    "binwalk",
+    "ca-certificates",
+    "checksec",
+    "coreutils",
+    "curl",
+    "default-mysql-client",
+    "dirsearch",
+    "dnsenum",
+    "bind9-dnsutils",
+    "dotdotpwn",
+    "enum4linux-ng",
+    "ffuf",
+    "fierce",
+    "findutils",
+    "foremost",
+    "gawk",
+    "gcc",
+    "gdb",
+    "ghidra",
+    "git",
+    "grep",
+    "gzip",
+    "hashcat",
+    "hydra",
+    "iproute2",
+    "iputils-ping",
+    "john",
+    "jq",
+    "libcap2-bin",
+    "libimage-exiftool-perl",
+    "libssl3t64",
+    "masscan",
+    "metasploit-framework",
+    "nbtscan",
+    "netcat-openbsd",
+    "netexec",
+    "nikto",
+    "nmap",
+    "nodejs",
+    "nuclei",
+    "openssh-client",
+    "procps",
+    "python3",
+    "python3-dev",
+    "python3-httpx",
+    "python3-impacket",
+    "python3-boto3",
+    "python3-geoip2",
+    "python3-jinja2",
+    "python3-jq",
+    "python3-matplotlib",
+    "python3-netaddr",
+    "python3-netifaces",
+    "python3-pandas",
+    "python3-pip",
+    "python3-requests",
+    "python3-seaborn",
+    "python3-venv",
+    "python3-yaml",
+    "radare2",
+    "responder",
+    "ripgrep",
+    "ropper",
+    "ruby",
+    "samba-common-bin",
+    "sed",
+    "smbmap",
+    "sqlmap",
+    "steghide",
+    "subfinder",
+    "tar",
+    "tcpdump",
+    "unzip",
+    "wafw00f",
+    "wget",
+    "wpscan",
+    "xsser",
+    "xxd",
+    "xz-utils",
+    "zip"
+  ],
+  "pip_packages": [
+    {
+      "name": "angr",
+      "version": "9.2.154"
+    },
+    {
+      "name": "pycparser",
+      "version": "2.22",
+      "reason": "angr 9.2.154 compatibility; pycparser 3.0 changed CLexer.filename"
+    },
+    {
+      "name": "bloodhound",
+      "version": "1.8.0"
+    },
+    {
+      "name": "checkov",
+      "version": "3.2.472",
+      "python": "3.14",
+      "environment": "checkov"
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6"
+    },
+    {
+      "name": "cprint",
+      "version": "1.2.2"
+    },
+    {
+      "name": "kube-hunter",
+      "version": "0.6.8"
+    },
+    {
+      "name": "parliament",
+      "version": "1.6.4"
+    },
+    {
+      "name": "policyuniverse",
+      "version": "1.5.1.20231109"
+    },
+    {
+      "name": "pycryptodomex",
+      "version": "3.23.0"
+    },
+    {
+      "name": "pwntools",
+      "version": "4.14.1"
+    },
+    {
+      "name": "ropgadget",
+      "version": "7.6"
+    },
+    {
+      "name": "scoutsuite",
+      "version": "5.14.0"
+    },
+    {
+      "name": "termcolor",
+      "version": "2.3.0"
+    },
+    {
+      "name": "requests",
+      "version": "2.32.4"
+    },
+    {
+      "name": "urllib3",
+      "version": "2.5.0"
+    },
+    {
+      "name": "volatility3",
+      "version": "2.28.0"
+    }
+  ],
+  "gem_packages": [
+    {
+      "name": "one_gadget",
+      "version": "1.10.0"
+    },
+    {
+      "name": "zsteg",
+      "version": "0.2.14"
+    }
+  ],
+  "npm_packages": [
+    {
+      "name": "@stoplight/spectral-cli",
+      "version": "6.16.3"
+    }
+  ],
+  "github_releases": [
+    {
+      "id": "trivy",
+      "repo": "aquasecurity/trivy",
+      "tag": "v0.74.0",
+      "asset_template": "trivy_{ver}_Linux-{Arch}.tar.gz",
+      "sha256_arm64": "b94ce1976bbf3c15b514b605ee88be7c6d94a29be2302847ff01cb794d47aad5",
+      "sha256_amd64": "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a",
+      "asset_arm64": "trivy_0.74.0_Linux-ARM64.tar.gz",
+      "asset_amd64": "trivy_0.74.0_Linux-64bit.tar.gz"
+    },
+    {
+      "id": "katana",
+      "repo": "projectdiscovery/katana",
+      "tag": "v1.7.0",
+      "asset_template": "katana_{ver}_linux_{arch}.zip",
+      "sha256_arm64": "9a6885fe9fda850129b110e0f079d42529b0693dd81b59c316f04084935300f0",
+      "sha256_amd64": "fe1142d92f418549338ea46d67a472124878482e225d279e9a42700c75d76a4d",
+      "asset_arm64": "katana_1.7.0_linux_arm64.zip",
+      "asset_amd64": "katana_1.7.0_linux_amd64.zip"
+    },
+    {
+      "id": "gau",
+      "repo": "lc/gau",
+      "tag": "v2.2.4",
+      "asset_template": "gau_{ver}_linux_{arch}.tar.gz",
+      "sha256_arm64": "c194992df360d3a24e021c6dc5a5a0576cfd769be1d19cccb29adc1d3759637d",
+      "sha256_amd64": "10e2e248c37cafb0be3f6d2931125296b95cd4186066d596d47fa417237529a9",
+      "asset_arm64": "gau_2.2.4_linux_arm64.tar.gz",
+      "asset_amd64": "gau_2.2.4_linux_amd64.tar.gz"
+    },
+    {
+      "id": "cloudmapper",
+      "repo": "duo-labs/cloudmapper",
+      "tag": "2.10.0",
+      "sha256_arm64": "dd81e2a735419c89fa298775ff79d372af224a288b3367b06a2c61fec4ce21a5",
+      "sha256_amd64": "dd81e2a735419c89fa298775ff79d372af224a288b3367b06a2c61fec4ce21a5",
+      "asset_name": "cloudmapper-2.10.0.tar.gz",
+      "download_url_template": "https://github.com/duo-labs/cloudmapper/archive/refs/tags/2.10.0.tar.gz",
+      "packaging": "source_tree"
+    },
+    {
+      "id": "graphqlmap",
+      "repo": "swisskyrepo/GraphQLmap",
+      "tag": "59305d7570c8fbbb04a324e869ec9a196c150936",
+      "sha256_arm64": "c69aeb79da3584a6f177d541942425a62cea36762e641e45f1efcf6bd807cad6",
+      "sha256_amd64": "c69aeb79da3584a6f177d541942425a62cea36762e641e45f1efcf6bd807cad6",
+      "asset_name": "graphqlmap-59305d7570c8fbbb04a324e869ec9a196c150936.tar.gz",
+      "download_url_template": "https://github.com/swisskyrepo/GraphQLmap/archive/59305d7570c8fbbb04a324e869ec9a196c150936.tar.gz",
+      "packaging": "source_tree"
+    },
+    {
+      "id": "jwt-tool",
+      "repo": "ticarpi/jwt_tool",
+      "tag": "v2.2.7",
+      "sha256_arm64": "8d2953cd3c307f54d6a0e48ec904ba74b0ce495d3adb8fb90401d22049ecc866",
+      "sha256_amd64": "8d2953cd3c307f54d6a0e48ec904ba74b0ce495d3adb8fb90401d22049ecc866",
+      "asset_name": "jwt_tool-v2.2.7.tar.gz",
+      "download_url_template": "https://github.com/ticarpi/jwt_tool/archive/refs/tags/v2.2.7.tar.gz",
+      "packaging": "source_tree"
+    },
+    {
+      "id": "paramspider",
+      "repo": "devanshbatham/ParamSpider",
+      "tag": "v1.0.1",
+      "sha256_arm64": "7866f2f27a57c47c9c22658dd3550727a4d32a8daab7b2d3a479831efb31f4ef",
+      "sha256_amd64": "7866f2f27a57c47c9c22658dd3550727a4d32a8daab7b2d3a479831efb31f4ef",
+      "asset_name": "ParamSpider-v1.0.1.tar.gz",
+      "download_url_template": "https://github.com/devanshbatham/ParamSpider/archive/refs/tags/v1.0.1.tar.gz",
+      "packaging": "source_tree"
+    },
+    {
+      "id": "hashpump",
+      "repo": "timb-machine-mirrors/bwall-HashPump",
+      "tag": "314268e07c7f838c7057a2d02eaecb79924d4f32",
+      "sha256_arm64": "cf5e08de1583346537b4e44c57d1c0f2130012ca9008f2bb8199caf260c2458b",
+      "sha256_amd64": "cf5e08de1583346537b4e44c57d1c0f2130012ca9008f2bb8199caf260c2458b",
+      "asset_name": "hashpump-314268e07c7f838c7057a2d02eaecb79924d4f32.tar.gz",
+      "download_url_template": "https://github.com/timb-machine-mirrors/bwall-HashPump/archive/314268e07c7f838c7057a2d02eaecb79924d4f32.tar.gz",
+      "packaging": "source_build"
+    },
+    {
+      "id": "dalfox",
+      "repo": "hahwul/dalfox",
+      "tag": "v3.2.1",
+      "asset_template": "dalfox_{ver}_linux_{arch}.tar.gz",
+      "sha256_arm64": "464e563ee07f6afba50a3859a781e6357bce8b9050ca7918630f5d890dbb8d4a",
+      "sha256_amd64": "f84a8c10280902359055d06b0311d279e4c00d5254d97e5a37df09a5ebf4dabb",
+      "asset_arm64": "dalfox-v3.2.1-linux-aarch64.tar.gz",
+      "asset_amd64": "dalfox-v3.2.1-linux-x86_64.tar.gz"
+    },
+    {
+      "id": "terrascan",
+      "repo": "tenable/terrascan",
+      "tag": "v1.19.9",
+      "asset_template": "terrascan_{ver}_Linux_{Arch}.tar.gz",
+      "sha256_arm64": "5473112b147fa852e7c21c29dcf3915acf419ba680484f53aa656ed895e91867",
+      "sha256_amd64": "9275d75210b7df52f8870252035803288646674f5701ced82812037700a39670",
+      "asset_arm64": "terrascan_1.19.9_Linux_arm64.tar.gz",
+      "asset_amd64": "terrascan_1.19.9_Linux_x86_64.tar.gz"
+    },
+    {
+      "id": "kube-bench",
+      "repo": "aquasecurity/kube-bench",
+      "tag": "v0.16.0",
+      "asset_template": "kube-bench_{ver}_linux_{arch}.tar.gz",
+      "sha256_arm64": "3faa4082bd44e91d98eb2064324146a6f9c560f70e0cdd55b500c9a846003d34",
+      "sha256_amd64": "f1a95c6c4ff08631382ae00438b8f3bf0eceedc229192e451bdba0e4c8803019",
+      "asset_arm64": "kube-bench_0.16.0_linux_arm64.deb",
+      "asset_amd64": "kube-bench_0.16.0_linux_amd64.deb"
+    },
+    {
+      "id": "falco",
+      "repo": "falcosecurity/falco",
+      "tag": "0.44.1",
+      "asset_template": "falco-{ver}-linux-{arch}.tar.gz",
+      "sha256_arm64": "17ff67764cb84374ca0fcc98a733316f973a90f3457495df35a24bd839b4ce87",
+      "sha256_amd64": "bc5b7a3bdf26fc91e520fc20b3461613c6e725148437121697a8d20243132127",
+      "asset_amd64": "falco-0.44.1-x86_64.tar.gz",
+      "download_url_amd64": "https://download.falco.org/packages/bin/x86_64/falco-0.44.1-x86_64.tar.gz",
+      "asset_arm64": "falco-0.44.1-aarch64.tar.gz",
+      "download_url_arm64": "https://download.falco.org/packages/bin/aarch64/falco-0.44.1-aarch64.tar.gz"
+    },
+    {
+      "id": "pwninit",
+      "repo": "io12/pwninit",
+      "tag": "3.3.3",
+      "supported_architectures": [
+        "amd64"
+      ],
+      "sha256_amd64": "f124b6645b01b0fc4adacabe61438fe73eef517dc3e4696a08e1250a8f47eec3",
+      "asset_amd64": "pwninit",
+      "packaging": "raw_binary"
+    },
+    {
+      "id": "x8",
+      "repo": "Sh1Yo/x8",
+      "tag": "v4.3.0",
+      "supported_architectures": [
+        "amd64"
+      ],
+      "sha256_amd64": "b3e54da4c0cc62163a3485addea6671368ee69342ea5740e56d6d6112196bd0e",
+      "asset_amd64": "x86_64-linux-x8.gz",
+      "packaging": "gzip_binary"
+    },
+    {
+      "id": "rustscan",
+      "repo": "bee-san/RustScan",
+      "tag": "2.4.1",
+      "sha256_arm64": "4f49103e2dfc9e9709a36da2cd61f1f81613f8d0a203307f750439fc3ce39eae",
+      "sha256_amd64": "f3a4365d939e3b81f25ba8c37852ce9ac9e938c3cc882c5b3e6fff6152c740be",
+      "asset_arm64": "aarch64-linux-rustscan.zip",
+      "asset_amd64": "x86_64-linux-rustscan.tar.gz.zip",
+      "packaging": "nested_archive"
+    },
+    {
+      "id": "linpeas",
+      "repo": "peass-ng/PEASS-ng",
+      "tag": "20260824-c1d29dcd",
+      "asset_template": "linpeas.sh",
+      "sha256_arm64": "f26df15f977c63f3b09ed8012bcb309636c333ad588e4518bb904f75856fa249",
+      "sha256_amd64": "f26df15f977c63f3b09ed8012bcb309636c333ad588e4518bb904f75856fa249",
+      "asset_name": "linpeas.sh",
+      "download_url_template": "https://github.com/peass-ng/PEASS-ng/releases/download/20260824-c1d29dcd/linpeas.sh"
+    }
+  ],
+  "go_modules": [
+    {
+      "path": "github.com/tomnomnom/waybackurls",
+      "version": "v0.1.0"
+    },
+    {
+      "path": "github.com/jaeles-project/jaeles",
+      "version": "0782a83565ca6b78e103fec735fa536e1031aa6a"
+    }
+  ],
+  "git_sources": [
+    {
+      "name": "libc-database",
+      "repository": "https://github.com/niklasb/libc-database.git",
+      "revision": "b7e948f7324cde8ac5cdb26bc4d58fbeeb1fbb5c"
+    }
+  ],
+  "tool_map": [
+    {
+      "yaml_name": "amass",
+      "probe_bin": "amass",
+      "install_method": "apt",
+      "package": "amass",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "angr",
+      "probe_bin": "angr",
+      "install_method": "pip",
+      "package": "angr",
+      "category": "binary",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "api-schema-analyzer",
+      "probe_bin": "spectral",
+      "install_method": "npm",
+      "package": "@stoplight/spectral-cli",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "arjun",
+      "probe_bin": "arjun",
+      "install_method": "apt",
+      "package": "arjun",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "arp-scan",
+      "probe_bin": "arp-scan",
+      "install_method": "apt",
+      "package": "arp-scan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "binwalk",
+      "probe_bin": "binwalk",
+      "install_method": "apt",
+      "package": "binwalk",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "bloodhound",
+      "probe_bin": "bloodhound-python",
+      "install_method": "pip",
+      "package": "bloodhound",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "checkov",
+      "probe_bin": "checkov",
+      "install_method": "pip_venv",
+      "package": "checkov@3.2.472/python3.14",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "checksec",
+      "probe_bin": "checksec",
+      "install_method": "apt",
+      "package": "checksec",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "cloudmapper",
+      "probe_bin": "cloudmapper",
+      "install_method": "github",
+      "package": "cloudmapper",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dalfox",
+      "probe_bin": "dalfox",
+      "install_method": "github",
+      "package": "dalfox",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dirsearch",
+      "probe_bin": "dirsearch",
+      "install_method": "apt",
+      "package": "dirsearch",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dnsenum",
+      "probe_bin": "dnsenum",
+      "install_method": "apt",
+      "package": "dnsenum",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dnslog",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "dotdotpwn",
+      "probe_bin": "dotdotpwn",
+      "install_method": "apt",
+      "package": "dotdotpwn",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "enum4linux-ng",
+      "probe_bin": "enum4linux-ng",
+      "install_method": "apt",
+      "package": "enum4linux-ng",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "exec",
+      "probe_bin": "sh",
+      "install_method": "runtime_builtin",
+      "package": "bash",
+      "category": "runtime",
+      "probe_kind": "bash"
+    },
+    {
+      "yaml_name": "execute-python-script",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "exiftool",
+      "probe_bin": "exiftool",
+      "install_method": "apt",
+      "package": "libimage-exiftool-perl",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "falco",
+      "probe_bin": "falco",
+      "install_method": "github",
+      "package": "falco",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ffuf",
+      "probe_bin": "ffuf",
+      "install_method": "apt",
+      "package": "ffuf",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "fierce",
+      "probe_bin": "fierce",
+      "install_method": "apt",
+      "package": "fierce",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "foremost",
+      "probe_bin": "foremost",
+      "install_method": "apt",
+      "package": "foremost",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "gau",
+      "probe_bin": "gau",
+      "install_method": "github",
+      "package": "gau",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "gdb",
+      "probe_bin": "gdb",
+      "install_method": "apt",
+      "package": "gdb",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ghidra",
+      "probe_bin": "analyzeHeadless",
+      "install_method": "apt",
+      "package": "ghidra",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "graphql-scanner",
+      "probe_bin": "graphqlmap",
+      "install_method": "github",
+      "package": "swisskyrepo/GraphQLmap@59305d7570c8fbbb04a324e869ec9a196c150936",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hashcat",
+      "probe_bin": "hashcat",
+      "install_method": "apt",
+      "package": "hashcat",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hashpump",
+      "probe_bin": "hashpump",
+      "install_method": "github",
+      "package": "hashpump",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "http-framework-test",
+      "probe_bin": "python3",
+      "install_method": "runtime_builtin",
+      "package": "python3",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "hydra",
+      "probe_bin": "hydra",
+      "install_method": "apt",
+      "package": "hydra",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "impacket",
+      "probe_bin": "impacket",
+      "install_method": "apt",
+      "package": "python3-impacket",
+      "category": "ad",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "install-python-package",
+      "probe_bin": "pip3",
+      "install_method": "runtime_builtin",
+      "package": "python3-pip",
+      "category": "runtime",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "jaeles",
+      "probe_bin": "jaeles",
+      "install_method": "go",
+      "package": "github.com/jaeles-project/jaeles",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "john",
+      "probe_bin": "john",
+      "install_method": "apt",
+      "package": "john",
+      "category": "creds",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "jwt-analyzer",
+      "probe_bin": "jwt_tool",
+      "install_method": "github",
+      "package": "ticarpi/jwt_tool@v2.2.7",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "katana",
+      "probe_bin": "katana",
+      "install_method": "github",
+      "package": "katana",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "kube-bench",
+      "probe_bin": "kube-bench",
+      "install_method": "github",
+      "package": "kube-bench",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "kube-hunter",
+      "probe_bin": "kube-hunter",
+      "install_method": "pip",
+      "package": "kube-hunter",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "libc-database",
+      "probe_bin": "libc-database",
+      "install_method": "bash_script",
+      "package": "libc-database",
+      "category": "binary",
+      "probe_kind": "bash"
+    },
+    {
+      "yaml_name": "linpeas",
+      "probe_bin": "linpeas.sh",
+      "install_method": "github",
+      "package": "linpeas",
+      "category": "post",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "masscan",
+      "probe_bin": "masscan",
+      "install_method": "apt",
+      "package": "masscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "metasploit",
+      "probe_bin": "msfconsole",
+      "install_method": "apt",
+      "package": "metasploit-framework",
+      "category": "exploit",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "msfvenom",
+      "probe_bin": "msfvenom",
+      "install_method": "apt",
+      "package": "metasploit-framework",
+      "category": "exploit",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nbtscan",
+      "probe_bin": "nbtscan",
+      "install_method": "apt",
+      "package": "nbtscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "netexec",
+      "probe_bin": "netexec",
+      "install_method": "apt",
+      "package": "netexec",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nikto",
+      "probe_bin": "nikto",
+      "install_method": "apt",
+      "package": "nikto",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nmap",
+      "probe_bin": "nmap",
+      "install_method": "apt",
+      "package": "nmap",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "nuclei",
+      "probe_bin": "nuclei",
+      "install_method": "apt",
+      "package": "nuclei",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "objdump",
+      "probe_bin": "objdump",
+      "install_method": "apt",
+      "package": "binutils",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "one-gadget",
+      "probe_bin": "one_gadget",
+      "install_method": "gem",
+      "package": "one_gadget",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "paramspider",
+      "probe_bin": "paramspider",
+      "install_method": "github",
+      "package": "devanshbatham/ParamSpider@v1.0.1",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "pwninit",
+      "probe_bin": "pwninit",
+      "install_method": "github",
+      "package": "pwninit",
+      "category": "binary",
+      "probe_kind": "bin",
+      "supported_platforms": [
+        "linux/amd64"
+      ]
+    },
+    {
+      "yaml_name": "pwntools",
+      "probe_bin": "pwn",
+      "install_method": "pip",
+      "package": "pwntools",
+      "category": "binary",
+      "probe_kind": "python_import"
+    },
+    {
+      "yaml_name": "query_execution_result",
+      "probe_bin": "internal:query_execution_result",
+      "install_method": "control_plane",
+      "package": "none",
+      "category": "control_plane",
+      "probe_kind": "control_plane"
+    },
+    {
+      "yaml_name": "radare2",
+      "probe_bin": "r2",
+      "install_method": "apt",
+      "package": "radare2",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "responder",
+      "probe_bin": "responder",
+      "install_method": "apt",
+      "package": "responder",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ropgadget",
+      "probe_bin": "ROPgadget",
+      "install_method": "pip",
+      "package": "ropgadget",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "ropper",
+      "probe_bin": "ropper",
+      "install_method": "apt",
+      "package": "ropper",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "rpcclient",
+      "probe_bin": "rpcclient",
+      "install_method": "apt",
+      "package": "samba-common-bin",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "rustscan",
+      "probe_bin": "rustscan",
+      "install_method": "github",
+      "package": "rustscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "scout-suite",
+      "probe_bin": "scout",
+      "install_method": "pip",
+      "package": "scoutsuite",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "smbmap",
+      "probe_bin": "smbmap",
+      "install_method": "apt",
+      "package": "smbmap",
+      "category": "ad",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "sqlmap",
+      "probe_bin": "sqlmap",
+      "install_method": "apt",
+      "package": "sqlmap",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "steghide",
+      "probe_bin": "steghide",
+      "install_method": "apt",
+      "package": "steghide",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "strings",
+      "probe_bin": "strings",
+      "install_method": "apt",
+      "package": "binutils",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "subfinder",
+      "probe_bin": "subfinder",
+      "install_method": "apt",
+      "package": "subfinder",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "terrascan",
+      "probe_bin": "terrascan",
+      "install_method": "github",
+      "package": "terrascan",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "trivy",
+      "probe_bin": "trivy",
+      "install_method": "github",
+      "package": "trivy",
+      "category": "cloud",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "volatility3",
+      "probe_bin": "volatility3",
+      "install_method": "pip",
+      "package": "volatility3",
+      "category": "forensics",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "wafw00f",
+      "probe_bin": "wafw00f",
+      "install_method": "apt",
+      "package": "wafw00f",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "waybackurls",
+      "probe_bin": "waybackurls",
+      "install_method": "go",
+      "package": "github.com/tomnomnom/waybackurls",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "wpscan",
+      "probe_bin": "wpscan",
+      "install_method": "apt",
+      "package": "wpscan",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "x8",
+      "probe_bin": "x8",
+      "install_method": "github",
+      "package": "x8",
+      "category": "recon",
+      "probe_kind": "bin",
+      "supported_platforms": [
+        "linux/amd64"
+      ]
+    },
+    {
+      "yaml_name": "xsser",
+      "probe_bin": "xsser",
+      "install_method": "apt",
+      "package": "xsser",
+      "category": "recon",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "xxd",
+      "probe_bin": "xxd",
+      "install_method": "apt",
+      "package": "xxd",
+      "category": "binary",
+      "probe_kind": "bin"
+    },
+    {
+      "yaml_name": "zsteg",
+      "probe_bin": "zsteg",
+      "install_method": "gem",
+      "package": "zsteg",
+      "category": "forensics",
+      "probe_kind": "bin"
+    }
+  ],
+  "notes": {
+    "architecture_sources": "waybackurls and jaeles use pinned Go module versions; rustscan uses SHA-256-pinned upstream AMD64/ARM64 release assets; pwninit and x8 use AMD64-only upstream release binaries and are explicitly skipped on ARM64",
+    "kali_platform_digests": "recorded for arm64 and amd64 under kali_platform_digests"
+  }
+}

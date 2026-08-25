@@ -60,7 +60,7 @@ agent_workspace_env=(
   --env XDG_CONFIG_HOME=/workspace/.config
   --env PIP_CACHE_DIR=/workspace/.cache/pip
   --env VIRTUAL_ENV=/workspace/.venv
-  --env PATH=/workspace/.venv/bin:/workspace/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  --env PATH=/workspace/.venv/bin:/workspace/.local/bin:/opt/tools-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 )
 agent_keepalive_script="umask 077; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; trap 'exit 0' TERM INT; while :; do sleep 3600; done"
 

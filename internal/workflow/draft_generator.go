@@ -85,7 +85,7 @@ var draftToolHints = []draftToolHint{
 	{Label: "漏洞扫描", Keywords: []string{"漏洞", "vuln", "漏洞扫描", "nuclei", "nikto", "zap"}, Tools: []string{"nuclei", "nikto", "zap"}},
 	{Label: "暴露面探测", Keywords: []string{"目录", "路径", "暴露页面", "dir", "ffuf", "gobuster", "feroxbuster"}, Tools: []string{"ffuf", "gobuster", "feroxbuster", "dirsearch"}},
 	{Label: "证书与域名线索收集", Keywords: []string{"证书", "certificate", "crt"}, Tools: []string{"subfinder"}},
-	{Label: "云配置审计", Keywords: []string{"云", "cloud", "配置审计", "prowler", "scout"}, Tools: []string{"prowler", "scout-suite"}},
+	{Label: "云配置审计", Keywords: []string{"云", "cloud", "配置审计", "scout"}, Tools: []string{"scout-suite"}},
 	{Label: "容器安全检查", Keywords: []string{"容器", "镜像", "k8s", "kubernetes", "trivy", "kube"}, Tools: []string{"trivy", "kube-bench", "kube-hunter"}},
 	{Label: "威胁情报收集", Keywords: []string{"情报", "威胁情报", "threat", "ioc", "virustotal", "shodan", "fofa"}, Tools: []string{"virustotal_search", "shodan_search", "fofa_search"}},
 }
