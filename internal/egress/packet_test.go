@@ -74,6 +74,62 @@ func TestPacketFilterDropsMalformedAndUnsupportedPackets(t *testing.T) {
 	}
 }
 
+func TestPacketDispositionRejectsOnlyEvaluatedTCPAndUDPPolicyDenials(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowed   bool
+		evaluated bool
+		kind      string
+		want      packetDisposition
+	}{
+		{name: "allowed TCP", allowed: true, evaluated: true, kind: ActivityRequestTCP, want: packetDispositionAccept},
+		{name: "blocked TCP", evaluated: true, kind: ActivityRequestTCP, want: packetDispositionReject},
+		{name: "blocked UDP", evaluated: true, kind: ActivityRequestUDP, want: packetDispositionReject},
+		{name: "blocked ICMP stays silent", evaluated: true, kind: ActivityRequestICMP, want: packetDispositionDrop},
+		{name: "malformed packet stays silent", kind: ActivityRequestTCP, want: packetDispositionDrop},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dispositionForPacket(test.allowed, test.evaluated, ActivityEvent{RequestType: test.kind}); got != test.want {
+				t.Fatalf("disposition = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestPacketFilterAppliesPortRulesIndependentlyDuringMixedScan(t *testing.T) {
+	now := time.Date(2026, 8, 25, 16, 0, 0, 0, time.UTC)
+	policy, err := boundary.NewPolicy([]boundary.Rule{
+		{
+			ID: "block-example-81", Effect: boundary.EffectBlocked,
+			Target: boundary.RuleTarget{Host: "example.com", Schemes: []string{"tcp"}, Ports: []int{81}},
+		},
+		{
+			ID: "allow-example", Effect: boundary.EffectAllowVisit,
+			Target: boundary.RuleTarget{Host: "example.com", Schemes: []string{"tcp"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := netip.MustParseAddr("93.184.216.34")
+	leases := NewDNSLeaseStore()
+	leases.Remember("example.com", []netip.Addr{address}, 60, now)
+	filter, err := newPacketFilter(policy, PacketOptions{Now: func() time.Time { return now }, DNSLeases: leases})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	allowed, event, evaluated := filter.evaluate(testIPv4Packet(6, address, 80))
+	if !evaluated || !allowed || event.RuleID != "allow-example" || dispositionForPacket(allowed, evaluated, event) != packetDispositionAccept {
+		t.Fatalf("allowed port decision = %#v, evaluated=%v allowed=%v", event, evaluated, allowed)
+	}
+	allowed, event, evaluated = filter.evaluate(testIPv4Packet(6, address, 81))
+	if !evaluated || allowed || event.RuleID != "block-example-81" || event.Reason != boundary.ReasonBlockedTarget || dispositionForPacket(allowed, evaluated, event) != packetDispositionReject {
+		t.Fatalf("blocked port decision = %#v, evaluated=%v allowed=%v", event, evaluated, allowed)
+	}
+}
+
 func testIPv4Packet(protocol byte, destination netip.Addr, port int) []byte {
 	length := 20
 	if protocol == 6 || protocol == 17 {

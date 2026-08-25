@@ -13,6 +13,19 @@ const (
 	defaultPacketQueueNumber = 100
 	maxPacketCaptureBytes    = 65535
 	maxPacketQueueLength     = 4096
+	// packetPolicyRejectMark is attached only to a parsed TCP/UDP packet that
+	// the immutable boundary policy denied. NF_REPEAT sends the marked packet
+	// back through the nftables chain, where it is rejected with an explicit
+	// administrative-prohibited response instead of being silently dropped.
+	packetPolicyRejectMark uint32 = 0x4353424b // "CSBK"
+)
+
+type packetDisposition uint8
+
+const (
+	packetDispositionDrop packetDisposition = iota
+	packetDispositionAccept
+	packetDispositionReject
 )
 
 type PacketOptions struct {
@@ -51,6 +64,21 @@ func newPacketFilter(policy *boundary.Policy, options PacketOptions) (*packetFil
 	return &packetFilter{policy: policy, now: now, activitySink: options.ActivitySink, dnsLeases: leases}, nil
 }
 
+// dispositionForPacket keeps malformed, unsupported and ICMP packets on the
+// fail-closed drop path. Only a fully parsed policy denial for TCP or UDP gets
+// an active rejection. This makes a mixed port scan fail fast per blocked
+// destination tuple without terminating or changing the verdict of any other
+// port in the same tool process.
+func dispositionForPacket(allowed, evaluated bool, event ActivityEvent) packetDisposition {
+	if allowed {
+		return packetDispositionAccept
+	}
+	if evaluated && (event.RequestType == ActivityRequestTCP || event.RequestType == ActivityRequestUDP) {
+		return packetDispositionReject
+	}
+	return packetDispositionDrop
+}
+
 // evaluate returns true only when the complete destination is approved. The
 // parser supports IPv4 TCP, UDP and ICMP, which are the protocols routed by the
 // per-conversation Docker networks. Anything malformed or unsupported is
@@ -84,9 +112,17 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 		emitActivity(f.activitySink, event)
 		return false, event, true
 	}
+	var explicitDenial *boundary.Decision
 	for _, domain := range f.dnsLeases.Domains(target.address, now) {
 		decision, decisionErr := f.policy.EvaluateNetwork(domain, target.port, target.protocol, []netip.Addr{target.address}, now)
-		if decisionErr != nil || !decision.Allowed {
+		if decisionErr != nil {
+			continue
+		}
+		if !decision.Allowed {
+			if decision.RuleID != "" && explicitDenial == nil {
+				copy := decision
+				explicitDenial = &copy
+			}
 			continue
 		}
 		event.Domain = domain
@@ -95,6 +131,11 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 		event.Decision, event.Outcome = ActivityDecisionAllowed, "forwarded"
 		emitActivity(f.activitySink, event)
 		return true, event, true
+	}
+	if explicitDenial != nil {
+		event.Domain = explicitDenial.Target.Host
+		event.ResolvedIPs = []string{target.address.String()}
+		event.RuleID, event.Reason = explicitDenial.RuleID, explicitDenial.Reason
 	}
 	emitActivity(f.activitySink, event)
 	return false, event, true

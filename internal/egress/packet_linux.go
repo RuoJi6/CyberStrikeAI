@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"strconv"
 	"sync"
 	"time"
 
@@ -49,12 +48,25 @@ func startPacketGateway(ctx context.Context, policy *boundary.Policy, options Pa
 			return 0
 		}
 		verdict := nfqueue.NfDrop
+		var verdictErr error
 		if attribute.Payload != nil {
-			if allowed, _, _ := filter.evaluate(*attribute.Payload); allowed {
+			allowed, event, evaluated := filter.evaluate(*attribute.Payload)
+			switch dispositionForPacket(allowed, evaluated, event) {
+			case packetDispositionAccept:
 				verdict = nfqueue.NfAccept
+			case packetDispositionReject:
+				verdict = nfqueue.NfRepeat
+				verdictErr = queue.SetVerdictWithOption(
+					*attribute.PacketID,
+					nfqueue.NfRepeat,
+					nfqueue.WithMark(packetPolicyRejectMark),
+				)
 			}
 		}
-		if verdictErr := queue.SetVerdict(*attribute.PacketID, verdict); verdictErr != nil {
+		if verdictErr == nil && verdict != nfqueue.NfRepeat {
+			verdictErr = queue.SetVerdict(*attribute.PacketID, verdict)
+		}
+		if verdictErr != nil {
 			select {
 			case queueErrors <- verdictErr:
 			default:
@@ -117,20 +129,22 @@ func (g *packetGateway) Done() <-chan error {
 
 func installPacketFirewall(ctx context.Context, queueNumber uint16) error {
 	_ = removePacketFirewall()
-	rules := `table inet cyberstrike {
+	rules := fmt.Sprintf(`table inet cyberstrike {
   chain forward {
     type filter hook forward priority filter; policy drop;
+    meta mark 0x%08x ip protocol tcp reject with icmpx type admin-prohibited
+    meta mark 0x%08x ip protocol udp reject with icmpx type admin-prohibited
     ct state established,related accept
     ct state invalid drop
-    ip protocol tcp ct state new queue num ` + strconv.Itoa(int(queueNumber)) + `
-    ip protocol udp ct state new queue num ` + strconv.Itoa(int(queueNumber)) + `
-    ip protocol icmp ct state new queue num ` + strconv.Itoa(int(queueNumber)) + `
+    ip protocol tcp ct state new queue num %d
+    ip protocol udp ct state new queue num %d
+    ip protocol icmp ct state new queue num %d
   }
   chain postrouting {
     type nat hook postrouting priority srcnat; policy accept;
     oifname != "lo" masquerade
   }
-}`
+}`, packetPolicyRejectMark, packetPolicyRejectMark, queueNumber, queueNumber, queueNumber)
 	command := exec.CommandContext(ctx, "nft", "-f", "-")
 	command.Stdin = bytes.NewBufferString(rules)
 	if output, err := command.CombinedOutput(); err != nil {
