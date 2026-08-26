@@ -628,6 +628,50 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 				return containerruntime.InitializationRecord{}, fmt.Errorf("complete pending boundary rebuild: %w", err)
 			}
 		}
+		var egressMode, egressSource, routeID, routeSHA256 string
+		var egressProxyID, egressProxyGroupID sql.NullString
+		var expectedEgressGeneration int
+		egressErr := tx.QueryRowContext(ctx, `
+			SELECT mode, proxy_id, proxy_group_id, source, route_id, route_sha256, expected_runtime_generation
+			FROM conversation_egress_rebuilds WHERE conversation_id = ? AND interrupted = 0
+		`, strings.TrimSpace(conversationID)).Scan(
+			&egressMode, &egressProxyID, &egressProxyGroupID, &egressSource,
+			&routeID, &routeSHA256, &expectedEgressGeneration,
+		)
+		switch {
+		case errors.Is(egressErr, sql.ErrNoRows):
+		case egressErr != nil:
+			return containerruntime.InitializationRecord{}, fmt.Errorf("load pending egress rebuild: %w", egressErr)
+		default:
+			var runtimeGeneration int
+			if err := tx.QueryRowContext(ctx, `SELECT runtime_generation FROM conversation_container_runtimes WHERE conversation_id = ?`, strings.TrimSpace(conversationID)).Scan(&runtimeGeneration); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load egress rebuild generation: %w", err)
+			}
+			if runtimeGeneration != expectedEgressGeneration {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: egress rebuild expected runtime generation %d, got %d", containerruntime.ErrRuntimeStateConflict, expectedEgressGeneration, runtimeGeneration)
+			}
+			if completion.ReplacementSpec == nil || completion.ReplacementSpec.EgressGateway == nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: egress rebuild did not replace the runtime specification", containerruntime.ErrRuntimeStateConflict)
+			}
+			requestedRoute := completion.ReplacementSpec.EgressGateway.UpstreamRoute
+			if routeID == "" || routeSHA256 == "" {
+				if requestedRoute != nil {
+					return containerruntime.InitializationRecord{}, fmt.Errorf("%w: direct egress rebuild retained an upstream route", containerruntime.ErrRuntimeStateConflict)
+				}
+			} else if requestedRoute == nil || requestedRoute.ID != routeID || requestedRoute.SHA256 != routeSHA256 {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: rebuilt upstream route does not match the staged binding", containerruntime.ErrRuntimeStateConflict)
+			}
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE conversation_egress_bindings
+				SET mode = ?, proxy_id = NULLIF(?, ''), proxy_group_id = NULLIF(?, ''), source = ?, bound_at = ?
+				WHERE conversation_id = ?
+			`, egressMode, egressProxyID.String, egressProxyGroupID.String, egressSource, formatSQLiteUTC(time.Now().UTC()), strings.TrimSpace(conversationID)); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("activate rebuilt conversation egress binding: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_egress_rebuilds WHERE conversation_id = ?`, strings.TrimSpace(conversationID)); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("complete conversation egress rebuild: %w", err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return containerruntime.InitializationRecord{}, fmt.Errorf("commit container lifecycle %s: %w", operation, err)
@@ -819,6 +863,30 @@ func validateLifecycleSpecReplacement(
 			changed = true
 		}
 	}
+	if replacement.EgressGateway != nil && current.EgressGateway != nil && current.EgressGateway.BoundarySnapshot != nil {
+		var currentRoute *containerruntime.EgressUpstreamRouteSpec
+		if current.EgressGateway != nil {
+			currentRoute = current.EgressGateway.UpstreamRoute
+		}
+		requestedRoute := replacement.EgressGateway.UpstreamRoute
+		if !sameEgressUpstreamRoute(currentRoute, requestedRoute) {
+			if err := validateLifecycleUpstreamRoute(ctx, tx, conversationID, operation, requestedRoute); err != nil {
+				return 0, "", err
+			}
+			if expected.EgressGateway == nil {
+				return 0, "", fmt.Errorf("%w: upstream route requires an egress gateway", containerruntime.ErrRuntimeStateConflict)
+			}
+			gateway := *expected.EgressGateway
+			if requestedRoute == nil {
+				gateway.UpstreamRoute = nil
+			} else {
+				route := *requestedRoute
+				gateway.UpstreamRoute = &route
+			}
+			expected.EgressGateway = &gateway
+			changed = true
+		}
+	}
 	if replacement.EgressGateway != nil && replacement.EgressGateway.BoundarySnapshot != nil {
 		var currentAuthProfiles *containerruntime.EgressAuthProfilesSpec
 		if current.EgressGateway != nil {
@@ -844,7 +912,7 @@ func validateLifecycleSpecReplacement(
 		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
 	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, refresh the pinned egress gateway, bind an authorized boundary snapshot, and update gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, refresh the pinned egress gateway, bind authorized boundary/upstream material, and update gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {
@@ -858,6 +926,38 @@ func sameEgressBoundarySnapshot(left, right *containerruntime.EgressBoundarySnap
 		return left == nil && right == nil
 	}
 	return left.ID == right.ID && left.SHA256 == right.SHA256
+}
+
+func sameEgressUpstreamRoute(left, right *containerruntime.EgressUpstreamRouteSpec) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.ID == right.ID && left.SHA256 == right.SHA256
+}
+
+func validateLifecycleUpstreamRoute(ctx context.Context, tx *sql.Tx, conversationID string, operation containerruntime.LifecycleOperation, requested *containerruntime.EgressUpstreamRouteSpec) error {
+	if operation != containerruntime.LifecycleOperationRebuild {
+		return fmt.Errorf("%w: upstream route replacement requires rebuild", containerruntime.ErrRuntimeStateConflict)
+	}
+	var routeID, routeSHA256 string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT route_id, route_sha256 FROM conversation_egress_rebuilds WHERE conversation_id = ? AND interrupted = 0
+	`, strings.TrimSpace(conversationID)).Scan(&routeID, &routeSHA256); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: upstream route replacement is not authorized", containerruntime.ErrRuntimeStateConflict)
+		}
+		return err
+	}
+	if routeID == "" || routeSHA256 == "" {
+		if requested != nil {
+			return fmt.Errorf("%w: staged direct egress requires no upstream route", containerruntime.ErrRuntimeStateConflict)
+		}
+		return nil
+	}
+	if requested == nil || requested.ID != routeID || requested.SHA256 != routeSHA256 {
+		return fmt.Errorf("%w: upstream route does not match the staged egress rebuild", containerruntime.ErrRuntimeStateConflict)
+	}
+	return nil
 }
 
 func sameEgressAuthProfiles(left, right *containerruntime.EgressAuthProfilesSpec) bool {

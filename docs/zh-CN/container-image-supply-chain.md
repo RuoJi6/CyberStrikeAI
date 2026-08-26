@@ -7,14 +7,14 @@ CyberStrikeAI 当前使用 Docker Hub 上的自有多架构 Agent 镜像，不�
 | 项目 | 值 |
 | --- | --- |
 | 仓库 | `ruoji6/cyberstrikeai-agent` |
-| 版本标签 | `full-tools-slim2-20260825`、`latest` |
-| 多架构 index digest | `sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50` |
-| ARM64 manifest | `sha256:13b24dec5541d7bac77ce439c7dab5044a2fd5775987924e5bbdd9414e354b8f` |
-| AMD64 manifest | `sha256:4e8d11662efa90c700a3d48241fa303f992d6ad04a195323a0da8fc329736b85` |
+| 版本标签 | `full-tools-seclists-20260826`、`latest` |
+| 多架构 index digest | `sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d` |
+| ARM64 manifest | `sha256:aeacc44686dc93697ede82ab6f1455d49b691b1d70372f1ff8363d38d18ffa1a` |
+| AMD64 manifest | `sha256:ae742a453c3627ed984c4a174b83d37a6a5c2404f5c5a171b28fa60e70570dc4` |
 | ARM64 inventory | `container/agent-tool-inventory-linux-arm64.json` |
-| inventory 内容摘要 | `sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4` |
+| inventory 内容摘要 | `sha256:83173e182532f08cbbfc67ab2083a3c09e4df428a139a096c4a29b10e1d66759` |
 
-`latest` 与版本标签当前指向同一个 index digest。ARM64 虚拟机从 Hub 直接拉取该镜像，并以 `repository@digest` 运行；本地 tag 不能替代 digest 校验。该 digest 已通过 ARM64 全工具功能门禁和无网络容器安全冒烟，包括 `/usr/local/bin/amass` wrapper。生产配置和 inventory 已切换到该 digest；旧 Agent 镜像仅因仍有现存对话容器引用而保留，不得强制删除。
+`latest` 当前指向上述 index digest。ARM64 虚拟机从 Hub 直接拉取该镜像，并以 `repository@digest` 运行；本地 tag 不能替代 digest 校验。该 digest 已通过 77/77 配置覆盖、75/77 ARM64 平台支持、全工具功能探针和无网络容器安全冒烟。
 
 ## 当前 Egress 发布版本
 
@@ -40,7 +40,7 @@ Egress 镜像也从 Docker Hub 按 index digest 拉取。ARM64 镜像已通过�
 
 镜像基于 digest 锁定的官方 Kali Rolling 基础镜像，通过仓库内的 Dockerfile、工具映射和锁文件构建。非 APT 制品必须锁定版本/提交和 SHA-256；发布前运行配置覆盖、平台映射和镜像内探针。
 
-本次候选由用户提供的 Docker Build Cloud 制品发布，不是 GitHub Actions 构建。OCI `revision` 标签为干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb`，版本标签为 `full-tools-slim2-20260825`；ARM64 镜像已通过 Amass 和其余平台声明支持工具的功能探针。
+本次候选由用户提供的 Docker Build Cloud 制品发布，不是 GitHub Actions 构建。OCI `revision` 标签为干净提交 `21b1ca30dfda14092a52225a0e1f2ef09572de76`，版本标签为 `full-tools-seclists-20260826`；ARM64 镜像已通过全工具功能探针。
 
 `scripts/verify-container-release.sh` 支持分别传入 Agent 与 Egress revision，因为两个镜像可以由不同的干净提交发布。当前 ARM64 镜像组合已通过禁网 SPDX 2.3 OS 软件包清单与 `SHA256SUMS` 回读（Agent 859 个包、Egress 112 个包）；独立的 Agent 工具 inventory 仍是镜像内安全工具功能范围的权威依据。
 

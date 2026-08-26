@@ -132,7 +132,9 @@ func TestPacketFilterAppliesPortRulesIndependentlyDuringMixedScan(t *testing.T) 
 
 func testIPv4Packet(protocol byte, destination netip.Addr, port int) []byte {
 	length := 20
-	if protocol == 6 || protocol == 17 {
+	if protocol == 6 {
+		length += 20
+	} else if protocol == 17 || protocol == 1 {
 		length += 8
 	}
 	packet := make([]byte, length)
@@ -146,5 +148,41 @@ func testIPv4Packet(protocol byte, destination netip.Addr, port int) []byte {
 		binary.BigEndian.PutUint16(packet[20:22], 40000)
 		binary.BigEndian.PutUint16(packet[22:24], uint16(port))
 	}
+	if protocol == 6 {
+		packet[32] = 0x50
+		packet[33] = 0x02
+	}
+	if protocol == 1 {
+		packet[20] = 8
+	}
 	return packet
+}
+
+func TestPacketFilterAuditsOnlyNewTCPAttempts(t *testing.T) {
+	policy, err := boundary.NewPolicyWithDefault(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []ActivityEvent
+	filter, err := newPacketFilter(policy, PacketOptions{ActivitySink: func(event ActivityEvent) { events = append(events, event) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := netip.MustParseAddr("47.116.200.74")
+	syn := testIPv4Packet(6, target, 3306)
+	ack := append([]byte(nil), syn...)
+	ack[33] = 0x10
+	data := append([]byte(nil), syn...)
+	data[33] = 0x18
+	retransmittedSyn := append([]byte(nil), syn...)
+	newConnection := append([]byte(nil), syn...)
+	binary.BigEndian.PutUint16(newConnection[20:22], 40001)
+	for _, packet := range [][]byte{syn, retransmittedSyn, ack, data, newConnection} {
+		if allowed, _, parsed := filter.evaluate(packet); !parsed || !allowed {
+			t.Fatalf("packet parsed=%v allowed=%v", parsed, allowed)
+		}
+	}
+	if len(events) != 2 || events[0].Port != 3306 || events[1].Port != 3306 {
+		t.Fatalf("TCP activity events = %#v", events)
+	}
 }

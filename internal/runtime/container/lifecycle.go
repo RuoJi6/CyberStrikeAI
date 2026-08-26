@@ -47,6 +47,12 @@ type LifecycleFailure struct {
 }
 
 type boundaryRebuildSnapshotContextKey struct{}
+type egressRebuildRouteContextKey struct{}
+
+type egressRebuildRouteContext struct {
+	Present bool
+	Route   *EgressUpstreamRouteSpec
+}
 
 // WithBoundaryRebuildSnapshot binds one prepared immutable snapshot to the
 // explicit rebuild request that is allowed to activate it.
@@ -63,6 +69,35 @@ func BoundaryRebuildSnapshotFromContext(ctx context.Context) string {
 	}
 	value, _ := ctx.Value(boundaryRebuildSnapshotContextKey{}).(string)
 	return strings.TrimSpace(value)
+}
+
+// WithEgressRebuildRoute authorizes one staged upstream route replacement.
+// A nil route is meaningful and switches the rebuilt gateway to direct egress.
+func WithEgressRebuildRoute(ctx context.Context, route *EgressUpstreamRouteSpec) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	value := egressRebuildRouteContext{Present: true}
+	if route != nil {
+		copy := *route
+		value.Route = &copy
+	}
+	return context.WithValue(ctx, egressRebuildRouteContextKey{}, value)
+}
+
+func EgressRebuildRouteFromContext(ctx context.Context) (*EgressUpstreamRouteSpec, bool) {
+	if ctx == nil {
+		return nil, false
+	}
+	value, ok := ctx.Value(egressRebuildRouteContextKey{}).(egressRebuildRouteContext)
+	if !ok || !value.Present {
+		return nil, false
+	}
+	if value.Route == nil {
+		return nil, true
+	}
+	copy := *value.Route
+	return &copy, true
 }
 
 // LifecycleStore is the durable compare-and-swap boundary for runtime
@@ -448,6 +483,7 @@ func lifecycleFailureAfterRebuild(original, target InitializationRecord, runtime
 }
 
 func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec RuntimeSpec, requestedSnapshotID string) (RuntimeSpec, error) {
+	requestedRoute, replaceRoute := EgressRebuildRouteFromContext(ctx)
 	if spec.Security.NetworkMode == NetworkNone {
 		spec.Security.NetworkMode = NetworkInternal
 	}
@@ -489,6 +525,11 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway.TLSAuthority = authority
 			spec.EgressGateway = &gateway
 		}
+		if replaceRoute {
+			gateway := *spec.EgressGateway
+			gateway.UpstreamRoute = requestedRoute
+			spec.EgressGateway = &gateway
+		}
 		if err := ValidateSpec(spec); err != nil {
 			return RuntimeSpec{}, err
 		}
@@ -507,6 +548,9 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 	}
 	gateway := *spec.EgressGateway
 	gateway.BoundarySnapshot = &snapshot
+	if replaceRoute {
+		gateway.UpstreamRoute = requestedRoute
+	}
 	if c.authProfiles != nil {
 		authProfiles, authErr := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, requestedSnapshotID)
 		if authErr != nil {

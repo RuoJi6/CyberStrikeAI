@@ -354,6 +354,12 @@ type ActivityStreamOptions struct {
 	// It is reserved for the trusted persistent audit collector; HTTP callers
 	// remain limited to Tail <= 500.
 	All bool
+	// ReplayComplete is called after the bounded historical tail has been
+	// delivered and before live following begins. Callers use this trusted
+	// boundary to flush historical aggregation without weakening the longer
+	// idle window used for live fuzz traffic. Complete audit collectors leave
+	// it nil because their unbounded replay intentionally has no such boundary.
+	ReplayComplete func() error
 }
 
 type RuntimeActivitySink func(egress.ActivityEvent) error

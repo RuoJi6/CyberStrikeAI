@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"cyberstrike-ai/internal/egress"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 )
 
 func createConversationEgressResources(t *testing.T, db *DB) (EgressProxy, EgressProxyGroup) {
@@ -31,6 +32,98 @@ func createConversationEgressResources(t *testing.T, db *DB) (EgressProxy, Egres
 		t.Fatal(err)
 	}
 	return proxy, group
+}
+
+func TestConversationEgressRebuildActivatesOnlyWithMatchingRuntimeGeneration(t *testing.T) {
+	db := newEgressProxyTestDB(t)
+	proxy, _ := createConversationEgressResources(t, db)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("egress rebuild", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnsureConversationEgressBinding(ctx, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := databaseRuntimeSpec(conversation.ID)
+	spec.Security.NetworkMode = containerruntime.NetworkInternal
+	spec.EgressGateway = databaseGatewaySpec()
+	spec.EgressGateway.BoundarySnapshot = &containerruntime.EgressBoundarySnapshotSpec{ID: snapshot.SnapshotID, SHA256: snapshot.SHA256}
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{ID: spec.ID, ProviderID: "egress-before", Status: containerruntime.StatusStopped}); err != nil {
+		t.Fatal(err)
+	}
+
+	inherited, err := db.PrepareConversationEgressRebuild(ctx, conversation.ID, "", "", "", true)
+	if err != nil || inherited.Binding.Source != ConversationEgressSourceNone || inherited.Binding.Mode != ConversationEgressModeNone {
+		t.Fatalf("inherited rebuild = %#v, %v", inherited, err)
+	}
+	if err := db.CancelConversationEgressRebuild(ctx, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	interrupted, err := db.PrepareConversationEgressRebuild(ctx, conversation.ID, ConversationEgressModeProxy, proxy.ID, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PrepareConversationEgressRebuild(ctx, conversation.ID, ConversationEgressModeProxy, proxy.ID, "", false); !errors.Is(err, ErrConversationEgressRebuildPending) {
+		t.Fatalf("concurrent egress rebuild error = %v", err)
+	}
+	if count, err := db.MarkPendingConversationEgressRebuildsInterrupted(ctx); err != nil || count != 1 {
+		t.Fatalf("mark interrupted = %d, %v", count, err)
+	}
+	activeBeforeRetry, err := db.GetConversationEgressBinding(ctx, conversation.ID)
+	if err != nil || activeBeforeRetry.Mode != ConversationEgressModeNone {
+		t.Fatalf("interrupted rebuild changed active binding = %#v, %v", activeBeforeRetry, err)
+	}
+	prepared, err := db.PrepareConversationEgressRebuild(ctx, conversation.ID, ConversationEgressModeProxy, proxy.ID, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepared.RouteID == interrupted.RouteID {
+		t.Fatalf("retry reused immutable route id %q", prepared.RouteID)
+	}
+	route := &containerruntime.EgressUpstreamRouteSpec{ID: prepared.RouteID, SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+	if err := db.SetConversationEgressRebuildRouteReference(ctx, conversation.ID, route.ID, route.SHA256); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	replacement := spec
+	replacement.EgressGateway = &containerruntime.EgressGatewaySpec{}
+	*replacement.EgressGateway = *spec.EgressGateway
+	replacement.EgressGateway.UpstreamRoute = route
+	completed, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: containerruntime.Runtime{
+			ID: spec.ID, ProviderID: "egress-after", Status: containerruntime.StatusStopped,
+			Image: replacement.Image, SpecDigest: containerruntime.RuntimeSpecDigest(replacement),
+		},
+		IncrementGeneration: true, ReplacementSpec: &replacement,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.RuntimeGeneration != prepared.ExpectedRuntimeGeneration {
+		t.Fatalf("generation = %d", completed.RuntimeGeneration)
+	}
+	active, err := db.GetConversationEgressBinding(ctx, conversation.ID)
+	if err != nil || active.Mode != ConversationEgressModeProxy || active.Proxy == nil || active.Proxy.ID != proxy.ID {
+		t.Fatalf("active egress = %#v, %v", active, err)
+	}
+	var pending int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversation_egress_rebuilds WHERE conversation_id = ?`, conversation.ID).Scan(&pending); err != nil || pending != 0 {
+		t.Fatalf("pending = %d, %v", pending, err)
+	}
 }
 
 func TestConversationEgressSelectionCreateUpdateFreezeAndSafeProjection(t *testing.T) {

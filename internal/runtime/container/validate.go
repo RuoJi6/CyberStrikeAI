@@ -82,11 +82,15 @@ func ValidateSpec(spec RuntimeSpec) error {
 		if err := ValidateEgressGatewaySpec(*spec.EgressGateway); err != nil {
 			return err
 		}
-		if spec.EgressGateway.UpstreamRoute != nil && spec.EgressGateway.UpstreamRoute.ID != spec.ConversationID {
+		if spec.EgressGateway.UpstreamRoute != nil && !upstreamRouteBoundToConversation(spec.EgressGateway.UpstreamRoute.ID, spec.ConversationID) {
 			return invalidSpec("egress gateway upstream route must be bound to the conversation")
 		}
 	}
 	return nil
+}
+
+func upstreamRouteBoundToConversation(routeID, conversationID string) bool {
+	return routeID == conversationID || strings.HasPrefix(routeID, conversationID+"-egress-")
 }
 
 // ValidateEgressGatewaySpec rejects an unpinned or effectively unlimited

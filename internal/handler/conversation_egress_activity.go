@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/egressactivity"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"github.com/gin-gonic/gin"
@@ -23,6 +24,12 @@ type conversationEgressActivityView struct {
 	ConversationTitle string `json:"conversationTitle"`
 	Agent             string `json:"agent"`
 	Tool              string `json:"tool"`
+}
+
+type conversationEgressActivityStreamItem struct {
+	event          egress.ActivityEvent
+	hasEvent       bool
+	replayComplete bool
 }
 
 // StreamConversationEgressActivity streams a verified gateway log as SSE.
@@ -61,6 +68,11 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "对话容器网关尚未就绪", "code": "not_ready"})
 		return
 	}
+	auditSetting, settingErr := h.db.GetConversationEgressAuditSetting(c.Request.Context(), id)
+	activityMode := egressactivity.ModeCompact
+	if settingErr == nil && auditSetting.Mode == egressactivity.ModeFull {
+		activityMode = egressactivity.ModeFull
+	}
 	tail, err := strconv.Atoi(c.DefaultQuery("tail", "100"))
 	if err != nil || tail < 1 || tail > 500 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "tail 必须为 1 到 500 的整数"})
@@ -81,13 +93,23 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 		return
 	}
 
-	activity := make(chan egress.ActivityEvent, 64)
+	activity := make(chan conversationEgressActivityStreamItem, 64)
 	streamDone := make(chan error, 1)
 	ctx := c.Request.Context()
 	go func() {
-		err := h.egressActivityStreamer.StreamEgressActivity(ctx, record.Spec, containerruntime.ActivityStreamOptions{Tail: tail}, func(event egress.ActivityEvent) error {
+		err := h.egressActivityStreamer.StreamEgressActivity(ctx, record.Spec, containerruntime.ActivityStreamOptions{
+			Tail: tail,
+			ReplayComplete: func() error {
+				select {
+				case activity <- conversationEgressActivityStreamItem{replayComplete: true}:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			},
+		}, func(event egress.ActivityEvent) error {
 			select {
-			case activity <- event:
+			case activity <- conversationEgressActivityStreamItem{event: event, hasEvent: true}:
 				return nil
 			case <-ctx.Done():
 				return ctx.Err()
@@ -99,6 +121,21 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 
 	keepalive := time.NewTicker(egressActivityKeepaliveInterval)
 	defer keepalive.Stop()
+	aggregateTicker := time.NewTicker(100 * time.Millisecond)
+	defer aggregateTicker.Stop()
+	aggregator := egressactivity.New(egressactivity.DefaultConfig())
+	writeActivities := func(events []egress.ActivityEvent) error {
+		for _, event := range events {
+			view := conversationEgressActivityView{
+				ActivityEvent: event, ConversationID: id, ConversationTitle: conversation.Title,
+				Agent: "container-agent", Tool: "",
+			}
+			if err := writeConversationActivitySSE(c.Writer, flusher, "activity", view); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -108,19 +145,36 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 				return
 			}
 			flusher.Flush()
-		case event, open := <-activity:
+		case now := <-aggregateTicker.C:
+			if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushExpired(now.UTC())) != nil {
+				return
+			}
+		case item, open := <-activity:
 			if !open {
+				if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushAll()) != nil {
+					return
+				}
 				streamErr := <-streamDone
 				if ctx.Err() == nil {
 					_ = writeConversationActivitySSE(c.Writer, flusher, "stream_error", gin.H{"code": safeEgressActivityStreamError(streamErr)})
 				}
 				return
 			}
-			view := conversationEgressActivityView{
-				ActivityEvent: event, ConversationID: id, ConversationTitle: conversation.Title,
-				Agent: "container-agent", Tool: "",
+			if item.replayComplete {
+				if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushAll()) != nil {
+					return
+				}
+				continue
 			}
-			if err := writeConversationActivitySSE(c.Writer, flusher, "activity", view); err != nil {
+			if !item.hasEvent {
+				continue
+			}
+			event := item.event
+			outgoing := []egress.ActivityEvent{event}
+			if activityMode == egressactivity.ModeCompact && event.RequestType != egress.ActivityRequestHealth {
+				outgoing = aggregator.ObserveAt(event, time.Now().UTC())
+			}
+			if err := writeActivities(outgoing); err != nil {
 				return
 			}
 		}

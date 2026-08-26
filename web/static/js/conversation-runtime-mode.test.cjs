@@ -35,7 +35,8 @@ test('存量对话空闲时可切换执行位置，运行中保持锁定', () =>
     assert.match(chat, /apiFetch\(`\/api\/conversations\/\$\{encodeURIComponent\(existingConversationId\)\}\/runtime-mode`/);
     assert.match(chat, /method: 'PUT'[\s\S]{0,140}runtimeMode: normalized/);
     assert.match(chat, /updateChatPrimaryActionState\(\)[\s\S]{0,180}setChatRuntimeModeLocked\(running\)/);
-    assert.match(chat, /setConversationContainerControlsLocked\(taskLocked \|\| existingConversation\)/);
+    assert.match(chat, /setConversationContainerControlsLocked\(taskLocked\)/);
+    assert.doesNotMatch(chat, /setConversationContainerControlsLocked\(taskLocked \|\| existingConversation\)/);
     for (const locale of [zh, en]) {
         assert.equal(typeof locale.chat.runtimeModeSwitchRunning, 'string');
         assert.equal(typeof locale.chat.runtimeModeSwitchSuccess, 'string');

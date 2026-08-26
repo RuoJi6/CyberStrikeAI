@@ -137,9 +137,64 @@ func (m *DockerManager) StreamEgressActivity(ctx context.Context, spec RuntimeSp
 	if !ok {
 		return fmt.Errorf("%w: engine log streaming is unavailable", ErrEngineUnavailable)
 	}
-	logs, err := logsAPI.ContainerLogs(ctx, observation.Gateway.ProviderID, mobyclient.ContainerLogsOptions{
-		ShowStdout: true, ShowStderr: false, Follow: true, Tail: tailValue,
+	providerID := observation.Gateway.ProviderID
+	if options.All {
+		return streamVerifiedGatewayActivityLogs(ctx, logsAPI, providerID, mobyclient.ContainerLogsOptions{
+			ShowStdout: true, ShowStderr: false, Follow: true, Tail: tailValue,
+		}, spec, sink)
+	}
+
+	// Docker does not expose an in-band delimiter between an initial Tail and
+	// the subsequent Follow stream. Read them in two phases around one cutoff
+	// so HTTP callers can render history immediately while still following
+	// events emitted during the replay. Since/Until can overlap at the cutoff;
+	// replayCounts removes only exact boundary duplicates.
+	cutoff := time.Now().UTC()
+	replayCounts := make(map[string]int, options.Tail)
+	if err := streamVerifiedGatewayActivityLogs(ctx, logsAPI, providerID, mobyclient.ContainerLogsOptions{
+		ShowStdout: true, ShowStderr: false, Follow: false, Tail: tailValue,
+		Until: cutoff.Format(time.RFC3339Nano),
+	}, spec, func(event egress.ActivityEvent) error {
+		replayCounts[activityEventFingerprint(event)]++
+		return sink(event)
+	}); err != nil {
+		return err
+	}
+	if options.ReplayComplete != nil {
+		if err := options.ReplayComplete(); err != nil {
+			return err
+		}
+	}
+	return streamVerifiedGatewayActivityLogs(ctx, logsAPI, providerID, mobyclient.ContainerLogsOptions{
+		ShowStdout: true, ShowStderr: false, Follow: true, Tail: "0",
+		Since: cutoff.Format(time.RFC3339Nano),
+	}, spec, func(event egress.ActivityEvent) error {
+		key := activityEventFingerprint(event)
+		if !event.Timestamp.After(cutoff) && replayCounts[key] > 0 {
+			replayCounts[key]--
+			if replayCounts[key] == 0 {
+				delete(replayCounts, key)
+			}
+			return nil
+		}
+		return sink(event)
 	})
+}
+
+func activityEventFingerprint(event egress.ActivityEvent) string {
+	encoded, _ := json.Marshal(event)
+	return string(encoded)
+}
+
+func streamVerifiedGatewayActivityLogs(
+	ctx context.Context,
+	logsAPI dockerContainerLogsAPI,
+	providerID string,
+	options mobyclient.ContainerLogsOptions,
+	spec RuntimeSpec,
+	sink RuntimeActivitySink,
+) error {
+	logs, err := logsAPI.ContainerLogs(ctx, providerID, options)
 	if err != nil {
 		return fmt.Errorf("stream verified egress gateway logs: %w", err)
 	}

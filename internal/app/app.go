@@ -569,6 +569,26 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		conversationHandler.SetContainerInteractiveExecutor(containerManager)
 		conversationHandler.SetEgressActivityStreamer(containerManager)
 		conversationHandler.SetEgressHealthController(containerManager)
+		conversationHandler.SetConversationEgressRebuildPreparer(func(ctx context.Context, conversationID, mode, proxyID, proxyGroupID string, inherit bool) (*containerruntime.EgressUpstreamRouteSpec, error) {
+			prepared, err := db.PrepareConversationEgressRebuild(ctx, conversationID, mode, proxyID, proxyGroupID, inherit)
+			if err != nil {
+				return nil, err
+			}
+			route, err := materializeConversationUpstreamRouteWithID(ctx, db, credentialCipher, containerUpstreamStore, prepared.Binding, prepared.RouteID)
+			if err != nil {
+				_ = db.CancelConversationEgressRebuild(context.Background(), conversationID)
+				return nil, err
+			}
+			routeID, routeSHA256 := "", ""
+			if route != nil {
+				routeID, routeSHA256 = route.ID, route.SHA256
+			}
+			if err := db.SetConversationEgressRebuildRouteReference(ctx, conversationID, routeID, routeSHA256); err != nil {
+				_ = db.CancelConversationEgressRebuild(context.Background(), conversationID)
+				return nil, err
+			}
+			return route, nil
+		})
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger)
@@ -1278,6 +1298,7 @@ func setupRoutes(
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)
 		protected.POST("/conversations/:id/container/rebuild", conversationHandler.RebuildConversationContainer)
+		protected.GET("/conversations/:id/container/network-settings", conversationHandler.GetConversationContainerNetworkSettings)
 		protected.POST("/conversations/:id/container/reconcile", conversationHandler.ReconcileConversationContainer)
 		protected.DELETE("/conversations/:id/container", conversationHandler.DeleteConversationContainer)
 		protected.GET("/conversations/:id/plan-tasks", conversationHandler.GetConversationPlanTasks)

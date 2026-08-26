@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"github.com/google/uuid"
 )
 
 const createConversationEgressTables = `
@@ -44,6 +45,28 @@ CREATE TABLE IF NOT EXISTS conversation_egress_bindings (
 		OR (mode = 'group' AND proxy_id IS NULL AND proxy_group_id IS NOT NULL AND length(trim(proxy_group_id)) > 0)
 	),
 	CHECK (source <> 'none' OR mode = 'none')
+);
+
+CREATE TABLE IF NOT EXISTS conversation_egress_rebuilds (
+	conversation_id TEXT PRIMARY KEY,
+	mode TEXT NOT NULL CHECK (mode IN ('none', 'proxy', 'group')),
+	proxy_id TEXT,
+	proxy_group_id TEXT,
+	source TEXT NOT NULL CHECK (source IN ('none', 'conversation', 'project', 'user')),
+	route_id TEXT NOT NULL DEFAULT '',
+	route_sha256 TEXT NOT NULL DEFAULT '',
+	expected_runtime_generation INTEGER NOT NULL CHECK (expected_runtime_generation > 0),
+	interrupted INTEGER NOT NULL DEFAULT 0 CHECK (interrupted IN (0, 1)),
+	prepared_at DATETIME NOT NULL,
+	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+	FOREIGN KEY (proxy_id) REFERENCES egress_proxies(id) ON DELETE RESTRICT,
+	FOREIGN KEY (proxy_group_id) REFERENCES egress_proxy_groups(id) ON DELETE RESTRICT,
+	CHECK (
+		(mode = 'none' AND proxy_id IS NULL AND proxy_group_id IS NULL)
+		OR (mode = 'proxy' AND proxy_id IS NOT NULL AND length(trim(proxy_id)) > 0 AND proxy_group_id IS NULL)
+		OR (mode = 'group' AND proxy_id IS NULL AND proxy_group_id IS NOT NULL AND length(trim(proxy_group_id)) > 0)
+	),
+	CHECK (source <> 'none' OR mode = 'none')
 );`
 
 const (
@@ -63,6 +86,8 @@ const (
 var (
 	ErrConversationEgressBindingNotFound = errors.New("conversation egress binding not found")
 	ErrConversationEgressBindingActive   = errors.New("conversation egress binding is already active")
+	ErrConversationEgressRebuildPending  = errors.New("conversation egress rebuild is already pending")
+	ErrConversationEgressRuntimeNotIdle  = errors.New("conversation egress runtime is not idle")
 	ErrConversationEgressIntegrity       = errors.New("conversation egress binding integrity check failed")
 )
 
@@ -93,17 +118,44 @@ type ConversationEgressBinding struct {
 	BoundAt        *time.Time               `json:"boundAt,omitempty"`
 }
 
+// ConversationEgressRebuild is a staged replacement. The active binding and
+// running container remain unchanged until the matching runtime generation is
+// rebuilt successfully.
+type ConversationEgressRebuild struct {
+	Binding                   ConversationEgressBinding
+	RouteID                   string
+	RouteSHA256               string
+	ExpectedRuntimeGeneration int
+}
+
 func (db *DB) initConversationEgressTables() error {
 	if _, err := db.Exec(createConversationEgressTables); err != nil {
 		return err
+	}
+	if err := db.addColumnIfMissing(
+		"conversation_egress_rebuilds",
+		"interrupted",
+		"ALTER TABLE conversation_egress_rebuilds ADD COLUMN interrupted INTEGER NOT NULL DEFAULT 0 CHECK (interrupted IN (0, 1))",
+	); err != nil {
+		return fmt.Errorf("initialize conversation egress rebuild recovery state: %w", err)
 	}
 	for _, statement := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_conversation_egress_selections_proxy ON conversation_egress_selections(proxy_id) WHERE proxy_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_conversation_egress_selections_group ON conversation_egress_selections(proxy_group_id) WHERE proxy_group_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_conversation_egress_bindings_proxy ON conversation_egress_bindings(proxy_id) WHERE proxy_id IS NOT NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_conversation_egress_bindings_group ON conversation_egress_bindings(proxy_group_id) WHERE proxy_group_id IS NOT NULL`,
-		`CREATE TRIGGER IF NOT EXISTS conversation_egress_bindings_no_update
+		`DROP TRIGGER IF EXISTS conversation_egress_bindings_no_update`,
+		`CREATE TRIGGER conversation_egress_bindings_no_update
 		 BEFORE UPDATE ON conversation_egress_bindings
+		 WHEN NOT EXISTS (
+			SELECT 1 FROM conversation_egress_rebuilds r
+			WHERE r.conversation_id = OLD.conversation_id
+				AND r.interrupted = 0
+				AND r.mode = NEW.mode
+				AND COALESCE(r.proxy_id, '') = COALESCE(NEW.proxy_id, '')
+				AND COALESCE(r.proxy_group_id, '') = COALESCE(NEW.proxy_group_id, '')
+				AND r.source = NEW.source
+		 )
 		 BEGIN SELECT RAISE(ABORT, 'conversation egress bindings are immutable'); END`,
 		`CREATE TRIGGER IF NOT EXISTS conversation_egress_bindings_no_live_delete
 		 BEFORE DELETE ON conversation_egress_bindings
@@ -115,6 +167,137 @@ func (db *DB) initConversationEgressTables() error {
 		}
 	}
 	return nil
+}
+
+// PrepareConversationEgressRebuild stages either an explicit selection or the
+// currently resolved project/user inheritance. It never mutates the active
+// binding and requires an idle, fully-created runtime.
+func (db *DB) PrepareConversationEgressRebuild(ctx context.Context, conversationID, mode, proxyID, proxyGroupID string, inherit bool) (ConversationEgressRebuild, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ConversationEgressRebuild{}, fmt.Errorf("conversation id is required")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return ConversationEgressRebuild{}, fmt.Errorf("begin conversation egress rebuild: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := lockContainerConversationForEgress(ctx, tx, conversationID); err != nil {
+		return ConversationEgressRebuild{}, err
+	}
+	var generation int
+	var initializationStatus, lifecycleState string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT runtime_generation, initialization_status, lifecycle_state
+		FROM conversation_container_runtimes WHERE conversation_id = ?
+	`, conversationID).Scan(&generation, &initializationStatus, &lifecycleState); err != nil {
+		return ConversationEgressRebuild{}, fmt.Errorf("load conversation runtime for egress rebuild: %w", err)
+	}
+	if initializationStatus != "created" || (lifecycleState != "idle" && lifecycleState != "failed") {
+		return ConversationEgressRebuild{}, ErrConversationEgressRuntimeNotIdle
+	}
+	if _, err := getConversationEgressBinding(ctx, tx, conversationID); err != nil {
+		return ConversationEgressRebuild{}, fmt.Errorf("load active conversation egress binding: %w", err)
+	}
+	var interrupted int
+	if err := tx.QueryRowContext(ctx, `SELECT interrupted FROM conversation_egress_rebuilds WHERE conversation_id = ?`, conversationID).Scan(&interrupted); err == nil {
+		if interrupted == 0 {
+			return ConversationEgressRebuild{}, ErrConversationEgressRebuildPending
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_egress_rebuilds WHERE conversation_id = ?`, conversationID); err != nil {
+			return ConversationEgressRebuild{}, fmt.Errorf("replace interrupted conversation egress rebuild: %w", err)
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return ConversationEgressRebuild{}, fmt.Errorf("inspect pending conversation egress rebuild: %w", err)
+	}
+
+	source := ConversationEgressSourceConversation
+	if inherit {
+		var projectID, ownerUserID sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT project_id, owner_user_id FROM conversations WHERE id = ?`, conversationID).Scan(&projectID, &ownerUserID); err != nil {
+			return ConversationEgressRebuild{}, err
+		}
+		view, err := resolveEgressDefaultView(ctx, tx, ownerUserID.String, projectID.String)
+		if err != nil {
+			return ConversationEgressRebuild{}, fmt.Errorf("resolve inherited conversation egress: %w", err)
+		}
+		mode, source = view.Mode, view.Source
+		proxyID, proxyGroupID = "", ""
+		if view.Proxy != nil {
+			proxyID = view.Proxy.ID
+		}
+		if view.ProxyGroup != nil {
+			proxyGroupID = view.ProxyGroup.ID
+		}
+	} else {
+		var configured bool
+		mode, proxyID, proxyGroupID, configured, err = NormalizeConversationEgressSelection(mode, proxyID, proxyGroupID)
+		if err != nil || !configured {
+			if err == nil {
+				err = fmt.Errorf("explicit egress mode is required")
+			}
+			return ConversationEgressRebuild{}, err
+		}
+	}
+	if err := validateConversationEgressTarget(ctx, tx, mode, proxyID, proxyGroupID); err != nil {
+		return ConversationEgressRebuild{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO conversation_egress_rebuilds (
+			conversation_id, mode, proxy_id, proxy_group_id, source,
+			route_id, route_sha256, expected_runtime_generation, prepared_at
+		) VALUES (?, ?, NULLIF(?, ''), NULLIF(?, ''), ?, '', '', ?, ?)
+	`, conversationID, mode, proxyID, proxyGroupID, source, generation+1, formatSQLiteUTC(time.Now().UTC())); err != nil {
+		return ConversationEgressRebuild{}, fmt.Errorf("stage conversation egress rebuild: %w", err)
+	}
+	binding, err := scanConversationEgress(tx.QueryRowContext(ctx,
+		conversationEgressSelectSQL("conversation_egress_rebuilds", "prepared_at")+` WHERE e.conversation_id = ?`, conversationID),
+		ConversationEgressStatePending)
+	if err != nil {
+		return ConversationEgressRebuild{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ConversationEgressRebuild{}, fmt.Errorf("commit conversation egress rebuild: %w", err)
+	}
+	return ConversationEgressRebuild{
+		Binding: binding, RouteID: conversationID + "-egress-" + uuid.NewString(), ExpectedRuntimeGeneration: generation + 1,
+	}, nil
+}
+
+func (db *DB) SetConversationEgressRebuildRouteReference(ctx context.Context, conversationID, routeID, routeSHA256 string) error {
+	result, err := db.ExecContext(ctx, `
+		UPDATE conversation_egress_rebuilds SET route_id = ?, route_sha256 = ? WHERE conversation_id = ? AND interrupted = 0
+	`, strings.TrimSpace(routeID), strings.TrimSpace(routeSHA256), strings.TrimSpace(conversationID))
+	if err != nil {
+		return fmt.Errorf("store conversation egress rebuild route: %w", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("conversation egress rebuild is not pending")
+	}
+	return nil
+}
+
+func (db *DB) CancelConversationEgressRebuild(ctx context.Context, conversationID string) error {
+	_, err := db.ExecContext(ctx, `DELETE FROM conversation_egress_rebuilds WHERE conversation_id = ?`, strings.TrimSpace(conversationID))
+	return err
+}
+
+// MarkPendingConversationEgressRebuildsInterrupted preserves the active
+// binding while allowing a later explicit retry to replace a request that was
+// interrupted by a process restart.
+func (db *DB) MarkPendingConversationEgressRebuildsInterrupted(ctx context.Context) (int64, error) {
+	result, err := db.ExecContext(ctx, `UPDATE conversation_egress_rebuilds SET interrupted = 1 WHERE interrupted = 0`)
+	if err != nil {
+		return 0, fmt.Errorf("mark pending conversation egress rebuilds interrupted: %w", err)
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // NormalizeConversationEgressSelection validates the exact three-state
@@ -449,7 +632,7 @@ func getConversationEgressBinding(ctx context.Context, query conversationEgressQ
 
 func conversationEgressSelectSQL(table, timestampColumn string) string {
 	source := `'conversation'`
-	if table == "conversation_egress_bindings" {
+	if table == "conversation_egress_bindings" || table == "conversation_egress_rebuilds" {
 		source = `e.source`
 	}
 	return `

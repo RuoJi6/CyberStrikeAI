@@ -988,7 +988,7 @@ function setChatRuntimeModeLocked(locked) {
     const persistenceOption = document.getElementById('workspace-persistence-option');
     if (persistenceOption) persistenceOption.classList.toggle('locked', taskLocked || existingConversation);
     if (typeof window.setConversationContainerControlsLocked === 'function') {
-        window.setConversationContainerControlsLocked(taskLocked || existingConversation);
+        window.setConversationContainerControlsLocked(taskLocked);
     }
 }
 
@@ -2568,6 +2568,15 @@ async function sendMessage() {
         updateChatPrimaryActionState();
         showChatToast(chatTranslate('chat.taskAlreadyRunning', '当前会话已有任务正在执行，请先等待完成或停止任务。'), 'info');
         return;
+    }
+
+    // 已完成的容器对话允许用户先调整边界与上游出口。
+    // 下一次发送时自动完成必要的安全重建；失败时不显示用户气泡、不启动任务。
+    if (requestConversationId && typeof window.ensureConversationContainerNetworkSettings === 'function') {
+        const networkReady = await window.ensureConversationContainerNetworkSettings();
+        if (!networkReady || requestNavigationSeq !== chatConversationNavigationSeq || currentConversationId !== requestConversationId) {
+            return;
+        }
     }
 
     if (hasAttachments) {

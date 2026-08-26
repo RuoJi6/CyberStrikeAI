@@ -7,14 +7,14 @@ CyberStrikeAI now uses its own Docker Hub multi-platform Agent image and no long
 | Item | Value |
 | --- | --- |
 | Repository | `ruoji6/cyberstrikeai-agent` |
-| Tags | `full-tools-slim2-20260825`, `latest` |
-| Multi-platform index | `sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50` |
-| ARM64 manifest | `sha256:13b24dec5541d7bac77ce439c7dab5044a2fd5775987924e5bbdd9414e354b8f` |
-| AMD64 manifest | `sha256:4e8d11662efa90c700a3d48241fa303f992d6ad04a195323a0da8fc329736b85` |
+| Tags | `full-tools-seclists-20260826`, `latest` |
+| Multi-platform index | `sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d` |
+| ARM64 manifest | `sha256:aeacc44686dc93697ede82ab6f1455d49b691b1d70372f1ff8363d38d18ffa1a` |
+| AMD64 manifest | `sha256:ae742a453c3627ed984c4a174b83d37a6a5c2404f5c5a171b28fa60e70570dc4` |
 | ARM64 inventory | `container/agent-tool-inventory-linux-arm64.json` |
-| Inventory digest | `sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4` |
+| Inventory digest | `sha256:83173e182532f08cbbfc67ab2083a3c09e4df428a139a096c4a29b10e1d66759` |
 
-Both published tags currently resolve to the same index digest. The ARM64 VM pulls the image directly from Docker Hub and runs it as `repository@digest`. This digest has passed the ARM64 full-tool functional gate and offline container-security smoke test, including the `/usr/local/bin/amass` wrapper. Production configuration and the inventory now pin this digest. A previous Agent image is retained only while an existing conversation container still references it; it must not be force-removed.
+The `latest` tag currently resolves to the index digest above. The ARM64 VM pulls the image directly from Docker Hub and runs it as `repository@digest`. This digest has passed 77/77 configuration coverage, 75/77 ARM64 platform availability, all image functional probes, and the network-disabled container-security smoke test.
 
 ## Current Egress release
 
@@ -40,7 +40,7 @@ The Egress image is also pulled from Docker Hub by index digest. Its ARM64 manif
 
 The image is based on a digest-pinned official Kali Rolling image and the repository's Dockerfile, tool mapping, and artifact lock. Non-APT artifacts must pin a version or revision and SHA-256.
 
-This candidate was supplied from Docker Build Cloud, not GitHub Actions. Its OCI revision label is the clean commit `1007db0523a18c0f123d3a19899648eff57a91fb`, and its version label is `full-tools-slim2-20260825`. The ARM64 image has passed the Amass probe and the functional gate for every tool declared supported on that platform.
+This candidate was supplied from Docker Build Cloud, not GitHub Actions. Its OCI revision label is the clean commit `21b1ca30dfda14092a52225a0e1f2ef09572de76`, and its version label is `full-tools-seclists-20260826`. The ARM64 image has passed the functional gate for every tool declared supported on that platform.
 
 `scripts/verify-container-release.sh` accepts separate Agent and Egress revisions because the two images can be published from different clean commits. The current ARM64 pair passed its network-disabled SPDX 2.3 OS-package inventory and `SHA256SUMS` readback (859 Agent packages and 112 Egress packages); the independent Agent tool inventory remains the functional source of truth for bundled security tools.
 

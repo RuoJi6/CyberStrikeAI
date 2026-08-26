@@ -32,6 +32,8 @@ test('client activity validation and filters use closed request/decision vocabul
     assert.equal(activity.isSafeActivityEvent({ ...allowed, requestType: 'icmp', connectedIp: '93.184.216.34' }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, dnsQueryType: 'mx', dnsAnswers: ['allowed.example MX 10 mail.allowed.example'] }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, dnsAnswers: new Array(129).fill('A') }), false);
+    assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration', aggregateFirstAt: '2026-08-22T12:00:00Z', aggregateLastAt: '2026-08-22T12:00:01Z', aggregateDistinctVariants: 30 }), true);
+    assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration' }), false);
     const filtered = activity.filteredEventsForTest([allowed, blocked], { domain: '93.184', requestType: 'dns', decision: 'allowed', agent: 'container-agent', tool: 'unknown', route: 'route-a' });
     assert.deepEqual(filtered, [allowed]);
 });
@@ -70,7 +72,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
         'network-activity-tool', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-    assert.match(template, /network-activity\.js\?v=20260824-6/);
+    assert.match(template, /network-activity\.js\?v=20260826-1/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);

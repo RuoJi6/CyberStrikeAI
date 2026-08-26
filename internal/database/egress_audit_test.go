@@ -154,6 +154,79 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 	}
 }
 
+func TestEgressAuditPersistsCompactBatchMetadataAndWeightedSummary(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "compact audit")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 || targets[0].AuditMode != EgressAuditModeCompact {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	firstAt := time.Now().UTC()
+	lastAt := firstAt.Add(500 * time.Millisecond)
+	event := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: firstAt, RequestType: egress.ActivityRequestTCP,
+		Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
+		Decision: egress.ActivityDecisionBlocked, RuleID: "block-ssh", Reason: "blocked-target", Outcome: "policy_denied",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		AggregateCount: 20, AggregateKind: "connection-burst", AggregateFirstAt: &firstAt, AggregateLastAt: &lastAt,
+		AggregateDistinctTargets: 1, AggregateDistinctPorts: 1, AggregateDistinctVariants: 1,
+	}
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], event); err != nil || !inserted {
+		t.Fatalf("append aggregate = %v, %v", inserted, err)
+	}
+	items, err := db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 2 || items[0].AggregateCount != 20 || items[0].AggregateKind != "connection-burst" || items[0].AggregateLastAt == nil {
+		t.Fatalf("aggregate projection = %#v, %v", items, err)
+	}
+	summary, err := db.SummarizeEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll})
+	if err != nil || summary.Total != 21 || summary.Network != 20 || summary.Lifecycle != 1 || summary.Blocked != 20 {
+		t.Fatalf("weighted summary = %#v, %v", summary, err)
+	}
+	if _, err := db.VerifyEgressAuditIntegrity(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEgressAuditDoesNotAppendRecalculatedAggregateOverSealedFirstSample(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	ctx := context.Background()
+	conversation, spec := createRunningEgressAuditRuntime(t, db, "aggregate replay")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("targets = %#v, %v", targets, err)
+	}
+	firstAt := time.Now().UTC()
+	event := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: firstAt, RequestType: egress.ActivityRequestTCP,
+		Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
+		Decision: egress.ActivityDecisionAllowed, RuleID: "allow-ssh", Reason: "allow-visit", Outcome: "forwarded",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], event); err != nil || !inserted {
+		t.Fatalf("append first sample = %v, %v", inserted, err)
+	}
+	aggregate := event
+	lastAt := firstAt.Add(20 * time.Second)
+	aggregate.AggregateCount = 20
+	aggregate.AggregateKind = "connection-burst"
+	aggregate.AggregateFirstAt = &firstAt
+	aggregate.AggregateLastAt = &lastAt
+	aggregate.AggregateDistinctTargets = 1
+	aggregate.AggregateDistinctPorts = 1
+	aggregate.AggregateDistinctVariants = 1
+	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], aggregate); err != nil || inserted {
+		t.Fatalf("recalculated replay aggregate = %v, %v", inserted, err)
+	}
+	items, err := db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
+	if err != nil || len(items) != 2 || items[0].AggregateCount != 0 {
+		t.Fatalf("immutable first-sample projection = %#v, %v", items, err)
+	}
+	if _, err := db.VerifyEgressAuditIntegrity(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPurgeEgressAuditEventsRebuildsAndVerifiesAffectedChains(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()

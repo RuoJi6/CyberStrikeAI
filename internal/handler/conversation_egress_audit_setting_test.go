@@ -50,4 +50,19 @@ func TestConversationEgressAuditSettingHandlerGetsAndUpdatesContainerConversatio
 	if enabled, err := db.GetConversationEgressAuditEnabled(t.Context(), conversation.ID); err != nil || enabled {
 		t.Fatalf("stored setting = %v, %v", enabled, err)
 	}
+
+	fullRecorder := httptest.NewRecorder()
+	fullContext, _ := gin.CreateTestContext(fullRecorder)
+	fullContext.Request = httptest.NewRequest(http.MethodPut, "/api/conversations/"+conversation.ID+"/egress-audit", strings.NewReader(`{"mode":"full"}`))
+	fullContext.Request.Header.Set("Content-Type", "application/json")
+	fullContext.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+	fullContext.Set(security.ContextSessionKey, security.Session{UserID: "admin", Username: "admin", Scope: database.RBACScopeAll})
+	handler.UpdateConversationEgressAuditSetting(fullContext)
+	if fullRecorder.Code != http.StatusOK || !strings.Contains(fullRecorder.Body.String(), `"mode":"full"`) {
+		t.Fatalf("put full setting = %d %s", fullRecorder.Code, fullRecorder.Body.String())
+	}
+	setting, err := db.GetConversationEgressAuditSetting(t.Context(), conversation.ID)
+	if err != nil || !setting.Enabled || setting.Mode != database.EgressAuditModeFull {
+		t.Fatalf("stored full setting = %#v, %v", setting, err)
+	}
 }

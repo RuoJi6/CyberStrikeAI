@@ -263,8 +263,10 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	rebuildJSON := rebuildContent["application/json"].(map[string]interface{})
 	rebuildSchema := rebuildJSON["schema"].(map[string]interface{})
 	rebuildProperties := rebuildSchema["properties"].(map[string]interface{})
-	if _, ok := rebuildProperties["boundaryPolicyId"]; !ok {
-		t.Fatal("container rebuild request schema is missing boundaryPolicyId")
+	for _, field := range []string{"boundaryPolicyId", "egressMode", "egressProxyId", "egressProxyGroupId"} {
+		if _, ok := rebuildProperties[field]; !ok {
+			t.Fatalf("container rebuild request schema is missing %s", field)
+		}
 	}
 	if description, _ := rebuildPost["description"].(string); !strings.Contains(description, "重建成功") || !strings.Contains(description, "原子激活") {
 		t.Fatalf("container rebuild description does not document snapshot activation: %q", description)
@@ -314,13 +316,14 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatalf("AgentTask status enum does not include %q: %#v", containerGateInitializing, statusEnum)
 	}
 	for path, method := range map[string]string{
-		"/api/conversations/{id}/container/start":       "post",
-		"/api/conversations/{id}/container/stop":        "post",
-		"/api/conversations/{id}/container/rebuild":     "post",
-		"/api/conversations/{id}/container/reconcile":   "post",
-		"/api/conversations/{id}/container":             "delete",
-		"/api/conversations/{id}/container/workspace":   "get",
-		"/api/conversations/{id}/container/terminal/ws": "get",
+		"/api/conversations/{id}/container/start":            "post",
+		"/api/conversations/{id}/container/stop":             "post",
+		"/api/conversations/{id}/container/rebuild":          "post",
+		"/api/conversations/{id}/container/network-settings": "get",
+		"/api/conversations/{id}/container/reconcile":        "post",
+		"/api/conversations/{id}/container":                  "delete",
+		"/api/conversations/{id}/container/workspace":        "get",
+		"/api/conversations/{id}/container/terminal/ws":      "get",
 	} {
 		item, ok := paths[path].(map[string]interface{})
 		if !ok || item[method] == nil {

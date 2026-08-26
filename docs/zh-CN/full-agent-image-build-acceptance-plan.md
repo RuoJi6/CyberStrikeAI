@@ -74,8 +74,8 @@ internal/runtime/container
   512 MiB 容器限制下稳定 OOM，已从发布范围移除并改为禁用。
 - 候选 `container/agent/tool-inventory.entries.json` 已扩展到 83 个命令/运行时条目，
   并由平台映射过滤；实际镜像可用性仍须由镜像内探针证明。
-- 当前 ARM64 虚拟机已直接从 Docker Hub 拉取 index digest `sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50`，生产配置已指向该 repository/digest。发布物来自干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb`，版本为 `full-tools-slim2-20260825`；77/77 配置映射、75/77 ARM64 平台支持、全工具功能探针和无网络安全冒烟均通过，`amass` 实际命中 `/usr/local/bin/amass` 并可正常执行。
-- 当前 81 项 ARM64 inventory 内容摘要为 `sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4`；旧 Agent/Strix 镜像须等新建对话端到端验收通过且无容器引用后再删除。
+- 当前 ARM64 虚拟机已直接从 Docker Hub 拉取 index digest `sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d`。发布物来自干净提交 `21b1ca30dfda14092a52225a0e1f2ef09572de76`，版本为 `full-tools-seclists-20260826`；77/77 配置映射、75/77 ARM64 平台支持、全工具功能探针和无网络安全冒烟均通过。
+- 当前 81 项 ARM64 inventory 内容摘要为 `sha256:83173e182532f08cbbfc67ab2083a3c09e4df428a139a096c4a29b10e1d66759`；旧 Agent 镜像及其已停止测试容器已清理，工作区卷保留。
 
 ## 3. 工具范围
 
@@ -197,7 +197,7 @@ internal/runtime/container
 - [x] 从 Docker Hub 回读 manifest digest、平台 digest、OCI 标签和平台列表。
 - [x] 确认版本标签与 `latest` 当前解析到同一个 index digest。
 - [x] 在 ARM64 VM 使用精确 repository/index digest 拉取并重跑冒烟。
-- [x] 新 `latest` 由干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb` 重建，并包含 `container/agent/amass-wrapper.sh`。
+- [x] 新 `latest` 由干净提交 `21b1ca30dfda14092a52225a0e1f2ef09572de76` 重建，版本为 `full-tools-seclists-20260826`。
 
 门禁：Hub 上内容与本地候选一致，按 digest 可在无本地 tag 依赖时拉取和执行。
 
@@ -368,7 +368,7 @@ release-evidence/
 | 1. 镜像实现 | 源码通过 | 77/77 配置覆盖；ARM64 75/77、AMD64 77/77；Amass wrapper 与稳定 PATH 修复已进入源码 | 2026-08-25 |
 | 2. ARM64 拉取/镜像内验收 | 通过 | 新 Hub digest 的安全基线、全工具功能和无网络冒烟通过；`amass` 命中 `/usr/local/bin/amass`，版本 `v5.1.1` | 2026-08-25 |
 | 3. AMD64/多架构 | 部分通过 | 双平台 index 已回读；AMD64 77/77 映射，按用户要求不做 AMD64 实机运行验收 | 2026-08-25 |
-| 4. Docker Hub | 通过 | `latest` 与 `full-tools-slim2-20260825` 指向 index `sha256:a535bbe3…974f50`，OCI revision 为干净提交 `1007db0523a18c0f123d3a19899648eff57a91fb` | 2026-08-25 |
+| 4. Docker Hub | 通过 | `latest` 指向 index `sha256:14bed420…38111d`，OCI revision 为干净提交 `21b1ca30dfda14092a52225a0e1f2ef09572de76` | 2026-08-26 |
 | 5. 系统切换 | 通过 | VM 配置、inventory、systemd/HTTP、新建对话实际镜像、ARM64、`pentester`、只读根文件系统和容器安全参数均通过；旧 Agent 镜像仅因仍被现存对话容器引用而保留 | 2026-08-26 |
 | 6. 端到端功能 | 部分通过 | 容器初始化、状态/工作区、停止恢复、HTTP、TCP/UDP 混合放行与立即阻断、默认开放策略、按对话持久审计及完整性校验通过；内置浏览器可连接，但新建页面在导航前超时，交互终端和页面 UI 未验收 | 2026-08-26 |
 | 7. 清理、提交和推送 | 通过 | QA 对话、策略、审计、候选/旧 Egress 镜像及本轮临时文件已精准清理；Go 全包、vet、tidy、174 项前端测试和 diff 门禁通过；ARM64 禁网 SPDX（Agent 859 包、Egress 112 包）及 SHA256 回读通过；旧 Agent 镜像因仍被现存容器引用而保留 | 2026-08-26 |

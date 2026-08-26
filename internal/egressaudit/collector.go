@@ -10,6 +10,7 @@ import (
 
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/egressactivity"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 
 	"go.uber.org/zap"
@@ -56,7 +57,7 @@ func NewCollector(store Store, streamer ActivityStreamer, logger *zap.Logger) (*
 
 func auditStreamKey(target database.EgressAuditRuntimeTarget) string {
 	record := target.Record
-	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID
+	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID + ":" + egressactivity.NormalizeMode(target.AuditMode)
 }
 
 func (c *Collector) Reconcile(ctx context.Context) error {
@@ -107,14 +108,96 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 		c.mu.Unlock()
 	}()
 	record := target.Record
-	err := c.streamer.StreamEgressActivity(ctx, record.Spec, containerruntime.ActivityStreamOptions{All: true}, func(event egress.ActivityEvent) error {
+	mode := egressactivity.NormalizeMode(target.AuditMode)
+	aggregator := egressactivity.New(egressactivity.DefaultConfig())
+	events := make(chan egress.ActivityEvent, 256)
+	streamDone := make(chan error, 1)
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	go func() {
+		streamDone <- c.streamer.StreamEgressActivity(streamCtx, record.Spec, containerruntime.ActivityStreamOptions{All: true}, func(event egress.ActivityEvent) error {
+			select {
+			case events <- event:
+				return nil
+			case <-streamCtx.Done():
+				return streamCtx.Err()
+			}
+		})
+	}()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	appendEvents := func(appendCtx context.Context, outgoing []egress.ActivityEvent) error {
+		for _, event := range outgoing {
+			if _, appendErr := c.store.AppendEgressNetworkAuditEvent(appendCtx, target, event); appendErr != nil {
+				return appendErr
+			}
+		}
+		return nil
+	}
+	appendEvent := func(appendCtx context.Context, event egress.ActivityEvent) error {
 		if event.RequestType == egress.ActivityRequestHealth {
-			_, appendErr := c.store.ApplyEgressHealthEvent(ctx, target, event)
+			_, appendErr := c.store.ApplyEgressHealthEvent(appendCtx, target, event)
 			return appendErr
 		}
-		_, appendErr := c.store.AppendEgressNetworkAuditEvent(ctx, target, event)
-		return appendErr
-	})
+		if mode == egressactivity.ModeFull {
+			return appendEvents(appendCtx, []egress.ActivityEvent{event})
+		}
+		return appendEvents(appendCtx, aggregator.ObserveAt(event, time.Now().UTC()))
+	}
+	drainEvents := func(appendCtx context.Context) error {
+		for {
+			select {
+			case event := <-events:
+				if drainErr := appendEvent(appendCtx, event); drainErr != nil {
+					return drainErr
+				}
+			default:
+				return nil
+			}
+		}
+	}
+	finalize := func(waitForStream bool) error {
+		cancelStream()
+		if waitForStream {
+			select {
+			case <-streamDone:
+			case <-time.After(500 * time.Millisecond):
+			}
+		}
+		flushCtx, flushCancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer flushCancel()
+		if finalizeErr := drainEvents(flushCtx); finalizeErr != nil {
+			return finalizeErr
+		}
+		return appendEvents(flushCtx, aggregator.FlushAll())
+	}
+	var err error
+	for err == nil {
+		select {
+		case <-ctx.Done():
+			err = finalize(true)
+			if err == nil {
+				err = ctx.Err()
+			}
+		case streamErr := <-streamDone:
+			if finalizeErr := finalize(false); finalizeErr != nil {
+				err = finalizeErr
+				break
+			}
+			if streamErr != nil && !errors.Is(streamErr, context.Canceled) && ctx.Err() == nil {
+				c.logger.Warn("对话出站审计流中断，将在下一轮重新连接",
+					zap.String("conversationId", record.ConversationID), zap.Error(streamErr))
+			}
+			return
+		case event := <-events:
+			err = appendEvent(ctx, event)
+		case now := <-ticker.C:
+			if mode == egressactivity.ModeCompact {
+				err = appendEvents(ctx, aggregator.FlushExpired(now.UTC()))
+			}
+		}
+	}
+	cancelStream()
 	if err != nil && ctx.Err() == nil {
 		c.logger.Warn("对话出站审计流中断，将在下一轮重新连接",
 			zap.String("conversationId", record.ConversationID), zap.Error(err))

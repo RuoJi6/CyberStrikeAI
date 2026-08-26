@@ -150,6 +150,16 @@
         if (value.upstreamRouteId !== undefined && (typeof value.upstreamRouteId !== 'string' || !/^$|^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value.upstreamRouteId))) return false;
         if (value.dnsQueryType !== undefined && (typeof value.dnsQueryType !== 'string' || value.dnsQueryType.length > 128)) return false;
         if (value.dnsAnswers !== undefined && (!Array.isArray(value.dnsAnswers) || value.dnsAnswers.length > 128 || value.dnsAnswers.some((answer) => typeof answer !== 'string' || answer.length > 1024))) return false;
+        const aggregateCount = Number(value.aggregateCount || 0);
+        if (!Number.isSafeInteger(aggregateCount) || aggregateCount < 0 || aggregateCount === 1) return false;
+        if (aggregateCount > 1) {
+            if (typeof value.aggregateKind !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,127}$/.test(value.aggregateKind)) return false;
+            if (Number.isNaN(Date.parse(value.aggregateFirstAt)) || Number.isNaN(Date.parse(value.aggregateLastAt))) return false;
+        }
+        for (const field of ['aggregateDistinctTargets', 'aggregateDistinctPorts', 'aggregateDistinctVariants']) {
+            const number = Number(value[field] || 0);
+            if (!Number.isSafeInteger(number) || number < 0) return false;
+        }
         return true;
     }
 
@@ -162,6 +172,7 @@
             event.method || '', event.path || '', event.httpStatus || 0, event.outcome || '',
             event.latencyMs || 0, event.bytesUp || 0, event.bytesDown || 0,
             event.snapshotId || '', event.snapshotSha256 || '', event.agent || '', event.tool || '',
+            event.aggregateCount || 0, event.aggregateKind || '', event.aggregateLastAt || '',
         ]);
     }
 
@@ -330,9 +341,10 @@
         const requestType = event.requestType === 'dns' && event.dnsQueryType
             ? `DNS ${String(event.dnsQueryType).toUpperCase()}`
             : String(event.requestType || '').toUpperCase();
-        const requestDetail = event.requestType === 'http' || event.requestType === 'https'
+        let requestDetail = event.requestType === 'http' || event.requestType === 'https'
             ? [event.method, event.path].filter(Boolean).join(' ')
             : (['connect', 'tcp', 'udp'].includes(event.requestType) ? `:${event.port || 0}` : '');
+        if (Number(event.aggregateCount || 0) > 1) requestDetail = `${requestDetail}${requestDetail ? ' · ' : ''}批次 ×${event.aggregateCount}`;
         const target = event.port ? `${event.domain}:${event.port}` : event.domain;
         const resolved = Array.isArray(event.resolvedIps) && event.resolvedIps.length
             ? event.resolvedIps.join(', ')
@@ -345,7 +357,8 @@
         const route = event.upstreamRouteId ? `${t('activityRoute', '路由')} ${event.upstreamRouteId}` : t('activityDirectRoute', '直接出口');
         const result = activityText(event.outcome || 'unknown', event.outcome || 'unknown');
         const performance = `${Number(event.latencyMs || 0)} ms · ↑${formatBytes(event.bytesUp)} ↓${formatBytes(event.bytesDown)}`;
-        const status = (event.requestType === 'http' || event.requestType === 'https') && event.httpStatus ? `HTTP ${event.httpStatus} · ${performance}` : performance;
+        const aggregate = Number(event.aggregateCount || 0) > 1 ? `${activityText(event.aggregateKind, event.aggregateKind)} · ${event.aggregateCount} 次 · ` : '';
+        const status = `${aggregate}${(event.requestType === 'http' || event.requestType === 'https') && event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${performance}`;
         row.append(
             cell(t('activityTime', '时间'), formatTime(event.timestamp), new Date(event.timestamp).toLocaleDateString()),
             cell(t('activityRequest', '请求'), requestType, requestDetail, 'is-request'),
@@ -376,10 +389,12 @@
     function renderCounts(visible) {
         const rootNode = element('network-activity-counts');
         if (!rootNode) return;
-        const allowed = state.events.filter((event) => event.decision === 'allowed').length;
-        const blocked = state.events.filter((event) => event.decision === 'blocked').length;
+        const eventWeight = (event) => Number(event.aggregateCount || 0) > 1 ? Number(event.aggregateCount) : 1;
+        const allowed = state.events.filter((event) => event.decision === 'allowed').reduce((total, event) => total + eventWeight(event), 0);
+        const blocked = state.events.filter((event) => event.decision === 'blocked').reduce((total, event) => total + eventWeight(event), 0);
+        const visibleCount = visible.reduce((total, event) => total + eventWeight(event), 0);
         const values = [
-            [t('activityVisibleCount', '可见 {{count}}', { count: visible.length }), 'neutral'],
+            [t('activityVisibleCount', '可见 {{count}}', { count: visibleCount }), 'neutral'],
             [t('activityAllowedCount', '允许 {{count}}', { count: allowed }), 'success'],
             [t('activityBlockedCount', '阻断 {{count}}', { count: blocked }), 'danger'],
         ];
@@ -402,8 +417,10 @@
         table.hidden = !hasEvents;
         empty.hidden = hasEvents;
         if (summary) {
+            const receivedCount = state.events.reduce((total, event) => total + (Number(event.aggregateCount || 0) > 1 ? Number(event.aggregateCount) : 1), 0);
+            const renderedCount = rendered.reduce((total, event) => total + (Number(event.aggregateCount || 0) > 1 ? Number(event.aggregateCount) : 1), 0);
             summary.textContent = state.events.length
-                ? t('activitySummary', '已接收 {{total}} 条，当前显示 {{visible}} 条', { total: state.events.length, visible: rendered.length })
+                ? t('activitySummary', '已接收 {{total}} 条，当前显示 {{visible}} 条', { total: receivedCount, visible: renderedCount })
                 : t('activityEmptySummary', '尚未收到网络活动');
         }
         renderCounts(rendered);

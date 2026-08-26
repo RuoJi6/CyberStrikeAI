@@ -122,6 +122,18 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 		logger.Warn("检测到服务重启中断的边界快照重建请求；执行将失败关闭直到显式重试",
 			zap.Int64("count", interruptedBoundaryRebuilds))
 	}
+	egressRebuildRecoveryCtx, egressRebuildRecoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	interruptedEgressRebuilds, err := db.MarkPendingConversationEgressRebuildsInterrupted(egressRebuildRecoveryCtx)
+	egressRebuildRecoveryCancel()
+	if err != nil {
+		_ = initializer.Close(context.Background())
+		_ = manager.Close()
+		return nil, nil, nil, nil, nil, nil, nil, nil, fmt.Errorf("inspect interrupted upstream egress rebuilds: %w", err)
+	}
+	if interruptedEgressRebuilds > 0 {
+		logger.Warn("检测到服务重启中断的上游出口重建请求；保留当前生效出口直到显式重试",
+			zap.Int64("count", interruptedEgressRebuilds))
+	}
 	recoverCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	err = initializer.Recover(recoverCtx)
 	cancel()
@@ -380,6 +392,10 @@ func materializeConversationAuthProfiles(ctx context.Context, db *database.DB, c
 }
 
 func materializeConversationUpstreamRoute(ctx context.Context, db *database.DB, cipher *egress.CredentialCipher, store *egress.UpstreamRouteStore, binding database.ConversationEgressBinding) (*containerruntime.EgressUpstreamRouteSpec, error) {
+	return materializeConversationUpstreamRouteWithID(ctx, db, cipher, store, binding, binding.ConversationID)
+}
+
+func materializeConversationUpstreamRouteWithID(ctx context.Context, db *database.DB, cipher *egress.CredentialCipher, store *egress.UpstreamRouteStore, binding database.ConversationEgressBinding, routeID string) (*containerruntime.EgressUpstreamRouteSpec, error) {
 	if binding.Mode == database.ConversationEgressModeNone {
 		return nil, nil
 	}
@@ -445,7 +461,7 @@ func materializeConversationUpstreamRoute(ctx context.Context, db *database.DB, 
 	default:
 		return nil, database.ErrConversationEgressIntegrity
 	}
-	reference, _, err := store.Put(binding.ConversationID, route)
+	reference, _, err := store.Put(strings.TrimSpace(routeID), route)
 	if err != nil {
 		return nil, err
 	}

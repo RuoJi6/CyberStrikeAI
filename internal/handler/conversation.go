@@ -62,6 +62,8 @@ type ConversationEgressHealthController interface {
 	RecoverEgressHealth(context.Context, containerruntime.RuntimeSpec) error
 }
 
+type ConversationEgressRebuildPreparer func(context.Context, string, string, string, string, bool) (*containerruntime.EgressUpstreamRouteSpec, error)
+
 type ConversationContainerLifecycleController interface {
 	Start(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 	Stop(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
@@ -88,6 +90,7 @@ type ConversationHandler struct {
 	containerInteractive     ConversationContainerInteractiveExecutor
 	egressActivityStreamer   ConversationEgressActivityStreamer
 	egressHealthController   ConversationEgressHealthController
+	egressRebuildPreparer    ConversationEgressRebuildPreparer
 	containerLifecycle       ConversationContainerLifecycleController
 	retainedWorkspace        ConversationRetainedWorkspaceController
 	containerRollout         func(userID, projectID string) (enabled, allowed bool)
@@ -137,6 +140,10 @@ func (h *ConversationHandler) SetEgressHealthController(controller ConversationE
 	h.egressHealthController = controller
 }
 
+func (h *ConversationHandler) SetConversationEgressRebuildPreparer(preparer ConversationEgressRebuildPreparer) {
+	h.egressRebuildPreparer = preparer
+}
+
 func (h *ConversationHandler) SetContainerLifecycleController(controller ConversationContainerLifecycleController) {
 	h.containerLifecycle = controller
 }
@@ -168,6 +175,7 @@ type CreateConversationRequest struct {
 	EgressProxyID       string `json:"egressProxyId,omitempty"`
 	EgressProxyGroupID  string `json:"egressProxyGroupId,omitempty"`
 	EgressAuditEnabled  *bool  `json:"egressAuditEnabled,omitempty"`
+	EgressAuditMode     string `json:"egressAuditMode,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -210,6 +218,18 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.EgressAuditEnabled = req.EgressAuditEnabled
+	if strings.TrimSpace(req.EgressAuditMode) != "" {
+		if runtimeMode != database.ConversationRuntimeModeContainer {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "egressAuditMode 只能用于 container 对话"})
+			return
+		}
+		auditMode, modeErr := database.NormalizeConversationEgressAuditMode(req.EgressAuditMode)
+		if modeErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "egressAuditMode 必须为 compact、full 或 off"})
+			return
+		}
+		meta.EgressAuditMode = auditMode
+	}
 	meta.BoundaryPolicyID = strings.TrimSpace(req.BoundaryPolicyID)
 	if meta.BoundaryPolicyID != "" {
 		if runtimeMode != database.ConversationRuntimeModeContainer {

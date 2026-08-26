@@ -24,10 +24,12 @@ type fakeConversationContainerLifecycle struct {
 	conversationID  string
 	removeWorkspace bool
 	rebuild         func(context.Context, string) (containerruntime.InitializationRecord, error)
+	actions         []string
 }
 
 func (f *fakeConversationContainerLifecycle) call(_ context.Context, action, conversationID string) (containerruntime.InitializationRecord, error) {
 	f.action = action
+	f.actions = append(f.actions, action)
 	f.conversationID = conversationID
 	return f.record, f.err
 }
@@ -43,6 +45,7 @@ func (f *fakeConversationContainerLifecycle) Stop(ctx context.Context, id string
 func (f *fakeConversationContainerLifecycle) Rebuild(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
 	if f.rebuild != nil {
 		f.action = "rebuild"
+		f.actions = append(f.actions, "rebuild")
 		f.conversationID = id
 		return f.rebuild(ctx, id)
 	}
@@ -325,6 +328,75 @@ func TestConversationContainerBoundaryChangeRequiresSuccessfulExplicitRebuild(t 
 	}
 }
 
+func TestConversationContainerRebuildCarriesStagedDirectEgressRoute(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("direct egress rebuild", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	prepared := false
+	controller := &fakeConversationContainerLifecycle{}
+	controller.rebuild = func(ctx context.Context, _ string) (containerruntime.InitializationRecord, error) {
+		route, ok := containerruntime.EgressRebuildRouteFromContext(ctx)
+		if !ok || route != nil {
+			t.Fatalf("egress rebuild context = %#v, %v", route, ok)
+		}
+		return containerruntime.InitializationRecord{ConversationID: conversation.ID, RuntimeGeneration: 2}, nil
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerLifecycleController(controller)
+	handler.SetConversationEgressRebuildPreparer(func(context.Context, string, string, string, string, bool) (*containerruntime.EgressUpstreamRouteSpec, error) {
+		prepared = true
+		return nil, nil
+	})
+	response := performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{"egressMode": "none"}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusOK || !prepared {
+		t.Fatalf("response=%d %s prepared=%v", response.Code, response.Body.String(), prepared)
+	}
+}
+
+func TestConversationContainerNetworkChangeStopsRunningRuntimeBeforeRebuild(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("running network rebuild", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerBoundaryRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(context.Background(), conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "running-provider", Status: containerruntime.StatusRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	controller := &fakeConversationContainerLifecycle{record: containerruntime.InitializationRecord{ConversationID: conversation.ID, RuntimeStatus: containerruntime.StatusStopped}}
+	controller.rebuild = func(ctx context.Context, _ string) (containerruntime.InitializationRecord, error) {
+		if route, ok := containerruntime.EgressRebuildRouteFromContext(ctx); !ok || route != nil {
+			t.Fatalf("egress rebuild context = %#v, %v", route, ok)
+		}
+		return containerruntime.InitializationRecord{ConversationID: conversation.ID, RuntimeGeneration: 2}, nil
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerLifecycleController(controller)
+	handler.SetConversationEgressRebuildPreparer(func(context.Context, string, string, string, string, bool) (*containerruntime.EgressUpstreamRouteSpec, error) {
+		return nil, nil
+	})
+	response := performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{"egressMode": "none"}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusOK || len(controller.actions) != 2 || controller.actions[0] != "stop" || controller.actions[1] != "rebuild" {
+		t.Fatalf("response=%d %s actions=%v", response.Code, response.Body.String(), controller.actions)
+	}
+}
+
 func performBoundaryRebuildRequest(user *database.RBACUser, conversationID string, body interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	payload, _ := json.Marshal(body)
 	response := httptest.NewRecorder()
@@ -334,8 +406,8 @@ func performBoundaryRebuildRequest(user *database.RBACUser, conversationID strin
 	c.Params = gin.Params{{Key: "id", Value: conversationID}}
 	c.Set(security.ContextSessionKey, security.Session{
 		UserID: user.ID, Username: user.Username, Scope: database.RBACScopeAssigned,
-		Permissions:      map[string]bool{"chat:write": true, "boundary:read": true},
-		PermissionScopes: map[string]string{"boundary:read": database.RBACScopeOwn},
+		Permissions:      map[string]bool{"chat:write": true, "boundary:read": true, "egress:read": true},
+		PermissionScopes: map[string]string{"boundary:read": database.RBACScopeOwn, "egress:read": database.RBACScopeOwn},
 	})
 	handler(c)
 	return response

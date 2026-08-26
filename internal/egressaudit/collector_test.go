@@ -171,6 +171,105 @@ func TestCollectorPeriodicShutdownCancelsAndWaitsForStreams(t *testing.T) {
 	}
 }
 
+type collectorBurstStreamer struct {
+	events []egress.ActivityEvent
+	finite bool
+}
+
+func (s *collectorBurstStreamer) StreamEgressActivity(ctx context.Context, _ containerruntime.RuntimeSpec, _ containerruntime.ActivityStreamOptions, sink containerruntime.RuntimeActivitySink) error {
+	for _, event := range s.events {
+		if err := sink(event); err != nil {
+			return err
+		}
+	}
+	if s.finite {
+		return nil
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestCollectorDrainsBufferedEventsBeforeFiniteStreamFlush(t *testing.T) {
+	start := time.Now().UTC()
+	events := make([]egress.ActivityEvent, 0, 10)
+	for index := 0; index < 10; index++ {
+		offset := time.Duration(index) * 250 * time.Millisecond
+		if index >= 4 {
+			offset += 4 * time.Second
+		}
+		if index >= 7 {
+			offset += 4 * time.Second
+		}
+		events = append(events, egress.ActivityEvent{
+			Event: egress.ActivityEventName, Timestamp: start.Add(offset),
+			RequestType: egress.ActivityRequestTCP, Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
+			Decision: egress.ActivityDecisionAllowed, Outcome: "forwarded",
+		})
+	}
+	target := collectorTargetFixture()
+	target.AuditMode = database.EgressAuditModeCompact
+	store := &collectorTestStore{targets: []database.EgressAuditRuntimeTarget{target}}
+	collector, err := NewCollector(store, &collectorBurstStreamer{events: events, finite: true}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := collector.Reconcile(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitCollectorCondition(t, func() bool { return collector.ActiveStreams() == 0 }, "finite stream completion")
+
+	store.mu.Lock()
+	stored := append([]egress.ActivityEvent(nil), store.events...)
+	store.mu.Unlock()
+	if len(stored) != 1 || stored[0].AggregateCount != 10 || stored[0].AggregateKind != "connection-burst" {
+		t.Fatalf("finite stream aggregate = %#v", stored)
+	}
+}
+
+func TestCollectorCompactsBehaviouralBurstButFullModeRetainsEveryEvent(t *testing.T) {
+	start := time.Now().UTC()
+	events := make([]egress.ActivityEvent, 0, 12)
+	for index := 0; index < 12; index++ {
+		events = append(events, egress.ActivityEvent{
+			Event: egress.ActivityEventName, Timestamp: start.Add(time.Duration(index) * 20 * time.Millisecond),
+			RequestType: egress.ActivityRequestTCP, Domain: "47.116.200.74", Port: 20 + index,
+			Decision: egress.ActivityDecisionAllowed, Outcome: "forwarded",
+		})
+	}
+	for _, test := range []struct {
+		name string
+		mode string
+		want int
+	}{
+		{name: "compact", mode: database.EgressAuditModeCompact, want: 1},
+		{name: "full", mode: database.EgressAuditModeFull, want: 12},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := collectorTargetFixture()
+			target.AuditMode = test.mode
+			store := &collectorTestStore{targets: []database.EgressAuditRuntimeTarget{target}}
+			collector, err := NewCollector(store, &collectorBurstStreamer{events: events}, zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := collector.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			waitCollectorCondition(t, func() bool { return store.eventCount() == test.want }, "burst persistence")
+			store.mu.Lock()
+			stored := append([]egress.ActivityEvent(nil), store.events...)
+			store.mu.Unlock()
+			if test.mode == database.EgressAuditModeCompact && (stored[0].AggregateCount != 12 || stored[0].AggregateKind != "port-scan") {
+				t.Fatalf("compact event = %#v", stored[0])
+			}
+		})
+	}
+}
+
 func collectorTargetFixture() database.EgressAuditRuntimeTarget {
 	return database.EgressAuditRuntimeTarget{
 		ConversationTitle: "collector target",

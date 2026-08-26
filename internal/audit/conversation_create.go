@@ -36,6 +36,9 @@ func RegisterConversationCreateHook(s *Service) {
 		if meta.EgressAuditEnabled != nil {
 			detail["egress_audit_enabled"] = *meta.EgressAuditEnabled
 		}
+		if meta.EgressAuditMode != "" {
+			detail["egress_audit_mode"] = meta.EgressAuditMode
+		}
 		s.Record(nil, Entry{
 			Category:     "conversation",
 			Action:       "create",

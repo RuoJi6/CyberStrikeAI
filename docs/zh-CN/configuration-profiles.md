@@ -194,13 +194,13 @@ container:
   rollout_project_ids: []
   owner_id: cyberstrike-production-01
   image_repository: ruoji6/cyberstrikeai-agent
-  image_digest: sha256:a535bbe3da57a2d103df60fbca37fdd7b8937c882d8b49e9be49050b9d974f50
+  image_digest: sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d
   image_platform: linux/arm64
   egress_image_repository: ruoji6/cyberstrikeai-egress
   egress_image_digest: sha256:5e9c03756eea3ca22a0fb3a6235d8fdf9ee0a992af36c64f367e664d9423c3d5
   egress_image_platform: linux/arm64
   tool_inventory_path: container/agent-tool-inventory-linux-arm64.json
-  tool_inventory_digest: sha256:3664b426c9de1cb86fa914f336005c797685eff18643bdae0f78e5c8ff7437b4
+  tool_inventory_digest: sha256:83173e182532f08cbbfc67ab2083a3c09e4df428a139a096c4a29b10e1d66759
 ```
 
 - `rollout_user_ids` 与 `rollout_project_ids` 是“或”关系；两者都为空时表示对全部已登录用户开放。

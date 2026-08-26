@@ -85,6 +85,15 @@ func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T)
 	if err := container.ValidateSpec(withRoute); err != nil {
 		t.Fatalf("valid gateway upstream route rejected: %v", err)
 	}
+	versionedRoute := withRoute
+	gatewayWithVersionedRoute := *withRoute.EgressGateway
+	gatewayWithVersionedRoute.UpstreamRoute = &container.EgressUpstreamRouteSpec{
+		ID: "conversation-1-egress-12345678-1234-1234-1234-123456789abc", SHA256: withRoute.EgressGateway.UpstreamRoute.SHA256,
+	}
+	versionedRoute.EgressGateway = &gatewayWithVersionedRoute
+	if err := container.ValidateSpec(versionedRoute); err != nil {
+		t.Fatalf("versioned conversation upstream route rejected: %v", err)
+	}
 	crossConversationRoute := withRoute
 	gatewayWithCrossConversationRoute := *withRoute.EgressGateway
 	gatewayWithCrossConversationRoute.UpstreamRoute = &container.EgressUpstreamRouteSpec{

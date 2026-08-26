@@ -28,6 +28,53 @@ func (h *ConversationHandler) StopConversationContainer(c *gin.Context) {
 	h.runConversationContainerLifecycle(c, "stop", "停止对话容器", h.containerLifecycleStop)
 }
 
+// GetConversationContainerNetworkSettings returns the active immutable
+// boundary/upstream selections without exposing route credentials.
+func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Context) {
+	id, ok := h.authorizeConversationContainer(c)
+	if !ok {
+		return
+	}
+	session, hasSession := security.CurrentSession(c)
+	if !hasSession || !session.Permissions["boundary:read"] || !session.Permissions["egress:read"] {
+		c.JSON(http.StatusForbidden, gin.H{"error": "缺少边界或出口读取权限"})
+		return
+	}
+	snapshot, err := h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "对话容器边界快照尚未就绪"})
+		return
+	}
+	binding, err := h.db.GetConversationEgress(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取对话上游出口失败"})
+		return
+	}
+	record, err := h.db.GetContainerInitialization(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusConflict, gin.H{"error": "对话容器尚未就绪"})
+		return
+	}
+	proxyID, proxyGroupID := "", ""
+	if binding.Proxy != nil {
+		proxyID = binding.Proxy.ID
+	}
+	if binding.ProxyGroup != nil {
+		proxyGroupID = binding.ProxyGroup.ID
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"conversationId":     id,
+		"boundaryPolicyId":   snapshot.PolicyID,
+		"egressMode":         binding.Mode,
+		"egressSource":       binding.Source,
+		"egressProxyId":      proxyID,
+		"egressProxyGroupId": proxyGroupID,
+		"runtimeStatus":      record.RuntimeStatus,
+		"lifecycleState":     record.LifecycleState,
+		"runtimeGeneration":  record.RuntimeGeneration,
+	})
+}
+
 func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 	id, ok := h.authorizeConversationContainer(c)
 	if !ok {
@@ -85,13 +132,105 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		staged = &prepared
 	}
 
+	var stagedRoute *containerruntime.EgressUpstreamRouteSpec
+	egressChanged := len(request.EgressMode) != 0
+	if egressChanged {
+		if h.egressRebuildPreparer == nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "上游出口重建服务未配置"})
+			return
+		}
+		if bytes.Equal(bytes.TrimSpace(request.EgressMode), []byte("null")) {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "egressMode 必须为字符串"})
+			return
+		}
+		var requestedMode string
+		if err := json.Unmarshal(request.EgressMode, &requestedMode); err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "egressMode 必须为字符串"})
+			return
+		}
+		requestedMode = strings.TrimSpace(requestedMode)
+		inherit := requestedMode == ""
+		proxyID, proxyGroupID := strings.TrimSpace(request.EgressProxyID), strings.TrimSpace(request.EgressProxyGroupID)
+		if inherit {
+			if proxyID != "" || proxyGroupID != "" {
+				h.cancelStagedBoundaryRebuild(id, staged)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "继承上游出口时不能指定代理资源"})
+				return
+			}
+		} else {
+			session, hasSession := security.CurrentSession(c)
+			if !hasSession {
+				h.cancelStagedBoundaryRebuild(id, staged)
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+				return
+			}
+			mode, normalizedProxyID, normalizedGroupID, configured, requestErr := normalizeConversationEgressForSession(
+				c.Request.Context(), h.db, session, database.ConversationRuntimeModeContainer,
+				requestedMode, proxyID, proxyGroupID,
+			)
+			if requestErr != nil || !configured {
+				h.cancelStagedBoundaryRebuild(id, staged)
+				if requestErr != nil {
+					c.JSON(requestErr.Status, gin.H{"error": requestErr.Message})
+				} else {
+					c.JSON(http.StatusBadRequest, gin.H{"error": "egressMode 无效"})
+				}
+				return
+			}
+			requestedMode, proxyID, proxyGroupID = mode, normalizedProxyID, normalizedGroupID
+		}
+		var err error
+		stagedRoute, err = h.egressRebuildPreparer(c.Request.Context(), id, requestedMode, proxyID, proxyGroupID, inherit)
+		if err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			h.writeBoundaryRebuildPreparationError(c, err)
+			return
+		}
+	}
+
 	rebuildCtx := c.Request.Context()
 	if staged != nil {
 		rebuildCtx = containerruntime.WithBoundaryRebuildSnapshot(rebuildCtx, staged.SnapshotID)
 	}
+	if egressChanged {
+		rebuildCtx = containerruntime.WithEgressRebuildRoute(rebuildCtx, stagedRoute)
+	}
+	current, err := h.db.GetContainerInitialization(c.Request.Context(), id)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, containerruntime.ErrNotFound) {
+		h.cancelStagedBoundaryRebuild(id, staged)
+		if egressChanged {
+			h.cancelStagedEgressRebuild(id)
+		}
+		h.writeContainerLifecycleError(c, id, "rebuild", err)
+		return
+	}
+	if err == nil && current.RuntimeStatus == containerruntime.StatusRunning {
+		if _, err := h.containerLifecycle.Stop(c.Request.Context(), id); err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			if egressChanged {
+				h.cancelStagedEgressRebuild(id)
+			}
+			h.writeContainerLifecycleError(c, id, "stop", err)
+			return
+		}
+	} else if err == nil && (current.RuntimeStatus == containerruntime.StatusCreating ||
+		current.RuntimeStatus == containerruntime.StatusStarting || current.RuntimeStatus == containerruntime.StatusStopping) {
+		h.cancelStagedBoundaryRebuild(id, staged)
+		if egressChanged {
+			h.cancelStagedEgressRebuild(id)
+		}
+		c.JSON(http.StatusConflict, gin.H{"error": "对话容器状态正在变化，请稍后重试"})
+		return
+	}
 	record, err := h.containerLifecycle.Rebuild(rebuildCtx, id)
 	if err != nil {
 		h.cancelStagedBoundaryRebuild(id, staged)
+		if egressChanged {
+			h.cancelStagedEgressRebuild(id)
+		}
 		h.writeContainerLifecycleError(c, id, "rebuild", err)
 		return
 	}
@@ -109,6 +248,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 			"runtime_status": record.RuntimeStatus, "lifecycle_state": record.LifecycleState,
 			"runtime_drift": record.RuntimeDrift, "runtime_generation": record.RuntimeGeneration,
 			"boundary_changed": staged != nil,
+			"egress_changed":   egressChanged,
 		}
 		if staged != nil {
 			detail["previous_boundary_sha256"] = previous.SHA256
@@ -127,6 +267,11 @@ type RebuildConversationContainerRequest struct {
 	// nil means a maintenance rebuild using the active snapshot. An explicit
 	// empty JSON string creates and activates a new no-boundary/default-allow snapshot.
 	BoundaryPolicyID json.RawMessage `json:"boundaryPolicyId,omitempty"`
+	// An explicit empty string re-resolves project/user inheritance. Omission
+	// preserves the active immutable binding during a maintenance rebuild.
+	EgressMode         json.RawMessage `json:"egressMode,omitempty"`
+	EgressProxyID      string          `json:"egressProxyId,omitempty"`
+	EgressProxyGroupID string          `json:"egressProxyGroupId,omitempty"`
 }
 
 func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {
@@ -301,8 +446,21 @@ func (h *ConversationHandler) cancelStagedBoundaryRebuild(conversationID string,
 	}
 }
 
+func (h *ConversationHandler) cancelStagedEgressRebuild(conversationID string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := h.db.CancelConversationEgressRebuild(ctx, conversationID); err != nil {
+		h.logger.Error("取消失败的上游出口重建请求失败",
+			zap.String("conversationId", conversationID), zap.Error(err))
+	}
+}
+
 func (h *ConversationHandler) writeBoundaryRebuildPreparationError(c *gin.Context, err error) {
 	switch {
+	case errors.Is(err, database.ErrConversationEgressRebuildPending):
+		c.JSON(http.StatusConflict, gin.H{"error": "对话已有上游出口重建请求正在处理"})
+	case errors.Is(err, database.ErrConversationEgressRuntimeNotIdle):
+		c.JSON(http.StatusConflict, gin.H{"error": "对话容器正在执行其他生命周期操作"})
 	case errors.Is(err, database.ErrConversationBoundaryRebuildPending), errors.Is(err, containerruntime.ErrRuntimeStateConflict):
 		c.JSON(http.StatusConflict, gin.H{"error": "对话已有边界快照重建请求正在处理"})
 	case errors.Is(err, database.ErrConversationBoundarySnapshotNotFound), errors.Is(err, containerruntime.ErrNotFound), errors.Is(err, sql.ErrNoRows):

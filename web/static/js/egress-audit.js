@@ -21,6 +21,7 @@
         'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'dnsQueryType', 'dnsAnswers', 'resolvedIps',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
         'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket',
+        'aggregateCount', 'aggregateKind', 'aggregateFirstAt', 'aggregateLastAt', 'aggregateDistinctTargets', 'aggregateDistinctPorts', 'aggregateDistinctVariants',
     ]);
     const URL_KEYS = Object.freeze({
         page: 'audit_page', pageSize: 'audit_page_size', query: 'audit_q',
@@ -180,6 +181,13 @@
         if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
         if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
         if (event.httpPacket !== undefined && !isSafeHTTPPacket(event.httpPacket)) return false;
+        const aggregateCount = Number(event.aggregateCount || 0);
+        if (!Number.isSafeInteger(aggregateCount) || aggregateCount < 0 || aggregateCount === 1) return false;
+        if (aggregateCount > 1 && (typeof event.aggregateKind !== 'string' || Number.isNaN(Date.parse(event.aggregateFirstAt)) || Number.isNaN(Date.parse(event.aggregateLastAt)))) return false;
+        for (const field of ['aggregateDistinctTargets', 'aggregateDistinctPorts', 'aggregateDistinctVariants']) {
+            const number = Number(event[field] || 0);
+            if (!Number.isSafeInteger(number) || number < 0) return false;
+        }
         return true;
     }
 
@@ -274,11 +282,12 @@
         } else if (event.eventType === 'dns') {
             primary = `DNS ${(event.dnsQueryType || '').toUpperCase()} ${event.domain || '—'}`.replace('DNS  ', 'DNS ');
         }
+        const aggregate = Number(event.aggregateCount || 0) > 1 ? ` · 批次 ${event.aggregateCount} 次` : '';
         return {
             primary,
             secondary: event.eventType === 'dns' && Array.isArray(event.dnsAnswers) && event.dnsAnswers.length
-                ? event.dnsAnswers.join(' · ')
-                : `↑${formatBytes(event.bytesUp)} · ↓${formatBytes(event.bytesDown)}`,
+                ? event.dnsAnswers.join(' · ') + aggregate
+                : `↑${formatBytes(event.bytesUp)} · ↓${formatBytes(event.bytesDown)}${aggregate}`,
         };
     }
 
@@ -373,7 +382,7 @@
         const outcome = outcomeLabel(event);
         const packet = packetSummary(event);
         const resultDetail = event.category === 'network'
-            ? `${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
+            ? `${Number(event.aggregateCount || 0) > 1 ? `${event.aggregateKind} · ${event.aggregateCount} 次 · ` : ''}${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
             : t(`status.${event.lifecycleState}`, event.lifecycleState);
         row.append(
             selectionCell(event),

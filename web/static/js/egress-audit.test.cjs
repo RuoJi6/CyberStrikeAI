@@ -34,6 +34,8 @@ test('egress audit validates the closed safe projection without requiring omitte
 	};
     assert.equal(audit.isSafeAuditEvent(network), true);
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: undefined }), true);
+    assert.equal(audit.isSafeAuditEvent({ ...network, aggregateCount: 25, aggregateKind: 'web-fuzz', aggregateFirstAt: '2026-08-22T12:00:00Z', aggregateLastAt: '2026-08-22T12:00:01Z', aggregateDistinctVariants: 25 }), true);
+    assert.equal(audit.isSafeAuditEvent({ ...network, aggregateCount: 25, aggregateKind: 'web-fuzz' }), false);
     assert.equal(audit.isSafeAuditEvent(lifecycle), true);
 	assert.equal(audit.isSafeAuditEvent(health), true);
     assert.equal(audit.isSafeAuditEvent({ ...network, eventType: 'raw_socket' }), false);
@@ -102,7 +104,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260826-2/);
+    assert.match(template, /egress-audit\.js\?v=20260826-3/);
     assert.equal(zh.containerManagement.auditReconcile, '状态校准');
     assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
@@ -151,7 +153,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260826-4/);
+    assert.match(template, /style\.css\?v=20260826-6/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260826-1/);
 });

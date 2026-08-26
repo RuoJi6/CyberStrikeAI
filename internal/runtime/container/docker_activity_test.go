@@ -16,14 +16,18 @@ import (
 
 type fakeActivityDockerAPI struct {
 	*fakeDockerCreationAPI
-	logsContainerID string
-	logsOptions     mobyclient.ContainerLogsOptions
-	logs            []byte
+	logsContainerID  string
+	logsOptions      mobyclient.ContainerLogsOptions
+	logsContainerIDs []string
+	logsOptionsCalls []mobyclient.ContainerLogsOptions
+	logs             []byte
 }
 
 func (f *fakeActivityDockerAPI) ContainerLogs(_ context.Context, id string, options mobyclient.ContainerLogsOptions) (mobyclient.ContainerLogsResult, error) {
 	f.logsContainerID = id
 	f.logsOptions = options
+	f.logsContainerIDs = append(f.logsContainerIDs, id)
+	f.logsOptionsCalls = append(f.logsOptionsCalls, options)
 	return io.NopCloser(bytes.NewReader(f.logs)), nil
 }
 
@@ -57,7 +61,11 @@ func TestDockerManagerStreamsOnlyValidatedExactSnapshotActivity(t *testing.T) {
 	api.logs = multiplexed.Bytes()
 
 	var received []egress.ActivityEvent
-	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{Tail: 37}, func(event egress.ActivityEvent) error {
+	replayComplete := 0
+	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{Tail: 37, ReplayComplete: func() error {
+		replayComplete++
+		return nil
+	}}, func(event egress.ActivityEvent) error {
 		received = append(received, event)
 		return nil
 	}); err != nil {
@@ -66,8 +74,15 @@ func TestDockerManagerStreamsOnlyValidatedExactSnapshotActivity(t *testing.T) {
 	if len(received) != 1 || received[0].Domain != "allowed.example" {
 		t.Fatalf("received = %#v", received)
 	}
-	if api.logsContainerID != "provider-gateway-1" || !api.logsOptions.ShowStdout || api.logsOptions.ShowStderr || !api.logsOptions.Follow || api.logsOptions.Tail != "37" {
-		t.Fatalf("logs request = %q %#v", api.logsContainerID, api.logsOptions)
+	if replayComplete != 1 || len(api.logsOptionsCalls) != 2 {
+		t.Fatalf("replay callbacks=%d log calls=%#v", replayComplete, api.logsOptionsCalls)
+	}
+	replayOptions, followOptions := api.logsOptionsCalls[0], api.logsOptionsCalls[1]
+	if api.logsContainerIDs[0] != "provider-gateway-1" || !replayOptions.ShowStdout || replayOptions.ShowStderr || replayOptions.Follow || replayOptions.Tail != "37" || replayOptions.Until == "" || replayOptions.Since != "" {
+		t.Fatalf("replay logs request = %q %#v", api.logsContainerIDs[0], replayOptions)
+	}
+	if api.logsContainerIDs[1] != "provider-gateway-1" || !followOptions.ShowStdout || followOptions.ShowStderr || !followOptions.Follow || followOptions.Tail != "0" || followOptions.Since == "" || followOptions.Until != "" {
+		t.Fatalf("follow logs request = %q %#v", api.logsContainerIDs[1], followOptions)
 	}
 	received = nil
 	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{All: true}, func(event egress.ActivityEvent) error {
@@ -76,8 +91,9 @@ func TestDockerManagerStreamsOnlyValidatedExactSnapshotActivity(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(received) != 1 || api.logsOptions.Tail != "all" || !api.logsOptions.Follow {
-		t.Fatalf("complete bounded log replay = %#v, options = %#v", received, api.logsOptions)
+	allOptions := api.logsOptionsCalls[len(api.logsOptionsCalls)-1]
+	if len(received) != 1 || allOptions.Tail != "all" || !allOptions.Follow || allOptions.Since != "" || allOptions.Until != "" {
+		t.Fatalf("complete bounded log replay = %#v, options = %#v", received, allOptions)
 	}
 	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{All: true, Tail: 1}, func(egress.ActivityEvent) error { return nil }); err == nil {
 		t.Fatal("combined all/tail stream options were accepted")
