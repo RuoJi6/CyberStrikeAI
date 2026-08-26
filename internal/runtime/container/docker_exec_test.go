@@ -36,7 +36,7 @@ func TestDockerManagerExecAppendsBoundedRawBoundaryDenial(t *testing.T) {
 	}
 	base.execExitCode = 1
 	event := egress.ActivityEvent{
-		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestTCP,
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC().Add(500 * time.Millisecond), RequestType: egress.ActivityRequestTCP,
 		Domain: "203.0.113.10", ConnectedIP: "203.0.113.10", Port: 22,
 		Decision: egress.ActivityDecisionBlocked, Reason: "default_deny", Outcome: "policy_denied",
 		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
@@ -59,11 +59,91 @@ func TestDockerManagerExecAppendsBoundedRawBoundaryDenial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 1 || !strings.Contains(stderr.String(), "已阻止本次 TCP 访问") || !strings.Contains(stderr.String(), "203.0.113.10:22") || !strings.Contains(stderr.String(), "default_deny") {
+	if result.ExitCode != 1 || !strings.Contains(stderr.String(), "本次工具执行触发 1 次网络阻断") || !strings.Contains(stderr.String(), "TCP 203.0.113.10:22（1 次）") || !strings.Contains(stderr.String(), "default_deny") {
 		t.Fatalf("result/feedback = %#v / %q", result, stderr.String())
 	}
-	if api.logsContainerID != "provider-gateway-1" || api.logsOptions.Follow || api.logsOptions.Tail != "100" || api.logsOptions.Since == "" {
+	if api.logsContainerID != "provider-gateway-1" || api.logsOptions.Follow || api.logsOptions.Tail != "all" || api.logsOptions.Since == "" || api.logsOptions.Until == "" {
 		t.Fatalf("bounded feedback log request = %q %#v", api.logsContainerID, api.logsOptions)
+	}
+}
+
+func TestDockerManagerExecAppendsAggregatedBoundaryDenialAfterSuccessfulTool(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	base := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	api := &fakeActivityDockerAPI{fakeDockerCreationAPI: base}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root, OperationTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	base.execExitCode = 0
+	eventTime := time.Now().UTC().Add(500 * time.Millisecond)
+	events := []egress.ActivityEvent{
+		{
+			Event: egress.ActivityEventName, Timestamp: eventTime, RequestType: egress.ActivityRequestTCP,
+			Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
+			Decision: egress.ActivityDecisionBlocked, RuleID: "block-ssh", Reason: "blocked-target", Outcome: "policy_denied",
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		},
+		{
+			Event: egress.ActivityEventName, Timestamp: eventTime, RequestType: egress.ActivityRequestTCP,
+			Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
+			Decision: egress.ActivityDecisionBlocked, RuleID: "block-ssh", Reason: "blocked-target", Outcome: "policy_denied",
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		},
+		{
+			Event: egress.ActivityEventName, Timestamp: eventTime, RequestType: egress.ActivityRequestUDP,
+			Domain: "time.example", ConnectedIP: "203.0.113.123", Port: 123,
+			Decision: egress.ActivityDecisionBlocked, Reason: "default-deny", Outcome: "policy_denied",
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		},
+		{
+			Event: egress.ActivityEventName, Timestamp: eventTime, RequestType: egress.ActivityRequestDNS,
+			Domain: "blocked.example", DNSQueryType: "a",
+			Decision: egress.ActivityDecisionBlocked, RuleID: "block-dns", Reason: "blocked-target", Outcome: "policy_denied",
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		},
+		{
+			Event: egress.ActivityEventName, Timestamp: eventTime, RequestType: egress.ActivityRequestHealth,
+			Domain: "upstream.example", Decision: egress.ActivityDecisionBlocked, RuleID: "upstream-guard",
+			Reason: "upstream_rate_limited", Outcome: "cooldown_started", RetryAfterMS: 30000,
+			SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		},
+	}
+	var multiplexed bytes.Buffer
+	for _, event := range events {
+		encoded, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		writeActivityLogFrame(&multiplexed, append(encoded, '\n'))
+	}
+	api.logs = multiplexed.Bytes()
+
+	var stderr strings.Builder
+	result, err := manager.Exec(context.Background(), spec, ExecRequest{Command: []string{"future-network-tool", "--probe"}}, func(stream ExecStream, chunk []byte) error {
+		if stream == ExecStreamStderr {
+			stderr.Write(chunk)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback := stderr.String()
+	if result.ExitCode != 0 || !strings.Contains(feedback, "本次工具执行触发 4 次网络阻断") ||
+		!strings.Contains(feedback, "TCP 47.116.200.74:22（2 次）：原因 blocked-target，规则 block-ssh") ||
+		!strings.Contains(feedback, "UDP time.example:123（1 次）：原因 default-deny，规则 默认策略") ||
+		!strings.Contains(feedback, "DNS blocked.example（1 次）：原因 blocked-target，规则 block-dns") ||
+		strings.Contains(feedback, "HEALTH") || strings.Contains(feedback, "upstream.example") ||
+		!strings.Contains(feedback, "以下请求未到达目标") ||
+		!strings.Contains(feedback, "当前边界规则中网络策略已明确禁止上述访问，请停止测试上述访问") {
+		t.Fatalf("result/feedback = %#v / %q", result, feedback)
 	}
 }
 

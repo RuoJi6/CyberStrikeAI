@@ -24,7 +24,6 @@ const (
 	defaultActivityTail             = 100
 	maxActivityTail                 = 500
 	maxActivityLine                 = 1024 << 10
-	execBoundaryFeedbackTail        = 100
 	maxExecBoundaryFeedbackLogBytes = 4 << 20
 )
 
@@ -36,64 +35,66 @@ type dockerContainerLogsAPI interface {
 
 var _ RuntimeActivityStreamer = (*DockerManager)(nil)
 
-// latestBlockedEgressActivity performs a bounded, non-following read of the
-// verified gateway log. It is intentionally best-effort: packet enforcement
-// remains inside the gateway, while this projection gives a failed tool call a
-// clear model-facing explanation without exposing raw provider errors.
-func (m *DockerManager) latestBlockedEgressActivity(ctx context.Context, spec RuntimeSpec, since time.Time) (egress.ActivityEvent, bool) {
+// blockedEgressActivities performs a bounded, non-following read of the
+// verified gateway log for one exec window. It is intentionally best-effort:
+// packet enforcement remains inside the gateway, while this projection gives
+// the model a clear explanation even when a tool reports success after one or
+// more network operations were denied. Tool names and command arguments are
+// deliberately irrelevant: every blocked network activity in the execution
+// window is included, while gateway-internal health signals are excluded.
+func (m *DockerManager) blockedEgressActivities(ctx context.Context, spec RuntimeSpec, since, until time.Time) ([]egress.ActivityEvent, bool) {
 	if m == nil || m.api == nil || spec.EgressGateway == nil || spec.EgressGateway.BoundarySnapshot == nil {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
 	observation, err := m.Observe(ctx, spec)
 	if err != nil || observation.Gateway == nil || observation.Gateway.Status != StatusRunning || strings.TrimSpace(observation.Gateway.ProviderID) == "" {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
 	logsAPI, ok := m.api.(dockerContainerLogsAPI)
 	if !ok {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
+	windowStart := since.UTC()
+	queryStart := windowStart.Add(-2 * time.Second)
+	windowEnd := until.Add(2 * time.Second).UTC()
 	logs, err := logsAPI.ContainerLogs(ctx, observation.Gateway.ProviderID, mobyclient.ContainerLogsOptions{
 		ShowStdout: true,
 		ShowStderr: false,
 		Follow:     false,
-		Tail:       strconv.Itoa(execBoundaryFeedbackTail),
-		Since:      since.Add(-2 * time.Second).UTC().Format(time.RFC3339Nano),
+		Tail:       "all",
+		Since:      queryStart.Format(time.RFC3339Nano),
+		Until:      windowEnd.Format(time.RFC3339Nano),
 	})
 	if err != nil {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
 	defer logs.Close()
 
 	var stdout bytes.Buffer
 	limited := io.LimitReader(logs, maxExecBoundaryFeedbackLogBytes+1)
 	if _, err := stdcopy.StdCopy(&stdout, io.Discard, limited); err != nil || stdout.Len() > maxExecBoundaryFeedbackLogBytes {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
 	scanner := bufio.NewScanner(&stdout)
 	scanner.Buffer(make([]byte, 4096), maxActivityLine)
-	var latest egress.ActivityEvent
-	found := false
+	blocked := make([]egress.ActivityEvent, 0, 4)
 	for scanner.Scan() {
 		event, isActivity, parseErr := parseGatewayActivityLine(scanner.Bytes(), spec)
 		if parseErr != nil {
-			return egress.ActivityEvent{}, false
+			return nil, false
 		}
-		if !isActivity || event.Timestamp.Before(since.Add(-2*time.Second)) || event.Decision != egress.ActivityDecisionBlocked {
+		if !isActivity || event.Timestamp.Before(windowStart) || event.Timestamp.After(windowEnd) || event.Decision != egress.ActivityDecisionBlocked {
 			continue
 		}
-		switch event.RequestType {
-		case egress.ActivityRequestTCP, egress.ActivityRequestUDP, egress.ActivityRequestICMP:
-		default:
+		if event.RequestType == egress.ActivityRequestHealth {
 			continue
 		}
-		if !found || event.Timestamp.After(latest.Timestamp) {
-			latest, found = event, true
-		}
+		blocked = append(blocked, event)
 	}
 	if scanner.Err() != nil {
-		return egress.ActivityEvent{}, false
+		return nil, false
 	}
-	return latest, found
+	return blocked, len(blocked) > 0
 }
 
 // StreamEgressActivity verifies the exact owned runtime topology before it
