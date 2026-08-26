@@ -326,6 +326,57 @@ func TestEgressGatewayTrafficLimitsArePersistedInEnvironmentAndLabels(t *testing
 	}
 }
 
+func TestEgressGatewayTrafficEnvironmentIgnoresImageDefaultsAndRejectsManagedDrift(t *testing.T) {
+	withoutLimits := gatewayCreationSpec()
+	if !matchesEgressGatewayTrafficEnvironment([]string{"PATH=/usr/local/bin:/usr/bin"}, egressGatewayEnvironment(withoutLimits)) {
+		t.Fatal("image-defined PATH was treated as managed traffic-limit drift")
+	}
+	if matchesEgressGatewayTrafficEnvironment([]string{"PATH=/usr/bin", "CYBERSTRIKE_HTTP_RPS=1"}, egressGatewayEnvironment(withoutLimits)) {
+		t.Fatal("disabled traffic limits accepted a managed rate variable")
+	}
+
+	withLimits := gatewayCreationSpec()
+	withLimits.EgressGateway.TrafficLimits = &EgressTrafficLimits{
+		HTTPRequestsPerSecond: 7, TCPConnectionsPerSecond: 11, UDPDatagramsPerSecond: 13,
+	}
+	expected := egressGatewayEnvironment(withLimits)
+	actual := append([]string{"PATH=/usr/local/bin:/usr/bin", "LANG=C.UTF-8"}, expected...)
+	if !matchesEgressGatewayTrafficEnvironment(actual, expected) {
+		t.Fatal("matching managed rates with image-defined environment were rejected")
+	}
+	for name, mutated := range map[string][]string{
+		"missing":   append([]string(nil), actual[:len(actual)-1]...),
+		"changed":   replaceTestEnvironmentEntry(append([]string(nil), actual...), "CYBERSTRIKE_TCP_CPS", "12"),
+		"duplicate": append(append([]string(nil), actual...), "CYBERSTRIKE_HTTP_RPS=7"),
+		"malformed": append(append([]string(nil), actual[:len(actual)-3]...), "CYBERSTRIKE_HTTP_RPS"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if matchesEgressGatewayTrafficEnvironment(mutated, expected) {
+				t.Fatalf("managed traffic-limit drift was accepted: %#v", mutated)
+			}
+		})
+	}
+}
+
+func TestDockerManagerInspectionAllowsImageDefinedGatewayEnvironment(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatalf("create gateway topology: %v", err)
+	}
+	name := EgressGatewayContainerName(spec.ID)
+	gateway := api.containerResults[name]
+	gateway.Container.Config.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	api.containerResults[name] = gateway
+	if _, err := manager.Inspect(context.Background(), spec.ID); err != nil {
+		t.Fatalf("inspect gateway with image-defined environment: %v", err)
+	}
+}
+
 func TestTLSInspectionMountsPrivateKeyOnlyIntoGatewayAndCertificateReadOnlyIntoAgent(t *testing.T) {
 	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
 	tlsStore, err := egress.NewTLSAuthorityStore(filepath.Join(t.TempDir(), "tls-authorities"))

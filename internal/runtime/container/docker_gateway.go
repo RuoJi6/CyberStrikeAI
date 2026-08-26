@@ -312,7 +312,7 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
 		return fmt.Errorf("%w: egress gateway process configuration mismatch", ErrRuntimeStateConflict)
 	}
-	if !equalStrings(actual.Config.Env, egressGatewayEnvironment(spec)) {
+	if !matchesEgressGatewayTrafficEnvironment(actual.Config.Env, egressGatewayEnvironment(spec)) {
 		return fmt.Errorf("%w: egress gateway traffic limit environment mismatch", ErrRuntimeStateConflict)
 	}
 	expectedCommand := egressGatewayCommand(spec, "run")
@@ -420,6 +420,45 @@ func egressGatewayEnvironment(spec RuntimeSpec) []string {
 		"CYBERSTRIKE_TCP_CPS=" + strconv.Itoa(limits.TCPConnectionsPerSecond),
 		"CYBERSTRIKE_UDP_DPS=" + strconv.Itoa(limits.UDPDatagramsPerSecond),
 	}
+}
+
+func matchesEgressGatewayTrafficEnvironment(actual, expected []string) bool {
+	managedKeys := map[string]struct{}{
+		"CYBERSTRIKE_HTTP_RPS": {},
+		"CYBERSTRIKE_TCP_CPS":  {},
+		"CYBERSTRIKE_UDP_DPS":  {},
+	}
+	expectedValues := make(map[string]string, len(expected))
+	for _, entry := range expected {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok {
+			return false
+		}
+		expectedValues[key] = value
+	}
+	actualValues := make(map[string]string, len(expectedValues))
+	for _, entry := range actual {
+		key, value, ok := strings.Cut(entry, "=")
+		if _, managed := managedKeys[key]; !managed {
+			continue
+		}
+		if !ok {
+			return false
+		}
+		if _, duplicate := actualValues[key]; duplicate {
+			return false
+		}
+		actualValues[key] = value
+	}
+	if len(actualValues) != len(expectedValues) {
+		return false
+	}
+	for key, expectedValue := range expectedValues {
+		if actualValues[key] != expectedValue {
+			return false
+		}
+	}
+	return true
 }
 
 func egressGatewayCommand(spec RuntimeSpec, action string) []string {
