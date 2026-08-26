@@ -75,6 +75,7 @@
     "ropper",
     "ruby",
     "samba-common-bin",
+    "seclists",
     "sed",
     "smbmap",
     "sqlmap",

@@ -8,8 +8,10 @@ FROM ${KALI_IMAGE} AS builder
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends \
+    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+      -exec sed -i 's#http://http.kali.org/kali#http://kali.download/kali#g' '{}' +; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
       ca-certificates curl wget git jq unzip xz-utils \
       golang-go build-essential libssl-dev; \
     rm -rf /var/lib/apt/lists/*
@@ -36,8 +38,10 @@ FROM ${KALI_IMAGE} AS node-builder
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
 RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates jq nodejs npm; \
+    find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
+      -exec sed -i 's#http://http.kali.org/kali#http://kali.download/kali#g' '{}' +; \
+    apt-get -o Acquire::Retries=5 update; \
+    apt-get -o Acquire::Retries=5 install -y --no-install-recommends ca-certificates jq nodejs npm; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 COPY toolchain.lock /build/toolchain.lock
@@ -75,9 +79,10 @@ RUN set -eux; \
     rm -rf /etc/sudoers.d/* /app/certs 2>/dev/null || true
 
 # APT packages from toolchain.lock (no kali-linux-everything).
-# The Kali redirector repeatedly assigned the large Ghidra package to an
-# unreachable mirror during multi-arch builds. Pin this stage to Kali's verified
-# official download endpoint; package authenticity is enforced by its keyring.
+# Large Kali packages repeatedly timed out when APT fetched each package over a
+# single connection during multi-arch builds. Pin this stage to Kali's official
+# download endpoint and fetch the large archives in verified, resumable
+# chunks. Package authenticity is enforced by the signed index and SHA-256.
 COPY toolchain.lock /tmp/toolchain.lock
 RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,id=cyberstrike-agent-apt-cache-${TARGETARCH},target=/var/cache/apt,sharing=locked \
@@ -97,7 +102,7 @@ RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/
     apt-get -o Acquire::Retries=5 update; \
     apt-get -o Acquire::Retries=5 install -y --no-install-recommends jq findutils; \
     jq -e '.apt_packages | length > 0' /tmp/toolchain.lock >/dev/null; \
-    jq -r '.apt_packages[] | select(. != "ghidra")' /tmp/toolchain.lock \
+    jq -r '.apt_packages[] | select(. != "ghidra" and . != "metasploit-framework" and . != "seclists")' /tmp/toolchain.lock \
       | xargs -r -n 8 sh -ec '\
           attempt=1; \
           until apt-get -o Acquire::Retries=5 install -y --no-install-recommends "$@"; do \
@@ -108,44 +113,55 @@ RUN --mount=type=cache,id=cyberstrike-agent-apt-lists-${TARGETARCH},target=/var/
             attempt=$((attempt + 1)); \
             apt-get -o Acquire::Retries=5 update; \
           done' sh; \
-    ghidra_filename=$(apt-cache show ghidra | awk -F': ' '$1 == "Filename" {print $2; exit}'); \
-    ghidra_sha256=$(apt-cache show ghidra | awk -F': ' '$1 == "SHA256" {print $2; exit}'); \
-    ghidra_size=$(apt-cache show ghidra | awk -F': ' '$1 == "Size" {print $2; exit}'); \
-    test -n "$ghidra_filename"; \
-    test -n "$ghidra_sha256"; \
-    test -n "$ghidra_size"; \
-    case "$ghidra_size" in *[!0-9]*) exit 1 ;; esac; \
-    ghidra_deb="/var/cache/apt/archives/$(basename "$ghidra_filename")"; \
-    if ! test -f "$ghidra_deb" || ! printf '%s  %s\n' "$ghidra_sha256" "$ghidra_deb" | sha256sum -c -; then \
-      ghidra_url="http://kali.download/kali/$ghidra_filename"; \
-      ghidra_parts="${ghidra_deb}.parts"; \
-      ghidra_chunk_size=8388608; \
-      ghidra_chunks=$(((ghidra_size + ghidra_chunk_size - 1) / ghidra_chunk_size)); \
-      mkdir -p "$ghidra_parts"; \
-      export ghidra_url ghidra_parts ghidra_size ghidra_chunk_size; \
-      seq 0 $((ghidra_chunks - 1)) \
+    install_large_apt_package() { \
+      large_package=$1; \
+      large_filename=$(apt-cache show "$large_package" | awk -F': ' '$1 == "Filename" {print $2; exit}'); \
+      large_sha256=$(apt-cache show "$large_package" | awk -F': ' '$1 == "SHA256" {print $2; exit}'); \
+      large_size=$(apt-cache show "$large_package" | awk -F': ' '$1 == "Size" {print $2; exit}'); \
+      test -n "$large_filename"; \
+      test -n "$large_sha256"; \
+      test -n "$large_size"; \
+      case "$large_size" in *[!0-9]*) exit 1 ;; esac; \
+      large_deb="/var/cache/apt/archives/$(basename "$large_filename")"; \
+      if ! test -f "$large_deb" || ! printf '%s  %s\n' "$large_sha256" "$large_deb" | sha256sum -c -; then \
+        large_url="http://kali.download/kali/$large_filename"; \
+        large_parts="${large_deb}.parts"; \
+        large_chunk_size=8388608; \
+        large_chunks=$(((large_size + large_chunk_size - 1) / large_chunk_size)); \
+        mkdir -p "$large_parts"; \
+        export large_url large_parts large_size large_chunk_size; \
+        seq 0 $((large_chunks - 1)) \
         | xargs -P 8 -n 1 sh -ec '\
             index=$1; \
-            start=$((index * ghidra_chunk_size)); \
-            end=$((start + ghidra_chunk_size - 1)); \
-            if [ "$end" -ge "$ghidra_size" ]; then end=$((ghidra_size - 1)); fi; \
+            start=$((index * large_chunk_size)); \
+            end=$((start + large_chunk_size - 1)); \
+            if [ "$end" -ge "$large_size" ]; then end=$((large_size - 1)); fi; \
             expected=$((end - start + 1)); \
-            part=$(printf "%s/%06d.part" "$ghidra_parts" "$index"); \
+            part=$(printf "%s/%06d.part" "$large_parts" "$index"); \
             if [ -f "$part" ] && [ "$(wc -c < "$part")" -eq "$expected" ]; then exit 0; fi; \
             tmp="${part}.tmp"; \
             rm -f "$tmp"; \
             curl --fail --location --retry 10 --retry-all-errors \
               --range "${start}-${end}" --speed-limit 1024 --speed-time 300 \
-              --output "$tmp" "$ghidra_url"; \
+              --output "$tmp" "$large_url"; \
             test "$(wc -c < "$tmp")" -eq "$expected"; \
             mv -f "$tmp" "$part"' sh; \
-      : >"$ghidra_deb"; \
-      for part in "$ghidra_parts"/*.part; do cat "$part" >>"$ghidra_deb"; done; \
-      test "$(wc -c < "$ghidra_deb")" -eq "$ghidra_size"; \
-      rm -rf "$ghidra_parts"; \
-    fi; \
-    printf '%s  %s\n' "$ghidra_sha256" "$ghidra_deb" | sha256sum -c -; \
-    apt-get -o Acquire::Retries=5 install -y --no-install-recommends "$ghidra_deb"; \
+        : >"$large_deb"; \
+        for part in "$large_parts"/*.part; do cat "$part" >>"$large_deb"; done; \
+        test "$(wc -c < "$large_deb")" -eq "$large_size"; \
+        rm -rf "$large_parts"; \
+      fi; \
+      printf '%s  %s\n' "$large_sha256" "$large_deb" | sha256sum -c -; \
+      apt-get -o Acquire::Retries=5 install -y --no-install-recommends "$large_deb"; \
+    }; \
+    install_large_apt_package metasploit-framework; \
+    install_large_apt_package seclists; \
+    install_large_apt_package ghidra; \
+    test -d /usr/share/seclists/Discovery/Web-Content; \
+    test -n "$(find /usr/share/seclists/Discovery/Web-Content -type f -size +0c -print -quit)"; \
+    mkdir -p /usr/share/wordlists; \
+    ln -sfn /usr/share/seclists /usr/share/wordlists/seclists; \
+    test "$(readlink -f /usr/share/wordlists/seclists)" = /usr/share/seclists; \
     rm -rf \
       /var/cache/debconf/*-old \
       /var/log/apt/*
@@ -301,6 +317,9 @@ RUN set -eux; \
     grep -q 'An open-source memory forensics framework' /tmp/volatility3-help.txt; \
     paramspider --help >/tmp/paramspider-help.txt; \
     grep -q 'Mining URLs from dark corners' /tmp/paramspider-help.txt; \
+    test -d /usr/share/seclists/Discovery/Web-Content; \
+    test -n "$(find /usr/share/seclists/Discovery/Web-Content -type f -size +0c -print -quit)"; \
+    test "$(readlink -f /usr/share/wordlists/seclists)" = /usr/share/seclists; \
     expected=$(jq -r --arg platform "$platform" \
       '[.tools[] | select(((.supported_platforms // ["linux/amd64", "linux/arm64"]) | index($platform)) != null)] | length' \
       /tmp/tool-mapping.json); \
@@ -336,7 +355,8 @@ LABEL org.opencontainers.image.created="${BUILD_DATE}" \
       com.cyberstrike.base.name="kalilinux/kali-rolling" \
       com.cyberstrike.base.digest="${KALI_INDEX_DIGEST}" \
       com.cyberstrike.base.index-digest="${KALI_INDEX_DIGEST}" \
-      com.cyberstrike.agent.toolset="configured-77-platform-aware"
+      com.cyberstrike.agent.toolset="configured-77-platform-aware" \
+      com.cyberstrike.agent.wordlists="seclists:/usr/share/seclists"
 
 USER pentester
 WORKDIR /workspace
