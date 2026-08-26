@@ -122,6 +122,7 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     assert.match(styles, /\.boundary-policy-editor-dialog\s*\{[\s\S]*?grid-template-rows: auto minmax\(0, 1fr\);[\s\S]*?max-height:[\s\S]*?overflow: hidden;/);
     assert.match(styles, /\.boundary-policy-editor-body\s*\{[\s\S]*?overflow: auto;/);
     assert.match(styles, /\.boundary-rule-form:not\(\[hidden\]\)\s*\{[\s\S]*?position: fixed;[\s\S]*?transform: translate\(-50%, -50%\)/);
+    assert.match(styles, /\.boundary-policy-overlay-open \.unified-select-menu\s*\{\s*z-index: 10110;\s*\}/);
     assert.match(styles, /\.container-policy-detail\s*\{/);
     assert.match(styles, /\.container-policy-rule-grid\s*\{/);
     assert.match(styles, /\.egress-management-view\s*\{/);

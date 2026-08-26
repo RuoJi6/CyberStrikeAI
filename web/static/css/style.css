@@ -5141,6 +5141,7 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .boundary-policy-editor-body { min-height: 0; max-height: calc(100dvh - 188px); overflow: auto; overscroll-behavior: contain; padding: 0 24px 28px; scrollbar-gutter: stable; }
 .boundary-policy-editor-body > .boundary-rule-editor { margin-bottom: 0; }
 .boundary-policy-overlay-open { overflow: hidden; }
+.boundary-policy-overlay-open .unified-select-menu { z-index: 10110; }
 
 html[data-theme="dark"] .boundary-policy-row-value strong.is-used { color: #fbbf24; }
 
