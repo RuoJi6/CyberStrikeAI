@@ -21,13 +21,13 @@ The `latest` tag currently resolves to the index digest above. The ARM64 VM pull
 | Item | Value |
 | --- | --- |
 | Repository | `ruoji6/cyberstrikeai-egress` |
-| Tags | `fast-reject-20260825`, `latest` |
-| Multi-platform index | `sha256:5e9c03756eea3ca22a0fb3a6235d8fdf9ee0a992af36c64f367e664d9423c3d5` |
-| ARM64 manifest | `sha256:5c109b32fe43418e154f2ce20d60fca6ea23ae29090edcdc9b7376f6473d7905` |
-| AMD64 manifest | `sha256:588cdb0c6cc63935d430ff1ca1e99782a425a856d84a62d70d6b82d090bfc0fa` |
-| OCI revision | `1b00ebb1215fb08b25958e2c251b727af1afe003` |
+| Tags | `runtime-controls-20260826`, `latest` |
+| Multi-platform index | `sha256:14c6b318f82fd5fcf85a1add501a329f01d5a0b02280668a0ab18483b883c511` |
+| ARM64 manifest | `sha256:8315466e05ddfcaae46de008a36ceeee614bcfb115f1ca78db5408285bade7c0` |
+| AMD64 manifest | `sha256:614abfc446fb35832a0335b86389c0c766f2e24f8be1aad383e2902a0ee32392` |
+| OCI revision | `7454258` |
 
-The Egress image is also pulled from Docker Hub by index digest. Its ARM64 manifest has passed a read-only-rootfs smoke test with all capabilities dropped, only `NET_ADMIN`/`NET_RAW` restored, `no-new-privileges`, and an immutable boundary snapshot health check. The production VM then passed HTTP, mixed TCP/UDP allow-and-block, persistent audit-chain, restart, and exact-runtime-image acceptance. This release immediately rejects evaluated denied TCP/UDP tuples. Mixed-port scans are decided independently per `(IP, port, protocol)`, so denied ports neither terminate nor affect allowed ports in the same scan.
+The Egress image is also pulled from Docker Hub by index digest. Both platform manifests passed the publisher smoke test. Its ARM64 runtime keeps a read-only root filesystem, drops all capabilities before restoring only `NET_ADMIN`/`NET_RAW`, enables `no-new-privileges`, and loads an immutable boundary snapshot. This release retains immediate per-tuple TCP/UDP denial and adds optional HTTP request, TCP connection, and UDP datagram pacing configured per conversation.
 
 ## Tool and platform coverage
 
