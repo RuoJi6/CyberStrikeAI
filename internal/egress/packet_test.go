@@ -186,3 +186,38 @@ func TestPacketFilterAuditsOnlyNewTCPAttempts(t *testing.T) {
 		t.Fatalf("TCP activity events = %#v", events)
 	}
 }
+
+func TestPacketFilterRateLimitsOnlyNewTCPConnections(t *testing.T) {
+	policy, err := boundary.NewPolicyWithDefault(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter, err := newPacketFilter(policy, PacketOptions{TCPConnectionsPerSecond: 100000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := netip.MustParseAddr("47.116.200.74")
+	syn := testIPv4Packet(6, target, 22)
+	if allowed, _, parsed := filter.evaluate(syn); !parsed || !allowed {
+		t.Fatalf("SYN parsed=%v allowed=%v", parsed, allowed)
+	}
+	filter.tcpPacer.mu.Lock()
+	reservedAfterSYN := filter.tcpPacer.next
+	filter.tcpPacer.mu.Unlock()
+	if reservedAfterSYN.IsZero() {
+		t.Fatal("new TCP connection did not reserve the pacer")
+	}
+	for _, flags := range []byte{0x10, 0x18} {
+		packet := append([]byte(nil), syn...)
+		packet[33] = flags
+		if allowed, _, parsed := filter.evaluate(packet); !parsed || !allowed {
+			t.Fatalf("established TCP packet flags=%#x parsed=%v allowed=%v", flags, parsed, allowed)
+		}
+	}
+	filter.tcpPacer.mu.Lock()
+	reservedAfterEstablishedTraffic := filter.tcpPacer.next
+	filter.tcpPacer.mu.Unlock()
+	if !reservedAfterEstablishedTraffic.Equal(reservedAfterSYN) {
+		t.Fatalf("established TCP packets consumed connection rate: before=%s after=%s", reservedAfterSYN, reservedAfterEstablishedTraffic)
+	}
+}

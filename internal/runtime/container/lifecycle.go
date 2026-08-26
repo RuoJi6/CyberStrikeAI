@@ -48,10 +48,48 @@ type LifecycleFailure struct {
 
 type boundaryRebuildSnapshotContextKey struct{}
 type egressRebuildRouteContextKey struct{}
+type runtimeControlsContextKey struct{}
 
 type egressRebuildRouteContext struct {
 	Present bool
 	Route   *EgressUpstreamRouteSpec
+}
+
+type runtimeControlsContext struct {
+	Resources     ResourceLimits
+	TrafficLimits *EgressTrafficLimits
+}
+
+// WithRuntimeControls authorizes an explicit rebuild to replace only the
+// Agent CPU/memory values and optional gateway traffic limits. All other hard
+// resource and security controls remain inherited from platform policy.
+func WithRuntimeControls(ctx context.Context, resources ResourceLimits, traffic *EgressTrafficLimits) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	value := runtimeControlsContext{Resources: resources}
+	if traffic != nil {
+		copy := *traffic
+		value.TrafficLimits = &copy
+	}
+	return context.WithValue(ctx, runtimeControlsContextKey{}, value)
+}
+
+func applyRuntimeControlsFromContext(ctx context.Context, spec *RuntimeSpec) {
+	if ctx == nil || spec == nil {
+		return
+	}
+	value, ok := ctx.Value(runtimeControlsContextKey{}).(runtimeControlsContext)
+	if !ok {
+		return
+	}
+	spec.Resources.NanoCPUs = value.Resources.NanoCPUs
+	spec.Resources.MemoryBytes = value.Resources.MemoryBytes
+	if spec.EgressGateway != nil {
+		gateway := *spec.EgressGateway
+		gateway.TrafficLimits = value.TrafficLimits
+		spec.EgressGateway = &gateway
+	}
 }
 
 // WithBoundaryRebuildSnapshot binds one prepared immutable snapshot to the
@@ -492,6 +530,10 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 		spec.EgressGateway = &gateway
 	}
 	if spec.EgressGateway == nil || c == nil || c.snapshots == nil {
+		applyRuntimeControlsFromContext(ctx, &spec)
+		if err := ValidateSpec(spec); err != nil {
+			return RuntimeSpec{}, err
+		}
 		return spec, nil
 	}
 	if strings.TrimSpace(requestedSnapshotID) == "" && spec.EgressGateway.BoundarySnapshot != nil {
@@ -530,6 +572,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway.UpstreamRoute = requestedRoute
 			spec.EgressGateway = &gateway
 		}
+		applyRuntimeControlsFromContext(ctx, &spec)
 		if err := ValidateSpec(spec); err != nil {
 			return RuntimeSpec{}, err
 		}
@@ -566,6 +609,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 		gateway.TLSAuthority = authority
 	}
 	spec.EgressGateway = &gateway
+	applyRuntimeControlsFromContext(ctx, &spec)
 	if err := ValidateSpec(spec); err != nil {
 		return RuntimeSpec{}, err
 	}

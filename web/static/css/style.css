@@ -30667,6 +30667,49 @@ html[data-theme="dark"] .vulnerability-details code.vuln-detail-field-value {
     opacity: 0.68;
 }
 
+.container-runtime-control-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.container-runtime-control-grid[hidden] {
+    display: none;
+}
+
+.container-runtime-control-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: #475569;
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.container-runtime-control-grid input {
+    width: 100%;
+    min-height: 36px;
+    padding: 7px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    color: #0f172a;
+    background: #fff;
+    font: inherit;
+    font-size: 12px;
+}
+
+.container-runtime-control-grid input:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+    border-color: #2563eb;
+}
+
+@media (max-width: 680px) {
+    .container-runtime-control-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 /* Unified searchable single/multi select. Menus are portalled to body and
    positioned against the visual viewport so nested panels cannot clip them. */
 select.unified-select-native {
@@ -39605,6 +39648,16 @@ html[data-theme="dark"] .container-conversation-field {
 html[data-theme="dark"] .container-conversation-field select {
     color: #e2e8f0;
     background: #111827;
+    border-color: #334155;
+}
+
+html[data-theme="dark"] .container-runtime-control-grid label {
+    color: #94a3b8;
+}
+
+html[data-theme="dark"] .container-runtime-control-grid input {
+    color: #e2e8f0;
+    background: #0f172a;
     border-color: #334155;
 }
 

@@ -55,6 +55,11 @@ func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Con
 		c.JSON(http.StatusConflict, gin.H{"error": "对话容器尚未就绪"})
 		return
 	}
+	runtimeControls, err := h.db.GetConversationRuntimeControls(c.Request.Context(), id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取容器运行控制失败"})
+		return
+	}
 	proxyID, proxyGroupID := "", ""
 	if binding.Proxy != nil {
 		proxyID = binding.Proxy.ID
@@ -63,15 +68,18 @@ func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Con
 		proxyGroupID = binding.ProxyGroup.ID
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"conversationId":     id,
-		"boundaryPolicyId":   snapshot.PolicyID,
-		"egressMode":         binding.Mode,
-		"egressSource":       binding.Source,
-		"egressProxyId":      proxyID,
-		"egressProxyGroupId": proxyGroupID,
-		"runtimeStatus":      record.RuntimeStatus,
-		"lifecycleState":     record.LifecycleState,
-		"runtimeGeneration":  record.RuntimeGeneration,
+		"conversationId":       id,
+		"boundaryPolicyId":     snapshot.PolicyID,
+		"egressMode":           binding.Mode,
+		"egressSource":         binding.Source,
+		"egressProxyId":        proxyID,
+		"egressProxyGroupId":   proxyGroupID,
+		"runtimeStatus":        record.RuntimeStatus,
+		"lifecycleState":       record.LifecycleState,
+		"runtimeGeneration":    record.RuntimeGeneration,
+		"runtimeControls":      runtimeControls,
+		"effectiveNanoCpus":    record.Spec.Resources.NanoCPUs,
+		"effectiveMemoryBytes": record.Spec.Resources.MemoryBytes,
 	})
 }
 
@@ -191,6 +199,31 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		}
 	}
 
+	var previousRuntimeControls database.ConversationRuntimeControls
+	var requestedRuntimeControls database.ConversationRuntimeControls
+	runtimeControlsChanged := request.RuntimeControls != nil
+	if runtimeControlsChanged {
+		var err error
+		requestedRuntimeControls, err = database.NormalizeConversationRuntimeControls(*request.RuntimeControls)
+		if err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			if egressChanged {
+				h.cancelStagedEgressRebuild(id)
+			}
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		previousRuntimeControls, err = h.db.GetConversationRuntimeControls(c.Request.Context(), id)
+		if err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			if egressChanged {
+				h.cancelStagedEgressRebuild(id)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "读取当前容器运行控制失败"})
+			return
+		}
+	}
+
 	rebuildCtx := c.Request.Context()
 	if staged != nil {
 		rebuildCtx = containerruntime.WithBoundaryRebuildSnapshot(rebuildCtx, staged.SnapshotID)
@@ -225,8 +258,41 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "对话容器状态正在变化，请稍后重试"})
 		return
 	}
+	if runtimeControlsChanged {
+		resources := current.Spec.Resources
+		if h.containerResourceDefaults.NanoCPUs > 0 {
+			resources.NanoCPUs = h.containerResourceDefaults.NanoCPUs
+		}
+		if h.containerResourceDefaults.MemoryBytes > 0 {
+			resources.MemoryBytes = h.containerResourceDefaults.MemoryBytes
+		}
+		if requestedRuntimeControls.CustomResourcesEnabled {
+			resources.NanoCPUs = requestedRuntimeControls.NanoCPUs
+			resources.MemoryBytes = requestedRuntimeControls.MemoryBytes
+		}
+		var traffic *containerruntime.EgressTrafficLimits
+		if requestedRuntimeControls.ScanRateEnabled {
+			traffic = &containerruntime.EgressTrafficLimits{
+				HTTPRequestsPerSecond:   requestedRuntimeControls.HTTPRequestsPerSecond,
+				TCPConnectionsPerSecond: requestedRuntimeControls.TCPConnectionsPerSecond,
+				UDPDatagramsPerSecond:   requestedRuntimeControls.UDPDatagramsPerSecond,
+			}
+		}
+		rebuildCtx = containerruntime.WithRuntimeControls(rebuildCtx, resources, traffic)
+		if _, err := h.db.SetConversationRuntimeControls(c.Request.Context(), id, requestedRuntimeControls); err != nil {
+			h.cancelStagedBoundaryRebuild(id, staged)
+			if egressChanged {
+				h.cancelStagedEgressRebuild(id)
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
 	record, err := h.containerLifecycle.Rebuild(rebuildCtx, id)
 	if err != nil {
+		if runtimeControlsChanged {
+			_, _ = h.db.SetConversationRuntimeControls(context.Background(), id, previousRuntimeControls)
+		}
 		h.cancelStagedBoundaryRebuild(id, staged)
 		if egressChanged {
 			h.cancelStagedEgressRebuild(id)
@@ -247,8 +313,9 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		detail := map[string]interface{}{
 			"runtime_status": record.RuntimeStatus, "lifecycle_state": record.LifecycleState,
 			"runtime_drift": record.RuntimeDrift, "runtime_generation": record.RuntimeGeneration,
-			"boundary_changed": staged != nil,
-			"egress_changed":   egressChanged,
+			"boundary_changed":         staged != nil,
+			"egress_changed":           egressChanged,
+			"runtime_controls_changed": runtimeControlsChanged,
 		}
 		if staged != nil {
 			detail["previous_boundary_sha256"] = previous.SHA256
@@ -269,9 +336,10 @@ type RebuildConversationContainerRequest struct {
 	BoundaryPolicyID json.RawMessage `json:"boundaryPolicyId,omitempty"`
 	// An explicit empty string re-resolves project/user inheritance. Omission
 	// preserves the active immutable binding during a maintenance rebuild.
-	EgressMode         json.RawMessage `json:"egressMode,omitempty"`
-	EgressProxyID      string          `json:"egressProxyId,omitempty"`
-	EgressProxyGroupID string          `json:"egressProxyGroupId,omitempty"`
+	EgressMode         json.RawMessage                       `json:"egressMode,omitempty"`
+	EgressProxyID      string                                `json:"egressProxyId,omitempty"`
+	EgressProxyGroupID string                                `json:"egressProxyGroupId,omitempty"`
+	RuntimeControls    *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
 }
 
 func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {

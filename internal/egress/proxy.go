@@ -32,18 +32,21 @@ type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 type LookupNetIPFunc func(context.Context, string, string) ([]netip.Addr, error)
 
 type ProxyOptions struct {
-	DialContext        DialContextFunc
-	LookupNetIP        LookupNetIPFunc
-	Transport          http.RoundTripper
-	UpstreamRoute      *UpstreamRoute
-	AuthProfiles       *AuthProfilesDocument
-	UpstreamTLSConfig  *tls.Config
-	Now                func() time.Time
-	ClientHelloTimeout time.Duration
-	MaxClientHello     int
-	ActivitySink       ActivitySink
-	TLSInspection      *TLSInspectionPolicy
-	TLSAuthority       *TLSAuthority
+	DialContext             DialContextFunc
+	LookupNetIP             LookupNetIPFunc
+	Transport               http.RoundTripper
+	UpstreamRoute           *UpstreamRoute
+	AuthProfiles            *AuthProfilesDocument
+	UpstreamTLSConfig       *tls.Config
+	Now                     func() time.Time
+	ClientHelloTimeout      time.Duration
+	MaxClientHello          int
+	ActivitySink            ActivitySink
+	TLSInspection           *TLSInspectionPolicy
+	TLSAuthority            *TLSAuthority
+	HTTPRequestsPerSecond   int
+	TCPConnectionsPerSecond int
+	UDPDatagramsPerSecond   int
 }
 
 // Proxy is the policy-enforcing HTTP forward proxy and HTTPS CONNECT tunnel.
@@ -62,6 +65,9 @@ type Proxy struct {
 	guard              *requestGuard
 	tlsInspection      *TLSInspectionPolicy
 	tlsAuthority       *TLSAuthority
+	httpPacer          *trafficPacer
+	tcpPacer           *trafficPacer
+	udpPacer           *trafficPacer
 }
 
 type boundedPacketCapture struct {
@@ -157,6 +163,13 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	if options.ClientHelloTimeout < 0 || options.MaxClientHello < 0 {
 		return nil, errors.New("egress proxy limits must not be negative")
 	}
+	if err := ValidateTrafficLimits(&TrafficLimits{
+		HTTPRequestsPerSecond:   options.HTTPRequestsPerSecond,
+		TCPConnectionsPerSecond: options.TCPConnectionsPerSecond,
+		UDPDatagramsPerSecond:   options.UDPDatagramsPerSecond,
+	}); err != nil && (options.HTTPRequestsPerSecond != 0 || options.TCPConnectionsPerSecond != 0 || options.UDPDatagramsPerSecond != 0) {
+		return nil, err
+	}
 	if options.UpstreamRoute != nil && options.Transport != nil {
 		return nil, errors.New("egress upstream route cannot be combined with a custom HTTP transport")
 	}
@@ -205,6 +218,9 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
 		tlsInspection: options.TLSInspection, tlsAuthority: options.TLSAuthority,
+		httpPacer: newTrafficPacer(options.HTTPRequestsPerSecond),
+		tcpPacer:  newTrafficPacer(options.TCPConnectionsPerSecond),
+		udpPacer:  newTrafficPacer(options.UDPDatagramsPerSecond),
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -251,6 +267,10 @@ func authProfilesForPolicy(policy *boundary.Policy, document *AuthProfilesDocume
 func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if p == nil || p.policy == nil || request == nil {
 		http.Error(writer, "egress proxy unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := p.httpPacer.Wait(request.Context()); err != nil {
+		http.Error(writer, "egress request canceled while waiting for the configured rate", http.StatusServiceUnavailable)
 		return
 	}
 	if request.Method == http.MethodConnect {

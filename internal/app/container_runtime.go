@@ -592,6 +592,25 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 	return spec, nil
 }
 
+func applyConversationRuntimeControls(spec *containerruntime.RuntimeSpec, controls database.ConversationRuntimeControls) {
+	if spec == nil {
+		return
+	}
+	if controls.CustomResourcesEnabled {
+		spec.Resources.NanoCPUs = controls.NanoCPUs
+		spec.Resources.MemoryBytes = controls.MemoryBytes
+	}
+	if spec.EgressGateway != nil && controls.ScanRateEnabled {
+		gateway := *spec.EgressGateway
+		gateway.TrafficLimits = &containerruntime.EgressTrafficLimits{
+			HTTPRequestsPerSecond:   controls.HTTPRequestsPerSecond,
+			TCPConnectionsPerSecond: controls.TCPConnectionsPerSecond,
+			UDPDatagramsPerSecond:   controls.UDPDatagramsPerSecond,
+		}
+		spec.EgressGateway = &gateway
+	}
+}
+
 func conversationEgressGatewaySpec(cfg *config.Config) containerruntime.EgressGatewaySpec {
 	return containerruntime.EgressGatewaySpec{
 		Image: containerruntime.ImageReference{

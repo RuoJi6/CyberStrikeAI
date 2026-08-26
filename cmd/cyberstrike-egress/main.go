@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -61,11 +62,16 @@ func runConfigured(args []string) error {
 			}
 		}
 	}()
+	trafficLimits, err := trafficLimitsFromEnvironment()
+	if err != nil {
+		return err
+	}
 	return egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
 		TLSCertificatePath: tlsCertPath, TLSPrivateKeyPath: tlsKeyPath, TLSAuthority: tlsReference,
 		ManualRecovery: recoveries,
+		TrafficLimits:  trafficLimits,
 	})
 }
 
@@ -74,11 +80,44 @@ func checkConfigured(args []string) error {
 	if err != nil {
 		return err
 	}
+	trafficLimits, err := trafficLimitsFromEnvironment()
+	if err != nil {
+		return err
+	}
 	return egress.CheckGatewayWithOptions(path, reference, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
 		TLSCertificatePath: tlsCertPath, TLSPrivateKeyPath: tlsKeyPath, TLSAuthority: tlsReference,
+		TrafficLimits: trafficLimits,
 	}, os.Stdout)
+}
+
+func trafficLimitsFromEnvironment() (*egress.TrafficLimits, error) {
+	names := []string{"CYBERSTRIKE_HTTP_RPS", "CYBERSTRIKE_TCP_CPS", "CYBERSTRIKE_UDP_DPS"}
+	values := make([]int, len(names))
+	configured := false
+	for index, name := range names {
+		raw := strings.TrimSpace(os.Getenv(name))
+		if raw == "" {
+			continue
+		}
+		configured = true
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			return nil, fmt.Errorf("%s must be a non-negative integer", name)
+		}
+		values[index] = value
+	}
+	if !configured {
+		return nil, nil
+	}
+	limits := &egress.TrafficLimits{
+		HTTPRequestsPerSecond: values[0], TCPConnectionsPerSecond: values[1], UDPDatagramsPerSecond: values[2],
+	}
+	if err := egress.ValidateTrafficLimits(limits); err != nil {
+		return nil, err
+	}
+	return limits, nil
 }
 
 func parseGatewayFlags(command string, args []string) (string, egress.SnapshotReference, string, *egress.UpstreamRouteReference, string, *egress.AuthProfilesReference, string, string, *egress.TLSAuthorityReference, error) {

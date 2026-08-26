@@ -78,22 +78,23 @@ type ConversationRetainedWorkspaceController interface {
 
 // ConversationHandler 对话处理器
 type ConversationHandler struct {
-	db                       *database.DB
-	logger                   *zap.Logger
-	audit                    *audit.Service
-	taskStopper              ConversationTaskStopper
-	taskState                ConversationTaskStateProvider
-	taskIdle                 ConversationTaskIdleRunner
-	containerInitializations ConversationContainerInitializationProvider
-	containerObserver        ConversationContainerRuntimeObserver
-	containerWorkspace       ConversationContainerWorkspaceInspector
-	containerInteractive     ConversationContainerInteractiveExecutor
-	egressActivityStreamer   ConversationEgressActivityStreamer
-	egressHealthController   ConversationEgressHealthController
-	egressRebuildPreparer    ConversationEgressRebuildPreparer
-	containerLifecycle       ConversationContainerLifecycleController
-	retainedWorkspace        ConversationRetainedWorkspaceController
-	containerRollout         func(userID, projectID string) (enabled, allowed bool)
+	db                        *database.DB
+	logger                    *zap.Logger
+	audit                     *audit.Service
+	taskStopper               ConversationTaskStopper
+	taskState                 ConversationTaskStateProvider
+	taskIdle                  ConversationTaskIdleRunner
+	containerInitializations  ConversationContainerInitializationProvider
+	containerObserver         ConversationContainerRuntimeObserver
+	containerWorkspace        ConversationContainerWorkspaceInspector
+	containerInteractive      ConversationContainerInteractiveExecutor
+	egressActivityStreamer    ConversationEgressActivityStreamer
+	egressHealthController    ConversationEgressHealthController
+	egressRebuildPreparer     ConversationEgressRebuildPreparer
+	containerLifecycle        ConversationContainerLifecycleController
+	containerResourceDefaults containerruntime.ResourceLimits
+	retainedWorkspace         ConversationRetainedWorkspaceController
+	containerRollout          func(userID, projectID string) (enabled, allowed bool)
 }
 
 // SetAudit wires platform audit logging.
@@ -148,6 +149,10 @@ func (h *ConversationHandler) SetContainerLifecycleController(controller Convers
 	h.containerLifecycle = controller
 }
 
+func (h *ConversationHandler) SetContainerResourceDefaults(resources containerruntime.ResourceLimits) {
+	h.containerResourceDefaults = resources
+}
+
 func (h *ConversationHandler) SetRetainedWorkspaceController(controller ConversationRetainedWorkspaceController) {
 	h.retainedWorkspace = controller
 }
@@ -166,16 +171,17 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 
 // CreateConversationRequest 创建对话请求
 type CreateConversationRequest struct {
-	Title               string `json:"title"`
-	ProjectID           string `json:"projectId,omitempty"`
-	RuntimeMode         string `json:"runtimeMode,omitempty"`
-	WorkspacePersistent bool   `json:"workspacePersistent,omitempty"`
-	BoundaryPolicyID    string `json:"boundaryPolicyId,omitempty"`
-	EgressMode          string `json:"egressMode,omitempty"`
-	EgressProxyID       string `json:"egressProxyId,omitempty"`
-	EgressProxyGroupID  string `json:"egressProxyGroupId,omitempty"`
-	EgressAuditEnabled  *bool  `json:"egressAuditEnabled,omitempty"`
-	EgressAuditMode     string `json:"egressAuditMode,omitempty"`
+	Title               string                                `json:"title"`
+	ProjectID           string                                `json:"projectId,omitempty"`
+	RuntimeMode         string                                `json:"runtimeMode,omitempty"`
+	WorkspacePersistent bool                                  `json:"workspacePersistent,omitempty"`
+	BoundaryPolicyID    string                                `json:"boundaryPolicyId,omitempty"`
+	EgressMode          string                                `json:"egressMode,omitempty"`
+	EgressProxyID       string                                `json:"egressProxyId,omitempty"`
+	EgressProxyGroupID  string                                `json:"egressProxyGroupId,omitempty"`
+	EgressAuditEnabled  *bool                                 `json:"egressAuditEnabled,omitempty"`
+	EgressAuditMode     string                                `json:"egressAuditMode,omitempty"`
+	RuntimeControls     *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -213,6 +219,18 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.WorkspacePersistent = req.WorkspacePersistent
+	if req.RuntimeControls != nil {
+		if runtimeMode != database.ConversationRuntimeModeContainer {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeControls 只能用于 container 对话"})
+			return
+		}
+		normalized, controlsErr := database.NormalizeConversationRuntimeControls(*req.RuntimeControls)
+		if controlsErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": controlsErr.Error()})
+			return
+		}
+		meta.RuntimeControls = normalized
+	}
 	if req.EgressAuditEnabled != nil && runtimeMode != database.ConversationRuntimeModeContainer {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "egressAuditEnabled 只能用于 container 对话"})
 		return

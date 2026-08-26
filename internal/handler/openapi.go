@@ -100,6 +100,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"default":     false,
 		"description": "仅在新建 container 对话时生效。false 使用临时 /workspace，删除容器即删除文件；true 使用系统生成的每对话 Docker named volume。创建后不可修改。",
 	}
+	conversationRuntimeControlsSchema := conversationRuntimeControlsOpenAPISchema()
 	boundaryPolicyRequestSchema := map[string]interface{}{
 		"type":        "string",
 		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许。",
@@ -566,6 +567,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"egressProxyGroupId":  conversationEgressProxyGroupIDRequestSchema,
 						"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 						"egressAuditMode":     conversationEgressAuditModeRequestSchema,
+						"runtimeControls":     conversationRuntimeControlsSchema,
 					},
 				},
 				"SetConversationProjectRequest": map[string]interface{}{
@@ -8312,12 +8314,30 @@ func conversationContainerRebuildOpenAPIOperation() map[string]interface{} {
 						},
 						"egressProxyId":      map[string]interface{}{"type": "string"},
 						"egressProxyGroupId": map[string]interface{}{"type": "string"},
+						"runtimeControls":    conversationRuntimeControlsOpenAPISchema(),
 					},
 				},
 			},
 		},
 	}
 	return operation
+}
+
+func conversationRuntimeControlsOpenAPISchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"description":          "可选 Agent 容器运行控制。两个开关默认关闭；关闭时使用平台资源和不限速网关。TCP 仅计算新连接。",
+		"properties": map[string]interface{}{
+			"scanRateEnabled":         map[string]interface{}{"type": "boolean", "default": false},
+			"httpRequestsPerSecond":   map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 100000},
+			"tcpConnectionsPerSecond": map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 100000},
+			"udpDatagramsPerSecond":   map[string]interface{}{"type": "integer", "minimum": 0, "maximum": 100000},
+			"customResourcesEnabled":  map[string]interface{}{"type": "boolean", "default": false},
+			"nanoCpus":                map[string]interface{}{"type": "integer", "format": "int64", "minimum": 250000000, "maximum": 8000000000},
+			"memoryBytes":             map[string]interface{}{"type": "integer", "format": "int64", "minimum": 268435456, "maximum": 17179869184},
+		},
+	}
 }
 
 func conversationContainerNetworkSettingsOpenAPIOperation() map[string]interface{} {

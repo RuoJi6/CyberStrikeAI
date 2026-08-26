@@ -65,6 +65,9 @@ const (
 	LabelEgressTmpfsBytes      = "com.cyberstrike.egress.limit.tmpfs-bytes"
 	LabelEgressLogMaxBytes     = "com.cyberstrike.egress.limit.log-max-bytes"
 	LabelEgressLogMaxFiles     = "com.cyberstrike.egress.limit.log-max-files"
+	LabelEgressHTTPRPS         = "com.cyberstrike.egress.traffic.http-rps"
+	LabelEgressTCPCPS          = "com.cyberstrike.egress.traffic.tcp-cps"
+	LabelEgressUDPDPS          = "com.cyberstrike.egress.traffic.udp-dps"
 	ResourceKindAgent          = "agent-runtime"
 
 	defaultDockerOperationTimeout  = 30 * time.Second
@@ -1170,6 +1173,11 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		labels[LabelEgressTLSAuthorityID] = gateway.TLSAuthority.ID
 		labels[LabelEgressTLSCertSHA256] = gateway.TLSAuthority.CertificateSHA256
 		labels[LabelEgressTLSKeySHA256] = gateway.TLSAuthority.PrivateKeySHA256
+	}
+	if gateway.TrafficLimits != nil {
+		labels[LabelEgressHTTPRPS] = strconv.Itoa(gateway.TrafficLimits.HTTPRequestsPerSecond)
+		labels[LabelEgressTCPCPS] = strconv.Itoa(gateway.TrafficLimits.TCPConnectionsPerSecond)
+		labels[LabelEgressUDPDPS] = strconv.Itoa(gateway.TrafficLimits.UDPDatagramsPerSecond)
 	}
 	return labels
 }

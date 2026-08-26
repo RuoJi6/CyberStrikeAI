@@ -227,6 +227,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := createProperties["boundaryPolicyId"]; !ok {
 		t.Fatal("CreateConversationRequest schema is missing boundaryPolicyId")
 	}
+	if _, ok := createProperties["runtimeControls"]; !ok {
+		t.Fatal("CreateConversationRequest schema is missing runtimeControls")
+	}
 	gateSchema, ok := schemas["ContainerExecutionGateResponse"].(map[string]interface{})
 	if !ok {
 		t.Fatal("ContainerExecutionGateResponse schema is missing")
@@ -263,7 +266,7 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	rebuildJSON := rebuildContent["application/json"].(map[string]interface{})
 	rebuildSchema := rebuildJSON["schema"].(map[string]interface{})
 	rebuildProperties := rebuildSchema["properties"].(map[string]interface{})
-	for _, field := range []string{"boundaryPolicyId", "egressMode", "egressProxyId", "egressProxyGroupId"} {
+	for _, field := range []string{"boundaryPolicyId", "egressMode", "egressProxyId", "egressProxyGroupId", "runtimeControls"} {
 		if _, ok := rebuildProperties[field]; !ok {
 			t.Fatalf("container rebuild request schema is missing %s", field)
 		}

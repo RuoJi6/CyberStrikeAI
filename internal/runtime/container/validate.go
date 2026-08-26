@@ -15,6 +15,8 @@ var snapshotIDPattern = regexp.MustCompile(`^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}
 var generatedNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var authProfilesVersionPattern = regexp.MustCompile(`^[a-f0-9]{16}$`)
 
+const maxEgressTrafficRate = 100_000
+
 // ValidateSpec rejects ambiguous or unsafe runtime requests before an engine
 // implementation sees them.
 func ValidateSpec(spec RuntimeSpec) error {
@@ -108,6 +110,17 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 	}
 	if resources.TmpfsBytes <= 0 || resources.LogMaxBytes <= 0 || resources.LogMaxFiles <= 0 {
 		return invalidSpec("egress gateway tmpfs and log rotation limits must be positive")
+	}
+	if spec.TrafficLimits != nil {
+		limits := spec.TrafficLimits
+		if limits.HTTPRequestsPerSecond < 0 || limits.HTTPRequestsPerSecond > maxEgressTrafficRate ||
+			limits.TCPConnectionsPerSecond < 0 || limits.TCPConnectionsPerSecond > maxEgressTrafficRate ||
+			limits.UDPDatagramsPerSecond < 0 || limits.UDPDatagramsPerSecond > maxEgressTrafficRate {
+			return invalidSpec("egress traffic limits must be between 0 and 100000 per second")
+		}
+		if limits.HTTPRequestsPerSecond == 0 && limits.TCPConnectionsPerSecond == 0 && limits.UDPDatagramsPerSecond == 0 {
+			return invalidSpec("egress traffic limits require at least one enabled protocol")
+		}
 	}
 	if spec.BoundarySnapshot != nil {
 		id := strings.TrimSpace(spec.BoundarySnapshot.ID)

@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260826-6">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260826-7">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1284,6 +1284,36 @@
                                                     <label id="conversation-egress-target-label" class="container-conversation-field-label" for="conversation-egress-target-select" data-i18n="chat.egressProxyLabel">选择代理</label>
                                                     <select id="conversation-egress-target-select" data-unified-select="single" onchange="syncConversationEgressTarget()"></select>
                                                     <span id="conversation-egress-target-hint" class="container-conversation-field-hint" data-i18n="chat.egressTargetHint">仅显示当前账号可访问且已脱敏的资源。</span>
+                                                </div>
+                                                <div class="container-conversation-field">
+                                                    <label class="workspace-persistence-toggle" for="conversation-scan-rate-toggle">
+                                                        <span class="workspace-persistence-toggle-copy">
+                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.scanRateLimitLabel">限制扫描速率</span>
+                                                            <span class="workspace-persistence-toggle-hint" data-i18n="chat.scanRateLimitHint">默认关闭；开启后由出站网关按协议平滑控制速率。</span>
+                                                        </span>
+                                                        <input type="checkbox" id="conversation-scan-rate-toggle" onchange="syncConversationRuntimeControls()">
+                                                        <span class="workspace-persistence-switch" aria-hidden="true"></span>
+                                                    </label>
+                                                    <div id="conversation-scan-rate-fields" class="container-runtime-control-grid" hidden>
+                                                        <label><span data-i18n="chat.httpRateLabel">HTTP(S) 请求/秒</span><input id="conversation-http-rate" type="number" min="0" max="100000" step="1" value="20" inputmode="numeric"></label>
+                                                        <label><span data-i18n="chat.tcpRateLabel">TCP 新连接/秒</span><input id="conversation-tcp-rate" type="number" min="0" max="100000" step="1" value="20" inputmode="numeric"></label>
+                                                        <label><span data-i18n="chat.udpRateLabel">UDP 数据报/秒</span><input id="conversation-udp-rate" type="number" min="0" max="100000" step="1" value="20" inputmode="numeric"></label>
+                                                    </div>
+                                                    <span class="container-conversation-field-hint" data-i18n="chat.scanRateZeroHint">单项填 0 表示不限制该协议；至少一项必须大于 0。</span>
+                                                </div>
+                                                <div class="container-conversation-field">
+                                                    <label class="workspace-persistence-toggle" for="conversation-resource-limit-toggle">
+                                                        <span class="workspace-persistence-toggle-copy">
+                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.customResourcesLabel">自定义 Agent CPU 与内存</span>
+                                                            <span class="workspace-persistence-toggle-hint" data-i18n="chat.customResourcesHint">默认关闭并使用平台资源；仅调整 Agent 容器，不影响安全网关。</span>
+                                                        </span>
+                                                        <input type="checkbox" id="conversation-resource-limit-toggle" onchange="syncConversationRuntimeControls()">
+                                                        <span class="workspace-persistence-switch" aria-hidden="true"></span>
+                                                    </label>
+                                                    <div id="conversation-resource-limit-fields" class="container-runtime-control-grid" hidden>
+                                                        <label><span data-i18n="chat.cpuLimitLabel">CPU 核数</span><input id="conversation-cpu-limit" type="number" min="0.25" max="8" step="0.25" value="1" inputmode="decimal"></label>
+                                                        <label><span data-i18n="chat.memoryLimitLabel">内存 (MiB)</span><input id="conversation-memory-limit" type="number" min="256" max="16384" step="128" value="512" inputmode="numeric"></label>
+                                                    </div>
                                                 </div>
                                                 <div class="container-conversation-field is-runtime-editable">
                                                     <label class="container-conversation-field-label" for="conversation-egress-audit-mode" data-i18n="chat.egressAuditModeLabel">高流量记录方式</label>
@@ -7337,7 +7367,7 @@
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260826-3"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260826-4"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>

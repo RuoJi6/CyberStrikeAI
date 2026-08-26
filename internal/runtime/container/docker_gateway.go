@@ -312,6 +312,9 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
 		return fmt.Errorf("%w: egress gateway process configuration mismatch", ErrRuntimeStateConflict)
 	}
+	if !equalStrings(actual.Config.Env, egressGatewayEnvironment(spec)) {
+		return fmt.Errorf("%w: egress gateway traffic limit environment mismatch", ErrRuntimeStateConflict)
+	}
 	expectedCommand := egressGatewayCommand(spec, "run")
 	if !equalStrings(actual.Config.Cmd, expectedCommand) || !equalHealthcheck(actual.Config.Healthcheck, egressGatewayHealthcheck(spec)) {
 		return fmt.Errorf("%w: egress gateway snapshot command or healthcheck mismatch", ErrRuntimeStateConflict)
@@ -357,7 +360,7 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 	config := &mobycontainer.Config{
 		NetworkDisabled: false, User: gatewayUser, WorkingDir: "/",
 		Entrypoint: []string{gatewayBinaryPath}, Cmd: egressGatewayCommand(spec, "run"),
-		Healthcheck: egressGatewayHealthcheck(spec), Labels: labels,
+		Healthcheck: egressGatewayHealthcheck(spec), Labels: labels, Env: egressGatewayEnvironment(spec),
 	}
 	hostConfig := egressGatewayHostConfig(spec)
 	if spec.EgressGateway.BoundarySnapshot == nil {
@@ -405,6 +408,18 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 		)
 	}
 	return config, hostConfig, nil
+}
+
+func egressGatewayEnvironment(spec RuntimeSpec) []string {
+	if spec.EgressGateway == nil || spec.EgressGateway.TrafficLimits == nil {
+		return nil
+	}
+	limits := spec.EgressGateway.TrafficLimits
+	return []string{
+		"CYBERSTRIKE_HTTP_RPS=" + strconv.Itoa(limits.HTTPRequestsPerSecond),
+		"CYBERSTRIKE_TCP_CPS=" + strconv.Itoa(limits.TCPConnectionsPerSecond),
+		"CYBERSTRIKE_UDP_DPS=" + strconv.Itoa(limits.UDPDatagramsPerSecond),
+	}
 }
 
 func egressGatewayCommand(spec RuntimeSpec, action string) []string {
@@ -820,6 +835,11 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 		labels[LabelEgressTLSCertSHA256] = gateway.TLSAuthority.CertificateSHA256
 		labels[LabelEgressTLSKeySHA256] = gateway.TLSAuthority.PrivateKeySHA256
 	}
+	if gateway.TrafficLimits != nil {
+		labels[LabelEgressHTTPRPS] = strconv.Itoa(gateway.TrafficLimits.HTTPRequestsPerSecond)
+		labels[LabelEgressTCPCPS] = strconv.Itoa(gateway.TrafficLimits.TCPConnectionsPerSecond)
+		labels[LabelEgressUDPDPS] = strconv.Itoa(gateway.TrafficLimits.UDPDatagramsPerSecond)
+	}
 	return labels
 }
 
@@ -834,6 +854,7 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressUpstreamRouteID, LabelEgressUpstreamSHA256,
 		LabelEgressAuthProfilesID, LabelEgressAuthSHA256,
 		LabelEgressTLSAuthorityID, LabelEgressTLSCertSHA256, LabelEgressTLSKeySHA256,
+		LabelEgressHTTPRPS, LabelEgressTCPCPS, LabelEgressUDPDPS,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -912,6 +933,25 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		gateway.TLSAuthority = &EgressTLSAuthoritySpec{
 			ID: tlsID, BoundarySnapshotID: snapshotID,
 			CertificateSHA256: tlsCertificateSHA256, PrivateKeySHA256: tlsPrivateKeySHA256,
+		}
+	}
+	httpRate := strings.TrimSpace(labels[LabelEgressHTTPRPS])
+	tcpRate := strings.TrimSpace(labels[LabelEgressTCPCPS])
+	udpRate := strings.TrimSpace(labels[LabelEgressUDPDPS])
+	if httpRate != "" || tcpRate != "" || udpRate != "" {
+		if httpRate == "" || tcpRate == "" || udpRate == "" {
+			return nil, errors.New("incomplete egress gateway traffic limit labels")
+		}
+		parsed := make([]int, 3)
+		for index, raw := range []string{httpRate, tcpRate, udpRate} {
+			value, parseErr := strconv.Atoi(raw)
+			if parseErr != nil || value < 0 {
+				return nil, errors.New("invalid egress gateway traffic limit label")
+			}
+			parsed[index] = value
+		}
+		gateway.TrafficLimits = &EgressTrafficLimits{
+			HTTPRequestsPerSecond: parsed[0], TCPConnectionsPerSecond: parsed[1], UDPDatagramsPerSecond: parsed[2],
 		}
 	}
 	if err := ValidateEgressGatewaySpec(*gateway); err != nil {

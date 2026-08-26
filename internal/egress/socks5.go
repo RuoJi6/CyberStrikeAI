@@ -34,6 +34,8 @@ type SOCKS5Proxy struct {
 	upstream     bool
 	sem          chan struct{}
 	udpSem       chan struct{}
+	tcpPacer     *trafficPacer
+	udpPacer     *trafficPacer
 }
 
 func NewSOCKS5Proxy(httpProxy *Proxy, upstream bool) (*SOCKS5Proxy, error) {
@@ -46,6 +48,7 @@ func NewSOCKS5Proxy(httpProxy *Proxy, upstream bool) (*SOCKS5Proxy, error) {
 		now: httpProxy.now, activitySink: httpProxy.activitySink, guard: httpProxy.guard,
 		upstream: upstream, dialUDP: udpDialer.DialContext,
 		sem: make(chan struct{}, maxSOCKS5Connections), udpSem: make(chan struct{}, maxSOCKS5Connections),
+		tcpPacer: httpProxy.tcpPacer, udpPacer: httpProxy.udpPacer,
 	}, nil
 }
 
@@ -151,6 +154,11 @@ func (p *SOCKS5Proxy) handleConnect(ctx context.Context, client net.Conn, client
 		_ = writeSOCKS5Reply(client, 2, nil)
 		return
 	}
+	if err := p.tcpPacer.Wait(ctx); err != nil {
+		event.Outcome = "rate_wait_canceled"
+		_ = writeSOCKS5Reply(client, 1, nil)
+		return
+	}
 	release, block, _ := p.guard.acquire(decision, started)
 	if block != nil {
 		event.Reason, event.Outcome, event.RetryAfterMS = block.reason, block.outcome, block.retryAfterMS
@@ -252,6 +260,10 @@ func (p *SOCKS5Proxy) forwardUDP(ctx context.Context, relay *net.UDPConn, client
 		emitActivity(p.activitySink, event)
 	}()
 	if authErr != nil {
+		return
+	}
+	if err := p.udpPacer.Wait(ctx); err != nil {
+		event.Outcome = "rate_wait_canceled"
 		return
 	}
 	release, block, _ := p.guard.acquire(decision, started)

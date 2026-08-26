@@ -1,6 +1,7 @@
 package egress
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"net/netip"
@@ -33,10 +34,12 @@ const (
 )
 
 type PacketOptions struct {
-	QueueNumber  uint16
-	Now          func() time.Time
-	ActivitySink ActivitySink
-	DNSLeases    *DNSLeaseStore
+	QueueNumber             uint16
+	Now                     func() time.Time
+	ActivitySink            ActivitySink
+	DNSLeases               *DNSLeaseStore
+	TCPConnectionsPerSecond int
+	UDPDatagramsPerSecond   int
 }
 
 type packetFilter struct {
@@ -46,6 +49,8 @@ type packetFilter struct {
 	dnsLeases    *DNSLeaseStore
 	attemptMu    sync.Mutex
 	tcpAttempts  map[tcpAttemptKey]time.Time
+	tcpPacer     *trafficPacer
+	udpPacer     *trafficPacer
 }
 
 type packetTarget struct {
@@ -78,7 +83,19 @@ func newPacketFilter(policy *boundary.Policy, options PacketOptions) (*packetFil
 	return &packetFilter{
 		policy: policy, now: now, activitySink: options.ActivitySink, dnsLeases: leases,
 		tcpAttempts: make(map[tcpAttemptKey]time.Time),
+		tcpPacer:    newTrafficPacer(options.TCPConnectionsPerSecond),
+		udpPacer:    newTrafficPacer(options.UDPDatagramsPerSecond),
 	}, nil
+}
+
+func (f *packetFilter) pace(target packetTarget) {
+	// TCP is controlled by new connections, not by packets in an established
+	// flow. parseIPv4PacketTarget marks only SYN-without-ACK as observable.
+	if target.protocol == ActivityRequestTCP && target.observe {
+		_ = f.tcpPacer.Wait(context.Background())
+	} else if target.protocol == ActivityRequestUDP {
+		_ = f.udpPacer.Wait(context.Background())
+	}
 }
 
 // dispositionForPacket keeps malformed, unsupported and ICMP packets on the
@@ -122,6 +139,7 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 	}
 	event.RuleID, event.Reason = direct.RuleID, direct.Reason
 	if direct.Allowed {
+		f.pace(target)
 		event.Decision, event.Outcome = ActivityDecisionAllowed, "forwarded"
 		if observe {
 			emitActivity(f.activitySink, event)
@@ -152,6 +170,7 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 		event.Domain = domain
 		event.ResolvedIPs = []string{target.address.String()}
 		event.RuleID, event.Reason = decision.RuleID, decision.Reason
+		f.pace(target)
 		event.Decision, event.Outcome = ActivityDecisionAllowed, "forwarded"
 		if observe {
 			emitActivity(f.activitySink, event)

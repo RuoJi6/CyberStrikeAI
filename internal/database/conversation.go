@@ -77,6 +77,13 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if meta.WorkspacePersistent && runtimeMode != ConversationRuntimeModeContainer {
 		return nil, fmt.Errorf("持久化工作区只能用于 container 对话")
 	}
+	runtimeControls, err := NormalizeConversationRuntimeControls(meta.RuntimeControls)
+	if err != nil {
+		return nil, err
+	}
+	if runtimeMode != ConversationRuntimeModeContainer && (runtimeControls.ScanRateEnabled || runtimeControls.CustomResourcesEnabled) {
+		return nil, fmt.Errorf("容器运行控制只能用于 container 对话")
+	}
 	boundaryPolicyID := strings.TrimSpace(meta.BoundaryPolicyID)
 	if boundaryPolicyID != "" {
 		if runtimeMode != ConversationRuntimeModeContainer {
@@ -132,6 +139,14 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 		return nil, fmt.Errorf("创建对话失败: %w", err)
 	}
 	if runtimeMode == ConversationRuntimeModeContainer {
+		if _, err = tx.Exec(`
+			UPDATE conversations SET scan_rate_enabled = ?, scan_http_rps = ?, scan_tcp_cps = ?, scan_udp_dps = ?,
+				custom_resources_enabled = ?, custom_nano_cpus = ?, custom_memory_bytes = ? WHERE id = ?
+		`, runtimeControls.ScanRateEnabled, runtimeControls.HTTPRequestsPerSecond, runtimeControls.TCPConnectionsPerSecond,
+			runtimeControls.UDPDatagramsPerSecond, runtimeControls.CustomResourcesEnabled, runtimeControls.NanoCPUs,
+			runtimeControls.MemoryBytes, id); err != nil {
+			return nil, fmt.Errorf("保存对话容器运行控制失败: %w", err)
+		}
 		auditEnabled := true
 		auditMode := EgressAuditModeCompact
 		if meta.EgressAuditEnabled != nil {
@@ -191,6 +206,7 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	meta.EgressMode = egressMode
 	meta.EgressProxyID = egressProxyID
 	meta.EgressProxyGroupID = egressProxyGroupID
+	meta.RuntimeControls = runtimeControls
 	notifyConversationCreated(conv, meta)
 	return conv, nil
 }

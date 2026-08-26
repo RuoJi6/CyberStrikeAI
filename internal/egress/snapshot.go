@@ -83,6 +83,7 @@ type GatewayOptions struct {
 	TLSCertificatePath    string
 	TLSPrivateKeyPath     string
 	TLSAuthority          *TLSAuthorityReference
+	TrafficLimits         *TrafficLimits
 	Proxy                 ProxyOptions
 	DNS                   DNSOptions
 	Packet                PacketOptions
@@ -327,6 +328,16 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	if options.SnapshotCheckInterval < 0 {
 		return errors.New("egress snapshot check interval must not be negative")
+	}
+	if err := ValidateTrafficLimits(options.TrafficLimits); err != nil {
+		return err
+	}
+	if options.TrafficLimits != nil {
+		options.Proxy.HTTPRequestsPerSecond = options.TrafficLimits.HTTPRequestsPerSecond
+		options.Proxy.TCPConnectionsPerSecond = options.TrafficLimits.TCPConnectionsPerSecond
+		options.Proxy.UDPDatagramsPerSecond = options.TrafficLimits.UDPDatagramsPerSecond
+		options.Packet.TCPConnectionsPerSecond = options.TrafficLimits.TCPConnectionsPerSecond
+		options.Packet.UDPDatagramsPerSecond = options.TrafficLimits.UDPDatagramsPerSecond
 	}
 	if options.SnapshotCheckInterval == 0 {
 		options.SnapshotCheckInterval = defaultSnapshotCheckInterval
@@ -586,6 +597,9 @@ func CheckGateway(path string, reference SnapshotReference, routePath string, ro
 }
 
 func CheckGatewayWithOptions(path string, reference SnapshotReference, options GatewayOptions, output io.Writer) error {
+	if err := ValidateTrafficLimits(options.TrafficLimits); err != nil {
+		return err
+	}
 	report, policy, tlsInspection, err := LoadGatewaySnapshot(path, reference)
 	if err != nil {
 		return err

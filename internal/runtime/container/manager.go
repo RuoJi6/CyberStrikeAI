@@ -171,6 +171,15 @@ type EgressTLSAuthoritySpec struct {
 	PrivateKeySHA256   string
 }
 
+// EgressTrafficLimits optionally pace traffic by protocol at the trusted
+// gateway. Nil means the feature is disabled; a zero field leaves only that
+// protocol unlimited.
+type EgressTrafficLimits struct {
+	HTTPRequestsPerSecond   int `json:"httpRequestsPerSecond"`
+	TCPConnectionsPerSecond int `json:"tcpConnectionsPerSecond"`
+	UDPDatagramsPerSecond   int `json:"udpDatagramsPerSecond"`
+}
+
 // EgressGatewaySpec pins the only image that may bridge a conversation's
 // internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
@@ -180,6 +189,7 @@ type EgressGatewaySpec struct {
 	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
 	AuthProfiles     *EgressAuthProfilesSpec     `json:",omitempty"`
 	TLSAuthority     *EgressTLSAuthoritySpec     `json:",omitempty"`
+	TrafficLimits    *EgressTrafficLimits        `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.

@@ -293,6 +293,39 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	}
 }
 
+func TestEgressGatewayTrafficLimitsArePersistedInEnvironmentAndLabels(t *testing.T) {
+	spec, root, snapshotPath := snapshotGatewayFixture(t)
+	spec.EgressGateway.TrafficLimits = &EgressTrafficLimits{
+		HTTPRequestsPerSecond: 7, TCPConnectionsPerSecond: 11, UDPDatagramsPerSecond: 13,
+	}
+	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01", EgressSnapshotRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := runtimeLabels("instance-01", spec)
+	gatewayConfig, _, err := manager.egressGatewayContainerConfig(spec, expectedEgressGatewayLabels("instance-01", spec, "spec-digest"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantTrafficEnv := []string{"CYBERSTRIKE_HTTP_RPS=7", "CYBERSTRIKE_TCP_CPS=11", "CYBERSTRIKE_UDP_DPS=13"}
+	if !equalStrings(gatewayConfig.Env, wantTrafficEnv) {
+		t.Fatalf("gateway traffic limit environment = %#v, want %#v", gatewayConfig.Env, wantTrafficEnv)
+	}
+	for key, want := range map[string]string{LabelEgressHTTPRPS: "7", LabelEgressTCPCPS: "11", LabelEgressUDPDPS: "13"} {
+		if gatewayConfig.Labels[key] != want || labels[key] != want {
+			t.Fatalf("traffic limit label %s = gateway %q agent %q, want %q", key, gatewayConfig.Labels[key], labels[key], want)
+		}
+	}
+	reconstructed, err := egressGatewaySpecFromAgentLabels(labels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconstructed == nil || reconstructed.TrafficLimits == nil || *reconstructed.TrafficLimits != *spec.EgressGateway.TrafficLimits {
+		t.Fatalf("reconstructed traffic limits = %#v", reconstructed)
+	}
+}
+
 func TestTLSInspectionMountsPrivateKeyOnlyIntoGatewayAndCertificateReadOnlyIntoAgent(t *testing.T) {
 	spec, snapshotRoot, snapshotPath := snapshotGatewayFixture(t)
 	tlsStore, err := egress.NewTLSAuthorityStore(filepath.Join(t.TempDir(), "tls-authorities"))

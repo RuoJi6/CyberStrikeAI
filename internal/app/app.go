@@ -561,6 +561,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
+			runtimeControls, controlsErr := db.GetConversationRuntimeControls(ctx, conversationID)
+			if controlsErr != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load conversation runtime controls: %w", controlsErr)
+			}
+			applyConversationRuntimeControls(&spec, runtimeControls)
+			if specErr = containerruntime.ValidateSpec(spec); specErr != nil {
+				return containerruntime.InitializationRecord{}, specErr
+			}
 			return containerInitializer.EnsureAsync(ctx, spec)
 		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
@@ -590,6 +598,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			return route, nil
 		})
 		conversationHandler.SetContainerLifecycleController(containerLifecycle)
+		conversationHandler.SetContainerResourceDefaults(containerruntime.ResourceLimits{
+			NanoCPUs: cfg.Container.NanoCPUs, MemoryBytes: cfg.Container.MemoryBytes,
+		})
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger)
 		if auditErr != nil {

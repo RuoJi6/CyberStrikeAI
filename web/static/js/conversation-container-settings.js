@@ -234,12 +234,57 @@
             egressMode: mode,
             egressProxyId: mode === 'proxy' && target ? String(target.value || '').trim() : '',
             egressProxyGroupId: mode === 'group' && target ? String(target.value || '').trim() : '',
+            runtimeControls: currentRuntimeControls(),
         };
+    }
+
+    function numericValue(id, fallback) {
+        const element = selectElement(id);
+        const value = Number(element && element.value);
+        return Number.isFinite(value) ? value : fallback;
+    }
+
+    function currentRuntimeControls() {
+        const rateToggle = selectElement('conversation-scan-rate-toggle');
+        const resourceToggle = selectElement('conversation-resource-limit-toggle');
+        const scanRateEnabled = !!(rateToggle && rateToggle.checked);
+        const customResourcesEnabled = !!(resourceToggle && resourceToggle.checked);
+        return {
+            scanRateEnabled: scanRateEnabled,
+            httpRequestsPerSecond: scanRateEnabled ? Math.round(numericValue('conversation-http-rate', 0)) : 0,
+            tcpConnectionsPerSecond: scanRateEnabled ? Math.round(numericValue('conversation-tcp-rate', 0)) : 0,
+            udpDatagramsPerSecond: scanRateEnabled ? Math.round(numericValue('conversation-udp-rate', 0)) : 0,
+            customResourcesEnabled: customResourcesEnabled,
+            nanoCpus: customResourcesEnabled ? Math.round(numericValue('conversation-cpu-limit', 1) * 1000000000) : 0,
+            memoryBytes: customResourcesEnabled ? Math.round(numericValue('conversation-memory-limit', 512) * 1048576) : 0,
+        };
+    }
+
+    function validateRuntimeControls(value) {
+        if (value.scanRateEnabled) {
+            const rates = [value.httpRequestsPerSecond, value.tcpConnectionsPerSecond, value.udpDatagramsPerSecond];
+            if (rates.some(function (rate) { return !Number.isInteger(rate) || rate < 0 || rate > 100000; }) || rates.every(function (rate) { return rate === 0; })) {
+                throw new Error(translate('chat.scanRateInvalid', '启用速率限制后，请将至少一项设置为 1–100000。'));
+            }
+        }
+        if (value.customResourcesEnabled && (value.nanoCpus < 250000000 || value.nanoCpus > 8000000000 || value.memoryBytes < 268435456 || value.memoryBytes > 17179869184)) {
+            throw new Error(translate('chat.customResourcesInvalid', 'CPU 必须为 0.25–8 核，内存必须为 256–16384 MiB。'));
+        }
+        return value;
+    }
+
+    function syncConversationRuntimeControls() {
+        const rateToggle = selectElement('conversation-scan-rate-toggle');
+        const resourceToggle = selectElement('conversation-resource-limit-toggle');
+        const rateFields = selectElement('conversation-scan-rate-fields');
+        const resourceFields = selectElement('conversation-resource-limit-fields');
+        if (rateFields) rateFields.hidden = !(rateToggle && rateToggle.checked);
+        if (resourceFields) resourceFields.hidden = !(resourceToggle && resourceToggle.checked);
     }
 
     function networkSelectionSignature(selection) {
         const value = selection || currentNetworkSelection();
-        return [value.boundaryPolicyId, value.egressMode, value.egressProxyId, value.egressProxyGroupId].join('\u0000');
+        return [value.boundaryPolicyId, value.egressMode, value.egressProxyId, value.egressProxyGroupId, JSON.stringify(value.runtimeControls || {})].join('\u0000');
     }
 
     function applyActiveNetworkSettings(payload) {
@@ -259,6 +304,20 @@
         refreshEnhancedSelect(targetSelect);
         syncConversationBoundarySelection();
         updateEgressPreview();
+        const controls = payload.runtimeControls || {};
+        const rateToggle = selectElement('conversation-scan-rate-toggle');
+        const resourceToggle = selectElement('conversation-resource-limit-toggle');
+        if (rateToggle) rateToggle.checked = controls.scanRateEnabled === true;
+        if (resourceToggle) resourceToggle.checked = controls.customResourcesEnabled === true;
+        const values = {
+            'conversation-http-rate': controls.httpRequestsPerSecond || 20,
+            'conversation-tcp-rate': controls.tcpConnectionsPerSecond || 20,
+            'conversation-udp-rate': controls.udpDatagramsPerSecond || 20,
+            'conversation-cpu-limit': controls.nanoCpus ? controls.nanoCpus / 1000000000 : ((payload.effectiveNanoCpus || 1000000000) / 1000000000),
+            'conversation-memory-limit': controls.memoryBytes ? controls.memoryBytes / 1048576 : ((payload.effectiveMemoryBytes || 536870912) / 1048576),
+        };
+        Object.keys(values).forEach(function (id) { const element = selectElement(id); if (element) element.value = String(values[id]); });
+        syncConversationRuntimeControls();
         state.activeNetworkSignature = networkSelectionSignature();
         state.loadingActiveNetwork = false;
     }
@@ -290,6 +349,7 @@
         if (!conversationId || String(runtimeMode && runtimeMode.value || '').trim().toLowerCase() !== 'container') return true;
         if (state.taskLocked || state.applyingNetwork || state.loadingActiveNetwork) return false;
         const selection = currentNetworkSelection();
+        try { validateRuntimeControls(selection.runtimeControls); } catch (error) { notify(error.message, 'error'); return false; }
         if (!state.activeNetworkSignature || networkSelectionSignature(selection) === state.activeNetworkSignature) return true;
         if ((selection.egressMode === 'proxy' && !selection.egressProxyId) || (selection.egressMode === 'group' && !selection.egressProxyGroupId)) {
             notify(selection.egressMode === 'proxy'
@@ -300,7 +360,11 @@
         state.applyingNetwork = true;
         setConversationContainerControlsLocked(state.taskLocked);
         notify(translate('chat.containerNetworkAutoApplying', '正在应用新的边界策略和上游出口…'), 'info');
-        const body = { boundaryPolicyId: selection.boundaryPolicyId, egressMode: selection.egressMode };
+        const body = {
+            boundaryPolicyId: selection.boundaryPolicyId,
+            egressMode: selection.egressMode,
+            runtimeControls: selection.runtimeControls,
+        };
         if (selection.egressProxyId) body.egressProxyId = selection.egressProxyId;
         if (selection.egressProxyGroupId) body.egressProxyGroupId = selection.egressProxyGroupId;
         try {
@@ -490,7 +554,9 @@
         const container = selectElement('container-conversation-options');
         if (container) container.classList.toggle('locked', !!locked);
         const networkLocked = !!locked || state.applyingNetwork;
-        ['boundary-policy-select', 'conversation-egress-mode-select', 'conversation-egress-target-select'].forEach(function (id) {
+        ['boundary-policy-select', 'conversation-egress-mode-select', 'conversation-egress-target-select',
+            'conversation-scan-rate-toggle', 'conversation-http-rate', 'conversation-tcp-rate', 'conversation-udp-rate',
+            'conversation-resource-limit-toggle', 'conversation-cpu-limit', 'conversation-memory-limit'].forEach(function (id) {
             const control = selectElement(id);
             if (control) {
                 control.disabled = networkLocked;
@@ -509,12 +575,17 @@
         if (mode) mode.value = '';
         if (auditToggle) auditToggle.checked = true;
         if (auditMode) auditMode.value = 'compact';
+        const rateToggle = selectElement('conversation-scan-rate-toggle');
+        const resourceToggle = selectElement('conversation-resource-limit-toggle');
+        if (rateToggle) rateToggle.checked = false;
+        if (resourceToggle) resourceToggle.checked = false;
         refreshEnhancedSelect(boundary);
         refreshEnhancedSelect(mode);
         syncConversationBoundarySelection();
         syncConversationEgressMode();
         refreshEnhancedSelect(auditMode);
         updateAuditHint(true, false, 'compact');
+        syncConversationRuntimeControls();
     }
 
     function readNewConversationContainerControls(runtimeMode) {
@@ -524,6 +595,7 @@
         const auditMode = selectElement('conversation-egress-audit-mode');
         result.egressAuditEnabled = !auditToggle || auditToggle.checked;
         result.egressAuditMode = result.egressAuditEnabled && auditMode && auditMode.value === 'full' ? 'full' : (result.egressAuditEnabled ? 'compact' : 'off');
+        result.runtimeControls = validateRuntimeControls(currentRuntimeControls());
         const boundary = selectElement('boundary-policy-select');
         const boundaryPolicyId = boundary ? String(boundary.value || '').trim() : '';
         if (boundaryPolicyId) result.boundaryPolicyId = boundaryPolicyId;
@@ -551,6 +623,7 @@
     window.syncConversationEgressTarget = syncConversationEgressTarget;
     window.syncConversationEgressAudit = syncConversationEgressAudit;
     window.syncConversationEgressAuditMode = syncConversationEgressAuditMode;
+    window.syncConversationRuntimeControls = syncConversationRuntimeControls;
     window.loadConversationContainerChoices = loadConversationContainerChoices;
     window.syncConversationContainerControlsVisibility = syncConversationContainerControlsVisibility;
     window.setConversationContainerControlsLocked = setConversationContainerControlsLocked;

@@ -23,6 +23,10 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
     assert.match(template, /value="proxy"[^>]*disabled/);
     assert.match(template, /value="group"[^>]*disabled/);
     assert.match(template, /id="conversation-egress-target-select"/);
+	assert.match(template, /type="checkbox"[^>]*id="conversation-scan-rate-toggle"/);
+	assert.match(template, /type="checkbox"[^>]*id="conversation-resource-limit-toggle"/);
+	assert.match(template, /id="conversation-http-rate"[^>]*value="20"/);
+	assert.match(template, /id="conversation-cpu-limit"[^>]*value="1"/);
     assert.match(template, /id="conversation-egress-audit-toggle"[^>]*checked/);
     assert.match(template, /id="conversation-egress-audit-mode"[^>]*data-unified-select="single"/);
     assert.doesNotMatch(template, /conversation-network-settings-apply|applyConversationContainerNetworkSettings/);
@@ -62,6 +66,8 @@ test('new conversation request sends exact immutable selection fields only for c
         'conversation-egress-target-select': { value: 'proxy-1' },
         'conversation-egress-audit-toggle': { checked: true },
         'conversation-egress-audit-mode': { value: 'full' },
+		'conversation-scan-rate-toggle': { checked: false },
+		'conversation-resource-limit-toggle': { checked: false },
     };
     const document = {
         getElementById(id) { return elements[id] || null; },
@@ -73,18 +79,27 @@ test('new conversation request sends exact immutable selection fields only for c
 
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1' },
+		{ egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
+			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
+			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
+		} },
     );
     elements['conversation-egress-mode-select'].value = 'group';
     elements['conversation-egress-target-select'].value = 'group-1';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1' },
+		{ egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
+			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
+			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
+		} },
     );
     elements['conversation-egress-mode-select'].value = '';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-        { egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1' },
+		{ egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', runtimeControls: {
+			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
+			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
+		} },
     );
     assert.deepEqual(JSON.parse(JSON.stringify(window.readNewConversationContainerControls('host'))), {});
     assert.match(chat, /Object\.assign\(body, window\.readNewConversationContainerControls\(body\.runtimeMode\)\)/);
@@ -99,6 +114,8 @@ test('container creation copy is bilingual and cache-busted', () => {
             'egressAuditLabel', 'egressAuditHint', 'egressAuditDisabledHint', 'egressAuditFullHint',
             'egressAuditModeLabel', 'egressAuditModeCompact', 'egressAuditModeFull', 'egressAuditModeHint',
             'containerNetworkAutoApplying', 'containerNetworkAutoApplied', 'containerNetworkAutoApplyFailed',
+			'scanRateLimitLabel', 'scanRateLimitHint', 'httpRateLabel', 'tcpRateLabel', 'udpRateLabel',
+			'customResourcesLabel', 'customResourcesHint', 'cpuLimitLabel', 'memoryLimitLabel',
         ]) {
             assert.equal(typeof locale.chat[key], 'string', key);
             assert.ok(locale.chat[key].trim(), key);
@@ -107,10 +124,10 @@ test('container creation copy is bilingual and cache-busted', () => {
     assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /不限制/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260826-6/);
+    assert.match(template, /style\.css\?v=20260826-7/);
     assert.match(template, /chat\.js\?v=20260826-3/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-    assert.match(template, /conversation-container-settings\.js\?v=20260826-3/);
+    assert.match(template, /conversation-container-settings\.js\?v=20260826-4/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {
