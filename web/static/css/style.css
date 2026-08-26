@@ -5080,7 +5080,7 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .boundary-snapshot-viewer { margin-bottom: 0; }
 
 /* Boundary policy catalog: compact list + detail drawer + focused editor. */
-.boundary-page-header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.boundary-page-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .boundary-page-header > div { min-width: 0; }
 .boundary-policy-catalog { min-width: 0; padding: 22px; border: 1px solid var(--border-color); border-radius: 18px; background: var(--bg-secondary); box-shadow: 0 14px 34px color-mix(in srgb, #0f172a 5%, transparent); }
 .boundary-policy-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(120px, 150px) auto; align-items: end; gap: 12px; }
