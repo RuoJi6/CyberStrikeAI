@@ -93,7 +93,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type":        "string",
 		"enum":        []string{"host", "container"},
 		"default":     "host",
-		"description": "仅在不提供 conversationId 并新建对话时生效；存量对话的执行位置不由后续消息修改",
+		"description": "仅在不提供 conversationId 并新建对话时生效；存量对话在空闲时通过独立执行位置接口切换",
 	}
 	workspacePersistenceRequestSchema := map[string]interface{}{
 		"type":        "boolean",
@@ -544,7 +544,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":        "string",
 							"enum":        []string{"host", "container"},
 							"default":     "host",
-							"description": "对话创建时选定的执行位置；创建后不由后续消息修改",
+							"description": "对话创建时选定的执行位置；存量对话空闲时可切换",
 						},
 						"workspacePersistent": workspacePersistenceRequestSchema,
 						"boundaryPolicyId":    boundaryPolicyRequestSchema,
@@ -563,6 +563,16 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 					},
 					"required": []string{"projectId"},
+				},
+				"SetConversationRuntimeModeRequest": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"runtimeMode": map[string]interface{}{
+							"type": "string", "enum": []string{"host", "container"},
+							"description": "后续轮次的执行位置",
+						},
+					},
+					"required": []string{"runtimeMode"},
 				},
 				"AgentChatResponse": map[string]interface{}{
 					"type":        "object",
@@ -658,7 +668,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"runtimeMode": map[string]interface{}{
 							"type":        "string",
 							"enum":        []string{"host", "container"},
-							"description": "对话创建时锁定的执行位置",
+							"description": "对话后续轮次当前使用的执行位置",
 						},
 						"workspacePersistent": map[string]interface{}{
 							"type":        "boolean",
@@ -2913,6 +2923,27 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			},
 			"/api/conversations/{id}/container": map[string]interface{}{
 				"delete": conversationContainerDeleteOpenAPIOperation(),
+			},
+			"/api/conversations/{id}/runtime-mode": map[string]interface{}{
+				"put": map[string]interface{}{
+					"tags":        []string{"对话管理"},
+					"summary":     "切换对话执行位置",
+					"description": "仅在对话没有运行中或取消中任务时生效；下一轮将在新位置执行。",
+					"operationId": "setConversationRuntimeMode",
+					"parameters": []map[string]interface{}{{
+						"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"},
+					}},
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{
+						"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/SetConversationRuntimeModeRequest"}},
+					}},
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "切换成功"},
+						"400": map[string]interface{}{"description": "执行位置无效"},
+						"403": map[string]interface{}{"description": "无权访问对话或未开放容器执行"},
+						"404": map[string]interface{}{"description": "对话不存在"},
+						"409": map[string]interface{}{"description": "对话任务尚未完成"},
+					},
+				},
 			},
 			"/api/conversations/{id}/project": map[string]interface{}{
 				"put": map[string]interface{}{

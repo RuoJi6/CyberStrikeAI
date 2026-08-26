@@ -19,14 +19,28 @@ test('新对话使用自定义 host/container 选择器', () => {
     assert.match(styles, /\.workspace-persistence-toggle input:checked \+ \.workspace-persistence-switch/);
 });
 
-test('仅首条消息携带创建时执行位置', () => {
+test('新对话由首条消息创建执行位置', () => {
     assert.match(chat, /const creatingNewConversation = !requestConversationId;[\s\S]{0,520}body\.runtimeMode = normalizeConversationRuntimeModeForUI/);
     assert.match(chat, /body\.workspacePersistent = body\.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER/);
     assert.match(chat, /workspacePersistenceEnabledFromConversation\(conversation\)/);
     assert.match(chat, /applyConversationRuntimeMode\(conversationId, conversation\)/);
-    assert.match(chat, /lockedContainerSettings[\s\S]{0,400}button\.disabled = !!locked && !lockedContainerSettings/);
-    assert.match(chat, /runtime-mode-option[\s\S]{0,220}option\.disabled = !!locked/);
+    assert.match(chat, /taskLocked = !!locked \|\| chatRuntimeModeSwitchPending/);
+    assert.match(chat, /runtime-mode-option[\s\S]{0,220}option\.disabled = taskLocked/);
     assert.match(chat, /syncRuntimeModeFromValue\(CHAT_RUNTIME_MODE_HOST\);[\s\S]{0,320}resetNewConversationContainerControls[\s\S]{0,160}setChatRuntimeModeLocked\(false\)/);
+});
+
+test('存量对话空闲时可切换执行位置，运行中保持锁定', () => {
+    assert.doesNotMatch(chat, /async function selectRuntimeMode\(mode\) \{\s*if \(currentConversationId\) return;/);
+    assert.match(chat, /loadActiveTasks\(\)[\s\S]{0,260}isCurrentChatTaskActive\(\)/);
+    assert.match(chat, /apiFetch\(`\/api\/conversations\/\$\{encodeURIComponent\(existingConversationId\)\}\/runtime-mode`/);
+    assert.match(chat, /method: 'PUT'[\s\S]{0,140}runtimeMode: normalized/);
+    assert.match(chat, /updateChatPrimaryActionState\(\)[\s\S]{0,180}setChatRuntimeModeLocked\(running\)/);
+    assert.match(chat, /setConversationContainerControlsLocked\(taskLocked \|\| existingConversation\)/);
+    for (const locale of [zh, en]) {
+        assert.equal(typeof locale.chat.runtimeModeSwitchRunning, 'string');
+        assert.equal(typeof locale.chat.runtimeModeSwitchSuccess, 'string');
+        assert.equal(typeof locale.chat.runtimeModeSwitchFailed, 'string');
+    }
 });
 
 test('容器执行选择先通过服务端灰度授权并在异常时失败关闭', () => {
@@ -57,6 +71,8 @@ test('中英文文案明确区分执行位置与 Agent 编排', () => {
     assert.equal(zh.chat.runtimeModeContainer, '容器执行');
     assert.match(zh.chat.runtimeModeContainerHint, /每对话隔离容器/);
     assert.match(zh.chat.runtimeModeContainerHint, /失败关闭/);
+    assert.match(zh.chat.runtimeModeLockedHint, /完成后可切换/);
+    assert.match(en.chat.runtimeModeLockedHint, /after it finishes/i);
     assert.match(zh.chat.runtimeContainerSettingsAria, /出站网络审计可随时开关/);
     assert.match(en.chat.runtimeContainerSettingsAria, /auditing can be toggled at any time/i);
     assert.doesNotMatch(zh.chat.runtimeModeContainer + zh.chat.runtimeModeContainerHint, /待接入|后端未接入/);

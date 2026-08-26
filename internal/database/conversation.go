@@ -473,7 +473,7 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	return &conv, nil
 }
 
-// GetConversationRuntimeMode reads only the immutable execution location. Tool
+// GetConversationRuntimeMode reads the execution location currently selected for future turns. Tool
 // routing calls this for every OS command, so it must not load conversation
 // messages or process details.
 func (db *DB) GetConversationRuntimeMode(id string) (string, error) {
@@ -493,6 +493,30 @@ func (db *DB) GetConversationRuntimeMode(id string) (string, error) {
 		return "", fmt.Errorf("对话执行位置无效: %w", err)
 	}
 	return mode, nil
+}
+
+// SetConversationRuntimeMode updates the execution location for future turns.
+// The handler serializes this call with task registration so a running turn
+// always keeps the mode it started with.
+func (db *DB) SetConversationRuntimeMode(id, runtimeMode string) error {
+	if db == nil {
+		return fmt.Errorf("对话数据库未配置")
+	}
+	mode, err := NormalizeConversationRuntimeMode(runtimeMode)
+	if err != nil || strings.TrimSpace(runtimeMode) == "" {
+		return fmt.Errorf("更新对话执行位置失败: runtime mode must be host or container")
+	}
+	result, err := db.Exec(
+		"UPDATE conversations SET runtime_mode = ?, updated_at = ? WHERE id = ?",
+		mode, time.Now(), strings.TrimSpace(id),
+	)
+	if err != nil {
+		return fmt.Errorf("更新对话执行位置失败: %w", err)
+	}
+	if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected != 1 {
+		return fmt.Errorf("对话不存在")
+	}
+	return nil
 }
 
 // GetConversationWorkspacePersistent reads only the immutable workspace policy.
@@ -530,8 +554,8 @@ func normalizeConversationAgentMode(agentMode string) string {
 	}
 }
 
-// NormalizeConversationRuntimeMode validates the immutable execution location chosen when a
-// conversation is created. An empty value is intentionally compatible with historical callers.
+// NormalizeConversationRuntimeMode validates an execution location. An empty
+// value is intentionally compatible with historical creation callers.
 func NormalizeConversationRuntimeMode(runtimeMode string) (string, error) {
 	runtimeMode = strings.ToLower(strings.TrimSpace(runtimeMode))
 	if runtimeMode == "" {

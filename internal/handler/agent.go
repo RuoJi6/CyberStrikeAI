@@ -262,6 +262,19 @@ func (h *AgentHandler) ConversationTaskRuntimeState(conversationID string) (bool
 	return true, task.StartedAt
 }
 
+// RunWhenConversationTaskIdle serializes conversation configuration changes
+// with task registration. A cancelling task is still considered busy until it
+// is removed from the registry.
+func (h *AgentHandler) RunWhenConversationTaskIdle(conversationID string, fn func() error) error {
+	if h == nil || h.tasks == nil {
+		if fn == nil {
+			return nil
+		}
+		return fn()
+	}
+	return h.tasks.RunWhenIdle(conversationID, fn)
+}
+
 func (h *AgentHandler) cancelRunningMCPToolsForConversation(conversationID string) {
 	if h == nil || h.agent == nil {
 		return

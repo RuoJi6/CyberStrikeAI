@@ -101,8 +101,8 @@ test('container creation copy is bilingual and cache-busted', () => {
     assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /不限制/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260826-2/);
-    assert.match(template, /chat\.js\?v=20260824-3/);
+    assert.match(template, /style\.css\?v=20260826-3/);
+    assert.match(template, /chat\.js\?v=20260826-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
     assert.match(template, /conversation-container-settings\.js\?v=20260824-2/);
 });

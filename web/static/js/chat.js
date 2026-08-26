@@ -956,35 +956,39 @@ function syncWorkspacePersistenceVisibility(mode) {
     if (option) option.hidden = normalizeConversationRuntimeModeForUI(mode) !== CHAT_RUNTIME_MODE_CONTAINER;
 }
 
+let chatRuntimeModeSwitchPending = false;
+
 function setChatRuntimeModeLocked(locked) {
     const button = document.getElementById('runtime-mode-btn');
     const panel = document.getElementById('runtime-mode-panel');
     if (!button) return;
     const runtimeInput = document.getElementById('runtime-mode-select');
-    const lockedContainerSettings = !!locked
+    const taskLocked = !!locked || chatRuntimeModeSwitchPending;
+    const existingConversation = !!String(currentConversationId || '').trim();
+    const lockedContainerSettings = taskLocked
         && normalizeConversationRuntimeModeForUI(runtimeInput && runtimeInput.value) === CHAT_RUNTIME_MODE_CONTAINER;
-    button.disabled = !!locked && !lockedContainerSettings;
+    button.disabled = taskLocked && !lockedContainerSettings;
     button.setAttribute('aria-disabled', button.disabled ? 'true' : 'false');
     const titleKey = lockedContainerSettings
         ? 'chat.runtimeContainerSettingsAria'
-        : (locked ? 'chat.runtimeModeLockedHint' : 'chat.runtimeModeSelectAria');
+        : (taskLocked ? 'chat.runtimeModeLockedHint' : 'chat.runtimeModeSelectAria');
     const fallback = lockedContainerSettings
         ? '打开容器设置；执行位置、工作区、边界和出口已锁定，出站网络审计可随时开关'
-        : (locked ? '执行位置在对话创建后锁定' : '选择新对话执行位置');
+        : (taskLocked ? '当前任务运行中，完成后可切换执行位置' : '选择执行位置');
     const title = typeof window.t === 'function' ? window.t(titleKey) : fallback;
     button.title = title;
     button.setAttribute('aria-label', title);
-    if (locked && panel) closeRuntimeModePanel();
+    if (taskLocked && panel) closeRuntimeModePanel();
     document.querySelectorAll('.runtime-mode-option').forEach(function (option) {
-        option.disabled = !!locked;
-        option.setAttribute('aria-disabled', locked ? 'true' : 'false');
+        option.disabled = taskLocked;
+        option.setAttribute('aria-disabled', taskLocked ? 'true' : 'false');
     });
     const persistence = document.getElementById('workspace-persistence-toggle');
-    if (persistence) persistence.disabled = !!locked;
+    if (persistence) persistence.disabled = taskLocked || existingConversation;
     const persistenceOption = document.getElementById('workspace-persistence-option');
-    if (persistenceOption) persistenceOption.classList.toggle('locked', !!locked);
+    if (persistenceOption) persistenceOption.classList.toggle('locked', taskLocked || existingConversation);
     if (typeof window.setConversationContainerControlsLocked === 'function') {
-        window.setConversationContainerControlsLocked(!!locked);
+        window.setConversationContainerControlsLocked(taskLocked || existingConversation);
     }
 }
 
@@ -1014,7 +1018,7 @@ function applyConversationRuntimeMode(conversationId, conversation) {
     const fromServer = conversation && (conversation.runtimeMode || conversation.runtime_mode);
     syncRuntimeModeFromValue(fromServer || CHAT_RUNTIME_MODE_HOST);
     syncWorkspacePersistenceFromValue(workspacePersistenceEnabledFromConversation(conversation));
-    setChatRuntimeModeLocked(!!conversationId);
+    setChatRuntimeModeLocked(isCurrentChatTaskActive());
     if (typeof window.syncChatContainerWorkspaceButton === 'function') {
         window.syncChatContainerWorkspaceButton();
     }
@@ -2007,6 +2011,7 @@ function updateChatPrimaryActionState() {
     const button = document.getElementById('chat-send-btn');
     if (!button) return;
     const running = isCurrentChatTaskActive();
+    setChatRuntimeModeLocked(running);
     const label = running
         ? chatTranslate('tasks.stopTask', '停止任务')
         : chatTranslate('chat.send', '发送');
@@ -2217,8 +2222,23 @@ async function fetchContainerRuntimeRollout() {
 }
 
 async function selectRuntimeMode(mode) {
-    if (currentConversationId) return;
     const normalized = normalizeConversationRuntimeModeForUI(mode);
+    const existingConversationId = String(currentConversationId || '').trim();
+    const runtimeInput = document.getElementById('runtime-mode-select');
+    const previousMode = normalizeConversationRuntimeModeForUI(runtimeInput && runtimeInput.value);
+    if (existingConversationId) {
+        if (normalized === previousMode) {
+            closeRuntimeModePanel();
+            return;
+        }
+        if (typeof loadActiveTasks === 'function') await loadActiveTasks();
+        if (existingConversationId !== String(currentConversationId || '').trim()) return;
+        if (isCurrentChatTaskActive()) {
+            setChatRuntimeModeLocked(true);
+            showChatToast(chatTranslate('chat.runtimeModeSwitchRunning', '当前任务尚未完成，完成后才能切换执行位置。'), 'info');
+            return;
+        }
+    }
     if (normalized === CHAT_RUNTIME_MODE_CONTAINER) {
         const option = document.querySelector('.runtime-mode-option[data-value="container"]');
         if (option) {
@@ -2253,6 +2273,42 @@ async function selectRuntimeMode(mode) {
                 option.removeAttribute('aria-busy');
             }
         }
+    }
+
+    if (existingConversationId) {
+        chatRuntimeModeSwitchPending = true;
+        setChatRuntimeModeLocked(true);
+        try {
+            const response = await apiFetch(`/api/conversations/${encodeURIComponent(existingConversationId)}/runtime-mode`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ runtimeMode: normalized })
+            });
+            const payload = await response.json().catch(function () { return {}; });
+            if (!response.ok) {
+                throw new Error(payload && payload.error ? String(payload.error) : `HTTP ${response.status}`);
+            }
+            if (existingConversationId !== String(currentConversationId || '').trim()) return;
+            syncRuntimeModeFromValue(payload.runtimeMode || normalized);
+            syncWorkspacePersistenceFromValue(payload.workspacePersistent === true);
+            invalidateConversationLiteCache(existingConversationId);
+            if (typeof loadConversationsWithGroups === 'function') loadConversationsWithGroups();
+            showChatToast(chatTranslate('chat.runtimeModeSwitchSuccess', '执行位置已切换，下一次发送将在新位置执行。'), 'success');
+            closeRuntimeModePanel();
+        } catch (error) {
+            if (existingConversationId === String(currentConversationId || '').trim()) {
+                syncRuntimeModeFromValue(previousMode);
+                showChatToast(error && error.message
+                    ? error.message
+                    : chatTranslate('chat.runtimeModeSwitchFailed', '切换执行位置失败，请稍后重试。'), 'error');
+            }
+        } finally {
+            chatRuntimeModeSwitchPending = false;
+            if (existingConversationId === String(currentConversationId || '').trim()) {
+                setChatRuntimeModeLocked(isCurrentChatTaskActive());
+            }
+        }
+        return;
     }
     syncRuntimeModeFromValue(normalized);
     if (normalized !== CHAT_RUNTIME_MODE_CONTAINER) syncWorkspacePersistenceFromValue(false);
@@ -12559,7 +12615,7 @@ document.addEventListener('languagechange', function () {
 document.addEventListener('conversation-changed', function (event) {
     const conversationId = String(event && event.detail && event.detail.conversationId || '').trim();
     if (conversationId) {
-        setChatRuntimeModeLocked(true);
+        setChatRuntimeModeLocked(isCurrentChatTaskActive());
         return;
     }
     syncRuntimeModeFromValue(CHAT_RUNTIME_MODE_HOST);

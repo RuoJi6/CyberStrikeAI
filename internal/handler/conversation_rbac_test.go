@@ -96,6 +96,108 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	}
 }
 
+type conversationRuntimeModeIdleRunner struct {
+	busy bool
+}
+
+func (r conversationRuntimeModeIdleRunner) RunWhenConversationTaskIdle(_ string, fn func() error) error {
+	if r.busy {
+		return ErrTaskAlreadyRunning
+	}
+	return fn()
+}
+
+func TestSetConversationRuntimeModeOnlyWhenTaskIsIdle(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, user := setupConversationRBACTest(t)
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerRolloutAuthorizer(func(string, string) (bool, bool) { return true, true })
+
+	createdResponse := performConversationRequest(user, http.MethodPost, "/api/conversations", map[string]interface{}{
+		"title":       "switchable",
+		"runtimeMode": database.ConversationRuntimeModeHost,
+	}, handler.CreateConversation)
+	if createdResponse.Code != http.StatusOK {
+		t.Fatalf("create status = %d: %s", createdResponse.Code, createdResponse.Body.String())
+	}
+	var conversation database.Conversation
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &conversation); err != nil {
+		t.Fatalf("decode conversation: %v", err)
+	}
+
+	handler.SetTaskIdleRunner(conversationRuntimeModeIdleRunner{})
+	switchRequest := func(mode string) *httptest.ResponseRecorder {
+		return performConversationRequest(user, http.MethodPut, "/api/conversations/"+conversation.ID+"/runtime-mode", map[string]interface{}{
+			"runtimeMode": mode,
+		}, func(c *gin.Context) {
+			c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+			handler.SetConversationRuntimeMode(c)
+		})
+	}
+
+	w := switchRequest(database.ConversationRuntimeModeContainer)
+	if w.Code != http.StatusOK {
+		t.Fatalf("switch status = %d, want %d: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	stored, err := db.GetConversationLite(conversation.ID)
+	if err != nil {
+		t.Fatalf("GetConversationLite: %v", err)
+	}
+	if stored.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("stored runtime mode = %q", stored.RuntimeMode)
+	}
+
+	handler.SetTaskIdleRunner(conversationRuntimeModeIdleRunner{busy: true})
+	w = switchRequest(database.ConversationRuntimeModeHost)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("busy switch status = %d, want %d: %s", w.Code, http.StatusConflict, w.Body.String())
+	}
+	stored, err = db.GetConversationLite(conversation.ID)
+	if err != nil {
+		t.Fatalf("GetConversationLite after conflict: %v", err)
+	}
+	if stored.RuntimeMode != database.ConversationRuntimeModeContainer {
+		t.Fatalf("busy switch changed runtime mode to %q", stored.RuntimeMode)
+	}
+}
+
+func TestSetConversationRuntimeModeEnforcesRolloutAndOwnership(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, owner := setupConversationRBACTest(t)
+	handler := NewConversationHandler(db, zap.NewNop())
+
+	createdResponse := performConversationRequest(owner, http.MethodPost, "/api/conversations", map[string]interface{}{
+		"title": "owned",
+	}, handler.CreateConversation)
+	var conversation database.Conversation
+	if err := json.Unmarshal(createdResponse.Body.Bytes(), &conversation); err != nil {
+		t.Fatalf("decode conversation: %v", err)
+	}
+
+	handler.SetContainerRolloutAuthorizer(func(string, string) (bool, bool) { return true, false })
+	request := func(user *database.RBACUser) *httptest.ResponseRecorder {
+		return performConversationRequest(user, http.MethodPut, "/api/conversations/"+conversation.ID+"/runtime-mode", map[string]interface{}{
+			"runtimeMode": database.ConversationRuntimeModeContainer,
+		}, func(c *gin.Context) {
+			c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+			handler.SetConversationRuntimeMode(c)
+		})
+	}
+	w := request(owner)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("rollout status = %d, want %d: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+
+	other, err := db.CreateRBACUser("operator2", "Operator Two", "hash", true, nil)
+	if err != nil {
+		t.Fatalf("CreateRBACUser: %v", err)
+	}
+	w = request(other)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("ownership status = %d, want %d: %s", w.Code, http.StatusForbidden, w.Body.String())
+	}
+}
+
 func TestCreateConversationSelectsBoundaryPolicyWithIndependentRBAC(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, user := setupConversationRBACTest(t)

@@ -372,6 +372,21 @@ func (m *AgentTaskManager) GetTaskSnapshot(conversationID string) *AgentTask {
 	return &snapshot
 }
 
+// RunWhenIdle executes fn while holding the task registry lock, but only when
+// the conversation has no registered task. StartTask uses the same lock, so a
+// runtime-mode change cannot race with a new turn starting for that conversation.
+func (m *AgentTaskManager) RunWhenIdle(conversationID string, fn func() error) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.tasks[strings.TrimSpace(conversationID)]; exists {
+		return ErrTaskAlreadyRunning
+	}
+	if fn == nil {
+		return nil
+	}
+	return fn()
+}
+
 // runStuckCancellingCleanup 定期将长时间处于「取消中」的任务强制结束，避免卡住无法发新消息
 func (m *AgentTaskManager) runStuckCancellingCleanup() {
 	ticker := time.NewTicker(cleanupInterval)

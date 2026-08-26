@@ -32,6 +32,12 @@ type ConversationTaskStateProvider interface {
 	ConversationTaskRuntimeState(conversationID string) (running bool, startedAt time.Time)
 }
 
+// ConversationTaskIdleRunner serializes an update with task registration so
+// execution settings can change only after the current turn has fully ended.
+type ConversationTaskIdleRunner interface {
+	RunWhenConversationTaskIdle(conversationID string, fn func() error) error
+}
+
 type ConversationContainerInitializationProvider interface {
 	Get(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 }
@@ -75,6 +81,7 @@ type ConversationHandler struct {
 	audit                    *audit.Service
 	taskStopper              ConversationTaskStopper
 	taskState                ConversationTaskStateProvider
+	taskIdle                 ConversationTaskIdleRunner
 	containerInitializations ConversationContainerInitializationProvider
 	containerObserver        ConversationContainerRuntimeObserver
 	containerWorkspace       ConversationContainerWorkspaceInspector
@@ -100,6 +107,10 @@ func (h *ConversationHandler) SetTaskStopper(stopper ConversationTaskStopper) {
 // conversation UI such as the agent-maintained plan list.
 func (h *ConversationHandler) SetTaskStateProvider(provider ConversationTaskStateProvider) {
 	h.taskState = provider
+}
+
+func (h *ConversationHandler) SetTaskIdleRunner(runner ConversationTaskIdleRunner) {
+	h.taskIdle = runner
 }
 
 func (h *ConversationHandler) SetContainerInitializationProvider(provider ConversationContainerInitializationProvider) {
@@ -162,6 +173,10 @@ type CreateConversationRequest struct {
 // SetConversationProjectRequest 设置对话所属项目
 type SetConversationProjectRequest struct {
 	ProjectID string `json:"projectId"` // 空字符串表示解除绑定
+}
+
+type SetConversationRuntimeModeRequest struct {
+	RuntimeMode string `json:"runtimeMode"`
 }
 
 // CreateConversation 创建新对话
@@ -248,6 +263,80 @@ func (h *ConversationHandler) containerRolloutAllowed(userID, projectID string) 
 	}
 	_, allowed := h.containerRollout(strings.TrimSpace(userID), strings.TrimSpace(projectID))
 	return allowed
+}
+
+// SetConversationRuntimeMode switches the execution location used by future
+// turns. History is unchanged and an in-flight/cancelling turn keeps the mode
+// locked until it has fully left the task registry.
+func (h *ConversationHandler) SetConversationRuntimeMode(c *gin.Context) {
+	id := strings.TrimSpace(c.Param("id"))
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	if !h.db.UserCanAccessResource(session.UserID, session.Scope, "conversation", id) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "无权访问该对话"})
+		return
+	}
+
+	var req SetConversationRuntimeModeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeMode 必须为 host 或 container"})
+		return
+	}
+	mode, err := database.NormalizeConversationRuntimeMode(req.RuntimeMode)
+	if err != nil || strings.TrimSpace(req.RuntimeMode) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeMode 必须为 host 或 container"})
+		return
+	}
+	conversation, err := h.db.GetConversationLite(id)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
+		return
+	}
+	if mode == database.ConversationRuntimeModeContainer &&
+		!h.containerRolloutAllowed(session.UserID, conversation.ProjectID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "当前用户或项目尚未开放容器执行"})
+		return
+	}
+
+	update := func() error { return h.db.SetConversationRuntimeMode(id, mode) }
+	if h.taskIdle != nil {
+		err = h.taskIdle.RunWhenConversationTaskIdle(id, update)
+	} else {
+		if h.taskState != nil {
+			if running, _ := h.taskState.ConversationTaskRuntimeState(id); running {
+				err = ErrTaskAlreadyRunning
+			} else {
+				err = update()
+			}
+		} else {
+			err = update()
+		}
+	}
+	if errors.Is(err, ErrTaskAlreadyRunning) {
+		c.JSON(http.StatusConflict, gin.H{"error": "当前任务尚未完成，完成后才能切换执行位置"})
+		return
+	}
+	if err != nil {
+		h.logger.Error("切换对话执行位置失败", zap.String("conversationId", id), zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "切换执行位置失败"})
+		return
+	}
+
+	if h.audit != nil && conversation.RuntimeMode != mode {
+		h.audit.Record(c, audit.Entry{
+			Category: "conversation", Action: "switch_runtime_mode", Result: "success",
+			ResourceType: "conversation", ResourceID: id, Message: "切换对话执行位置",
+			Detail: map[string]interface{}{"from": conversation.RuntimeMode, "to": mode},
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"conversationId":      id,
+		"runtimeMode":         mode,
+		"workspacePersistent": conversation.WorkspacePersistent,
+	})
 }
 
 func (h *ConversationHandler) GetContainerRuntimeRollout(c *gin.Context) {

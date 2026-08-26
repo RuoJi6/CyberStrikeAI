@@ -170,5 +170,7 @@ test('对话容器详情可以切换边界策略并显式重建', () => {
     assert.match(management, /\/container\/rebuild/);
     assert.match(management, /JSON\.stringify\(\{ boundaryPolicyId: policyId \}\)/);
     assert.match(management, /record\.boundaryPolicyId/);
+    assert.match(management, /CyberStrikeSelect\.enhance\(policySelect\)/);
     assert.match(styles, /\.container-boundary-policy-switch\s*\{/);
+    assert.match(styles, /\.container-boundary-policy-switch-controls \.unified-select-trigger\s*\{/);
 });

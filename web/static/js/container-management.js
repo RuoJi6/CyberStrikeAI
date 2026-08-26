@@ -437,7 +437,10 @@ function renderConversationContainerDetail() {
     policyControls.append(policySelect, policyButton);
     policySwitch.append(policyCopy, policyControls);
     root.append(policySwitch);
-    if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(policySelect);
+    if (window.CyberStrikeSelect) {
+        if (typeof window.CyberStrikeSelect.enhance === 'function') window.CyberStrikeSelect.enhance(policySelect);
+        else if (typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(policySelect);
+    }
 
     if (record.status === 'created') {
         const workspaceActions = containerRuntimeElement('div', 'container-runtime-workspace-actions');
