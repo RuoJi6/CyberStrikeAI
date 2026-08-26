@@ -102,9 +102,13 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260824-5/);
+    assert.match(template, /egress-audit\.js\?v=20260826-2/);
+    assert.equal(zh.containerManagement.auditReconcile, '状态校准');
+    assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
-    assert.match(source, /\/api\/egress-audit-events\?\$\{queryParams\(true\)\.toString\(\)\}/);
+    assert.match(source, /params\.set\('defer_integrity', 'true'\)/);
+    assert.match(source, /\/api\/egress-audit-events\/conversations/);
+    assert.match(source, /\/api\/egress-audit-events\/integrity/);
     assert.match(source, /\/api\/egress-audit-events\/export\?\$\{params\.toString\(\)\}/);
     assert.match(source, /method: 'DELETE'/);
     assert.match(source, /\/api\/egress-audit-events\/.*encodeURIComponent\(event\.id\)/);
@@ -113,7 +117,8 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     assert.match(source, /URL_KEYS = Object\.freeze/);
     assert.match(source, /setTimeout\(applyFilters, 300\)/);
     assert.match(source, /params\.set\('conversation_id', state\.conversation\)/);
-    assert.match(source, /payload\.conversations\.filter\(isSafeAuditConversation\)/);
+    assert.match(source, /payload\.conversations\) \? payload\.conversations\.filter\(isSafeAuditConversation\)/);
+    assert.match(source, /root\.AbortController/);
     assert.match(source, /textContent/);
     assert.match(source, /isSafeIntegrity\(payload\.integrity\)/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
@@ -146,7 +151,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260826-1/);
+    assert.match(template, /style\.css\?v=20260826-2/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260824-8/);
 });

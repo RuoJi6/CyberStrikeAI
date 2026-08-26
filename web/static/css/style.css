@@ -5179,36 +5179,37 @@ html[data-theme="dark"] .boundary-policy-row-value strong.is-used { color: #fbbf
     .boundary-policy-drawer-actions { padding-left: 16px; padding-right: 16px; }
 }
 
-.egress-management-summary {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 18px;
-}
-
-.egress-management-tabs { align-items: center; flex-wrap: wrap; }
+.egress-management-catalog { min-width: 0; padding: 22px; border: 1px solid var(--border-color); border-radius: 18px; background: var(--bg-secondary); box-shadow: 0 14px 34px color-mix(in srgb, #0f172a 5%, transparent); }
+.egress-management-tabs { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding-bottom: 18px; border-bottom: 1px solid var(--border-color); }
 .egress-management-tab { min-height: 38px; padding: 0 14px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: var(--text-secondary); font-weight: 650; cursor: pointer; }
 .egress-management-tab:hover { background: color-mix(in srgb, var(--primary-color) 6%, transparent); color: var(--text-primary); }
 .egress-management-tab.is-active { border-color: color-mix(in srgb, var(--primary-color) 30%, var(--border-color)); background: color-mix(in srgb, var(--primary-color) 10%, transparent); color: var(--primary-color); }
-.egress-management-tabs > .btn-secondary { margin-left: auto; }
-
-.egress-management-view {
-    display: grid;
-    grid-template-columns: minmax(300px, 0.9fr) minmax(390px, 1.1fr);
-    align-items: start;
-    gap: 18px;
-    min-width: 0;
-}
+.egress-management-toolbar { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(120px, 150px) auto; align-items: end; gap: 12px; margin-top: 18px; }
+.egress-management-toolbar .container-runtime-search input { width: 100%; }
+.egress-management-view { display: block; min-width: 0; }
 .egress-management-view[hidden] { display: none; }
-.egress-management-list-pane .container-runtime-search { display: block; margin-top: 15px; }
-.egress-management-list-pane .container-runtime-search input { width: 100%; }
-.egress-resource-list { display: grid; gap: 10px; margin-top: 15px; }
-.egress-resource-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; min-width: 0; padding: 14px; border: 1px solid var(--border-color); border-radius: 13px; background: var(--bg-primary); }
-.egress-resource-card-main { min-width: 0; }
-.egress-resource-card-heading { align-items: center; justify-content: flex-start; flex-wrap: wrap; }
-.egress-resource-card-heading strong { min-width: 0; overflow: hidden; color: var(--text-primary); font-size: 0.8rem; overflow-wrap: anywhere; text-overflow: ellipsis; }
-.egress-resource-card-main p { margin: 7px 0 0; color: var(--text-secondary); font-size: 0.68rem; line-height: 1.5; overflow-wrap: anywhere; }
-.egress-resource-actions { display: flex; flex: 0 0 auto; gap: 7px; }
+.egress-resource-table-header,
+.egress-resource-row { display: grid; grid-template-columns: minmax(220px, 1.35fr) minmax(190px, 1fr) minmax(150px, 0.75fr) minmax(160px, 0.72fr) minmax(220px, auto); align-items: center; gap: 16px; }
+.egress-resource-table-header { margin-top: 10px; padding: 10px 14px; border-bottom: 1px solid var(--border-color); color: var(--text-secondary); font-size: 0.66rem; font-weight: 700; }
+.egress-resource-list { min-width: 0; }
+.egress-resource-list > .container-policy-empty { margin-top: 12px; }
+.egress-resource-row { min-width: 0; padding: 16px 14px; border-bottom: 1px solid var(--border-color); cursor: pointer; transition: background 140ms ease, box-shadow 140ms ease; }
+.egress-resource-row:hover,
+.egress-resource-row:focus-visible { background: color-mix(in srgb, var(--primary-color) 4%, transparent); outline: none; box-shadow: inset 3px 0 color-mix(in srgb, var(--primary-color) 72%, transparent); }
+.egress-resource-row-identity,
+.egress-resource-row-value { min-width: 0; }
+.egress-resource-row-identity strong { display: block; overflow: hidden; color: var(--text-primary); font-size: 0.82rem; text-overflow: ellipsis; white-space: nowrap; }
+.egress-resource-row-identity p { display: -webkit-box; margin: 6px 0 0; overflow: hidden; color: var(--text-secondary); font-size: 0.69rem; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.egress-resource-row-value { display: grid; justify-items: start; gap: 5px; }
+.egress-resource-row-value strong { max-width: 100%; overflow: hidden; color: var(--text-primary); font-size: 0.75rem; text-overflow: ellipsis; white-space: nowrap; }
+.egress-resource-row-value small,
+.egress-resource-row-time { color: var(--text-secondary); font-size: 0.66rem; line-height: 1.4; }
+.egress-resource-row-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.egress-management-catalog > .container-runtime-pagination { margin-top: 18px; }
+.egress-resource-editor-dialog { width: min(920px, 96vw); }
+.egress-resource-editor-dialog .egress-management-form { margin: 0; padding: 4px 0 0; border: 0; border-radius: 0; background: transparent; box-shadow: none; }
+.egress-resource-editor-dialog .egress-management-form[hidden] { display: none !important; }
+.egress-resource-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
 .egress-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
 .egress-form-grid > label,
@@ -5270,8 +5271,11 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
     .egress-audit-filter-grid { grid-template-columns: minmax(220px, 1.4fr) repeat(2, minmax(130px, 0.8fr)); }
     .egress-audit-field.is-search { grid-column: 1 / -1; }
     .egress-audit-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .egress-management-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .egress-management-view { grid-template-columns: 1fr; }
+    .egress-resource-table-header { display: none; }
+    .egress-resource-row { grid-template-columns: minmax(0, 1fr) minmax(150px, 0.5fr); align-items: start; margin-top: 10px; border: 1px solid var(--border-color); border-radius: 14px; }
+    .egress-resource-row-identity { grid-column: 1 / -1; }
+    .egress-resource-row-time { align-self: center; }
+    .egress-resource-row-actions { grid-column: 1 / -1; justify-content: flex-start; padding-top: 8px; border-top: 1px solid var(--border-color); }
 }
 
 @media (max-width: 760px) {
@@ -5311,6 +5315,23 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
         grid-column: 1 / -1;
         justify-self: start;
         margin-left: 60px;
+    }
+
+    .egress-management-catalog {
+        padding: 16px;
+        border-radius: 15px;
+    }
+
+    .egress-management-toolbar {
+        grid-template-columns: 1fr;
+    }
+
+    .egress-management-catalog .container-management-phase {
+        margin-left: 0;
+    }
+
+    .egress-resource-detail-grid {
+        grid-template-columns: 1fr;
     }
 
     .container-runtime-toolbar { align-items: flex-start; }
@@ -5391,6 +5412,9 @@ html[data-theme="dark"] .egress-audit-table td.is-decision.is-success strong { c
 }
 
 @media (max-width: 480px) {
+	.egress-resource-row { grid-template-columns: 1fr; }
+	.egress-resource-row-time { align-self: auto; }
+	.egress-resource-row-actions { flex-wrap: wrap; }
     .container-runtime-filter-bar { grid-template-columns: 1fr; }
     .container-runtime-search { grid-column: auto; }
     .container-runtime-toolbar-status { align-items: stretch; flex-direction: column; }

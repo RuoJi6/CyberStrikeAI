@@ -1335,6 +1335,7 @@ func setupRoutes(
 		protected.GET("/audit/logs/:id", auditHandler.GetLog)
 		protected.GET("/egress-audit-events", egressAuditHandler.List)
 		protected.DELETE("/egress-audit-events", egressAuditHandler.Delete)
+		protected.GET("/egress-audit-events/conversations", egressAuditHandler.Conversations)
 		protected.GET("/egress-audit-events/integrity", egressAuditHandler.Integrity)
 		protected.GET("/egress-audit-events/export", egressAuditHandler.Export)
 		protected.GET("/egress-audit-events/:id", egressAuditHandler.Get)

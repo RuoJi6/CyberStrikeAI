@@ -101,6 +101,47 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 	}
 }
 
+func TestEgressAuditHandlerDeferredProjectionAndConversationOptions(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, eventID := newEgressAuditHandlerFixture(t)
+	handler := NewEgressAuditHandler(db)
+
+	listRecorder := httptest.NewRecorder()
+	list := egressAuditTestContext(listRecorder, http.MethodGet, "/api/egress-audit-events?page=1&page_size=10&defer_integrity=true")
+	handler.List(list)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("deferred list status/body = %d %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := payload["integrity"]; exists {
+		t.Fatalf("deferred list unexpectedly included integrity: %#v", payload)
+	}
+	if _, exists := payload["conversations"]; exists {
+		t.Fatalf("deferred list unexpectedly included conversations: %#v", payload)
+	}
+	items, _ := payload["items"].([]interface{})
+	if len(items) != 1 || !strings.Contains(listRecorder.Body.String(), eventID) || int(payload["total"].(float64)) != 1 {
+		t.Fatalf("deferred list payload = %#v", payload)
+	}
+
+	conversationRecorder := httptest.NewRecorder()
+	conversationContext := egressAuditTestContext(conversationRecorder, http.MethodGet, "/api/egress-audit-events/conversations")
+	handler.Conversations(conversationContext)
+	if conversationRecorder.Code != http.StatusOK || !strings.Contains(conversationRecorder.Body.String(), `"conversationId"`) {
+		t.Fatalf("conversations status/body = %d %s", conversationRecorder.Code, conversationRecorder.Body.String())
+	}
+
+	invalidRecorder := httptest.NewRecorder()
+	invalid := egressAuditTestContext(invalidRecorder, http.MethodGet, "/api/egress-audit-events?defer_integrity=1")
+	handler.List(invalid)
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid defer_integrity = %d %s", invalidRecorder.Code, invalidRecorder.Body.String())
+	}
+}
+
 func TestEgressAuditHandlerDeletesSelectedEventsAndRejectsUnfilteredPurge(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db, eventID := newEgressAuditHandlerFixture(t)
@@ -239,9 +280,21 @@ func TestOpenAPIEgressAuditProjectionDocumentsFullPacketAndControlledDeletion(t 
 	if integritySchema["additionalProperties"] != false {
 		t.Fatalf("integrity schema is not closed: %#v", integritySchema)
 	}
+	listSchema := schemas["EgressAuditList"].(map[string]interface{})
+	requiredListFields := listSchema["required"].([]interface{})
+	for _, deferredField := range []string{"conversations", "integrity"} {
+		for _, requiredField := range requiredListFields {
+			if requiredField == deferredField {
+				t.Fatalf("deferred field %q must not be required in the audit list schema", deferredField)
+			}
+		}
+	}
 	paths := spec["paths"].(map[string]interface{})
 	if _, ok := paths["/api/egress-audit-events/integrity"]; !ok {
 		t.Fatal("egress audit integrity path is missing")
+	}
+	if _, ok := paths["/api/egress-audit-events/conversations"]; !ok {
+		t.Fatal("egress audit conversations path is missing")
 	}
 	if _, ok := paths["/api/egress-audit-events"].(map[string]interface{})["delete"]; !ok {
 		t.Fatal("egress audit controlled delete operation is missing")

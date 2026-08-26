@@ -130,7 +130,7 @@ type RebuildConversationContainerRequest struct {
 }
 
 func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {
-	h.runConversationContainerLifecycle(c, "reconcile", "对账对话容器状态", h.containerLifecycleReconcile)
+	h.runConversationContainerLifecycle(c, "reconcile", "校准对话容器状态", h.containerLifecycleReconcile)
 }
 
 func (h *ConversationHandler) GetConversationEgressHealth(c *gin.Context) {

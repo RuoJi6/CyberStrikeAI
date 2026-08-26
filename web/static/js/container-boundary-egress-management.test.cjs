@@ -60,8 +60,14 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
 
 test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () => {
     for (const id of [
-        'egress-management-summary',
+        'egress-resource-new',
+        'egress-resource-search',
+        'egress-resource-page-size',
         'egress-management-refresh',
+        'egress-resource-pagination',
+        'egress-resource-detail-drawer',
+        'egress-resource-detail-body',
+        'egress-resource-editor-modal',
         'egress-view-proxies',
         'egress-proxy-form',
         'egress-proxy-list',
@@ -73,6 +79,7 @@ test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () 
         'egress-auth-form',
         'egress-auth-list',
     ]) assert.match(template, new RegExp(`id="${id}"`));
+	assert.doesNotMatch(template, /id="egress-proxies-focus-title"/);
 
     for (const endpoint of ['egress-proxies', 'egress-proxy-groups', 'egress-auth-profiles']) {
         assert.match(egress, new RegExp(`/api/${endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
@@ -82,8 +89,13 @@ test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () 
     assert.match(egress, /payload\.credentials = null/);
     assert.match(egress, /payload\.credential = null/);
     assert.match(egress, /credentialsConfigured/);
-    assert.match(egress, /selectableProxyIds\.has\(member\.proxyId\)/);
+    assert.match(egress, /selectable\.has\(member\.proxyId\)/);
     assert.match(egress, /egress_view/);
+	assert.match(egress, /egress_page/);
+	assert.match(egress, /egress_page_size/);
+	assert.match(egress, /egress_q/);
+	assert.match(egress, /function openDetail/);
+	assert.match(egress, /function openEditor/);
     assert.match(egress, /window\.initEgressManagementPage = init/);
 });
 
@@ -125,13 +137,16 @@ test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     assert.match(styles, /\.boundary-policy-overlay-open \.unified-select-menu\s*\{\s*z-index: 10110;\s*\}/);
     assert.match(styles, /\.container-policy-detail\s*\{/);
     assert.match(styles, /\.container-policy-rule-grid\s*\{/);
-    assert.match(styles, /\.egress-management-view\s*\{/);
+    assert.match(styles, /\.egress-management-catalog\s*\{/);
+    assert.match(styles, /\.egress-management-toolbar\s*\{/);
+    assert.match(styles, /\.egress-resource-row\s*\{/);
+    assert.match(styles, /\.egress-resource-editor-dialog\s*\{/);
     assert.match(styles, /\.egress-form-grid\s*\{/);
     assert.match(styles, /\.egress-form-toggle\[hidden\]\s*\{\s*display: none !important;/);
     assert.match(styles, /\.container-environment-card\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\);[\s\S]*?min-width: 0;/);
     assert.match(styles, /\.container-environment-heading,[\s\S]*?\.container-environment-details\s*\{[\s\S]*?min-width: 0;/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-environment-details\s*\{\s*grid-template-columns: 1fr;/);
-    assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-management-view/);
+    assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-management-toolbar/);
     assert.match(styles, /@media \(max-width: 480px\)[\s\S]*?\.container-policy-rule-grid/);
     assert.match(styles, /@media \(max-width: 480px\)[\s\S]*?\.container-policy-snapshot-heading,[\s\S]*?flex-direction: column/);
 });

@@ -78,23 +78,26 @@ func (h *EgressAuditHandler) List(c *gin.Context) {
 	if !ok {
 		return
 	}
+	deferIntegrity, ok := strictBooleanQuery(c, "defer_integrity")
+	if !ok {
+		return
+	}
 	filter.Limit = pageSize
 	filter.Offset = (page - 1) * pageSize
-	integrity, err := h.db.VerifyEgressAuditIntegrity(c.Request.Context(), database.EgressAuditFilter{
-		ConversationID: filter.ConversationID, UserID: filter.UserID, Scope: filter.Scope,
-	})
-	if err != nil {
-		writeEgressAuditIntegrityError(c, err)
-		return
+	var integrity *database.EgressAuditIntegrity
+	if !deferIntegrity {
+		verified, err := h.db.VerifyEgressAuditIntegrity(c.Request.Context(), database.EgressAuditFilter{
+			ConversationID: filter.ConversationID, UserID: filter.UserID, Scope: filter.Scope,
+		})
+		if err != nil {
+			writeEgressAuditIntegrityError(c, err)
+			return
+		}
+		integrity = &verified
 	}
 	items, err := h.db.ListEgressAuditEvents(c.Request.Context(), filter)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取出站审计事件"})
-		return
-	}
-	total, err := h.db.CountEgressAuditEvents(c.Request.Context(), filter)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法统计出站审计事件"})
 		return
 	}
 	summary, err := h.db.SummarizeEgressAuditEvents(c.Request.Context(), filter)
@@ -102,20 +105,42 @@ func (h *EgressAuditHandler) List(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法汇总出站审计事件"})
 		return
 	}
+	total := summary.Total
+	totalPages := 0
+	if total > 0 {
+		totalPages = (total + pageSize - 1) / pageSize
+	}
+	payload := gin.H{
+		"items": items, "total": total, "page": page, "pageSize": pageSize,
+		"totalPages": totalPages, "summary": summary,
+	}
+	if integrity != nil {
+		conversations, err := h.db.ListEgressAuditConversations(c.Request.Context(), filter.UserID, filter.Scope)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取出站审计对话"})
+			return
+		}
+		payload["integrity"] = integrity
+		payload["conversations"] = conversations
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+// Conversations is intentionally separate from the paged projection so a
+// large audit chain does not block the conversation picker on every page or
+// filter change. The endpoint still applies the caller's RBAC scope.
+func (h *EgressAuditHandler) Conversations(c *gin.Context) {
+	setEgressAuditResponseHeaders(c)
+	filter, _, _, ok := egressAuditFilterFromRequest(c)
+	if !ok {
+		return
+	}
 	conversations, err := h.db.ListEgressAuditConversations(c.Request.Context(), filter.UserID, filter.Scope)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取出站审计对话"})
 		return
 	}
-	totalPages := 0
-	if total > 0 {
-		totalPages = (total + pageSize - 1) / pageSize
-	}
-	c.JSON(http.StatusOK, gin.H{
-		"items": items, "total": total, "page": page, "pageSize": pageSize,
-		"totalPages": totalPages, "summary": summary, "integrity": integrity,
-		"conversations": conversations,
-	})
+	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
 }
 
 func (h *EgressAuditHandler) Get(c *gin.Context) {
@@ -201,6 +226,18 @@ func setEgressAuditResponseHeaders(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
 	c.Header("Pragma", "no-cache")
 	c.Header("X-Content-Type-Options", "nosniff")
+}
+
+func strictBooleanQuery(c *gin.Context, name string) (bool, bool) {
+	raw := strings.TrimSpace(c.Query(name))
+	if raw == "" || raw == "false" {
+		return false, true
+	}
+	if raw == "true" {
+		return true, true
+	}
+	c.JSON(http.StatusBadRequest, gin.H{"error": name + " 必须为 true 或 false"})
+	return false, false
 }
 
 func egressAuditFilterFromRequest(c *gin.Context) (database.EgressAuditFilter, int, int, bool) {

@@ -456,7 +456,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	egressAuditListSchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
-		"required":             []string{"items", "conversations", "total", "page", "pageSize", "totalPages", "summary", "integrity"},
+		"required":             []string{"items", "total", "page", "pageSize", "totalPages", "summary"},
 		"properties": map[string]interface{}{
 			"items": map[string]interface{}{"type": "array", "items": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditEvent"}},
 			"conversations": map[string]interface{}{"type": "array", "maxItems": 5000, "items": map[string]interface{}{
@@ -2484,6 +2484,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						{"name": "decision", "in": "query", "schema": map[string]interface{}{"type": "string", "default": "all", "enum": []string{"all", "allowed", "blocked", "success", "failure"}}},
 						{"name": "since", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
 						{"name": "until", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
+						{"name": "defer_integrity", "in": "query", "description": "为 true 时先返回分页摘要，客户端再通过独立端点异步校验完整性并加载对话选项。", "schema": map[string]interface{}{"type": "boolean", "default": false}},
 					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{"description": "持久审计事件分页结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditList"}}}},
@@ -2498,6 +2499,16 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					}}}},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{"description": "删除及链重建成功"}, "400": map[string]interface{}{"description": "请求或筛选无效"}, "403": map[string]interface{}{"description": "缺少 audit:delete 权限"}, "409": map[string]interface{}{"description": "删除前审计链完整性校验失败"},
+					},
+				},
+			},
+			"/api/egress-audit-events/conversations": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"出站审计"}, "summary": "列出可筛选的审计对话", "operationId": "listEgressAuditConversations",
+					"description": "仅返回当前用户资源范围内的对话 ID 和标题，与事件分页、完整性校验分离加载。",
+					"responses": map[string]interface{}{
+						"200": map[string]interface{}{"description": "对话筛选选项"},
+						"400": map[string]interface{}{"description": "参数无效"}, "401": map[string]interface{}{"description": "未授权"}, "403": map[string]interface{}{"description": "缺少审计读取权限"},
 					},
 				},
 			},

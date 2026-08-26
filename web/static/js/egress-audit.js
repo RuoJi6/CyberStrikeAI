@@ -27,10 +27,11 @@
         conversation: 'audit_conversation', category: 'audit_category', type: 'audit_type', decision: 'audit_decision',
     });
     const state = {
-        active: false, bound: false, loading: false, generation: 0, searchTimer: null,
+        active: false, bound: false, loading: false, integrityLoading: false, conversationsLoading: false,
+        generation: 0, searchTimer: null, listController: null, integrityController: null,
         page: 1, pageSize: 20, query: '', conversation: '', category: 'all', type: 'all', decision: 'all',
         total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
-        conversations: [], integrity: null, error: '', selected: new Set(),
+        conversations: [], integrity: null, integrityError: '', error: '', selected: new Set(),
     };
 
     function t(key, fallback, values) {
@@ -285,7 +286,7 @@
         const labels = {
             dns: 'DNS', http: 'HTTP', https: 'HTTPS（已解密）', connect: 'CONNECT', tcp: 'TCP', udp: 'UDP', icmp: 'ICMP',
             create: t('auditCreate', '创建'), start: t('auditStart', '启动'), stop: t('auditStop', '停止'),
-			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '对账'),
+			rebuild: t('auditRebuild', '重建'), delete: t('auditDelete', '删除'), reconcile: t('auditReconcile', '状态校准'),
 			health: t('auditHealth', '出站健康'),
         };
         return labels[value] || String(value || '').toUpperCase();
@@ -312,7 +313,7 @@
         if (event.result === 'failure') return t('auditLifecycleFailed', '容器生命周期操作失败');
         if (event.eventType === 'create') return t('auditRuntimeCreated', '容器运行时已创建');
         if (event.eventType === 'delete') return t('auditRuntimeDeleted', '容器运行时已删除');
-        if (event.eventType === 'reconcile') return t('auditRuntimeReconciled', '容器运行时已对账');
+        if (event.eventType === 'reconcile') return t('auditRuntimeReconciled', '容器运行时状态已校准');
         return t('auditLifecycleCompleted', '容器生命周期操作已完成');
     }
 
@@ -497,13 +498,13 @@
         if (refresh) refresh.disabled = state.loading;
         const integrity = element('egress-audit-integrity');
         if (integrity) {
-            integrity.textContent = state.loading
+            integrity.textContent = state.integrityLoading
                 ? t('auditIntegrityChecking', '正在校验审计链…')
                 : (state.integrity
                     ? t('auditIntegrityVerified', '链已验证 · {{events}} 条', { events: state.integrity.events })
-                    : t('auditIntegrityFailed', '审计链校验失败'));
-            integrity.classList.toggle('is-ready', Boolean(state.integrity) && !state.loading);
-            integrity.classList.toggle('is-error', !state.integrity && !state.loading);
+                    : (state.integrityError || t('auditIntegrityChecking', '等待校验审计链…')));
+            integrity.classList.toggle('is-ready', Boolean(state.integrity) && !state.integrityLoading);
+            integrity.classList.toggle('is-error', Boolean(state.integrityError) && !state.integrityLoading);
         }
         renderSelectionControls();
     }
@@ -533,37 +534,95 @@
         await refresh();
     }
 
-    async function refresh() {
-        if (!state.active || state.loading) return;
-        state.loading = true;
-        state.error = '';
-        const generation = ++state.generation;
+    async function loadConversations(generation) {
+        if (state.conversationsLoading) return;
+        state.conversationsLoading = true;
+        try {
+            const payload = await requestJSON('/api/egress-audit-events/conversations');
+            if (!state.active) return;
+            state.conversations = Array.isArray(payload.conversations) ? payload.conversations.filter(isSafeAuditConversation) : [];
+            syncConversationOptions();
+        } catch (error) {
+            if (state.active && generation === state.generation && !state.error) {
+                state.error = error && error.message ? error.message : t('auditLoadFailed', '加载出站审计失败');
+            }
+        } finally {
+            state.conversationsLoading = false;
+            if (state.active) render();
+        }
+    }
+
+    async function verifyIntegrity(generation) {
+        if (state.integrityController && typeof state.integrityController.abort === 'function') state.integrityController.abort();
+        const controller = typeof root.AbortController === 'function' ? new root.AbortController() : null;
+        state.integrityController = controller;
+        state.integrityLoading = true;
+        state.integrityError = '';
+        state.integrity = null;
         render();
         try {
-            const payload = await requestJSON(`/api/egress-audit-events?${queryParams(true).toString()}`);
+            const params = new URLSearchParams();
+            if (state.conversation) params.set('conversation_id', state.conversation);
+            const suffix = params.toString();
+            const payload = await requestJSON('/api/egress-audit-events/integrity' + (suffix ? '?' + suffix : ''), controller ? { signal: controller.signal } : undefined);
             if (!state.active || generation !== state.generation) return;
             if (!isSafeIntegrity(payload.integrity)) throw new Error(t('auditIntegrityFailed', '审计链校验失败'));
-            const items = Array.isArray(payload.items) ? payload.items.filter(isSafeAuditEvent) : [];
-            state.items = items;
-            state.conversations = Array.isArray(payload.conversations) ? payload.conversations.filter(isSafeAuditConversation) : [];
-            state.total = Math.max(0, Number(payload.total || 0));
-            state.totalPages = Math.max(0, Number(payload.totalPages || 0));
-            state.summary = payload.summary || { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
             state.integrity = payload.integrity;
-            syncConversationOptions();
-            if (state.totalPages > 0 && state.page > state.totalPages) {
-                state.page = state.totalPages;
-                writeURLState();
-                state.loading = false;
-                return refresh();
-            }
         } catch (error) {
+            if (error && error.name === 'AbortError') return;
             if (!state.active || generation !== state.generation) return;
             state.items = [];
             state.total = 0;
             state.totalPages = 0;
             state.summary = { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
             state.integrity = null;
+            state.integrityError = error && error.message ? error.message : t('auditIntegrityFailed', '审计链校验失败');
+            state.error = state.integrityError;
+        } finally {
+            if (generation === state.generation) {
+                state.integrityLoading = false;
+                render();
+            }
+        }
+    }
+
+    async function refresh(options) {
+        if (!state.active) return;
+        const settings = options && typeof options === 'object' ? options : {};
+        if (state.listController && typeof state.listController.abort === 'function') state.listController.abort();
+        const controller = typeof root.AbortController === 'function' ? new root.AbortController() : null;
+        state.listController = controller;
+        state.loading = true;
+        state.error = '';
+        const generation = ++state.generation;
+        render();
+        if (settings.conversations || state.conversations.length === 0) void loadConversations(generation);
+        try {
+            const params = queryParams(true);
+            params.set('defer_integrity', 'true');
+            const payload = await requestJSON(`/api/egress-audit-events?${params.toString()}`, controller ? { signal: controller.signal } : undefined);
+            if (!state.active || generation !== state.generation) return;
+            const items = Array.isArray(payload.items) ? payload.items.filter(isSafeAuditEvent) : [];
+            state.items = items;
+            state.total = Math.max(0, Number(payload.total || 0));
+            state.totalPages = Math.max(0, Number(payload.totalPages || 0));
+            state.summary = payload.summary || { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
+            if (state.totalPages > 0 && state.page > state.totalPages) {
+                state.page = state.totalPages;
+                writeURLState();
+                state.loading = false;
+                return refresh(settings);
+            }
+            state.loading = false;
+            render();
+            if (settings.verify || !state.integrity) void verifyIntegrity(generation);
+        } catch (error) {
+            if (error && error.name === 'AbortError') return;
+            if (!state.active || generation !== state.generation) return;
+            state.items = [];
+            state.total = 0;
+            state.totalPages = 0;
+            state.summary = { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 };
             state.error = error && error.message ? error.message : t('auditLoadFailed', '加载出站审计失败');
         } finally {
             if (generation === state.generation) {
@@ -608,6 +667,7 @@
     }
 
     function applyFilters() {
+        const previousConversation = state.conversation;
         state.query = Array.from(element('egress-audit-search')?.value || '').slice(0, 200).join('');
         state.conversation = Array.from(element('egress-audit-conversation')?.value || '').slice(0, 128).join('');
         state.category = closedValue(element('egress-audit-category')?.value, CATEGORIES, 'all');
@@ -617,7 +677,7 @@
         state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
         state.page = 1;
         writeURLState();
-        refresh();
+        refresh({ verify: state.conversation !== previousConversation });
     }
 
     function bind() {
@@ -632,7 +692,7 @@
             const control = element(id);
             if (control) control.addEventListener('change', applyFilters);
         });
-        element('egress-audit-refresh')?.addEventListener('click', refresh);
+        element('egress-audit-refresh')?.addEventListener('click', function () { refresh({ verify: true, conversations: true }); });
         element('egress-audit-prev')?.addEventListener('click', function () {
             if (state.page <= 1) return;
             state.page -= 1;
@@ -670,13 +730,17 @@
         bind();
         syncControls();
         writeURLState();
-        refresh();
+        refresh({ verify: true, conversations: true });
     }
 
     function stop() {
         state.active = false;
         state.generation += 1;
         state.loading = false;
+        state.integrityLoading = false;
+        state.conversationsLoading = false;
+        if (state.listController && typeof state.listController.abort === 'function') state.listController.abort();
+        if (state.integrityController && typeof state.integrityController.abort === 'function') state.integrityController.abort();
         if (state.searchTimer) {
             root.clearTimeout(state.searchTimer);
             state.searchTimer = null;
