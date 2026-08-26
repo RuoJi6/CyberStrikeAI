@@ -98,9 +98,9 @@ fi
 metadata_file=$(mktemp "${TMPDIR:-/tmp}/cyberstrike-agent-publish.XXXXXX")
 trap 'rm -f "$metadata_file"' EXIT
 
-sbom_args=()
+sbom_args=(--sbom=false)
 if [[ "$registry_sbom" == true ]]; then
-  sbom_args+=(--sbom=true)
+  sbom_args=(--sbom=true)
 fi
 
 docker buildx build \
