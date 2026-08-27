@@ -21,13 +21,13 @@ CyberStrikeAI 当前使用 Docker Hub 上的自有多架构 Agent 镜像，不�
 | 项目 | 值 |
 | --- | --- |
 | 仓库 | `ruoji6/cyberstrikeai-egress` |
-| 版本标签 | `runtime-unlimited-20260827`、`latest` |
-| 多架构 index digest | `sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558` |
-| ARM64 manifest | `sha256:8315466e05ddfcaae46de008a36ceeee614bcfb115f1ca78db5408285bade7c0` |
-| AMD64 manifest | `sha256:614abfc446fb35832a0335b86389c0c766f2e24f8be1aad383e2902a0ee32392` |
-| OCI revision | `7454258` |
+| 版本标签 | `https-default-20260827` |
+| 多架构 index digest | `sha256:68e3b5873bb62a1448c22dd689b3d38768663f0f3ad3f402a58a7ee506c20855` |
+| ARM64 manifest | `sha256:29473ae320b9e97c6106f4dc6e1ea96b5c442c6d9c8a1c47cbee4a3b94035c56` |
+| AMD64 manifest | `sha256:85624a043bcf4d5dfb7407645bf32341cb11944f82c168a58de9d969ea8de00d` |
+| OCI revision | `8c75a4fb` |
 
-Egress 镜像也从 Docker Hub 按 index digest 拉取，两个平台 manifest 均通过发布脚本冒烟。ARM64 运行时保持只读 rootfs、`cap-drop ALL`、仅增加 `NET_ADMIN`/`NET_RAW`、`no-new-privileges` 和不可变边界快照；该版本保留按目标元组即时拒绝 TCP/UDP 的行为，并新增按对话可选的 HTTP 请求、TCP 新连接和 UDP 数据报速率控制。
+Egress 镜像也从 Docker Hub 按 index digest 拉取。ARM64 已在虚拟机完成无边界策略 HTTPS 默认解密与完整请求/响应审计端到端验收；AMD64 二进制执行和多架构清单已验证。ARM64 运行时保持只读 rootfs、`cap-drop ALL`、仅增加 `NET_ADMIN`/`NET_RAW`、`no-new-privileges` 和不可变边界快照；该版本保留按目标元组即时拒绝 TCP/UDP 的行为，并保留默认关闭的按对话流量控制。该候选因本地 Buildx 不可用而采用平台镜像组装并发布，未生成发布脚本提供的 SBOM/来源证明，`latest` 标签未随候选移动。
 
 ## 工具与平台范围
 

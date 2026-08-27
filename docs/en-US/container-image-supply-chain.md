@@ -21,13 +21,13 @@ The `latest` tag currently resolves to the index digest above. The ARM64 VM pull
 | Item | Value |
 | --- | --- |
 | Repository | `ruoji6/cyberstrikeai-egress` |
-| Tags | `runtime-unlimited-20260827`, `latest` |
-| Multi-platform index | `sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558` |
-| ARM64 manifest | `sha256:8315466e05ddfcaae46de008a36ceeee614bcfb115f1ca78db5408285bade7c0` |
-| AMD64 manifest | `sha256:614abfc446fb35832a0335b86389c0c766f2e24f8be1aad383e2902a0ee32392` |
-| OCI revision | `7454258` |
+| Tag | `https-default-20260827` |
+| Multi-platform index | `sha256:68e3b5873bb62a1448c22dd689b3d38768663f0f3ad3f402a58a7ee506c20855` |
+| ARM64 manifest | `sha256:29473ae320b9e97c6106f4dc6e1ea96b5c442c6d9c8a1c47cbee4a3b94035c56` |
+| AMD64 manifest | `sha256:85624a043bcf4d5dfb7407645bf32341cb11944f82c168a58de9d969ea8de00d` |
+| OCI revision | `8c75a4fb` |
 
-The Egress image is also pulled from Docker Hub by index digest. Both platform manifests passed the publisher smoke test. Its ARM64 runtime keeps a read-only root filesystem, drops all capabilities before restoring only `NET_ADMIN`/`NET_RAW`, enables `no-new-privileges`, and loads an immutable boundary snapshot. This release retains immediate per-tuple TCP/UDP denial and adds optional HTTP request, TCP connection, and UDP datagram pacing configured per conversation.
+The Egress image is also pulled from Docker Hub by index digest. ARM64 passed end-to-end VM acceptance for default HTTPS decryption and full request/response auditing without an explicit boundary policy; AMD64 binary execution and the multi-platform manifest were verified. Its ARM64 runtime keeps a read-only root filesystem, drops all capabilities before restoring only `NET_ADMIN`/`NET_RAW`, enables `no-new-privileges`, and loads an immutable boundary snapshot. This release retains immediate per-tuple TCP/UDP denial and optional, disabled-by-default traffic pacing. Because local Buildx was unavailable, this candidate was assembled and published per platform and therefore does not include the publisher script's SBOM/provenance attestations; `latest` was intentionally not moved.
 
 ## Tool and platform coverage
 
