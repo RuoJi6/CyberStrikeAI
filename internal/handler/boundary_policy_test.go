@@ -374,6 +374,11 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	if !ok || listPath["get"] == nil || listPath["post"] == nil {
 		t.Fatalf("boundary list path = %#v", listPath)
 	}
+	createOperation := listPath["post"].(map[string]interface{})
+	createDescription, _ := createOperation["description"].(string)
+	if !strings.Contains(createDescription, "容器 HTTPS 完整审计默认开启，不依赖是否选择边界策略") || strings.Contains(createDescription, "默认关闭") {
+		t.Fatalf("boundary create description still couples HTTPS inspection to policy selection: %q", createDescription)
+	}
 	detailPath, ok := paths["/api/boundary-policies/{id}"].(map[string]interface{})
 	if !ok || detailPath["get"] == nil || detailPath["put"] == nil || detailPath["delete"] == nil {
 		t.Fatalf("boundary detail CRUD path = %#v", detailPath)
@@ -398,6 +403,11 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 		if _, ok := schemas[name].(map[string]interface{}); !ok {
 			t.Fatalf("%s schema is missing", name)
 		}
+	}
+	boundaryWrite := schemas["BoundaryPolicyWrite"].(map[string]interface{})
+	boundaryWriteProperties := boundaryWrite["properties"].(map[string]interface{})
+	if _, exposed := boundaryWriteProperties["tlsInspectionEnabled"]; exposed {
+		t.Fatal("BoundaryPolicyWrite must not expose a TLS inspection switch")
 	}
 	snapshotSchema, ok := schemas["ConversationBoundarySnapshot"].(map[string]interface{})
 	if !ok {

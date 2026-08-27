@@ -1894,7 +1894,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				},
 				"post": map[string]interface{}{
 					"tags": []string{"边界策略"}, "summary": "创建可编辑边界策略草案", "operationId": "createBoundaryPolicy",
-					"description": "需要 boundary:write。HTTPS 完整审计默认关闭；启用后在对话快照中冻结设置。",
+					"description": "需要 boundary:write。边界策略只定义目标访问规则与证书固定兼容域名；容器 HTTPS 完整审计默认开启，不依赖是否选择边界策略。",
 					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyWrite"}}}},
 					"responses": map[string]interface{}{
 						"201": map[string]interface{}{"description": "草案已创建", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/BoundaryPolicyDetail"}}}},
