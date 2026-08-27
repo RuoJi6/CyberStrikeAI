@@ -113,7 +113,7 @@ test('加密解密页面展示脚本、Runner 和注入对话并在脚本内管�
     }
     assert.doesNotMatch(html, /id="traffic-transform-tab-cases"|id="traffic-transform-panel-cases"/);
     assert.doesNotMatch(html, /traffic-transform-overview|traffic-transform-workflow|traffic-transform-boundary/);
-    assert.match(html, /traffic-transforms\.js\?v=9/);
+    assert.match(html, /traffic-transforms\.js\?v=10/);
     assert.match(router, /case 'traffic-transforms':[\s\S]*?initTrafficTransformsPage\(\)/);
     assert.match(transformScript, /apiFetch\('\/api\/traffic-transforms'/);
     assert.match(transformScript, /function renderScopeRows\(container, transformID\)/);
@@ -122,6 +122,9 @@ test('加密解密页面展示脚本、Runner 和注入对话并在脚本内管�
     assert.match(transformScript, /function renderSourceCode\(source\)/);
     assert.match(transformScript, /function openEditor\(item\)/);
     assert.match(transformScript, /function deleteScript\(item\)/);
+    assert.match(transformScript, /确认删除脚本/);
+    assert.match(transformScript, /confirmDeleteTransformID/);
+    assert.doesNotMatch(transformScript, /root\.confirm/);
     assert.match(transformScript, /method: 'PUT'/);
     assert.match(transformScript, /method: 'DELETE'/);
     assert.match(html, /id="traffic-transform-editor"[^>]+aria-modal="true"/);

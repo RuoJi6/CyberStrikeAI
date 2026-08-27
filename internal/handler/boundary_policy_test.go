@@ -417,6 +417,15 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := snapshotProperties["runtimeGeneration"]; !ok {
 		t.Fatal("ConversationBoundarySnapshot runtimeGeneration is missing")
 	}
+	documentSchema := snapshotProperties["document"].(map[string]interface{})
+	documentProperties := documentSchema["properties"].(map[string]interface{})
+	schemaVersions, ok := documentProperties["schemaVersion"].(map[string]interface{})["enum"].([]interface{})
+	if !ok || len(schemaVersions) != 4 || schemaVersions[3] != float64(4) {
+		t.Fatalf("ConversationBoundarySnapshot schema versions = %#v", schemaVersions)
+	}
+	if _, ok := documentProperties["tlsInspection"]; !ok {
+		t.Fatal("ConversationBoundarySnapshot tlsInspection is missing")
+	}
 }
 
 func TestGetConversationBoundarySnapshotEnforcesConversationScope(t *testing.T) {

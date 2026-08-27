@@ -24,6 +24,8 @@
         scopeCreate: false,
         pendingBindings: new Set(),
         pendingTransforms: new Set(),
+        confirmDeleteBindingID: '',
+        confirmDeleteTransformID: '',
         requestID: 0,
         sourceRequestID: 0,
     };
@@ -183,10 +185,22 @@
         edit.addEventListener('click', () => openScope(item));
         container.appendChild(edit);
         if (item.status === 'disabled') {
-            const remove = create('button', 'traffic-transform-row-action is-danger', '删除');
+            const confirming = state.confirmDeleteBindingID === item.id;
+            const remove = create('button', `traffic-transform-row-action is-danger${confirming ? ' is-confirming' : ''}`, confirming ? '确认删除' : '删除');
             remove.type = 'button';
             remove.disabled = pending;
-            remove.addEventListener('click', () => void deleteBinding(item));
+            remove.setAttribute('aria-pressed', confirming ? 'true' : 'false');
+            remove.addEventListener('click', () => {
+                if (!confirming) {
+                    state.confirmDeleteBindingID = item.id;
+                    state.confirmDeleteTransformID = '';
+                    render();
+                    setText(byId('traffic-transform-status'), '请再次点击“确认删除”移除该作用范围；脚本源码和历史运行记录会保留。');
+                    return;
+                }
+                state.confirmDeleteBindingID = '';
+                void deleteBinding(item);
+            });
             container.appendChild(remove);
         }
     }
@@ -281,12 +295,24 @@
             actions.appendChild(edit);
         }
         if (canWriteScripts()) {
-            const remove = create('button', 'btn-secondary is-danger', '删除脚本');
+            const confirming = state.confirmDeleteTransformID === transform.id;
+            const remove = create('button', `btn-secondary is-danger${confirming ? ' is-confirming' : ''}`, confirming ? '确认删除脚本' : '删除脚本');
             remove.type = 'button';
             const hasBindings = Number(item.bindingCount || 0) > 0;
             remove.disabled = hasBindings || state.pendingTransforms.has(transform.id);
+            remove.setAttribute('aria-pressed', confirming ? 'true' : 'false');
             remove.title = hasBindings ? '请先停用并删除该脚本的全部作用范围' : '删除脚本；历史版本与运行证据仍会保留';
-            remove.addEventListener('click', () => void deleteScript(item));
+            remove.addEventListener('click', () => {
+                if (!confirming) {
+                    state.confirmDeleteTransformID = transform.id;
+                    state.confirmDeleteBindingID = '';
+                    render();
+                    setText(byId('traffic-transform-status'), '请再次点击“确认删除脚本”；历史版本、流量和 Runner 证据会保留。');
+                    return;
+                }
+                state.confirmDeleteTransformID = '';
+                void deleteScript(item);
+            });
             actions.appendChild(remove);
         }
         if (actions.childNodes.length) head.appendChild(actions);
@@ -352,6 +378,8 @@
             row.appendChild(badge(label, kind));
             row.addEventListener('click', () => {
                 state.selectedTransformID = transform.id;
+                state.confirmDeleteTransformID = '';
+                state.confirmDeleteBindingID = '';
                 renderScripts();
             });
             rail.appendChild(row);
@@ -625,7 +653,6 @@
     async function deleteScript(item) {
         const transform = item?.transform || {};
         if (!transform.id || Number(item.bindingCount || 0) > 0 || state.pendingTransforms.has(transform.id) || typeof root.apiFetch !== 'function') return;
-        if (typeof root.confirm === 'function' && !root.confirm(`确定删除脚本“${transform.name || '未命名脚本'}”吗？\n脚本会从管理界面移除，但历史版本、流量和运行证据会保留。`)) return;
         state.pendingTransforms.add(transform.id);
         render();
         setText(byId('traffic-transform-status'), '正在删除脚本…');
@@ -811,8 +838,6 @@
 
     async function deleteBinding(item) {
         if (!item?.id || item.status !== 'disabled' || state.pendingBindings.has(item.id) || typeof root.apiFetch !== 'function') return;
-        const label = `${item.transformName || '未命名脚本'} / ${list(item.matcher?.hosts).join(', ') || '未限定网站'}`;
-        if (typeof root.confirm === 'function' && !root.confirm(`确定删除作用范围“${label}”吗？\n脚本源码和历史运行记录会保留，此操作无法撤销。`)) return;
         state.pendingBindings.add(item.id);
         render();
         setText(byId('traffic-transform-status'), '正在删除已停用的作用范围…');

@@ -708,10 +708,17 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":     "object",
 							"required": []string{"schemaVersion", "policyId", "rules"},
 							"properties": map[string]interface{}{
-								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3}},
+								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3, 4}, "description": "v4 表示未绑定边界策略、默认允许外部目标且默认启用 HTTPS 完整审计"},
 								"policyId":      map[string]interface{}{"type": "string"},
 								"rules":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
-								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3 的无边界快照为 allow"},
+								"tlsInspection": map[string]interface{}{
+									"type": "object", "description": "HTTPS 完整审计配置；schemaVersion=4 的无边界快照也默认启用，与是否绑定边界策略无关",
+									"properties": map[string]interface{}{
+										"enabled":       map[string]interface{}{"type": "boolean", "enum": []bool{true}},
+										"bypassDomains": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+									},
+								},
+								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3/4 的无边界快照为 allow"},
 							},
 						},
 						"createdAt": map[string]interface{}{"type": "string", "format": "date-time"},

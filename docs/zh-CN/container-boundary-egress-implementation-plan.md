@@ -619,7 +619,7 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 
 #### 默认边界与 TCP/UDP 传输补充（2026-08-24）
 
-- [x] 默认不绑定边界策略：容器对话不选策略时生成 schema v3 不可变快照 `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}`，HTTP、HTTPS、TCP 和 UDP 外网请求默认放行；宿主私网、保留地址、云元数据、Docker API、外部 DNS 和加密 DNS 等强制隔离仍始终失败关闭。显式绑定的边界策略仍对未命中目标默认拒绝。
+- [x] 默认不绑定边界策略：容器对话不选策略时生成 schema v4 不可变快照 `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}`，HTTP、HTTPS、TCP 和 UDP 外网请求默认放行，HTTPS 完整审计默认开启且不依赖边界策略；宿主私网、保留地址、云元数据、Docker API、外部 DNS 和加密 DNS 等强制隔离仍始终失败关闭。显式绑定的边界策略仍对未命中目标默认拒绝，历史 schema v3 无边界快照继续兼容加载。
 - [x] 请求方法默认不限制：规则 `methods: []` 对 GET、POST、PUT、PATCH、DELETE 等任意 HTTP 方法匹配，界面明确显示“任意请求方式”；只有显式填写 methods 时才按列表限制。本节取代上文“空 methods 默认只读”的旧范围。
 - [x] TCP/UDP 规则与审计：目标 scheme 新增 `tcp` 和 `udp`，复用精确 host/port、过期、限速/并发、私网禁止、DNS Rebinding 与不可变快照判定；网络活动和出站审计支持 TCP/UDP 类别、命中规则、连接 IP、结果和字节数。
 - [x] 真实传输通道：每对 Agent/网关增加内网限定 SOCKS5 `1080/tcp`，支持 CONNECT 和 UDP ASSOCIATE，Agent 注入 `ALL_PROXY=socks5h://<gateway>:1080`。通用 SOCKS 客户端可直接访问 SSH、MySQL 和其他 TCP/UDP 协议；不自动读取 `ALL_PROXY` 的原生命令需使用自身 SOCKS/ProxyCommand 选项，不伪装成透明代理。
