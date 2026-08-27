@@ -1065,6 +1065,7 @@ type ContainerRuntimeConfig struct {
 	EgressImageDigest       string                         `yaml:"egress_image_digest,omitempty" json:"egress_image_digest,omitempty"`
 	EgressImagePlatform     string                         `yaml:"egress_image_platform,omitempty" json:"egress_image_platform,omitempty"`
 	EgressSnapshotDir       string                         `yaml:"egress_snapshot_dir,omitempty" json:"egress_snapshot_dir,omitempty"`
+	TrafficSpoolDir         string                         `yaml:"traffic_spool_dir,omitempty" json:"traffic_spool_dir,omitempty"`
 	EgressCredentialKeyFile string                         `yaml:"egress_credential_key_file,omitempty" json:"egress_credential_key_file,omitempty"`
 	InitializerWorkers      int                            `yaml:"initializer_workers,omitempty" json:"initializer_workers,omitempty"`
 	QueueCapacity           int                            `yaml:"queue_capacity,omitempty" json:"queue_capacity,omitempty"`
@@ -1098,6 +1099,9 @@ type ContainerRuntimeConfig struct {
 func (c *ContainerRuntimeConfig) applyDefaults() {
 	if strings.TrimSpace(c.EgressSnapshotDir) == "" {
 		c.EgressSnapshotDir = "data/egress-snapshots"
+	}
+	if strings.TrimSpace(c.TrafficSpoolDir) == "" {
+		c.TrafficSpoolDir = "data/traffic-spool"
 	}
 	if strings.TrimSpace(c.EgressCredentialKeyFile) == "" {
 		c.EgressCredentialKeyFile = "data/egress-credentials.key"
@@ -1192,6 +1196,22 @@ func (c *ContainerRuntimeConfig) resolveEgressSnapshotDirectory(configPath strin
 	return nil
 }
 
+func (c *ContainerRuntimeConfig) resolveTrafficSpoolDirectory(configPath string) error {
+	path := strings.TrimSpace(c.TrafficSpoolDir)
+	if path == "" {
+		return errors.New("container.traffic_spool_dir is required")
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(filepath.Dir(configPath), path)
+	}
+	abs, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return fmt.Errorf("resolve container.traffic_spool_dir: %w", err)
+	}
+	c.TrafficSpoolDir = abs
+	return nil
+}
+
 func (c *ContainerRuntimeConfig) resolveEgressCredentialKeyFile(configPath string) error {
 	path := strings.TrimSpace(c.EgressCredentialKeyFile)
 	if path == "" {
@@ -1229,6 +1249,9 @@ func (c ContainerRuntimeConfig) validateEnabled() error {
 	}
 	if strings.TrimSpace(c.EgressSnapshotDir) == "" {
 		return fmt.Errorf("container egress_snapshot_dir is required when enabled")
+	}
+	if strings.TrimSpace(c.TrafficSpoolDir) == "" {
+		return fmt.Errorf("container traffic_spool_dir is required when enabled")
 	}
 	if strings.TrimSpace(c.EgressCredentialKeyFile) == "" {
 		return fmt.Errorf("container egress_credential_key_file is required")
@@ -1674,6 +1697,9 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.Container.applyDefaults()
 	if err := cfg.Container.resolveEgressSnapshotDirectory(path); err != nil {
+		return nil, err
+	}
+	if err := cfg.Container.resolveTrafficSpoolDirectory(path); err != nil {
 		return nil, err
 	}
 	if err := cfg.Container.resolveEgressCredentialKeyFile(path); err != nil {
@@ -2198,6 +2224,7 @@ func Default() *Config {
 			InitializerWorkers: 2, QueueCapacity: 64, CreateTimeoutSeconds: 120,
 			IdleStopSeconds: 1800, IdleScanSeconds: 60,
 			EgressSnapshotDir:       "data/egress-snapshots",
+			TrafficSpoolDir:         "data/traffic-spool",
 			EgressCredentialKeyFile: "data/egress-credentials.key",
 			NanoCPUs:                1_000_000_000, MemoryBytes: 512 << 20, PIDs: 128,
 			NoFileSoft: 1024, NoFileHard: 2048, WorkspaceBytes: 1 << 30, TmpfsBytes: 64 << 20,

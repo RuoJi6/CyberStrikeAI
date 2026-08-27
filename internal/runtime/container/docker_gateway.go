@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/trafficspool"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -374,18 +375,17 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 		Healthcheck: egressGatewayHealthcheck(spec), Labels: labels, Env: egressGatewayEnvironment(spec),
 	}
 	hostConfig := egressGatewayHostConfig(spec)
-	if spec.EgressGateway.BoundarySnapshot == nil {
-		return config, hostConfig, nil
+	if spec.EgressGateway.BoundarySnapshot != nil {
+		path, _, err := m.loadBoundarySnapshot(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		hostConfig.Mounts = append(hostConfig.Mounts, mobymount.Mount{
+			Type: mobymount.TypeBind, Source: path,
+			Target: egress.SnapshotContainerPath, ReadOnly: true,
+			BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+		})
 	}
-	path, _, err := m.loadBoundarySnapshot(spec)
-	if err != nil {
-		return nil, nil, err
-	}
-	hostConfig.Mounts = []mobymount.Mount{{
-		Type: mobymount.TypeBind, Source: path,
-		Target: egress.SnapshotContainerPath, ReadOnly: true,
-		BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
-	}}
 	if spec.EgressGateway.UpstreamRoute != nil {
 		routePath, _, err := m.loadUpstreamRoute(spec)
 		if err != nil {
@@ -418,26 +418,48 @@ func (m *DockerManager) egressGatewayContainerConfig(spec RuntimeSpec, labels ma
 			mobymount.Mount{Type: mobymount.TypeBind, Source: privateKeyPath, Target: egress.TLSAuthorityPrivateKeyContainerPath, ReadOnly: true, BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate}},
 		)
 	}
+	if spec.EgressGateway.TrafficCapture {
+		path, err := m.trafficSpoolPath(spec)
+		if err != nil {
+			return nil, nil, err
+		}
+		hostConfig.Mounts = append(hostConfig.Mounts, mobymount.Mount{
+			Type: mobymount.TypeBind, Source: path,
+			Target: trafficspool.ContainerPath, ReadOnly: false,
+			BindOptions: &mobymount.BindOptions{Propagation: mobymount.PropagationRPrivate},
+		})
+	}
 	return config, hostConfig, nil
 }
 
 func egressGatewayEnvironment(spec RuntimeSpec) []string {
-	if spec.EgressGateway == nil || spec.EgressGateway.TrafficLimits == nil {
+	if spec.EgressGateway == nil {
 		return nil
 	}
-	limits := spec.EgressGateway.TrafficLimits
-	return []string{
-		"CYBERSTRIKE_HTTP_RPS=" + strconv.Itoa(limits.HTTPRequestsPerSecond),
-		"CYBERSTRIKE_TCP_CPS=" + strconv.Itoa(limits.TCPConnectionsPerSecond),
-		"CYBERSTRIKE_UDP_DPS=" + strconv.Itoa(limits.UDPDatagramsPerSecond),
+	result := make([]string, 0, 5)
+	if limits := spec.EgressGateway.TrafficLimits; limits != nil {
+		result = append(result,
+			"CYBERSTRIKE_HTTP_RPS="+strconv.Itoa(limits.HTTPRequestsPerSecond),
+			"CYBERSTRIKE_TCP_CPS="+strconv.Itoa(limits.TCPConnectionsPerSecond),
+			"CYBERSTRIKE_UDP_DPS="+strconv.Itoa(limits.UDPDatagramsPerSecond),
+		)
 	}
+	if spec.EgressGateway.TrafficCapture {
+		result = append(result,
+			"CYBERSTRIKE_TRAFFIC_SPOOL_PATH="+trafficspool.ContainerPath,
+			"CYBERSTRIKE_CONVERSATION_ID="+spec.ConversationID,
+		)
+	}
+	return result
 }
 
 func matchesEgressGatewayTrafficEnvironment(actual, expected []string) bool {
 	managedKeys := map[string]struct{}{
-		"CYBERSTRIKE_HTTP_RPS": {},
-		"CYBERSTRIKE_TCP_CPS":  {},
-		"CYBERSTRIKE_UDP_DPS":  {},
+		"CYBERSTRIKE_HTTP_RPS":           {},
+		"CYBERSTRIKE_TCP_CPS":            {},
+		"CYBERSTRIKE_UDP_DPS":            {},
+		"CYBERSTRIKE_TRAFFIC_SPOOL_PATH": {},
+		"CYBERSTRIKE_CONVERSATION_ID":    {},
 	}
 	expectedValues := make(map[string]string, len(expected))
 	for _, entry := range expected {
@@ -634,51 +656,59 @@ func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.Host
 	if actual.NetworkMode != expected.NetworkMode || actual.Privileged || actual.PublishAllPorts || actual.AutoRemove || len(actual.Binds) != 0 || len(actual.Devices) != 0 || len(actual.DeviceRequests) != 0 || len(actual.PortBindings) != 0 {
 		return fmt.Errorf("%w: egress gateway has host, device, privileged, or published-port access", ErrRuntimeStateConflict)
 	}
-	if spec.EgressGateway.BoundarySnapshot == nil {
-		if len(actual.Mounts) != 0 {
-			return fmt.Errorf("%w: legacy egress gateway has an unexpected mount", ErrRuntimeStateConflict)
-		}
-	} else {
+	type expectedMount struct {
+		source   string
+		readOnly bool
+	}
+	expectedMounts := make(map[string]expectedMount)
+	if spec.EgressGateway.BoundarySnapshot != nil {
 		expectedPath, _, err := m.loadBoundarySnapshot(spec)
 		if err != nil {
 			return err
 		}
-		expectedMounts := map[string]string{egress.SnapshotContainerPath: expectedPath}
+		expectedMounts[egress.SnapshotContainerPath] = expectedMount{source: expectedPath, readOnly: true}
 		if spec.EgressGateway.UpstreamRoute != nil {
 			routePath, _, err := m.loadUpstreamRoute(spec)
 			if err != nil {
 				return err
 			}
-			expectedMounts[egress.UpstreamRouteContainerPath] = routePath
+			expectedMounts[egress.UpstreamRouteContainerPath] = expectedMount{source: routePath, readOnly: true}
 		}
 		if spec.EgressGateway.AuthProfiles != nil {
 			authPath, _, err := m.loadAuthProfiles(spec)
 			if err != nil {
 				return err
 			}
-			expectedMounts[egress.AuthProfilesContainerPath] = authPath
+			expectedMounts[egress.AuthProfilesContainerPath] = expectedMount{source: authPath, readOnly: true}
 		}
 		if spec.EgressGateway.TLSAuthority != nil {
 			certificatePath, privateKeyPath, _, err := m.loadTLSAuthority(spec)
 			if err != nil {
 				return err
 			}
-			expectedMounts[egress.TLSAuthorityCertificateContainerPath] = certificatePath
-			expectedMounts[egress.TLSAuthorityPrivateKeyContainerPath] = privateKeyPath
+			expectedMounts[egress.TLSAuthorityCertificateContainerPath] = expectedMount{source: certificatePath, readOnly: true}
+			expectedMounts[egress.TLSAuthorityPrivateKeyContainerPath] = expectedMount{source: privateKeyPath, readOnly: true}
 		}
-		if len(actual.Mounts) != len(expectedMounts) {
-			return fmt.Errorf("%w: egress gateway trusted mount count mismatch", ErrRuntimeStateConflict)
+	}
+	if spec.EgressGateway.TrafficCapture {
+		path, err := m.trafficSpoolPath(spec)
+		if err != nil {
+			return err
 		}
-		for _, mount := range actual.Mounts {
-			expectedSource, ok := expectedMounts[mount.Target]
-			if !ok || mount.Type != mobymount.TypeBind || mount.Source != expectedSource || !mount.ReadOnly || mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate || mount.BindOptions.NonRecursive || mount.BindOptions.CreateMountpoint || mount.BindOptions.ReadOnlyNonRecursive || mount.BindOptions.ReadOnlyForceRecursive || mount.VolumeOptions != nil || mount.ImageOptions != nil || mount.TmpfsOptions != nil || mount.ClusterOptions != nil {
-				return fmt.Errorf("%w: egress gateway trusted mount mismatch", ErrRuntimeStateConflict)
-			}
-			delete(expectedMounts, mount.Target)
+		expectedMounts[trafficspool.ContainerPath] = expectedMount{source: path, readOnly: false}
+	}
+	if len(actual.Mounts) != len(expectedMounts) {
+		return fmt.Errorf("%w: egress gateway trusted mount count mismatch", ErrRuntimeStateConflict)
+	}
+	for _, mount := range actual.Mounts {
+		expectedMount, ok := expectedMounts[mount.Target]
+		if !ok || mount.Type != mobymount.TypeBind || mount.Source != expectedMount.source || mount.ReadOnly != expectedMount.readOnly || mount.BindOptions == nil || mount.BindOptions.Propagation != mobymount.PropagationRPrivate || mount.BindOptions.NonRecursive || mount.BindOptions.CreateMountpoint || mount.BindOptions.ReadOnlyNonRecursive || mount.BindOptions.ReadOnlyForceRecursive || mount.VolumeOptions != nil || mount.ImageOptions != nil || mount.TmpfsOptions != nil || mount.ClusterOptions != nil {
+			return fmt.Errorf("%w: egress gateway trusted mount mismatch", ErrRuntimeStateConflict)
 		}
-		if len(expectedMounts) != 0 {
-			return fmt.Errorf("%w: egress gateway trusted mount is missing", ErrRuntimeStateConflict)
-		}
+		delete(expectedMounts, mount.Target)
+	}
+	if len(expectedMounts) != 0 {
+		return fmt.Errorf("%w: egress gateway trusted mount is missing", ErrRuntimeStateConflict)
 	}
 	if !actual.ReadonlyRootfs || len(actual.CapDrop) != 1 || !strings.EqualFold(actual.CapDrop[0], "ALL") || !equalCapabilitySets(actual.CapAdd, gatewayCapabilities) || !containsString(actual.SecurityOpt, "no-new-privileges") {
 		return fmt.Errorf("%w: egress gateway privilege restrictions mismatch", ErrRuntimeStateConflict)
@@ -708,6 +738,17 @@ func (m *DockerManager) verifyEgressGatewayHostConfig(actual *mobycontainer.Host
 		return fmt.Errorf("%w: egress gateway tmpfs mismatch", ErrRuntimeStateConflict)
 	}
 	return nil
+}
+
+func (m *DockerManager) trafficSpoolPath(spec RuntimeSpec) (string, error) {
+	if m == nil || m.trafficSpool == nil {
+		return "", fmt.Errorf("%w: traffic spool is not configured", ErrRuntimeStateConflict)
+	}
+	path, err := m.trafficSpool.ConversationPath(spec.ConversationID)
+	if err != nil {
+		return "", fmt.Errorf("%w: resolve conversation traffic spool: %v", ErrRuntimeStateConflict, err)
+	}
+	return path, nil
 }
 
 func equalStrings(actual, expected []string) bool {
@@ -890,6 +931,9 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 		labels[LabelEgressTCPCPS] = strconv.Itoa(gateway.TrafficLimits.TCPConnectionsPerSecond)
 		labels[LabelEgressUDPDPS] = strconv.Itoa(gateway.TrafficLimits.UDPDatagramsPerSecond)
 	}
+	if gateway.TrafficCapture {
+		labels[LabelEgressTrafficCapture] = "true"
+	}
 	return labels
 }
 
@@ -905,6 +949,7 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressAuthProfilesID, LabelEgressAuthSHA256,
 		LabelEgressTLSAuthorityID, LabelEgressTLSCertSHA256, LabelEgressTLSKeySHA256,
 		LabelEgressHTTPRPS, LabelEgressTCPCPS, LabelEgressUDPDPS,
+		LabelEgressTrafficCapture,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -960,6 +1005,12 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard, TmpfsBytes: tmpfsBytes,
 			LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles),
 		},
+	}
+	if raw := strings.TrimSpace(labels[LabelEgressTrafficCapture]); raw != "" {
+		if raw != "true" {
+			return nil, errors.New("invalid egress gateway traffic capture label")
+		}
+		gateway.TrafficCapture = true
 	}
 	snapshotID := strings.TrimSpace(labels[LabelEgressSnapshotID])
 	snapshotSHA256 := strings.TrimSpace(labels[LabelEgressSnapshotSHA256])

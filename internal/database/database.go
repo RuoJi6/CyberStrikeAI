@@ -905,6 +905,12 @@ func (db *DB) initTables() error {
 	if _, err := db.Exec(createVulnerabilitiesTable); err != nil {
 		return fmt.Errorf("创建vulnerabilities表失败: %w", err)
 	}
+	if err := db.initTrafficTables(); err != nil {
+		return fmt.Errorf("创建流量证据表失败: %w", err)
+	}
+	if err := db.initTrafficTransformTables(); err != nil {
+		return fmt.Errorf("创建流量转换表失败: %w", err)
+	}
 	if _, err := db.Exec(createAssetsTable); err != nil {
 		return fmt.Errorf("创建assets表失败: %w", err)
 	}

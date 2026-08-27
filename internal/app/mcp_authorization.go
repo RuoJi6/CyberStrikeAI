@@ -47,6 +47,16 @@ func mcpToolAuthorizer(db *database.DB) func(context.Context, string, map[string
 			}
 			return nil
 		}
+		conversationResource := func(permission string) error {
+			if err := require(permission); err != nil {
+				return err
+			}
+			conversationID := mcpAuthorizationConversationID(ctx)
+			if conversationID == "" || db == nil || !db.UserCanAccessResource(principal.UserID, principal.ScopeFor(permission), "conversation", conversationID) {
+				return fmt.Errorf("no access to conversation %s", conversationID)
+			}
+			return nil
+		}
 
 		switch toolName {
 		case builtin.ToolWebshellExec, builtin.ToolWebshellFileWrite:
@@ -84,6 +94,22 @@ func mcpToolAuthorizer(db *database.DB) func(context.Context, string, map[string
 			return nil
 		case builtin.ToolGetVulnerability:
 			return resource("vulnerability:read", "vulnerability", "id")
+		case builtin.ToolListTrafficTransactions, builtin.ToolGetTrafficTransaction:
+			return conversationResource("traffic:read")
+		case builtin.ToolLinkTrafficEvidence:
+			if err := resource("vulnerability:write", "vulnerability", "vulnerability_id"); err != nil {
+				return err
+			}
+			return conversationResource("traffic:read")
+		case builtin.ToolCreateTrafficTransform, builtin.ToolValidateTrafficTransform:
+			return conversationResource("traffic_transform:write")
+		case builtin.ToolTestTrafficTransform:
+			if err := conversationResource("traffic_transform:write"); err != nil {
+				return err
+			}
+			return require("traffic:read_sensitive")
+		case builtin.ToolActivateTrafficTransform, builtin.ToolDeactivateTrafficTransform:
+			return conversationResource("traffic_transform:activate_observe")
 		case builtin.ToolQueryAssets:
 			return require("asset:read")
 		case builtin.ToolGetAsset:

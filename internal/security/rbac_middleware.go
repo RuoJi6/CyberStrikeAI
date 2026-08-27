@@ -160,6 +160,8 @@ func permissionForRequest(method, fullPath string) string {
 		return crudPermission(method, "knowledge")
 	case strings.HasPrefix(path, "/vulnerabilities"):
 		return crudPermission(method, "vulnerability")
+	case strings.HasPrefix(path, "/traffic-transactions"):
+		return crudPermission(method, "traffic")
 	case path == "/assets/batch-delete", path == "/assets/merge":
 		return "asset:delete"
 	case strings.HasPrefix(path, "/assets"):

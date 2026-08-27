@@ -129,7 +129,7 @@ function initRouter() {
         const hashParts = hash.split('?');
         let pageId = hashParts[0];
         if (pageId === 'c2') pageId = 'c2-listeners';
-        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
+        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'vulnerabilities', 'traffic-evidence', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'workflows', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'tasks', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
         if (pageId && routablePages.includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {
@@ -559,6 +559,11 @@ async function initPage(pageId) {
                 initVulnerabilityPage();
             }
             break;
+        case 'traffic-evidence':
+            if (typeof initTrafficEvidencePage === 'function') {
+                initTrafficEvidencePage();
+            }
+            break;
         case 'webshell':
             // 初始化 WebShell 管理页面
             if (typeof initWebshellPage === 'function') {
@@ -688,7 +693,7 @@ document.addEventListener('DOMContentLoaded', function() {
         let pageId = hashParts[0];
         
         if (pageId === 'c2') pageId = 'c2-listeners';
-        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
+        const routablePages = ['dashboard', 'chat', 'hitl', 'asset-overview', 'asset-library', 'info-collect', 'projects', 'tasks', 'workflows', 'vulnerabilities', 'traffic-evidence', 'webshell', 'chat-files', 'mcp-monitor', 'mcp-management', 'knowledge-management', 'knowledge-retrieval-logs', 'roles-management', 'platform-rbac', 'skills-monitor', 'skills-management', 'agents-management', 'settings', 'c2-listeners', 'c2-sessions', 'c2-tasks', 'c2-payloads', 'c2-events', 'c2-profiles', ...(window.CONTAINER_MANAGEMENT_PAGES || [])];
         if (pageId && routablePages.includes(pageId)) {
             switchPage(pageId);
             if (pageId === 'chat') {

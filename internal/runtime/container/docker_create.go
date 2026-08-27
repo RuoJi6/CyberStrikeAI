@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/trafficspool"
 	containerderrdefs "github.com/containerd/errdefs"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -68,6 +69,7 @@ const (
 	LabelEgressHTTPRPS         = "com.cyberstrike.egress.traffic.http-rps"
 	LabelEgressTCPCPS          = "com.cyberstrike.egress.traffic.tcp-cps"
 	LabelEgressUDPDPS          = "com.cyberstrike.egress.traffic.udp-dps"
+	LabelEgressTrafficCapture  = "com.cyberstrike.egress.traffic-capture"
 	ResourceKindAgent          = "agent-runtime"
 
 	defaultDockerOperationTimeout  = 30 * time.Second
@@ -151,6 +153,7 @@ type DockerManagerOptions struct {
 	EgressUpstreamRoot     string
 	EgressAuthProfilesRoot string
 	EgressTLSAuthorityRoot string
+	TrafficSpoolRoot       string
 }
 
 // DockerManager is the production RuntimeManager backed by the official Moby
@@ -168,6 +171,7 @@ type DockerManager struct {
 	upstreamStore     *egress.UpstreamRouteStore
 	authProfilesStore *egress.AuthProfilesStore
 	tlsAuthorityStore *egress.TLSAuthorityStore
+	trafficSpool      *trafficspool.Directory
 	ownerID           string
 	operationTimeout  time.Duration
 }
@@ -235,6 +239,14 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 			return nil, fmt.Errorf("configure TLS authority store: %w", err)
 		}
 	}
+	var trafficSpool *trafficspool.Directory
+	if strings.TrimSpace(options.TrafficSpoolRoot) != "" {
+		var err error
+		trafficSpool, err = trafficspool.NewDirectory(options.TrafficSpoolRoot)
+		if err != nil {
+			return nil, fmt.Errorf("configure traffic spool: %w", err)
+		}
+	}
 	globalConcurrent := options.GlobalConcurrentExec
 	if globalConcurrent == 0 {
 		globalConcurrent = defaultGlobalConcurrentExec
@@ -256,8 +268,8 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
 		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
 		snapshotStore: snapshotStore, upstreamStore: upstreamStore, authProfilesStore: authProfilesStore,
-		tlsAuthorityStore: tlsAuthorityStore,
-		ownerID:           ownerID, operationTimeout: operationTimeout,
+		tlsAuthorityStore: tlsAuthorityStore, trafficSpool: trafficSpool,
+		ownerID: ownerID, operationTimeout: operationTimeout,
 	}, nil
 }
 
@@ -1168,6 +1180,9 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	labels[LabelEgressTmpfsBytes] = strconv.FormatInt(resources.TmpfsBytes, 10)
 	labels[LabelEgressLogMaxBytes] = strconv.FormatInt(resources.LogMaxBytes, 10)
 	labels[LabelEgressLogMaxFiles] = strconv.Itoa(resources.LogMaxFiles)
+	if gateway.TrafficCapture {
+		labels[LabelEgressTrafficCapture] = "true"
+	}
 	if gateway.BoundarySnapshot != nil {
 		labels[LabelEgressSnapshotID] = gateway.BoundarySnapshot.ID
 		labels[LabelEgressSnapshotSHA256] = gateway.BoundarySnapshot.SHA256

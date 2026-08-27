@@ -143,6 +143,7 @@ container:
   egress_image_digest: sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558 # runtime-unlimited-20260827 / latest 的多架构 index digest；生产仍按 digest 拉取
   egress_image_platform: linux/arm64
   egress_snapshot_dir: data/egress-snapshots # 控制面生成的不可变快照文件；仅网关以只读 bind mount 加载
+  traffic_spool_dir: data/traffic-spool # MITM 网关专用可写抓包队列；Agent 容器不可见，控制面导入数据库后删除 .ready 文件
   egress_credential_key_file: data/egress-credentials.key # 自动生成的服务端 AES-256 密钥；必须持久化、权限 0600，禁止提交或共享
   initializer_workers: 2
   queue_capacity: 64

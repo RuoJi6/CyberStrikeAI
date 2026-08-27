@@ -411,6 +411,14 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	}
 	options.Proxy.ActivitySink = decorateActivitySink(options.Proxy.ActivitySink)
 	options.Proxy.TLSInspection = tlsInspection
+	if options.Proxy.BoundarySnapshotID != "" && options.Proxy.BoundarySnapshotID != report.SnapshotID {
+		return errors.New("traffic capture boundary snapshot id mismatch")
+	}
+	options.Proxy.BoundarySnapshotID = report.SnapshotID
+	if options.Proxy.UpstreamRouteID != "" && options.Proxy.UpstreamRouteID != report.UpstreamRouteID {
+		return errors.New("traffic capture upstream route id mismatch")
+	}
+	options.Proxy.UpstreamRouteID = report.UpstreamRouteID
 	options.DNS.ActivitySink = decorateActivitySink(options.DNS.ActivitySink)
 	options.Packet.ActivitySink = decorateActivitySink(options.Packet.ActivitySink)
 	dnsLeases := NewDNSLeaseStore()

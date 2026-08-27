@@ -141,6 +141,18 @@ func TestContainerRuntimeConfigResolvesEgressSnapshotDirectoryRelativeToConfig(t
 	}
 }
 
+func TestContainerRuntimeConfigResolvesTrafficSpoolDirectoryRelativeToConfig(t *testing.T) {
+	directory := t.TempDir()
+	config := ContainerRuntimeConfig{TrafficSpoolDir: "data/traffic-spool"}
+	if err := config.resolveTrafficSpoolDirectory(filepath.Join(directory, "config.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	expected := filepath.Join(directory, "data", "traffic-spool")
+	if config.TrafficSpoolDir != expected || !filepath.IsAbs(config.TrafficSpoolDir) {
+		t.Fatalf("resolved traffic spool directory = %q, want %q", config.TrafficSpoolDir, expected)
+	}
+}
+
 func TestContainerRuntimeConfigResolvesEgressCredentialKeyFileRelativeToConfig(t *testing.T) {
 	directory := t.TempDir()
 	config := ContainerRuntimeConfig{EgressCredentialKeyFile: "data/egress-credentials.key"}

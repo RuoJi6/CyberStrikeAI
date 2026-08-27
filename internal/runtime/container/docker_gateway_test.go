@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/trafficspool"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
 	mobymount "github.com/moby/moby/api/types/mount"
@@ -40,6 +41,49 @@ func TestRuntimeSpecGatewayOmitemptyPreservesLegacySerialization(t *testing.T) {
 	}
 	if strings.Contains(string(item2), "BoundarySnapshot") {
 		t.Fatalf("item-2 gateway specification gained a nil snapshot field: %s", item2)
+	}
+}
+
+func TestTrafficCaptureMountIsWritableOnlyForGateway(t *testing.T) {
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.TrafficCapture = true
+	spoolRoot := t.TempDir()
+	manager, err := newDockerManager(&fakeDockerCreationAPI{fakeDockerInspectionAPI: &fakeDockerInspectionAPI{}}, DockerManagerOptions{
+		OwnerID: "instance-01", TrafficSpoolRoot: spoolRoot,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, hostConfig, err := manager.egressGatewayContainerConfig(spec, egressGatewayLabels("instance-01", spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hostConfig.Mounts) != 1 {
+		t.Fatalf("gateway mounts = %#v", hostConfig.Mounts)
+	}
+	mount := hostConfig.Mounts[0]
+	resolvedRoot, err := filepath.EvalSymlinks(spoolRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSource := filepath.Join(resolvedRoot, spec.ConversationID)
+	if mount.Target != trafficspool.ContainerPath || mount.Source != wantSource || mount.ReadOnly {
+		t.Fatalf("traffic spool mount = %#v, want source %q", mount, wantSource)
+	}
+	if !equalStrings(config.Env, []string{
+		"CYBERSTRIKE_TRAFFIC_SPOOL_PATH=" + trafficspool.ContainerPath,
+		"CYBERSTRIKE_CONVERSATION_ID=" + spec.ConversationID,
+	}) {
+		t.Fatalf("gateway capture environment = %#v", config.Env)
+	}
+	for _, agentMount := range runtimeHostConfig(spec).Mounts {
+		if agentMount.Target == trafficspool.ContainerPath || agentMount.Source == wantSource {
+			t.Fatalf("Agent received traffic spool mount: %#v", agentMount)
+		}
+	}
+	reconstructed, err := egressGatewaySpecFromAgentLabels(runtimeLabels("instance-01", spec))
+	if err != nil || reconstructed == nil || !reconstructed.TrafficCapture {
+		t.Fatalf("reconstructed capture spec = %#v / %v", reconstructed, err)
 	}
 }
 

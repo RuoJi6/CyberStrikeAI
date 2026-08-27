@@ -8,6 +8,16 @@ const (
 	ToolListVulnerabilities = "list_vulnerabilities"
 	ToolGetVulnerability    = "get_vulnerability"
 
+	// MITM 流量证据与可编程应用层转换工具
+	ToolListTrafficTransactions    = "list_traffic_transactions"
+	ToolGetTrafficTransaction      = "get_traffic_transaction"
+	ToolLinkTrafficEvidence        = "link_traffic_evidence"
+	ToolCreateTrafficTransform     = "create_traffic_transform"
+	ToolValidateTrafficTransform   = "validate_traffic_transform"
+	ToolTestTrafficTransform       = "test_traffic_transform"
+	ToolActivateTrafficTransform   = "activate_traffic_transform"
+	ToolDeactivateTrafficTransform = "deactivate_traffic_transform"
+
 	// 资产管理工具
 	ToolCreateAsset       = "create_asset"
 	ToolGetAsset          = "get_asset"
@@ -81,6 +91,14 @@ func IsBuiltinTool(toolName string) bool {
 	case ToolRecordVulnerability,
 		ToolListVulnerabilities,
 		ToolGetVulnerability,
+		ToolListTrafficTransactions,
+		ToolGetTrafficTransaction,
+		ToolLinkTrafficEvidence,
+		ToolCreateTrafficTransform,
+		ToolValidateTrafficTransform,
+		ToolTestTrafficTransform,
+		ToolActivateTrafficTransform,
+		ToolDeactivateTrafficTransform,
 		ToolCreateAsset,
 		ToolGetAsset,
 		ToolQueryAssets,
@@ -142,6 +160,13 @@ func GetAllBuiltinTools() []string {
 		ToolRecordVulnerability,
 		ToolListVulnerabilities,
 		ToolGetVulnerability,
+		ToolListTrafficTransactions,
+		ToolGetTrafficTransaction,
+		ToolCreateTrafficTransform,
+		ToolValidateTrafficTransform,
+		ToolTestTrafficTransform,
+		ToolActivateTrafficTransform,
+		ToolDeactivateTrafficTransform,
 		ToolCreateAsset,
 		ToolGetAsset,
 		ToolQueryAssets,

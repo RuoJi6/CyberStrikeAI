@@ -21,6 +21,9 @@ import (
 	"unicode/utf8"
 
 	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/traffic"
+
+	"github.com/google/uuid"
 )
 
 const (
@@ -47,6 +50,12 @@ type ProxyOptions struct {
 	HTTPRequestsPerSecond   int
 	TCPConnectionsPerSecond int
 	UDPDatagramsPerSecond   int
+	TrafficSink             TrafficSink
+	ConversationID          string
+	BoundarySnapshotID      string
+	UpstreamRouteID         string
+	RuntimeMode             string
+	CaptureCoverage         string
 }
 
 // Proxy is the policy-enforcing HTTP forward proxy and HTTPS CONNECT tunnel.
@@ -68,6 +77,12 @@ type Proxy struct {
 	httpPacer          *trafficPacer
 	tcpPacer           *trafficPacer
 	udpPacer           *trafficPacer
+	trafficSink        TrafficSink
+	conversationID     string
+	boundarySnapshotID string
+	upstreamRouteID    string
+	runtimeMode        string
+	captureCoverage    string
 }
 
 type boundedPacketCapture struct {
@@ -185,6 +200,9 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 			return nil, errors.New("TLS inspection requires a conversation authority")
 		}
 	}
+	if options.TrafficSink != nil && strings.TrimSpace(options.ConversationID) == "" {
+		return nil, errors.New("traffic capture requires a conversation id")
+	}
 	baseDialContext := options.DialContext
 	if baseDialContext == nil {
 		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
@@ -218,9 +236,15 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
 		tlsInspection: options.TLSInspection, tlsAuthority: options.TLSAuthority,
-		httpPacer: newTrafficPacer(options.HTTPRequestsPerSecond),
-		tcpPacer:  newTrafficPacer(options.TCPConnectionsPerSecond),
-		udpPacer:  newTrafficPacer(options.UDPDatagramsPerSecond),
+		httpPacer:          newTrafficPacer(options.HTTPRequestsPerSecond),
+		tcpPacer:           newTrafficPacer(options.TCPConnectionsPerSecond),
+		udpPacer:           newTrafficPacer(options.UDPDatagramsPerSecond),
+		trafficSink:        options.TrafficSink,
+		conversationID:     strings.TrimSpace(options.ConversationID),
+		boundarySnapshotID: strings.TrimSpace(options.BoundarySnapshotID),
+		upstreamRouteID:    strings.TrimSpace(options.UpstreamRouteID),
+		runtimeMode:        traffic.NormalizeRuntimeMode(options.RuntimeMode),
+		captureCoverage:    traffic.NormalizeCaptureCoverage(options.CaptureCoverage),
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -290,6 +314,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	startedAt := p.now().UTC()
+	attribution := consumeTrafficAttribution(request.Header)
 	decision, err := p.policy.Evaluate(request.URL.String(), request.Method, nil, startedAt)
 	if err != nil || (decision.Target.Scheme != "http" && (!inspectedTLS || decision.Target.Scheme != "https")) {
 		http.Error(writer, "invalid HTTP proxy target", http.StatusBadRequest)
@@ -388,8 +413,9 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	// removing proxy-only/hop-by-hop headers.
 	packet = newHTTPPacket(outbound, event.Path)
 	requestCapture := &boundedPacketCapture{}
+	fullRequestCapture := &fullBodyCapture{}
 	if outbound.Body != nil {
-		outbound.Body = &packetCaptureReadCloser{Reader: io.TeeReader(outbound.Body, requestCapture), Closer: outbound.Body}
+		outbound.Body = &packetCaptureReadCloser{Reader: io.TeeReader(outbound.Body, io.MultiWriter(requestCapture, fullRequestCapture)), Closer: outbound.Body}
 	}
 
 	response, err := p.transport.RoundTrip(outbound)
@@ -421,12 +447,61 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	copyHeaders(writer.Header(), responseHeaders)
 	writer.WriteHeader(response.StatusCode)
 	responseCapture := &boundedPacketCapture{}
-	written, copyErr := io.Copy(writer, io.TeeReader(response.Body, responseCapture))
+	fullResponseCapture := &fullBodyCapture{}
+	written, copyErr := io.Copy(writer, io.TeeReader(response.Body, io.MultiWriter(responseCapture, fullResponseCapture)))
 	event.BytesDown = written
 	packet.ResponseBody, packet.ResponseBodyEncoding, packet.ResponseBodyTruncated = responseCapture.snapshot(response.Header.Get("Content-Type"))
 	if copyErr != nil {
 		event.Outcome = "response_interrupted"
 	}
+	completedAt := p.now().UTC()
+	transactionID := uuid.NewString()
+	redactHeader := ""
+	if authProfile != nil {
+		redactHeader = authProfile.HeaderName
+	}
+	requestProtocol := outbound.Proto
+	if requestProtocol == "" {
+		requestProtocol = "HTTP/1.1"
+	}
+	requestHeaders := trafficHeaders(outbound.Header, outbound.Host, redactHeader)
+	responseHeadersForTraffic := trafficHeaders(response.Header, "", "")
+	messages := []traffic.Message{
+		fullRequestCapture.message(
+			transactionID, traffic.StageUpstreamRequest, traffic.MessageKindRequest,
+			outbound.Method, packetRequestTarget(outbound, event.Path), 0, requestProtocol,
+			requestHeaders, startedAt,
+		),
+		fullResponseCapture.message(
+			transactionID, traffic.StageUpstreamResponse, traffic.MessageKindResponse,
+			"", "", response.StatusCode, responseProtocol,
+			responseHeadersForTraffic, completedAt,
+		),
+	}
+	transaction := traffic.Transaction{
+		ID:                 transactionID,
+		ConversationID:     p.conversationID,
+		AgentID:            attribution.agentID,
+		ExecutionID:        attribution.executionID,
+		ToolCallID:         attribution.toolCallID,
+		RuntimeMode:        p.runtimeMode,
+		CaptureCoverage:    p.captureCoverage,
+		Scheme:             decision.Target.Scheme,
+		Host:               decision.Target.Host,
+		Port:               decision.Target.Port,
+		Method:             outbound.Method,
+		Path:               packetRequestTarget(outbound, event.Path),
+		HTTPStatus:         response.StatusCode,
+		StartedAt:          startedAt,
+		CompletedAt:        &completedAt,
+		LatencyMS:          activityLatencyMS(startedAt, completedAt),
+		BytesUp:            fullRequestCapture.total,
+		BytesDown:          fullResponseCapture.total,
+		BoundarySnapshotID: p.boundarySnapshotID,
+		RuleID:             decision.RuleID,
+		UpstreamRouteID:    p.upstreamRouteID,
+	}
+	emitTraffic(p.trafficSink, context.WithoutCancel(request.Context()), transaction, messages)
 }
 
 func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) {
@@ -436,6 +511,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
+	attribution := consumeTrafficAttribution(request.Header)
 	interceptTLS := p.shouldInterceptTLS(targetHost)
 	decision := boundary.Decision{}
 	if interceptTLS {
@@ -465,9 +541,16 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	}
 	dialObservation := &activityDialObservation{}
 	defer func() {
+		completedAt := p.now().UTC()
 		event.ResolvedIPs, event.ConnectedIP = dialObservation.snapshot()
-		event.LatencyMS = activityLatencyMS(startedAt, p.now().UTC())
+		event.LatencyMS = activityLatencyMS(startedAt, completedAt)
 		emitActivity(p.activitySink, event)
+		if !interceptTLS && event.Decision == ActivityDecisionAllowed && event.Outcome == "tunnel_closed" {
+			transaction, messages := p.connectTrafficEvidence(
+				request, attribution, targetAuthority, targetHost, targetPort, event, startedAt, completedAt,
+			)
+			emitTraffic(p.trafficSink, context.WithoutCancel(request.Context()), transaction, messages)
+		}
 	}()
 	if !decision.Allowed || (!interceptTLS && !proxyDecisionAllowed(decision)) {
 		writeBoundaryDeniedResponse(writer, targetHost, decision.Reason, decision.RuleID)
@@ -561,6 +644,60 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	event.BytesUp += uploaded
 	event.BytesDown = downloaded
 	event.Outcome = "tunnel_closed"
+}
+
+// connectTrafficEvidence records the complete CONNECT control exchange and
+// encrypted tunnel byte counts. It intentionally does not represent TLS
+// ciphertext as decoded HTTP. Once TLS inspection is enabled, the normal
+// forward path records the decrypted HTTPS request and response instead.
+func (p *Proxy) connectTrafficEvidence(
+	request *http.Request,
+	attribution trafficAttribution,
+	authority, host string,
+	port int,
+	event ActivityEvent,
+	startedAt, completedAt time.Time,
+) (traffic.Transaction, []traffic.Message) {
+	transactionID := uuid.NewString()
+	protocol := strings.TrimSpace(request.Proto)
+	if protocol == "" {
+		protocol = "HTTP/1.1"
+	}
+	empty := &fullBodyCapture{}
+	messages := []traffic.Message{
+		empty.message(
+			transactionID, traffic.StageClientRequest, traffic.MessageKindRequest,
+			http.MethodConnect, "/", 0, protocol,
+			trafficHeaders(request.Header, authority, ""), startedAt,
+		),
+		empty.message(
+			transactionID, traffic.StageClientResponse, traffic.MessageKindResponse,
+			"", "", http.StatusOK, "HTTP/1.1", nil, completedAt,
+		),
+	}
+	return traffic.Transaction{
+		ID:                 transactionID,
+		ConversationID:     p.conversationID,
+		AgentID:            attribution.agentID,
+		ExecutionID:        attribution.executionID,
+		ToolCallID:         attribution.toolCallID,
+		RuntimeMode:        p.runtimeMode,
+		CaptureCoverage:    p.captureCoverage,
+		Scheme:             "https",
+		Host:               host,
+		Port:               port,
+		Method:             http.MethodConnect,
+		Path:               "/",
+		HTTPStatus:         http.StatusOK,
+		StartedAt:          startedAt,
+		CompletedAt:        &completedAt,
+		LatencyMS:          event.LatencyMS,
+		BytesUp:            event.BytesUp,
+		BytesDown:          event.BytesDown,
+		BoundarySnapshotID: p.boundarySnapshotID,
+		RuleID:             event.RuleID,
+		UpstreamRouteID:    p.upstreamRouteID,
+	}, messages
 }
 
 func (p *Proxy) shouldInterceptTLS(host string) bool {

@@ -13,6 +13,8 @@ import (
 	"syscall"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/traffic"
+	"cyberstrike-ai/internal/trafficspool"
 )
 
 func main() {
@@ -66,13 +68,25 @@ func runConfigured(args []string) error {
 	if err != nil {
 		return err
 	}
-	return egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
+	trafficSink, conversationID, closeTrafficSink, err := trafficSinkFromEnvironment()
+	if err != nil {
+		return err
+	}
+	runErr := egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
 		TLSCertificatePath: tlsCertPath, TLSPrivateKeyPath: tlsKeyPath, TLSAuthority: tlsReference,
 		ManualRecovery: recoveries,
 		TrafficLimits:  trafficLimits,
+		Proxy: egress.ProxyOptions{
+			TrafficSink: trafficSink, ConversationID: conversationID,
+			RuntimeMode: traffic.RuntimeModeContainer, CaptureCoverage: traffic.CaptureCoverageEnforced,
+		},
 	})
+	if closeTrafficSink != nil {
+		return errors.Join(runErr, closeTrafficSink())
+	}
+	return runErr
 }
 
 func checkConfigured(args []string) error {
@@ -84,12 +98,44 @@ func checkConfigured(args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateTrafficSpoolEnvironment(); err != nil {
+		return err
+	}
 	return egress.CheckGatewayWithOptions(path, reference, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
 		TLSCertificatePath: tlsCertPath, TLSPrivateKeyPath: tlsKeyPath, TLSAuthority: tlsReference,
 		TrafficLimits: trafficLimits,
 	}, os.Stdout)
+}
+
+func validateTrafficSpoolEnvironment() error {
+	path := strings.TrimSpace(os.Getenv("CYBERSTRIKE_TRAFFIC_SPOOL_PATH"))
+	conversationID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_CONVERSATION_ID"))
+	if (path == "") != (conversationID == "") {
+		return fmt.Errorf("CYBERSTRIKE_TRAFFIC_SPOOL_PATH and CYBERSTRIKE_CONVERSATION_ID must be configured together")
+	}
+	return nil
+}
+
+func trafficSinkFromEnvironment() (egress.TrafficSink, string, func() error, error) {
+	if err := validateTrafficSpoolEnvironment(); err != nil {
+		return nil, "", nil, err
+	}
+	path := strings.TrimSpace(os.Getenv("CYBERSTRIKE_TRAFFIC_SPOOL_PATH"))
+	conversationID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_CONVERSATION_ID"))
+	if path == "" {
+		return nil, "", nil, nil
+	}
+	writer, err := trafficspool.NewWriter(path, conversationID)
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("configure traffic spool: %w", err)
+	}
+	compactor, err := trafficspool.NewCompactingSink(writer.Write, trafficspool.DefaultCompactConfig())
+	if err != nil {
+		return nil, "", nil, fmt.Errorf("configure traffic compactor: %w", err)
+	}
+	return compactor.Write, conversationID, compactor.Close, nil
 }
 
 func trafficLimitsFromEnvironment() (*egress.TrafficLimits, error) {

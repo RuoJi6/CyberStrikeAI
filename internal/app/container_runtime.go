@@ -52,6 +52,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 		EgressUpstreamRoot:     upstreamStore.Root(),
 		EgressAuthProfilesRoot: authProfilesStore.Root(),
 		EgressTLSAuthorityRoot: tlsAuthorityStore.Root(),
+		TrafficSpoolRoot:       cfg.Container.TrafficSpoolDir,
 	})
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
@@ -613,6 +614,7 @@ func applyConversationRuntimeControls(spec *containerruntime.RuntimeSpec, contro
 
 func conversationEgressGatewaySpec(cfg *config.Config) containerruntime.EgressGatewaySpec {
 	return containerruntime.EgressGatewaySpec{
+		TrafficCapture: true,
 		Image: containerruntime.ImageReference{
 			Repository: strings.TrimSpace(cfg.Container.EgressImageRepository),
 			Digest:     strings.TrimSpace(cfg.Container.EgressImageDigest),

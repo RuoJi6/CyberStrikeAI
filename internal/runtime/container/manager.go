@@ -185,6 +185,7 @@ type EgressTrafficLimits struct {
 type EgressGatewaySpec struct {
 	Image            ImageReference
 	Resources        EgressGatewayResources
+	TrafficCapture   bool                        `json:",omitempty"`
 	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
 	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
 	AuthProfiles     *EgressAuthProfilesSpec     `json:",omitempty"`

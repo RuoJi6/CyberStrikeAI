@@ -380,6 +380,10 @@ func grantSystemRolePermissions(tx *sql.Tx, permissions map[string]string) error
 			continue
 		case key == "mcp:write" || key == "mcp:external:execute":
 			continue
+		case key == "traffic_transform:activate_inline":
+			// Live request/response mutation is reserved for administrators.
+			// Operators can author, validate, dry-run, and activate observe mode.
+			continue
 		case key == "roles:write" || key == "roles:delete" ||
 			key == "skills:write" || key == "skills:delete" ||
 			key == "agents:write" || key == "agents:delete" ||
