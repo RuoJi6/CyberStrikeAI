@@ -36,6 +36,10 @@ test('新建容器对话无需刷新即可显示工作区入口和实时容器�
     assert.match(containerTerminal, /renderChatContainerState\('idle'\)/);
     assert.match(containerTerminal, /window\.addEventListener\('conversation-changed', syncChatContainerWorkspaceButton\)/);
     assert.match(containerTerminal, /\/container-initialization/);
+    assert.match(containerTerminal, /\?observe=1/);
+    assert.match(containerTerminal, /observedAgentStatus === 'running'/);
+    assert.match(containerTerminal, /taskStatus === 'running'[\s\S]*?readiness === 'ready'/);
+    assert.match(containerTerminal, /runtimeStatus === 'running'[\s\S]*?\? 'running'/);
     assert.match(containerTerminal, /conversation-container-state-changed/);
     assert.match(containerTerminal, /containerStateStarting/);
     assert.match(containerTerminal, /containerStateRunning/);
@@ -50,7 +54,7 @@ test('系统设置终端与容器终端复用同一 xterm 会话和多标签代�
     assert.match(terminal, /window\.CyberStrikeTerminal/);
     assert.match(containerTerminal, /CyberStrikeTerminal\.createEmbeddedTerminal/);
     assert.match(template, /terminal\.js\?v=20260824-1/);
-    assert.match(template, /container-terminal\.js\?v=20260824-7/);
+    assert.match(template, /container-terminal\.js\?v=20260827-1/);
 });
 
 test('容器终端只连接会话容器端点且不会回退宿主机终端', () => {

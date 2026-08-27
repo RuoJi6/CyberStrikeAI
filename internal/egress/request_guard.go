@@ -11,20 +11,14 @@ import (
 )
 
 const (
-	defaultGlobalConcurrency       = 32
-	defaultRuleConcurrency         = 8
-	defaultAttackConcurrency       = 2
-	defaultAttackRequestsPerSecond = 2
-	defaultAttackBurst             = 5
-	defaultCooldown                = 60 * time.Second
-	maximumCooldown                = time.Hour
-	loginFailureThreshold          = 3
+	defaultCooldown       = 60 * time.Second
+	maximumCooldown       = time.Hour
+	loginFailureThreshold = 3
 )
 
 type requestGuard struct {
-	mu           sync.Mutex
-	globalActive int
-	rules        map[string]*requestGuardRule
+	mu    sync.Mutex
+	rules map[string]*requestGuardRule
 }
 
 type requestGuardRule struct {
@@ -72,11 +66,8 @@ func (g *requestGuard) acquire(decision boundary.Decision, now time.Time) (func(
 		retry := state.cooldownUntil.Sub(now)
 		return func() {}, &requestGuardBlock{outcome: "cooldown_active", reason: "upstream_rate_limited", retryAfterMS: durationMillisecondsCeil(retry)}, transition
 	}
-	if g.globalActive >= defaultGlobalConcurrency {
-		return func() {}, &requestGuardBlock{outcome: "concurrency_limited", reason: "global_concurrency_limit"}, transition
-	}
-	limit := effectiveRateLimit(decision)
-	if state.active >= limit.MaxConcurrent {
+	limit := decision.RateLimit
+	if limit.MaxConcurrent > 0 && state.active >= limit.MaxConcurrent {
 		return func() {}, &requestGuardBlock{outcome: "concurrency_limited", reason: "rule_concurrency_limit"}, transition
 	}
 	if limit.RequestsPerSecond > 0 {
@@ -98,7 +89,6 @@ func (g *requestGuard) acquire(decision boundary.Decision, now time.Time) (func(
 		state.tokens--
 	}
 	state.active++
-	g.globalActive++
 	released := false
 	return func() {
 		g.mu.Lock()
@@ -110,9 +100,6 @@ func (g *requestGuard) acquire(decision boundary.Decision, now time.Time) (func(
 		if state.active > 0 {
 			state.active--
 		}
-		if g.globalActive > 0 {
-			g.globalActive--
-		}
 	}, nil, transition
 }
 
@@ -123,7 +110,10 @@ func (g *requestGuard) observeResponse(decision boundary.Decision, request *http
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	state := g.rule(decision.RuleID)
-	if response.StatusCode == http.StatusTooManyRequests {
+	// A zero-valued boundary rate limit means unlimited. Do not turn a target's
+	// own 429 into a platform-wide cooldown unless the user explicitly enabled
+	// request governance on this rule.
+	if response.StatusCode == http.StatusTooManyRequests && requestGuardConfigured(decision) {
 		delay := retryAfterDuration(response.Header.Get("Retry-After"), now)
 		state.cooldownUntil = now.UTC().Add(delay)
 		return &requestGuardTransition{outcome: "cooldown_started", reason: "upstream_rate_limited", retryAfterMS: durationMillisecondsCeil(delay)}
@@ -168,21 +158,8 @@ func (g *requestGuard) rule(id string) *requestGuardRule {
 	return state
 }
 
-func effectiveRateLimit(decision boundary.Decision) boundary.RateLimit {
-	limit := decision.RateLimit
-	if limit.MaxConcurrent == 0 {
-		limit.MaxConcurrent = defaultRuleConcurrency
-	}
-	if decision.Effect == boundary.EffectAllowAttack {
-		if limit.RequestsPerSecond == 0 {
-			limit.RequestsPerSecond = defaultAttackRequestsPerSecond
-			limit.Burst = defaultAttackBurst
-		}
-		if decision.RateLimit.MaxConcurrent == 0 {
-			limit.MaxConcurrent = defaultAttackConcurrency
-		}
-	}
-	return limit
+func requestGuardConfigured(decision boundary.Decision) bool {
+	return decision.RateLimit.RequestsPerSecond > 0 || decision.RateLimit.MaxConcurrent > 0
 }
 
 func retryAfterDuration(value string, now time.Time) time.Duration {

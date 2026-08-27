@@ -42,10 +42,32 @@ func TestRequestGuardDeterministicRateAndConcurrencyLimits(t *testing.T) {
 	release()
 }
 
+func TestRequestGuardZeroLimitIsUnlimitedForVisitAndAttack(t *testing.T) {
+	now := time.Date(2026, 8, 27, 1, 0, 0, 0, time.UTC)
+	for _, effect := range []boundary.Effect{boundary.EffectAllowVisit, boundary.EffectAllowAttack} {
+		t.Run(string(effect), func(t *testing.T) {
+			guard := newRequestGuard()
+			var releases []func()
+			for attempt := 0; attempt < 128; attempt++ {
+				release, block, _ := guard.acquire(boundary.Decision{RuleID: "unlimited", Effect: effect}, now)
+				if block != nil {
+					t.Fatalf("zero-valued rate limit blocked attempt %d: %#v", attempt+1, block)
+				}
+				releases = append(releases, release)
+			}
+			for _, release := range releases {
+				release()
+			}
+		})
+	}
+}
+
 func TestRequestGuardCooldownSignalsLoginPauseAndManualRecovery(t *testing.T) {
 	now := time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC)
 	guard := newRequestGuard()
-	decision := boundary.Decision{RuleID: "visit", Effect: boundary.EffectAllowVisit}
+	decision := boundary.Decision{RuleID: "visit", Effect: boundary.EffectAllowVisit, RateLimit: boundary.RateLimit{
+		RequestsPerSecond: 100, Burst: 100,
+	}}
 	request := httptest.NewRequest(http.MethodPost, "http://example.test/api/login", nil)
 	response := func(status int, header http.Header) *http.Response {
 		return &http.Response{StatusCode: status, Header: header}
@@ -133,7 +155,11 @@ func TestProxyRateLimitAndUpstreamCooldownEmitCredentialFreeEvents(t *testing.T)
 
 func TestProxyUpstream429StartsCooldownUntilTrustedRecovery(t *testing.T) {
 	now := time.Date(2026, 8, 23, 1, 0, 0, 0, time.UTC)
-	policy := testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}}})
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "visit", Effect: boundary.EffectAllowVisit,
+		Target:    boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}},
+		RateLimit: boundary.RateLimit{RequestsPerSecond: 100, Burst: 100},
+	})
 	var calls atomic.Int32
 	var mu sync.Mutex
 	var events []ActivityEvent
@@ -178,5 +204,37 @@ func TestProxyUpstream429StartsCooldownUntilTrustedRecovery(t *testing.T) {
 	}
 	if !health || !blocked {
 		t.Fatalf("cooldown events = %#v", events)
+	}
+}
+
+func TestProxyUnconfiguredRateLimitDoesNotCreatePlatformCooldown(t *testing.T) {
+	now := time.Date(2026, 8, 27, 1, 0, 0, 0, time.UTC)
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "unlimited", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}},
+	})
+	var calls atomic.Int32
+	proxy, err := NewProxy(policy, ProxyOptions{
+		Now: func() time.Time { return now },
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				return &http.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"30"}}, Body: io.NopCloser(strings.NewReader("target limited"))}, nil
+			}
+			return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	serve := func() int {
+		recorder := httptest.NewRecorder()
+		proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
+		return recorder.Code
+	}
+	if status := serve(); status != http.StatusTooManyRequests {
+		t.Fatalf("upstream status = %d", status)
+	}
+	if status := serve(); status != http.StatusNoContent || calls.Load() != 2 {
+		t.Fatalf("unconfigured guard created cooldown: status=%d calls=%d", status, calls.Load())
 	}
 }

@@ -34,8 +34,9 @@ type Rule struct {
 }
 
 // RateLimit is the immutable request-governance contract attached to one
-// boundary rule. MaxConcurrent is additive and omitted from legacy snapshots
-// when zero, so already-bound canonical documents remain byte-for-byte valid.
+// boundary rule. Zero means unlimited for that dimension. MaxConcurrent is
+// omitted from legacy snapshots when zero, so already-bound canonical
+// documents remain byte-for-byte valid.
 type RateLimit struct {
 	RequestsPerSecond float64 `json:"requestsPerSecond"`
 	Burst             int     `json:"burst"`

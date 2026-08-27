@@ -167,21 +167,34 @@
         const initStatus = String(payload && payload.status || '').trim().toLowerCase();
         const readiness = String(payload && payload.readinessStatus || '').trim().toLowerCase();
         const runtimeStatus = String(payload && payload.runtimeStatus || '').trim().toLowerCase();
+        const observedAgentStatus = String(payload && payload.observation && payload.observation.agent && payload.observation.agent.status || '').trim().toLowerCase();
         const taskStatus = typeof window.getConversationExecutionStatus === 'function'
             ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
             : '';
-        if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed') return 'failed';
-        if (runtimeStatus === 'running') return 'running';
+        if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed' || observedAgentStatus === 'failed') return 'failed';
+        if (runtimeStatus === 'running' || observedAgentStatus === 'running') return 'running';
+        // A ready runtime is necessarily usable by an already-running turn. This
+        // closes the short persistence/event ordering window where chat output is
+        // visible while the lightweight runtimeStatus field is still stale.
+        if (taskStatus === 'running' && initStatus === 'created' && (readiness === 'ready' || readiness === 'not_required')) return 'running';
         if (initStatus === 'queued' || initStatus === 'creating' || readiness === 'pending' || readiness === 'validating' || taskStatus === 'initializing') return 'starting';
         if (runtimeStatus === 'stopped') return taskStatus === 'running' ? 'starting' : 'stopped';
-    return 'starting';
+        return 'starting';
     }
 
     async function refreshChatContainerState(conversationId, generation) {
         const id = String(conversationId || '').trim();
         if (!id || generation !== chatStatusGeneration) return;
         try {
-            const response = await window.apiFetch(`/api/conversations/${encodeURIComponent(id)}/container-initialization`);
+            const taskStatus = typeof window.getConversationExecutionStatus === 'function'
+                ? String(window.getConversationExecutionStatus(id) || '').trim().toLowerCase()
+                : '';
+            // While a turn is active, request one authoritative Docker observation.
+            // The loop ends immediately once running is confirmed, so this does not
+            // turn the normal 1-second lightweight poll into continuous Docker work.
+            const observe = taskStatus === 'running' || taskStatus === 'initializing';
+            const suffix = observe ? '?observe=1' : '';
+            const response = await window.apiFetch(`/api/conversations/${encodeURIComponent(id)}/container-initialization${suffix}`);
             const payload = await response.json().catch(() => ({}));
             if (!response.ok) throw new Error(payload && payload.error ? String(payload.error) : `HTTP ${response.status}`);
             if (generation !== chatStatusGeneration || id !== String(window.currentConversationId || '').trim()) return;
@@ -525,7 +538,10 @@
         const detail = event && event.detail || {};
         const id = String(detail.conversationId || '').trim();
         if (!id || id !== String(window.currentConversationId || '').trim()) return;
-        const state = String(detail.state || detail.runtimeStatus || '').trim().toLowerCase();
+        const runtimeStatus = String(detail.runtimeStatus || '').trim().toLowerCase();
+        const state = runtimeStatus === 'running'
+            ? 'running'
+            : String(detail.state || runtimeStatus || '').trim().toLowerCase();
         renderChatContainerState(state === 'ready' ? 'running' : state);
         if (state === 'ready' || state === 'running' || state === 'failed' || state === 'unavailable') {
             clearChatContainerStatusPoll();

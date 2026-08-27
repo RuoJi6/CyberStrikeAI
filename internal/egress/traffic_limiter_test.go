@@ -4,7 +4,30 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"cyberstrike-ai/internal/boundary"
 )
+
+func TestZeroTrafficRatesDisableHTTPTCPAndUDPPacers(t *testing.T) {
+	policy, err := boundary.NewPolicyWithDefault(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := NewProxy(policy, ProxyOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proxy.httpPacer != nil || proxy.tcpPacer != nil || proxy.udpPacer != nil {
+		t.Fatalf("zero traffic rates created proxy pacers: http=%v tcp=%v udp=%v", proxy.httpPacer, proxy.tcpPacer, proxy.udpPacer)
+	}
+	filter, err := newPacketFilter(policy, PacketOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filter.tcpPacer != nil || filter.udpPacer != nil {
+		t.Fatalf("zero traffic rates created packet pacers: tcp=%v udp=%v", filter.tcpPacer, filter.udpPacer)
+	}
+}
 
 func TestTrafficPacerSpacesRequestsAndHonorsCancellation(t *testing.T) {
 	pacer := newTrafficPacer(20)
