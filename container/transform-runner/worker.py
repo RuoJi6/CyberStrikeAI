@@ -57,6 +57,22 @@ def validate_source(source: str, hooks: list[str]) -> ast.AST:
         if isinstance(node, ast.Attribute) and node.attr.startswith(DENIED_ATTRIBUTE_PREFIX):
             raise SourcePolicyError("dunder attribute access is not permitted")
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in hooks:
+            body_decorator = any(
+                (isinstance(item, ast.Name) and item.id == "body_decoder")
+                or (isinstance(item, ast.Call) and isinstance(item.func, ast.Name) and item.func.id == "body_decoder")
+                for item in node.decorator_list
+            )
+            positional = len(node.args.posonlyargs) + len(node.args.args)
+            if body_decorator:
+                if not node.name.startswith("decode_"):
+                    raise SourcePolicyError("body_decoder can only decorate decode_request or decode_response")
+                if positional != 1 or node.args.vararg is not None:
+                    raise SourcePolicyError(f"{node.name} with body_decoder must accept exactly (body)")
+            else:
+                expected = 3 if node.name.startswith("encode_") else 2
+                signature = "(ctx, logical, original_wire)" if expected == 3 else "(ctx, wire)"
+                if positional != expected or node.args.vararg is not None:
+                    raise SourcePolicyError(f"{node.name} must accept exactly {signature}")
             declared_hooks.add(node.name)
     missing = sorted(set(hooks) - declared_hooks)
     if missing:

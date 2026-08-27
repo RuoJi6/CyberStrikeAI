@@ -9,8 +9,9 @@ from __future__ import annotations
 import base64
 import hashlib
 from dataclasses import dataclass, replace
+from functools import wraps
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,37 @@ class Message:
 
     def remove_header(self, name: str) -> "Message":
         return replace(self, headers=tuple(header for header in self.headers if header.name.lower() != name.lower()))
+
+
+def body_decoder(*, content_type: Optional[str] = None) -> Callable[[Callable[[bytes], Any]], Callable[..., Any]]:
+    """Turn a simple ``bytes -> bytes`` codec into a decode hook.
+
+    Agent-authored scripts can use this decorator for the common case and do
+    not need to handle Context, Message, or Result directly::
+
+        @body_decoder(content_type="application/json")
+        def decode_request(body: bytes) -> bytes:
+            return decrypt(body)
+
+    Returning ``None`` leaves the captured message unchanged. Text results are
+    encoded as UTF-8; bytes-like results replace the body.
+    """
+
+    def decorate(codec: Callable[[bytes], Any]) -> Callable[..., Any]:
+        @wraps(codec)
+        def hook(_ctx: "Context", wire: Message) -> Optional[Message]:
+            decoded = codec(wire.body)
+            if decoded is None:
+                return None
+            if isinstance(decoded, str):
+                decoded = decoded.encode("utf-8")
+            if not isinstance(decoded, (bytes, bytearray, memoryview)):
+                raise TypeError("body_decoder function must return bytes, str, or None")
+            return wire.with_body(bytes(decoded), content_type=content_type)
+
+        return hook
+
+    return decorate
 
 
 class Context:
