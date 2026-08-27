@@ -170,7 +170,7 @@
         if (!select || !hint) return;
         const selected = select.selectedOptions[0];
         if (!select.value) {
-            hint.textContent = translate('chat.boundaryPolicyDefaultAllowHint', '不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；Docker、宿主机与保留地址仍保持隔离。');
+            hint.textContent = translate('chat.boundaryPolicyDefaultAllowHint', '不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；HTTPS 默认解密并完整审计，Docker、宿主机与保留地址仍保持隔离。');
             return;
         }
         const description = selected ? String(selected.dataset.description || '').trim() : '';

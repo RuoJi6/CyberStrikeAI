@@ -122,12 +122,14 @@ test('container creation copy is bilingual and cache-busted', () => {
         }
     }
     assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /不限制/);
+	assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /HTTPS 默认解密并完整审计/);
+	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /HTTPS is decrypted and fully audited by default/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
     assert.match(template, /style\.css\?v=20260826-7/);
     assert.match(template, /chat\.js\?v=20260826-3/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-    assert.match(template, /conversation-container-settings\.js\?v=20260826-4/);
+    assert.match(template, /conversation-container-settings\.js\?v=20260827-1/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {

@@ -49,10 +49,9 @@ type boundaryPolicyDetail struct {
 }
 
 type boundaryPolicyWriteRequest struct {
-	Name                 string   `json:"name" binding:"required"`
-	Description          string   `json:"description"`
-	TLSInspectionEnabled bool     `json:"tlsInspectionEnabled"`
-	TLSBypassDomains     []string `json:"tlsBypassDomains"`
+	Name             string   `json:"name" binding:"required"`
+	Description      string   `json:"description"`
+	TLSBypassDomains []string `json:"tlsBypassDomains"`
 }
 
 type boundaryRuleWriteRequest struct {
@@ -243,7 +242,7 @@ func (h *BoundaryPolicyHandler) Create(c *gin.Context) {
 	}
 	created, err := h.db.CreateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
 		Name: request.Name, Description: request.Description, OwnerUserID: session.UserID,
-		TLSInspectionEnabled: request.TLSInspectionEnabled, TLSBypassDomains: request.TLSBypassDomains,
+		TLSInspectionEnabled: true, TLSBypassDomains: request.TLSBypassDomains,
 	})
 	if err != nil {
 		writeBoundaryPolicyStorageError(c, h.logger, "创建边界策略失败", err)
@@ -264,7 +263,7 @@ func (h *BoundaryPolicyHandler) Update(c *gin.Context) {
 	}
 	updated, err := h.db.UpdateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
 		ID: strings.TrimSpace(c.Param("id")), Name: request.Name, Description: request.Description,
-		TLSInspectionEnabled: request.TLSInspectionEnabled, TLSBypassDomains: request.TLSBypassDomains,
+		TLSInspectionEnabled: true, TLSBypassDomains: request.TLSBypassDomains,
 	})
 	if errors.Is(err, database.ErrBoundaryPolicyNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "边界策略不存在"})

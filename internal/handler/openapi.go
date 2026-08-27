@@ -103,7 +103,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	conversationRuntimeControlsSchema := conversationRuntimeControlsOpenAPISchema()
 	boundaryPolicyRequestSchema := map[string]interface{}{
 		"type":        "string",
-		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许。",
+		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许；HTTPS 仍默认解密并完整审计。",
 	}
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
@@ -113,7 +113,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
 			"name":                 map[string]interface{}{"type": "string", "maxLength": 128},
 			"description":          map[string]interface{}{"type": "string", "maxLength": 2048},
-			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
+			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": true, "readOnly": true, "description": "边界策略始终启用 HTTPS 完整审计。"},
 			"ruleCount":            map[string]interface{}{"type": "integer", "minimum": 0},
 			"protocols":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"any", "http", "https", "tcp", "udp", "icmp"}}},
 			"usageCount":           map[string]interface{}{"type": "integer", "minimum": 0, "description": "当前用户可见的使用中对话数"},
@@ -155,9 +155,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type": "object", "additionalProperties": false, "required": []string{"name"},
 		"properties": map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "maxLength": 128}, "description": map[string]interface{}{"type": "string", "maxLength": 2048},
-			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
 			"tlsBypassDomains": map[string]interface{}{"type": "array", "maxItems": 128, "items": map[string]interface{}{"type": "string", "maxLength": 253},
-				"description": "证书固定兼容域名；仅在启用 HTTPS 完整审计时允许。",
+				"description": "证书固定兼容域名；HTTPS 完整审计始终开启，命中域名时仅校验 SNI/端口。",
 			},
 		},
 	}

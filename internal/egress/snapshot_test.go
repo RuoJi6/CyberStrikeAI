@@ -160,6 +160,25 @@ func TestLoadNoBoundarySnapshotDefaultsExternalTrafficToAllow(t *testing.T) {
 	}
 }
 
+func TestLoadNoBoundaryTLSSnapshotDefaultsExternalTrafficToAllowAndDecryptsHTTPS(t *testing.T) {
+	content := `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}`
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	_, policy, tlsInspection, err := LoadGatewaySnapshot(path, testSnapshot(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := policy.Evaluate("https://example.com/write", http.MethodDelete, nil, time.Now().UTC())
+	if err != nil || !decision.Allowed {
+		t.Fatalf("HTTPS default decision = %#v, %v", decision, err)
+	}
+	if tlsInspection == nil || !tlsInspection.Enabled || len(tlsInspection.BypassDomains) != 0 {
+		t.Fatalf("TLS inspection = %#v", tlsInspection)
+	}
+}
+
 func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	content := `{"schemaVersion":1,"policyId":"","rules":[]}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")

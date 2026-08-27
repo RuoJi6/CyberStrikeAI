@@ -383,6 +383,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	}
 
 	skillsDir := skillpackage.SkillsRootFromConfig(cfg.SkillsDir, configPath)
+	skillsDir, err = filepath.Abs(skillsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve skills directory: %w", err)
+	}
+	// Resolve skills_dir exactly once against the config file.  The web
+	// management API and the Eino runtime must use the same root even when the
+	// service process is started from a different working directory.
+	cfg.SkillsDir = skillsDir
 	log.Logger.Debug("Skills 目录（Eino ADK skill 中间件 + Web 管理 API）", zap.String("skillsDir", skillsDir))
 	configDir := filepath.Dir(configPath)
 	plantaskRel := strings.TrimSpace(cfg.MultiAgent.EinoMiddleware.PlantaskRelDir)

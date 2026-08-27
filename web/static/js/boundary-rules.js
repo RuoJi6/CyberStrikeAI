@@ -285,7 +285,6 @@
         summary.append(element('p', 'boundary-policy-detail-description', policy.description || '未填写说明'));
         const metadata = element('dl', 'boundary-policy-detail-metadata');
         metadata.append(
-            detailField('HTTPS 完整审计', policy.tlsInspectionEnabled ? '已启用' : '未启用'),
             detailField('规则数量', String(Array.isArray(policy.rules) ? policy.rules.length : 0)),
             detailField('更新时间', formatDate(policy.updatedAt)),
         );
@@ -357,11 +356,9 @@
         document.getElementById('boundary-policy-id').value = policy ? policy.id : '';
         document.getElementById('boundary-policy-name').value = policy ? policy.name || '' : '';
         document.getElementById('boundary-policy-description').value = policy ? policy.description || '' : '';
-        document.getElementById('boundary-policy-tls-enabled').checked = Boolean(policy && policy.tlsInspectionEnabled);
         document.getElementById('boundary-policy-tls-bypass').value = policy && Array.isArray(policy.tlsBypassDomains) ? policy.tlsBypassDomains.join(', ') : '';
         document.getElementById('boundary-policy-editor').hidden = !policy;
         document.getElementById('boundary-policy-editor-title').textContent = policy ? '修改边界策略' : '新建边界策略';
-        syncPolicyTLS();
         resetRuleForm();
         renderDraftRules();
     }
@@ -498,16 +495,6 @@
         refreshUnified(select);
     }
 
-    function syncPolicyTLS() {
-        const enabled = document.getElementById('boundary-policy-tls-enabled');
-        const field = document.getElementById('boundary-policy-tls-bypass-field');
-        const input = document.getElementById('boundary-policy-tls-bypass');
-        if (!enabled || !field || !input) return;
-        field.hidden = !enabled.checked;
-        input.disabled = !enabled.checked;
-        if (!enabled.checked) input.value = '';
-    }
-
     async function reloadSelectedPolicy() {
         if (!state.selectedPolicyId) return;
         state.selectedPolicy = await requestJSON('/api/boundary-policies/' + encodeURIComponent(state.selectedPolicyId));
@@ -520,7 +507,6 @@
         const payload = {
             name: document.getElementById('boundary-policy-name').value.trim(),
             description: document.getElementById('boundary-policy-description').value.trim(),
-            tlsInspectionEnabled: document.getElementById('boundary-policy-tls-enabled').checked,
             tlsBypassDomains: splitValues(document.getElementById('boundary-policy-tls-bypass').value),
         };
         if (!payload.name) { notify('请输入策略名称', 'error'); return; }
@@ -651,7 +637,6 @@
         document.getElementById('boundary-rule-cancel')?.addEventListener('click', resetRuleForm);
         document.getElementById('boundary-rule-form')?.addEventListener('submit', saveRule);
         document.getElementById('boundary-rule-effect')?.addEventListener('change', syncRuleAuth);
-        document.getElementById('boundary-policy-tls-enabled')?.addEventListener('change', syncPolicyTLS);
         document.addEventListener('keydown', function (event) {
             if (event.key !== 'Escape') return;
             if (document.getElementById('boundary-rule-form')?.hidden === false) resetRuleForm();

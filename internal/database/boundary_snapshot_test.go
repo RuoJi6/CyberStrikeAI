@@ -67,8 +67,8 @@ func TestConversationBoundarySnapshotCanonicalJSONAndSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const wantCanonical = `{"schemaVersion":1,"policyId":"policy-canonical","rules":[{"id":"rule-a","effect":"allow-visit","host":"api.example","schemes":["http","https"],"ports":[80,443],"pathPrefixes":["/","/v1/"],"methods":["GET","POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2.5,"burst":4},"expiresAt":null,"position":1},{"id":"rule-b","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}]}`
-	const wantSHA256 = "sha256:bd40ddba728f458b9fa80c966b41e250e9a526ef3d57a4a88475e1edb1999c11"
+	const wantCanonical = `{"schemaVersion":2,"policyId":"policy-canonical","rules":[{"id":"rule-a","effect":"allow-visit","host":"api.example","schemes":["http","https"],"ports":[80,443],"pathPrefixes":["/","/v1/"],"methods":["GET","POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2.5,"burst":4},"expiresAt":null,"position":1},{"id":"rule-b","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}],"tlsInspection":{"enabled":true,"bypassDomains":[]}}`
+	const wantSHA256 = "sha256:bd6fd5831420ecf10543730c61920664e16dbfa53a67cb1b5ae0cdc8f0d37dee"
 	if snapshot.CanonicalJSON != wantCanonical {
 		t.Fatalf("canonical JSON = %s", snapshot.CanonicalJSON)
 	}
@@ -219,7 +219,7 @@ func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.Document.DefaultAction != "allow" || snapshot.CanonicalJSON != `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}` {
+	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.Document.DefaultAction != "allow" || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 0 || snapshot.CanonicalJSON != `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}` {
 		t.Fatalf("default-allow snapshot = %#v", snapshot)
 	}
 	host, err := db.CreateConversation("host", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeHost})
@@ -234,6 +234,26 @@ func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testi
 	}
 	if _, err := db.CreateConversation("missing policy", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer, BoundaryPolicyID: "missing"}); err == nil {
 		t.Fatal("missing boundary policy was accepted")
+	}
+}
+
+func TestLegacyNoBoundarySnapshotRemainsValid(t *testing.T) {
+	document := BoundaryPolicySnapshotDocument{
+		SchemaVersion: boundaryPolicyOpenSnapshotSchemaVersion,
+		PolicyID:      "",
+		Rules:         []BoundaryPolicySnapshotRule{},
+		DefaultAction: "allow",
+	}
+	canonical, digest, err := canonicalBoundarySnapshot(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if canonical != `{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}` || !strings.HasPrefix(digest, "sha256:") {
+		t.Fatalf("legacy snapshot canonicalization = %q / %q", canonical, digest)
+	}
+	loaded, err := validateCanonicalBoundarySnapshot(canonical, digest)
+	if err != nil || loaded.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion || loaded.TLSInspection != nil {
+		t.Fatalf("legacy snapshot validation = %#v / %v", loaded, err)
 	}
 }
 

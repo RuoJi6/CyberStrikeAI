@@ -51,7 +51,7 @@ func RunEinoSingleChatModelAgent(
 	ctx = ag.WithLocalToolExecutionAuditRecorder(ctx)
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
-	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger)
+	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger, ag.ExecutionBackendResolver())
 	if einoErr != nil {
 		return nil, einoErr
 	}

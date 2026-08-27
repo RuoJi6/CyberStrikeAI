@@ -1268,7 +1268,7 @@
                                                     <select id="boundary-policy-select" data-unified-select="single" onchange="syncConversationBoundarySelection()">
                                                         <option value="" data-i18n="chat.boundaryPolicyDefaultAllow">不设置边界（允许全部外部访问）</option>
                                                     </select>
-                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；Docker、宿主机与保留地址仍保持隔离。</span>
+                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；HTTPS 默认解密并完整审计，Docker、宿主机与保留地址仍保持隔离。</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="container-conversation-field-label" for="conversation-egress-mode-select" data-i18n="chat.egressModeLabel">上游出口</label>
@@ -5310,8 +5310,7 @@
                                     <div class="boundary-form-grid">
                                         <label><span>策略名称</span><input id="boundary-policy-name" type="text" maxlength="128" required autocomplete="off" placeholder="例如：仅允许目标站点"></label>
                                         <label class="is-wide"><span>说明</span><input id="boundary-policy-description" type="text" maxlength="2048" autocomplete="off" placeholder="说明适用范围和授权依据"></label>
-										<label class="boundary-form-toggle is-wide"><input id="boundary-policy-tls-enabled" type="checkbox"><span data-i18n="containerManagement.boundaryTLSEnabled">启用 HTTPS 完整审计（默认关闭；为该对话注入独立短期 CA）</span></label>
-										<label id="boundary-policy-tls-bypass-field" class="is-wide" hidden><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
+										<label id="boundary-policy-tls-bypass-field" class="is-wide"><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">HTTPS 完整审计默认开启；命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
                                     </div>
                                     <div class="boundary-form-actions"><button id="boundary-policy-reset" class="btn-secondary" type="button">取消</button><button class="btn-primary" type="submit">保存策略</button></div>
                                 </form>
@@ -7367,7 +7366,7 @@
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260826-4"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260827-1"></script>
     <script src="/static/js/vulnerability.js?v=14"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>
@@ -7379,7 +7378,7 @@
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260826-1"></script>
     <script src="/static/js/egress-audit.js?v=20260826-3"></script>
-    <script src="/static/js/boundary-rules.js?v=20260824-3"></script>
+    <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
     <script src="/static/js/container-management.js?v=20260826-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
