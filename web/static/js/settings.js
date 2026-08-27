@@ -2019,6 +2019,7 @@ async function applySettings() {
         const activeChannelId = normalizeAIChannelId(selectedAIChannelId || currentConfig.ai.default_channel || 'default');
         currentConfig.ai.channels[activeChannelId] = readAIChannelFromMainForm(activeChannelId);
         currentConfig.ai.default_channel = activeChannelId;
+        currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
         renderAIChannelSelect();
         const activeChannel = currentConfig.ai.channels[activeChannelId] || {};
         const prevOpenai = activeChannel;
@@ -2033,7 +2034,7 @@ async function applySettings() {
                 return String(s || '').split(/[\n,，]/).map(v => v.trim()).filter(Boolean);
             };
         const config = {
-            ai: currentConfig.ai,
+            ai: normalizeAIConfigProviderProfiles(currentConfig.ai),
             vision: visionPayload,
             fofa: {
                 api_key: document.getElementById('fofa-api-key')?.value.trim() || '',
@@ -2567,6 +2568,43 @@ function normalizeAIChannelId(name) {
     return id || 'default';
 }
 
+function aiChannelBaseURLHost(baseUrl) {
+    const raw = String(baseUrl || '').trim();
+    if (!raw) return '';
+    try {
+        return new URL(raw).hostname.toLowerCase().replace(/^www\./, '');
+    } catch (e) {
+        try {
+            return new URL(`https://${raw.replace(/^\/+/, '')}`).hostname.toLowerCase().replace(/^www\./, '');
+        } catch (_) {
+            return '';
+        }
+    }
+}
+
+function isOfficialDeepSeekBaseURL(baseUrl) {
+    return aiChannelBaseURLHost(baseUrl) === 'api.deepseek.com';
+}
+
+function normalizeAIChannelProviderProfile(channel) {
+    if (!channel || typeof channel !== 'object') return channel;
+    if (isOfficialDeepSeekBaseURL(channel.base_url)) {
+        channel.reasoning = {
+            ...(channel.reasoning || {}),
+            profile: 'deepseek'
+        };
+    }
+    return channel;
+}
+
+function normalizeAIConfigProviderProfiles(ai) {
+    if (!ai || typeof ai !== 'object' || !ai.channels || typeof ai.channels !== 'object') return ai;
+    Object.keys(ai.channels).forEach((id) => {
+        ai.channels[id] = normalizeAIChannelProviderProfile(ai.channels[id] || {});
+    });
+    return ai;
+}
+
 function escapeAIChannelHtml(value) {
     return String(value == null ? '' : value)
         .replace(/&/g, '&amp;')
@@ -2593,13 +2631,13 @@ function ensureAIConfigShape(cfg) {
             reasoning: oa.reasoning || {}
         };
     }
-    return { default_channel: def, channels };
+    return normalizeAIConfigProviderProfiles({ default_channel: def, channels });
 }
 
 function readAIChannelFromMainForm(id) {
     const prev = currentConfig?.ai?.channels?.[id] || {};
     const maxCompletionTokens = parseInt(document.getElementById('openai-max-completion-tokens')?.value, 10) || 32768;
-    return {
+    return normalizeAIChannelProviderProfile({
         ...prev,
         name: (document.getElementById('ai-channel-name')?.value || '').trim() || prev.name || id,
         provider: document.getElementById('openai-provider')?.value || 'openai',
@@ -2615,7 +2653,7 @@ function readAIChannelFromMainForm(id) {
             profile: document.getElementById('openai-reasoning-profile')?.value || 'auto',
             allow_client_reasoning: document.getElementById('openai-reasoning-allow-client')?.checked !== false
         }
-    };
+    });
 }
 
 function writeAIChannelToMainForm(id) {
@@ -2628,6 +2666,7 @@ function writeAIChannelToMainForm(id) {
     if (providerEl) {
         const provider = (ch.provider === 'openai' || !ch.provider) ? 'openai_compatible' : ch.provider;
         providerEl.value = provider;
+        syncSettingsCustomSelect(providerEl);
     }
     const keyEl = document.getElementById('openai-api-key');
     if (keyEl) keyEl.value = ch.api_key || '';
@@ -2641,11 +2680,20 @@ function writeAIChannelToMainForm(id) {
     if (maxCompletionTokensEl) maxCompletionTokensEl.value = ch.max_completion_tokens || 32768;
     const r = ch.reasoning || {};
     const modeEl = document.getElementById('openai-reasoning-mode');
-    if (modeEl) modeEl.value = ['auto', 'on', 'off'].includes(String(r.mode || '').toLowerCase()) ? String(r.mode).toLowerCase() : 'auto';
+    if (modeEl) {
+        modeEl.value = ['auto', 'on', 'off'].includes(String(r.mode || '').toLowerCase()) ? String(r.mode).toLowerCase() : 'auto';
+        syncSettingsCustomSelect(modeEl);
+    }
     const effEl = document.getElementById('openai-reasoning-effort');
-    if (effEl) effEl.value = ['', 'low', 'medium', 'high', 'max', 'xhigh'].includes(String(r.effort || '').toLowerCase()) ? String(r.effort || '').toLowerCase() : '';
+    if (effEl) {
+        effEl.value = ['', 'low', 'medium', 'high', 'max', 'xhigh'].includes(String(r.effort || '').toLowerCase()) ? String(r.effort || '').toLowerCase() : '';
+        syncSettingsCustomSelect(effEl);
+    }
     const profileEl = document.getElementById('openai-reasoning-profile');
-    if (profileEl) profileEl.value = ['auto', 'deepseek_compat', 'openai_compat', 'output_config_effort'].includes(String(r.profile || '').toLowerCase()) ? String(r.profile || '').toLowerCase() : 'auto';
+    if (profileEl) {
+        profileEl.value = ['auto', 'deepseek', 'deepseek_compat', 'openai_compat', 'output_config_effort'].includes(String(r.profile || '').toLowerCase()) ? String(r.profile || '').toLowerCase() : 'auto';
+        syncSettingsCustomSelect(profileEl);
+    }
     const allowEl = document.getElementById('openai-reasoning-allow-client');
     if (allowEl) allowEl.checked = r.allow_client_reasoning !== false;
     syncModelListFetchButtons();
@@ -2977,6 +3025,7 @@ async function persistAIChannelsToServer(successMessage, options = {}) {
                 currentConfig.ai.default_channel = latestAI.default_channel || id;
             }
         }
+        currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
         const updateResponse = await apiFetch('/api/config', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -3005,6 +3054,7 @@ async function persistAIConfigOnlyToServer(successMessage) {
     if (typeof requirePermission === 'function' && !requirePermission('config:write')) return false;
     if (!currentConfig) return false;
     currentConfig.ai = ensureAIConfigShape(currentConfig);
+    currentConfig.ai = normalizeAIConfigProviderProfiles(currentConfig.ai);
     showAIChannelSaveHint(settingsT('settingsBasic.aiChannelSaving', '正在保存通道...'), true);
     try {
         const updateResponse = await apiFetch('/api/config', {
