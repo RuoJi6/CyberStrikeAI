@@ -1044,7 +1044,7 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
     const bubble = assistantElement.querySelector('.message-bubble');
     if (!bubble) return;
 
-    // 保留复制按钮：addMessage 会把按钮 append 在 message-bubble 里
+    // 清理旧版本可能残留在气泡内的复制按钮；新版按钮统一在时间行。
     const copyBtn = bubble.querySelector('.message-copy-btn');
     if (copyBtn) copyBtn.remove();
 
@@ -1066,7 +1066,9 @@ function updateAssistantBubbleContent(assistantMessageId, content, renderMarkdow
     if (typeof wrapTablesInBubble === 'function') {
         wrapTablesInBubble(bubble);
     }
-    if (copyBtn) bubble.appendChild(copyBtn);
+    if (typeof window.appendMessageCopyButton === 'function') {
+        window.appendMessageCopyButton(assistantElement);
+    }
 
     if (typeof window.csMarkdownSanitize !== 'undefined') {
         window.csMarkdownSanitize.stripSuspiciousImages(bubble);
@@ -3012,11 +3014,9 @@ function handleStreamEvent(event, progressElement, progressId,
                 loadActiveTasks();
                 // 延迟刷新对话列表，确保用户消息已保存，updated_at已更新
                 // 这样新对话才能正确显示在最近对话列表的顶部
-                // 使用loadConversationsWithGroups确保分组映射缓存正确加载，无论是否有分组都能立即显示
+                // 刷新最近对话列表
                 setTimeout(() => {
-                    if (typeof loadConversationsWithGroups === 'function') {
-                        loadConversationsWithGroups();
-                    } else if (typeof loadConversations === 'function') {
+                    if (typeof loadConversations === 'function') {
                         loadConversations();
                     }
                     if (typeof window.refreshChatProjectFolders === 'function') {
@@ -3386,6 +3386,18 @@ function handleStreamEvent(event, progressElement, progressId,
                 expanded: false
             });
             break;
+
+        case 'finalization_pending_tools_cancelled': {
+            const d = event.data || {};
+            markToolExecutionItemsCancelled(timeline, autoCancelledExecutionIdsFromData(d));
+            addTimelineItem(timeline, 'progress', {
+                title: '工具执行已收尾',
+                message: event.message,
+                data: d,
+                expanded: false
+            });
+            break;
+        }
 
         case 'hitl_audit_agent_started': {
             const auditData = Object.assign({}, event.data || {}, {
@@ -3999,6 +4011,7 @@ function handleStreamEvent(event, progressElement, progressId,
             const responseData = event.data || {};
             const mcpIds = mergeMcpExecutionIDLists(typeof getMcpIds === 'function' ? (getMcpIds() || []) : [], responseData.mcpExecutionIds || []);
             setMcpIds(mcpIds);
+            markToolExecutionItemsCancelled(timeline, autoCancelledExecutionIdsFromData(responseData));
 
             // 更新对话ID
             if (responseData.conversationId) {
@@ -6023,6 +6036,9 @@ function getToolResultDisplayState(data, opts) {
         }
         return { kind: 'background_running', isError: false, success: false };
     }
+    if (explicitStatus === 'cancelled' || explicitStatus === 'canceled') {
+        return { kind: 'cancelled', isError: true, success: false };
+    }
     const parts = [];
     if (opts.rawText != null) parts.push(String(opts.rawText));
     collectToolResultTextParts(data.result, parts, 0);
@@ -6052,6 +6068,13 @@ function getBackgroundRunningToolLabel() {
         if (translated && translated !== 'timeline.backgroundRunning') return translated;
     }
     return '后台执行中';
+}
+
+function toolDisplayStatusFromState(displayState) {
+    if (!displayState) return 'completed';
+    if (displayState.kind === 'background_running') return 'background_running';
+    if (displayState.kind === 'cancelled') return 'cancelled';
+    return displayState.isError ? 'failed' : 'completed';
 }
 
 function buildToolResultSectionHtml(data, opts) {
@@ -6295,7 +6318,10 @@ function mergeToolResultIntoCallItem(item, data, options) {
         }
         item.dataset.toolResultMerged = '1';
         item.dataset.toolSuccess = (!displayState.isError && !backgroundRunning) ? '1' : '0';
-        item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (data.executionId != null && String(data.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(data.executionId).trim();
+        }
         item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
         item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
         applyToolCallStatus(item, item.dataset.toolDisplayStatus);
@@ -6335,7 +6361,10 @@ function mergeToolResultIntoCallItem(item, data, options) {
 
     item.dataset.toolResultMerged = '1';
     item.dataset.toolSuccess = (!displayState.isError && !backgroundRunning) ? '1' : '0';
-    item.dataset.toolDisplayStatus = backgroundRunning ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
+    item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+    if (data.executionId != null && String(data.executionId).trim() !== '') {
+        item.dataset.toolExecutionId = String(data.executionId).trim();
+    }
     item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-failed');
     item.classList.add(backgroundRunning ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
     applyToolCallStatus(item, item.dataset.toolDisplayStatus);
@@ -6498,6 +6527,9 @@ function getToolCallStatusPresentation(status) {
     if (normalized === 'failed') {
         return { status: normalized, itemClass: 'tool-call-failed', badgeClass: 'tool-status-failed', label: translate('timeline.execFailed', '执行失败'), icon: '❌ ' };
     }
+    if (normalized === 'cancelled' || normalized === 'canceled') {
+        return { status: 'cancelled', itemClass: 'tool-call-failed', badgeClass: 'tool-status-failed', label: translate('tasks.statusCancelled', '已取消'), icon: '⛔ ' };
+    }
     if (normalized === 'result_missing') {
         return { status: normalized, itemClass: 'tool-call-incomplete', badgeClass: 'tool-status-incomplete', label: translate('timeline.resultMissing', '结果记录缺失'), icon: '⚠️ ' };
     }
@@ -6536,6 +6568,52 @@ function updateToolCallStatus(progressId, toolCallId, status) {
     if (!item) return;
     
     applyToolCallStatus(item, status);
+}
+
+function normalizeExecutionIdList(value) {
+    const input = Array.isArray(value) ? value : (value == null ? [] : [value]);
+    const seen = new Set();
+    const out = [];
+    input.forEach(function (v) {
+        const s = String(v == null ? '' : v).trim();
+        if (!s || seen.has(s)) return;
+        seen.add(s);
+        out.push(s);
+    });
+    return out;
+}
+
+function autoCancelledExecutionIdsFromData(data) {
+    data = data || {};
+    return normalizeExecutionIdList(data.autoCancelledPendingExecutionIds || data.autoCancelledExecutionIds || []);
+}
+
+function markToolExecutionItemsCancelled(root, executionIds) {
+    const ids = normalizeExecutionIdList(executionIds);
+    if (!root || ids.length === 0) return 0;
+    const idSet = new Set(ids);
+    let count = 0;
+    root.querySelectorAll('.timeline-item[data-tool-execution-id]').forEach(function (item) {
+        const execId = String(item.dataset.toolExecutionId || '').trim();
+        if (!execId || !idSet.has(execId)) return;
+        item.dataset.toolSuccess = '0';
+        item.dataset.toolDisplayStatus = 'cancelled';
+        item.classList.remove('tool-call-running', 'tool-call-completed', 'tool-call-incomplete');
+        item.classList.add('tool-call-failed');
+        const state = toolCallDetailStateByItemId.get(item.id);
+        if (state && state.resultData && typeof state.resultData === 'object') {
+            state.resultData = Object.assign({}, state.resultData, {
+                status: 'cancelled',
+                success: false,
+                isError: true
+            });
+            state.pending = false;
+            setToolCallDetailState(item, state);
+        }
+        applyToolCallStatus(item, 'cancelled');
+        count++;
+    });
+    return count;
 }
 
 // 添加时间线项目
@@ -6684,17 +6762,23 @@ function addTimelineItem(timeline, type, options) {
         const mergedDisplayState = merged ? getToolResultDisplayState(merged) : null;
         const mergedBackgroundRunning = mergedDisplayState && mergedDisplayState.kind === 'background_running';
         const terminalStatus = String(options.toolStatus || '').toLowerCase();
+        const forcedStatus = (terminalStatus === 'completed' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled')
+            ? (terminalStatus === 'canceled' ? 'cancelled' : terminalStatus)
+            : '';
         if (merged) {
             item.dataset.toolResultMerged = '1';
-            item.dataset.toolSuccess = (!mergedDisplayState.isError && !mergedBackgroundRunning) ? '1' : '0';
-            item.dataset.toolDisplayStatus = mergedBackgroundRunning ? 'background_running' : (mergedDisplayState.isError ? 'failed' : 'completed');
-            item.classList.add(mergedBackgroundRunning ? 'tool-call-running' : (mergedDisplayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+            item.dataset.toolSuccess = forcedStatus ? (forcedStatus === 'completed' ? '1' : '0') : ((!mergedDisplayState.isError && !mergedBackgroundRunning) ? '1' : '0');
+            item.dataset.toolDisplayStatus = forcedStatus || toolDisplayStatusFromState(mergedDisplayState);
+            if (merged.executionId != null && String(merged.executionId).trim() !== '') {
+                item.dataset.toolExecutionId = String(merged.executionId).trim();
+            }
+            item.classList.add(item.dataset.toolDisplayStatus === 'background_running' ? 'tool-call-running' : (item.dataset.toolDisplayStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed'));
             if (d._mergedResultDetailId) {
                 item.dataset.toolResultDetailId = String(d._mergedResultDetailId);
             }
-        } else if (terminalStatus === 'completed' || terminalStatus === 'failed') {
+        } else if (terminalStatus === 'completed' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled') {
             item.dataset.toolSuccess = terminalStatus === 'completed' ? '1' : '0';
-            item.dataset.toolDisplayStatus = terminalStatus;
+            item.dataset.toolDisplayStatus = terminalStatus === 'canceled' ? 'cancelled' : terminalStatus;
             item.classList.add(terminalStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed');
         } else if (terminalStatus === 'result_missing') {
             item.dataset.toolDisplayStatus = 'result_missing';
@@ -6725,7 +6809,10 @@ function addTimelineItem(timeline, type, options) {
         }
         item.dataset.toolName = (d.toolName != null && d.toolName !== '') ? String(d.toolName) : '';
         item.dataset.toolSuccess = (!displayState.isError && displayState.kind !== 'background_running') ? '1' : '0';
-        item.dataset.toolDisplayStatus = displayState.kind === 'background_running' ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (d.executionId != null && String(d.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(d.executionId).trim();
+        }
     }
     if (type === 'eino_usage_summary' && options.data) {
         const d = options.data;
@@ -6795,10 +6882,14 @@ function addTimelineItem(timeline, type, options) {
         const mergedDisplayState = merged ? getToolResultDisplayState(merged) : null;
         const mergedBackgroundRunning = mergedDisplayState && mergedDisplayState.kind === 'background_running';
         const terminalStatus = String(options.toolStatus || '').toLowerCase();
-        const hasTerminalStatus = terminalStatus === 'completed' || terminalStatus === 'failed';
+        const forcedStatus = (terminalStatus === 'completed' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled')
+            ? (terminalStatus === 'canceled' ? 'cancelled' : terminalStatus)
+            : '';
+        const hasTerminalStatus = terminalStatus === 'completed' || terminalStatus === 'failed' || terminalStatus === 'cancelled' || terminalStatus === 'canceled';
         const hasHistoricalStatus = hasTerminalStatus || terminalStatus === 'result_missing';
         if (merged) {
-            item.classList.add(mergedBackgroundRunning ? 'tool-call-running' : (mergedDisplayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
+            const statusForClass = forcedStatus || toolDisplayStatusFromState(mergedDisplayState);
+            item.classList.add(statusForClass === 'background_running' ? 'tool-call-running' : (statusForClass === 'completed' ? 'tool-call-completed' : 'tool-call-failed'));
         } else if (hasTerminalStatus) {
             item.classList.add(terminalStatus === 'completed' ? 'tool-call-completed' : 'tool-call-failed');
         } else if (terminalStatus === 'result_missing') {
@@ -6808,7 +6899,7 @@ function addTimelineItem(timeline, type, options) {
         }
         setToolCallDetailState(item, {
             args: args,
-            resultData: merged || null,
+            resultData: (merged && forcedStatus) ? Object.assign({}, merged, { status: forcedStatus, success: forcedStatus === 'completed', isError: forcedStatus !== 'completed' }) : (merged || null),
             pending: !merged && !hasHistoricalStatus && !options.skipPendingResult,
             processDetailId: options.processDetailId || '',
             resultDetailId: data._mergedResultDetailId || (merged && merged.processDetailId) || '',
@@ -6860,7 +6951,10 @@ function addTimelineItem(timeline, type, options) {
             payloadDeferred: data._payloadDeferred === true,
             payloadLoaded: data._payloadDeferred !== true
         });
-        item.dataset.toolDisplayStatus = displayState.kind === 'background_running' ? 'background_running' : (displayState.isError ? 'failed' : 'completed');
+        item.dataset.toolDisplayStatus = toolDisplayStatusFromState(displayState);
+        if (data.executionId != null && String(data.executionId).trim() !== '') {
+            item.dataset.toolExecutionId = String(data.executionId).trim();
+        }
         item.classList.add(displayState.kind === 'background_running' ? 'tool-call-running' : (displayState.isError ? 'tool-call-failed' : 'tool-call-completed'));
     } else if (type === 'cancelled') {
         const taskCancelledLabel = typeof window.t === 'function' ? window.t('chat.taskCancelled') : '任务已取消';

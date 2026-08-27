@@ -855,81 +855,6 @@ func scanConversationRows(rows *sql.Rows) ([]*Conversation, error) {
 	return conversations, rows.Err()
 }
 
-const ungroupedConversationsSQL = `
-	FROM conversations c
-	WHERE NOT EXISTS (
-		SELECT 1 FROM conversation_group_mappings cgm WHERE cgm.conversation_id = c.id
-	)`
-
-// CountUngroupedConversations 统计不在任何分组中的对话数量。
-func (db *DB) CountUngroupedConversations(projectID string) (int, error) {
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计未分组对话失败: %w", err)
-	}
-	return count, nil
-}
-
-func (db *DB) CountUngroupedConversationsForAccess(projectID, userID, scope string) (int, error) {
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
-	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) `+where, args...).Scan(&count); err != nil {
-		return 0, fmt.Errorf("统计未分组对话失败: %w", err)
-	}
-	return count, nil
-}
-
-// ListUngroupedConversations 列出不在任何分组中的对话（最近对话侧栏）。
-func (db *DB) ListUngroupedConversations(limit, offset int, sortBy, projectID string) ([]*Conversation, error) {
-	orderClause := conversationOrderClause(sortBy, "c")
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	args = append(args, limit, offset)
-	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode, c.workspace_persistent `+
-			where+`
-		 `+orderClause+`
-		 LIMIT ? OFFSET ?`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("查询未分组对话失败: %w", err)
-	}
-	defer rows.Close()
-	return scanConversationRows(rows)
-}
-
-func (db *DB) ListUngroupedConversationsForAccess(limit, offset int, sortBy, projectID, userID, scope string) ([]*Conversation, error) {
-	if scope == RBACScopeAll || strings.TrimSpace(userID) == "" {
-		return db.ListUngroupedConversations(limit, offset, sortBy, projectID)
-	}
-	orderClause := conversationOrderClause(sortBy, "c")
-	where := ungroupedConversationsSQL
-	args := []interface{}{}
-	where, args = appendConversationProjectFilter(where, args, projectID, "c")
-	where, args = appendConversationAccessFilter(where, args, userID, scope, "c")
-	args = append(args, limit, offset)
-	rows, err := db.Query(
-		`SELECT c.id, c.title, COALESCE(c.pinned, 0), c.created_at, c.updated_at, c.project_id, c.role_name, c.agent_mode, c.runtime_mode, c.workspace_persistent `+
-			where+`
-		 `+orderClause+`
-		 LIMIT ? OFFSET ?`,
-		args...,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("查询未分组对话失败: %w", err)
-	}
-	defer rows.Close()
-	return scanConversationRows(rows)
-}
-
 // GetConversationTitle 获取对话标题（轻量查询，不加载消息）
 func (db *DB) GetConversationTitle(id string) (string, error) {
 	var title string
@@ -956,6 +881,22 @@ func (db *DB) UpdateConversationTitle(id, title string) error {
 	return nil
 }
 
+// UpdateConversationPinned 更新对话置顶状态
+func (db *DB) UpdateConversationPinned(id string, pinned bool) error {
+	pinnedValue := 0
+	if pinned {
+		pinnedValue = 1
+	}
+	_, err := db.Exec(
+		"UPDATE conversations SET pinned = ?, updated_at = ? WHERE id = ?",
+		pinnedValue, time.Now(), id,
+	)
+	if err != nil {
+		return fmt.Errorf("更新对话置顶状态失败: %w", err)
+	}
+	return nil
+}
+
 // UpdateConversationTime 更新对话时间
 func (db *DB) UpdateConversationTime(id string) error {
 	_, err := db.Exec(
@@ -974,7 +915,6 @@ func (db *DB) UpdateConversationTime(id string) error {
 // - process_details（过程详情）
 // - attack_chain_nodes（攻击链节点）
 // - attack_chain_edges（攻击链边）
-// - conversation_group_mappings（分组映射）
 // 漏洞记录会保留：vulnerabilities.conversation_id 使用 ON DELETE SET NULL，仅解除与会话的关联。
 // 注意：knowledge_retrieval_logs 在删除前会被显式清理。
 func (db *DB) DeleteConversation(id string) error {
@@ -1592,6 +1532,8 @@ func (db *DB) AddProcessDetailWithID(messageID, conversationID, eventType, messa
 		return "", fmt.Errorf("添加过程详情失败: %w", err)
 	}
 
+	db.maybeRecordModelTokenUsage(messageID, conversationID, id, eventType, data)
+
 	return id, nil
 }
 
@@ -1788,6 +1730,11 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 		return nil, fmt.Errorf("统计工具调用详情失败: %w", err)
 	}
 
+	pendingToolStatus := "result_missing"
+	if summary.Status == "running" {
+		pendingToolStatus = "running"
+	}
+
 	execRows, err := db.Query(
 		"SELECT id, event_type, data FROM process_details WHERE message_id = ? AND event_type IN ('tool_call', 'tool_result') ORDER BY created_at ASC, rowid ASC",
 		messageID,
@@ -1828,10 +1775,10 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 				ProcessDetailID: strings.TrimSpace(detailID),
 				ToolName:        toolName,
 				ToolCallID:      toolCallID,
-				// This summary is reconstructed from persisted history, not live
-				// execution state. Until a matching result is found the honest state
-				// is "result_missing", never "running".
-				Status: "result_missing",
+				// This summary is reconstructed from persisted history. For an
+				// active assistant turn, a missing result means the call is still
+				// pending; after the turn is terminal it is genuinely incomplete.
+				Status: pendingToolStatus,
 			})
 			matchedToolIndexes = append(matchedToolIndexes, false)
 			if toolCallID != "" {
@@ -1886,6 +1833,7 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 		return nil, fmt.Errorf("遍历工具执行摘要失败: %w", err)
 	}
 	execRows.Close()
+	db.applyPersistedToolExecutionStatuses(summary.ToolExecutions)
 
 	rows, err := db.Query(
 		"SELECT data FROM process_details WHERE message_id = ? AND event_type = 'iteration' ORDER BY created_at ASC, rowid ASC",
@@ -1952,6 +1900,24 @@ func toolResultStatusFromPayload(payload map[string]interface{}, eventType strin
 		return "failed"
 	}
 	return "completed"
+}
+
+func (db *DB) applyPersistedToolExecutionStatuses(executions []ProcessDetailsToolExecution) {
+	for i := range executions {
+		execID := strings.TrimSpace(executions[i].ExecutionID)
+		if execID == "" {
+			continue
+		}
+		var status string
+		if err := db.QueryRow(`SELECT status FROM tool_executions WHERE id = ?`, execID).Scan(&status); err != nil {
+			continue
+		}
+		status = strings.ToLower(strings.TrimSpace(status))
+		if status == "" {
+			continue
+		}
+		executions[i].Status = status
+	}
 }
 
 func matchToolExecutionIndex(
