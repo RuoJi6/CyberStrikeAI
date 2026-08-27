@@ -21,8 +21,8 @@ CyberStrikeAI 当前使用 Docker Hub 上的自有多架构 Agent 镜像，不�
 | 项目 | 值 |
 | --- | --- |
 | 仓库 | `ruoji6/cyberstrikeai-egress` |
-| 版本标签 | `runtime-controls-20260826`、`latest` |
-| 多架构 index digest | `sha256:14c6b318f82fd5fcf85a1add501a329f01d5a0b02280668a0ab18483b883c511` |
+| 版本标签 | `runtime-unlimited-20260827`、`latest` |
+| 多架构 index digest | `sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558` |
 | ARM64 manifest | `sha256:8315466e05ddfcaae46de008a36ceeee614bcfb115f1ca78db5408285bade7c0` |
 | AMD64 manifest | `sha256:614abfc446fb35832a0335b86389c0c766f2e24f8be1aad383e2902a0ee32392` |
 | OCI revision | `7454258` |

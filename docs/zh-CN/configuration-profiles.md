@@ -197,7 +197,7 @@ container:
   image_digest: sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d
   image_platform: linux/arm64
   egress_image_repository: ruoji6/cyberstrikeai-egress
-  egress_image_digest: sha256:14c6b318f82fd5fcf85a1add501a329f01d5a0b02280668a0ab18483b883c511
+  egress_image_digest: sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558
   egress_image_platform: linux/arm64
   tool_inventory_path: container/agent-tool-inventory-linux-arm64.json
   tool_inventory_digest: sha256:83173e182532f08cbbfc67ab2083a3c09e4df428a139a096c4a29b10e1d66759

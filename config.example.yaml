@@ -140,7 +140,7 @@ container:
   image_digest: sha256:14bed42067163e75430e5ea4bf335c18e9631569742da591894c2a1c0a38111d # full-tools-seclists-20260826 / latest 的多架构 index digest；生产仍按 digest 拉取
   image_platform: linux/arm64 # ARM 主机用 linux/arm64，AMD/Intel 主机用 linux/amd64
   egress_image_repository: ruoji6/cyberstrikeai-egress # Docker Hub 多架构最小出站网关镜像
-  egress_image_digest: sha256:14c6b318f82fd5fcf85a1add501a329f01d5a0b02280668a0ab18483b883c511 # runtime-controls-20260826 / latest 的多架构 index digest；生产仍按 digest 拉取
+  egress_image_digest: sha256:ef0261fde00a739360eb3c7f9b34671ec516bf58084f54bf0efbb0956d46d558 # runtime-unlimited-20260827 / latest 的多架构 index digest；生产仍按 digest 拉取
   egress_image_platform: linux/arm64
   egress_snapshot_dir: data/egress-snapshots # 控制面生成的不可变快照文件；仅网关以只读 bind mount 加载
   egress_credential_key_file: data/egress-credentials.key # 自动生成的服务端 AES-256 密钥；必须持久化、权限 0600，禁止提交或共享
