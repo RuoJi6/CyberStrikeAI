@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS traffic_transforms (
 	id TEXT PRIMARY KEY,
 	conversation_id TEXT,
 	project_id TEXT,
+	current_revision_id TEXT,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
 	language TEXT NOT NULL CHECK (language = 'python3'),
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS traffic_transforms (
 	created_by_agent_id TEXT NOT NULL DEFAULT '',
 	created_at DATETIME NOT NULL,
 	updated_at DATETIME NOT NULL,
+	deleted_at DATETIME,
 	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL,
 	FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
 );`
@@ -114,6 +116,23 @@ func (db *DB) initTrafficTransformTables() error {
 	if err := db.addColumnIfMissing("traffic_transform_bindings", "config_json", "ALTER TABLE traffic_transform_bindings ADD COLUMN config_json TEXT NOT NULL DEFAULT '{}'"); err != nil {
 		return fmt.Errorf("initialize traffic transform binding config: %w", err)
 	}
+	if err := db.addColumnIfMissing("traffic_transforms", "current_revision_id", "ALTER TABLE traffic_transforms ADD COLUMN current_revision_id TEXT"); err != nil {
+		return fmt.Errorf("initialize traffic transform current revision: %w", err)
+	}
+	if err := db.addColumnIfMissing("traffic_transforms", "deleted_at", "ALTER TABLE traffic_transforms ADD COLUMN deleted_at DATETIME"); err != nil {
+		return fmt.Errorf("initialize traffic transform soft deletion: %w", err)
+	}
+	if _, err := db.Exec(`
+		UPDATE traffic_transforms
+		SET current_revision_id = (
+			SELECT r.id FROM traffic_transform_revisions r
+			WHERE r.transform_id = traffic_transforms.id AND r.validation_status = 'passed'
+			ORDER BY r.created_at DESC, r.id ASC LIMIT 1
+		)
+		WHERE current_revision_id IS NULL OR current_revision_id = ''
+	`); err != nil {
+		return fmt.Errorf("backfill traffic transform current revision: %w", err)
+	}
 	return nil
 }
 
@@ -150,10 +169,10 @@ func (db *DB) CreateTrafficTransform(ctx context.Context, item *traffictransform
 	item.UpdatedAt = now
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO traffic_transforms (
-			id, conversation_id, project_id, name, description, language,
+			id, conversation_id, project_id, current_revision_id, name, description, language,
 			owner_user_id, created_by_agent_id, created_at, updated_at
-		) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?)
-	`, item.ID, item.ConversationID, item.ProjectID, item.Name, item.Description, item.Language,
+		) VALUES (?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?, ?, ?, ?, ?)
+	`, item.ID, item.ConversationID, item.ProjectID, item.CurrentRevisionID, item.Name, item.Description, item.Language,
 		item.OwnerUserID, item.CreatedByAgentID, item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("create traffic transform: %w", err)
@@ -168,21 +187,22 @@ type transformScanner interface {
 
 func scanTrafficTransform(scanner transformScanner) (*traffictransform.Transform, error) {
 	var item traffictransform.Transform
-	var conversationID, projectID sql.NullString
+	var conversationID, projectID, currentRevisionID sql.NullString
 	if err := scanner.Scan(
-		&item.ID, &conversationID, &projectID, &item.Name, &item.Description,
+		&item.ID, &conversationID, &projectID, &currentRevisionID, &item.Name, &item.Description,
 		&item.Language, &item.OwnerUserID, &item.CreatedByAgentID, &item.CreatedAt, &item.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	item.ConversationID = strings.TrimSpace(conversationID.String)
 	item.ProjectID = strings.TrimSpace(projectID.String)
+	item.CurrentRevisionID = strings.TrimSpace(currentRevisionID.String)
 	return &item, nil
 }
 
 func (db *DB) GetTrafficTransform(ctx context.Context, id string) (*traffictransform.Transform, error) {
 	return scanTrafficTransform(db.QueryRowContext(ctx, `
-		SELECT id, conversation_id, project_id, name, description, language,
+		SELECT id, conversation_id, project_id, current_revision_id, name, description, language,
 			owner_user_id, created_by_agent_id, created_at, updated_at
 		FROM traffic_transforms WHERE id = ?
 	`, strings.TrimSpace(id)))
@@ -194,11 +214,11 @@ func (db *DB) ListTrafficTransformsForConversation(ctx context.Context, conversa
 		return nil, errors.New("conversation id is required")
 	}
 	rows, err := db.QueryContext(ctx, `
-		SELECT t.id, t.conversation_id, t.project_id, t.name, t.description, t.language,
+		SELECT t.id, t.conversation_id, t.project_id, t.current_revision_id, t.name, t.description, t.language,
 			t.owner_user_id, t.created_by_agent_id, t.created_at, t.updated_at
 		FROM traffic_transforms t
 		LEFT JOIN conversations c ON c.id = ?
-		WHERE t.conversation_id = ? OR (c.project_id IS NOT NULL AND c.project_id != '' AND t.project_id = c.project_id)
+		WHERE t.deleted_at IS NULL AND (t.conversation_id = ? OR (c.project_id IS NOT NULL AND c.project_id != '' AND t.project_id = c.project_id))
 		ORDER BY t.updated_at DESC, t.id ASC
 	`, conversationID, conversationID)
 	if err != nil {
@@ -216,13 +236,44 @@ func (db *DB) ListTrafficTransformsForConversation(ctx context.Context, conversa
 	return result, rows.Err()
 }
 
+// ListTrafficTransforms returns recent transform metadata for management UIs.
+// Callers must apply the authenticated user's project/conversation scope before
+// returning these rows. Source is stored only on immutable revisions and is
+// intentionally not included here.
+func (db *DB) ListTrafficTransforms(ctx context.Context, limit int) ([]traffictransform.Transform, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 500
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, conversation_id, project_id, current_revision_id, name, description, language,
+			owner_user_id, created_by_agent_id, created_at, updated_at
+		FROM traffic_transforms
+		WHERE deleted_at IS NULL
+		ORDER BY updated_at DESC, id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]traffictransform.Transform, 0)
+	for rows.Next() {
+		item, scanErr := scanTrafficTransform(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, *item)
+	}
+	return result, rows.Err()
+}
+
 func (db *DB) TrafficTransformBelongsToConversation(ctx context.Context, transformID, conversationID string) bool {
 	var count int
 	err := db.QueryRowContext(ctx, `
 		SELECT COUNT(*)
 		FROM traffic_transforms t
 		LEFT JOIN conversations c ON c.id = ?
-		WHERE t.id = ? AND (t.conversation_id = ? OR (c.project_id IS NOT NULL AND c.project_id != '' AND t.project_id = c.project_id))
+		WHERE t.id = ? AND t.deleted_at IS NULL AND (t.conversation_id = ? OR (c.project_id IS NOT NULL AND c.project_id != '' AND t.project_id = c.project_id))
 	`, strings.TrimSpace(conversationID), strings.TrimSpace(transformID), strings.TrimSpace(conversationID)).Scan(&count)
 	return err == nil && count > 0
 }
@@ -340,6 +391,111 @@ func (db *DB) SetTrafficTransformRevisionValidation(ctx context.Context, revisio
 	return nil
 }
 
+// UpdateTrafficTransformMetadata changes only the mutable display fields. The
+// current immutable source revision and all bindings remain untouched.
+func (db *DB) UpdateTrafficTransformMetadata(ctx context.Context, id, name, description string) (*traffictransform.Transform, error) {
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+	if name == "" || len(name) > 120 {
+		return nil, errors.New("traffic transform name is required and must not exceed 120 bytes")
+	}
+	if len(description) > 4000 {
+		return nil, errors.New("traffic transform description is too large")
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE traffic_transforms SET name = ?, description = ?, updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, name, description, time.Now().UTC(), id)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, sql.ErrNoRows
+	}
+	return db.GetTrafficTransform(ctx, id)
+}
+
+// PromoteTrafficTransformRevision atomically makes a validated revision the
+// current one and moves observe-mode bindings to it. Inline bindings are
+// intentionally blocked because changing approved live-mutation code requires
+// a separate approval workflow.
+func (db *DB) PromoteTrafficTransformRevision(ctx context.Context, transformID, revisionID, name, description string) (*traffictransform.Transform, error) {
+	transformID = strings.TrimSpace(transformID)
+	revisionID = strings.TrimSpace(revisionID)
+	name = strings.TrimSpace(name)
+	description = strings.TrimSpace(description)
+	if name == "" || len(name) > 120 {
+		return nil, errors.New("traffic transform name is required and must not exceed 120 bytes")
+	}
+	if len(description) > 4000 {
+		return nil, errors.New("traffic transform description is too large")
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var revisionTransformID, validationStatus string
+	if err := tx.QueryRowContext(ctx, `SELECT transform_id, validation_status FROM traffic_transform_revisions WHERE id = ?`, revisionID).Scan(&revisionTransformID, &validationStatus); err != nil {
+		return nil, err
+	}
+	if revisionTransformID != transformID || validationStatus != traffictransform.ValidationPassed {
+		return nil, errors.New("traffic transform revision is not validated for this script")
+	}
+	var inlineBindings int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM traffic_transform_bindings WHERE transform_id = ? AND mode = 'inline'`, transformID).Scan(&inlineBindings); err != nil {
+		return nil, err
+	}
+	if inlineBindings > 0 {
+		return nil, errors.New("inline traffic transform bindings require a new approval before changing source")
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE traffic_transforms
+		SET name = ?, description = ?, current_revision_id = ?, updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+	`, name, description, revisionID, time.Now().UTC(), transformID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, sql.ErrNoRows
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE traffic_transform_bindings SET revision_id = ?, updated_at = ?
+		WHERE transform_id = ? AND mode = 'observe'
+	`, revisionID, time.Now().UTC(), transformID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return db.GetTrafficTransform(ctx, transformID)
+}
+
+// DeleteTrafficTransform performs a soft deletion. Immutable revisions and
+// historical runs remain available as evidence. Every binding must be removed
+// first so an apparently deleted script cannot continue processing traffic.
+func (db *DB) DeleteTrafficTransform(ctx context.Context, id string) error {
+	id = strings.TrimSpace(id)
+	result, err := db.ExecContext(ctx, `
+		UPDATE traffic_transforms SET deleted_at = ?, updated_at = ?
+		WHERE id = ? AND deleted_at IS NULL
+			AND NOT EXISTS (SELECT 1 FROM traffic_transform_bindings b WHERE b.transform_id = traffic_transforms.id)
+	`, time.Now().UTC(), time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 1 {
+		return nil
+	}
+	var bindingCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM traffic_transform_bindings WHERE transform_id = ?`, id).Scan(&bindingCount); err == nil && bindingCount > 0 {
+		return errors.New("remove all traffic transform scopes before deleting the script")
+	}
+	return sql.ErrNoRows
+}
+
 func (db *DB) CreateTrafficTransformBinding(ctx context.Context, binding *traffictransform.Binding) (*traffictransform.Binding, error) {
 	if binding == nil {
 		return nil, errors.New("traffic transform binding is required")
@@ -421,6 +577,46 @@ func (db *DB) GetTrafficTransformBinding(ctx context.Context, id string) (*traff
 	`, strings.TrimSpace(id)))
 }
 
+// UpdateTrafficTransformBindingScope replaces only the matcher and priority.
+// Binding config is intentionally left untouched because it can contain
+// session-scoped codec material that must never round-trip through the UI.
+func (db *DB) UpdateTrafficTransformBindingScope(ctx context.Context, id string, matcher traffictransform.Matcher, priority int) (*traffictransform.Binding, error) {
+	binding, err := db.GetTrafficTransformBinding(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	revision, err := db.GetTrafficTransformRevision(ctx, binding.RevisionID)
+	if err != nil {
+		return nil, err
+	}
+	binding.Matcher = matcher.Normalize()
+	binding.Priority = priority
+	if binding.Status == traffictransform.BindingActive {
+		err = traffictransform.ValidateBinding(*binding, *revision)
+	} else {
+		err = traffictransform.ValidateBindingDraft(*binding, *revision)
+	}
+	if err != nil {
+		return nil, err
+	}
+	matcherJSON, err := json.Marshal(binding.Matcher)
+	if err != nil {
+		return nil, err
+	}
+	result, err := db.ExecContext(ctx, `
+		UPDATE traffic_transform_bindings
+		SET matcher_json = ?, priority = ?, updated_at = ?
+		WHERE id = ?
+	`, string(matcherJSON), binding.Priority, time.Now().UTC(), binding.ID)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, errors.New("traffic transform binding is unavailable")
+	}
+	return db.GetTrafficTransformBinding(ctx, binding.ID)
+}
+
 func (db *DB) ActivateTrafficTransformBinding(ctx context.Context, id, approvingUserID string) (*traffictransform.Binding, error) {
 	binding, err := db.GetTrafficTransformBinding(ctx, id)
 	if err != nil {
@@ -463,6 +659,20 @@ func (db *DB) DisableTrafficTransformBinding(ctx context.Context, id string) (*t
 	return db.GetTrafficTransformBinding(ctx, id)
 }
 
+// DeleteTrafficTransformBinding removes only a disabled use-case binding.
+// Historical runs keep their revision and transaction evidence because their
+// optional binding foreign key is configured with ON DELETE SET NULL.
+func (db *DB) DeleteTrafficTransformBinding(ctx context.Context, id string) error {
+	result, err := db.ExecContext(ctx, `DELETE FROM traffic_transform_bindings WHERE id = ? AND status = 'disabled'`, strings.TrimSpace(id))
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("traffic transform binding must be disabled before deletion")
+	}
+	return nil
+}
+
 func (db *DB) ListActiveTrafficTransformBindings(ctx context.Context, conversationID string) ([]traffictransform.Binding, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT id, conversation_id, transform_id, revision_id, mode, matcher_json,
@@ -482,6 +692,102 @@ func (db *DB) ListActiveTrafficTransformBindings(ctx context.Context, conversati
 			return nil, scanErr
 		}
 		result = append(result, *item)
+	}
+	return result, rows.Err()
+}
+
+// ListTrafficTransformBindings returns recent binding metadata for the
+// transform dashboard. Config is loaded for internal callers, but handlers must
+// not expose it because it can contain per-session codec material.
+func (db *DB) ListTrafficTransformBindings(ctx context.Context, limit int) ([]traffictransform.Binding, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 1000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, conversation_id, transform_id, revision_id, mode, matcher_json,
+			config_json, priority, failure_policy, status, approved_by_user_id, approved_at, created_at, updated_at
+		FROM traffic_transform_bindings
+		ORDER BY updated_at DESC, id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]traffictransform.Binding, 0)
+	for rows.Next() {
+		item, scanErr := scanTrafficTransformBinding(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		result = append(result, *item)
+	}
+	return result, rows.Err()
+}
+
+// TrafficTransformRunSummary is the safe management projection for Runner
+// history. It intentionally excludes source, message bodies, hashes and
+// binding config while retaining the transform identity after soft deletion.
+type TrafficTransformRunSummary struct {
+	ID               string                `json:"id"`
+	BindingID        string                `json:"bindingId,omitempty"`
+	RevisionID       string                `json:"revisionId"`
+	TransformID      string                `json:"transformId"`
+	TransformName    string                `json:"transformName"`
+	TransformDeleted bool                  `json:"transformDeleted"`
+	ConversationID   string                `json:"conversationId,omitempty"`
+	ProjectID        string                `json:"projectId,omitempty"`
+	TransactionID    string                `json:"transactionId,omitempty"`
+	Kind             string                `json:"kind"`
+	Hook             traffictransform.Hook `json:"hook"`
+	Mode             string                `json:"mode"`
+	Action           string                `json:"action"`
+	DurationMS       int64                 `json:"durationMs"`
+	ErrorCode        string                `json:"errorCode,omitempty"`
+	ErrorSummary     string                `json:"errorSummary,omitempty"`
+	RunnerIdentity   string                `json:"runnerIdentity,omitempty"`
+	CreatedAt        time.Time             `json:"createdAt"`
+}
+
+func (db *DB) ListTrafficTransformRunSummaries(ctx context.Context, limit int) ([]TrafficTransformRunSummary, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 1000
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT run.id, run.binding_id, run.revision_id, revision.transform_id,
+			transform.name, CASE WHEN transform.deleted_at IS NULL THEN 0 ELSE 1 END,
+			transform.conversation_id, transform.project_id, run.transaction_id,
+			run.kind, run.hook, run.mode, run.action, run.duration_ms,
+			run.error_code, run.error_summary, run.runner_identity, run.created_at
+		FROM traffic_transform_runs run
+		JOIN traffic_transform_revisions revision ON revision.id = run.revision_id
+		JOIN traffic_transforms transform ON transform.id = revision.transform_id
+		ORDER BY run.created_at DESC, run.id ASC
+		LIMIT ?
+	`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]TrafficTransformRunSummary, 0)
+	for rows.Next() {
+		var item TrafficTransformRunSummary
+		var bindingID, conversationID, projectID, transactionID sql.NullString
+		var deleted int
+		if err := rows.Scan(
+			&item.ID, &bindingID, &item.RevisionID, &item.TransformID,
+			&item.TransformName, &deleted, &conversationID, &projectID, &transactionID,
+			&item.Kind, &item.Hook, &item.Mode, &item.Action, &item.DurationMS,
+			&item.ErrorCode, &item.ErrorSummary, &item.RunnerIdentity, &item.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		item.BindingID = strings.TrimSpace(bindingID.String)
+		item.ConversationID = strings.TrimSpace(conversationID.String)
+		item.ProjectID = strings.TrimSpace(projectID.String)
+		item.TransactionID = strings.TrimSpace(transactionID.String)
+		item.TransformDeleted = deleted != 0
+		result = append(result, item)
 	}
 	return result, rows.Err()
 }

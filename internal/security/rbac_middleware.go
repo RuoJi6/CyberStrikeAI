@@ -160,8 +160,22 @@ func permissionForRequest(method, fullPath string) string {
 		return crudPermission(method, "knowledge")
 	case strings.HasPrefix(path, "/vulnerabilities"):
 		return crudPermission(method, "vulnerability")
+	case strings.HasPrefix(path, "/traffic-transactions/") && strings.HasSuffix(path, "/replay") && method == http.MethodPost:
+		return "traffic:replay"
 	case strings.HasPrefix(path, "/traffic-transactions"):
 		return crudPermission(method, "traffic")
+	case strings.HasPrefix(path, "/traffic-transform-bindings"):
+		return "traffic_transform:activate_observe"
+	case strings.HasPrefix(path, "/traffic-transform-revisions"):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "traffic_transform:read_source"
+		}
+		return "traffic_transform:write"
+	case strings.HasPrefix(path, "/traffic-transforms"):
+		if method == http.MethodGet || method == http.MethodHead {
+			return "traffic_transform:read"
+		}
+		return "traffic_transform:write"
 	case path == "/assets/batch-delete", path == "/assets/merge":
 		return "asset:delete"
 	case strings.HasPrefix(path, "/assets"):

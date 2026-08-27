@@ -333,7 +333,17 @@ func TestEnsureContainerRuntimeEgressBindingsOnlyMigratesDurableRuntimes(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	staleLocal, err := db.CreateConversation("stale local", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := db.Queue(context.Background(), databaseRuntimeSpec(queued.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.Queue(context.Background(), databaseRuntimeSpec(staleLocal.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET runtime_mode = ? WHERE id = ?`, ConversationRuntimeModeHost, staleLocal.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.EnsureContainerRuntimeEgressBindings(context.Background()); err != nil {
@@ -345,6 +355,9 @@ func TestEnsureContainerRuntimeEgressBindingsOnlyMigratesDurableRuntimes(t *test
 	}
 	if _, err := db.GetConversationEgressBinding(context.Background(), unused.ID); !errors.Is(err, ErrConversationEgressBindingNotFound) {
 		t.Fatalf("unused binding = %v", err)
+	}
+	if _, err := db.GetConversationEgressBinding(context.Background(), staleLocal.ID); !errors.Is(err, ErrConversationEgressBindingNotFound) {
+		t.Fatalf("stale local runtime binding = %v", err)
 	}
 	pending, err := db.GetConversationEgress(context.Background(), unused.ID)
 	if err != nil || pending.State != ConversationEgressStatePending || pending.Proxy == nil || pending.Proxy.ID != proxy.ID {

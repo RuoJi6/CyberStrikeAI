@@ -5,6 +5,31 @@
 
 本文冻结 Gateway、Transform Runner、Agent 脚本和控制面之间的首版契约，避免实现阶段各自定义不兼容的数据结构。
 
+## Agent 常用入口
+
+普通网站流量解密不需要手工编排多个 MCP 工具。Agent 应加载
+`traffic-transform-authoring` Skill，然后调用 `configure_traffic_decoder`：
+
+1. 指定一条完整历史事务、`request`/`response`/`both` 方向和源码。
+2. 服务端自动推导 decode Hook 与已锁定依赖。
+3. 在一次调用内创建不可变 revision、Runner 校验并离线试跑。
+4. 只有用户明确要求时，才按该事务的精确 host 创建 observe 绑定。
+
+修改源码时传原 `transform_id`，新源码会成为同一脚本的新 revision，并把
+observe 作用范围切换到已验证版本。作用范围的编辑、启停和删除，以及无作用
+范围脚本的删除，统一使用 `manage_traffic_transform`。下文的六 Hook 和独立
+create/validate/test/activate 工具属于高级或兼容接口。
+
+最小正文解密 SDK：
+
+```python
+from cyberstrike_transform import body_decoder
+
+@body_decoder(content_type="application/json")
+def decode_request(body: bytes) -> bytes:
+    return decrypt(body)
+```
+
 ## 1. 协议原则
 
 - Gateway 负责授权、TLS、HTTP 规范化、目标校验、正文上限和持久化。
@@ -357,17 +382,20 @@ Gateway 为每个语义 HTTP 请求生成独立 transaction ID。TLS MITM 连接
 - `GET /api/vulnerabilities/:id/traffic-evidence`
 - `POST /api/vulnerabilities/:id/traffic-evidence`
 - `DELETE /api/vulnerabilities/:id/traffic-evidence/:transactionId`
+- `GET /api/traffic-transforms`（脚本、限定站点的使用案例和注入对话；不含源码与 binding config）
+- `GET /api/traffic-transform-revisions/:id/source`（需要独立的 `traffic_transform:read_source` 权限）
 
-Transform 当前通过 Agent MCP 的 `create_traffic_transform`、`validate_traffic_transform`、`test_traffic_transform`、`activate_traffic_transform` 和 `deactivate_traffic_transform` 使用。以下管理 REST 仍是后续草案：
+Transform 当前通过 Agent MCP 的 `create_traffic_transform`、`validate_traffic_transform`、`test_traffic_transform`、`activate_traffic_transform` 和 `deactivate_traffic_transform` 使用。Agent 激活时必须指定 `matcher.hosts`；抓包仍覆盖完整对话，但只有命中 host（以及可选 path、method、content-type）的事务才进入 Runner。管理端已提供 observe binding 的作用范围与启停接口；inline 仍不能通过这些接口自行审批：
 
-- `GET /api/traffic-transforms`
 - `POST /api/traffic-transforms`
 - `POST /api/traffic-transforms/:id/revisions`
 - `POST /api/traffic-transform-revisions/:id/validate`
 - `POST /api/traffic-transform-revisions/:id/test`
 - `POST /api/conversations/:id/traffic-transform-bindings`
+- `PUT /api/traffic-transform-bindings/:id/scope`（只更新 matcher 与优先级，不读写 binding config）
 - `POST /api/traffic-transform-bindings/:id/activate`
-- `POST /api/traffic-transform-bindings/:id/deactivate`
+- `POST /api/traffic-transform-bindings/:id/disable`
+- `DELETE /api/traffic-transform-bindings/:id`（只允许删除已停用的 observe 使用案例；保留 revision 与历史运行证据）
 - `GET /api/traffic-transform-bindings/:id/runs`
 
 列表 API 不返回源码和正文；详情仍按权限返回摘要。源码、敏感正文和导出使用独立权限并记录读取审计。

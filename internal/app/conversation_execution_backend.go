@@ -17,17 +17,26 @@ import (
 type conversationExecutionBackendResolver struct {
 	db        *database.DB
 	host      security.ExecutionBackend
+	hostProxy hostExecutionBackendProvider
 	container containerruntime.RuntimeExecutor
 	lifecycle *containerruntime.LifecycleController
 }
 
-func newConversationExecutionBackendResolver(db *database.DB, runtime containerruntime.RuntimeExecutor, lifecycle *containerruntime.LifecycleController) security.ExecutionBackendResolver {
-	return &conversationExecutionBackendResolver{
+type hostExecutionBackendProvider interface {
+	ResolveHostExecutionBackend(context.Context, string) (security.ExecutionBackend, error)
+}
+
+func newConversationExecutionBackendResolver(db *database.DB, runtime containerruntime.RuntimeExecutor, lifecycle *containerruntime.LifecycleController, hostProviders ...hostExecutionBackendProvider) security.ExecutionBackendResolver {
+	resolver := &conversationExecutionBackendResolver{
 		db:        db,
 		host:      security.NewHostExecutionBackend(),
 		container: runtime,
 		lifecycle: lifecycle,
 	}
+	if len(hostProviders) > 0 {
+		resolver.hostProxy = hostProviders[0]
+	}
+	return resolver
 }
 
 func (r *conversationExecutionBackendResolver) ResolveExecutionBackend(ctx context.Context) (security.ExecutionBackend, error) {
@@ -47,6 +56,13 @@ func (r *conversationExecutionBackendResolver) ResolveExecutionBackend(ctx conte
 	}
 	switch runtimeMode {
 	case database.ConversationRuntimeModeHost:
+		if r.hostProxy != nil {
+			backend, resolveErr := r.hostProxy.ResolveHostExecutionBackend(ctx, conversationID)
+			if resolveErr != nil {
+				return nil, fmt.Errorf("configure host traffic capture for conversation %s: %w", conversationID, resolveErr)
+			}
+			return backend, nil
+		}
 		return r.host, nil
 	case database.ConversationRuntimeModeContainer:
 		return r.resolveContainer(ctx, conversationID)

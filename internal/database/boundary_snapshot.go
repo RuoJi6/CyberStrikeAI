@@ -378,8 +378,12 @@ func (db *DB) GetPendingConversationBoundarySnapshot(ctx context.Context, conver
 // conversations keep their editable selection until their first start.
 func (db *DB) EnsureContainerRuntimeBoundarySnapshots(ctx context.Context) error {
 	rows, err := db.QueryContext(ctx, `
-		SELECT conversation_id FROM conversation_container_runtimes ORDER BY conversation_id
-	`)
+		SELECT r.conversation_id
+		FROM conversation_container_runtimes r
+		JOIN conversations c ON c.id = r.conversation_id
+		WHERE c.runtime_mode = ?
+		ORDER BY r.conversation_id
+	`, ConversationRuntimeModeContainer)
 	if err != nil {
 		return fmt.Errorf("list container runtimes for boundary snapshot migration: %w", err)
 	}

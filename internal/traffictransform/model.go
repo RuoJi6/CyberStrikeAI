@@ -81,16 +81,17 @@ var (
 type Hook string
 
 type Transform struct {
-	ID               string    `json:"id"`
-	ConversationID   string    `json:"conversationId,omitempty"`
-	ProjectID        string    `json:"projectId,omitempty"`
-	Name             string    `json:"name"`
-	Description      string    `json:"description,omitempty"`
-	Language         string    `json:"language"`
-	OwnerUserID      string    `json:"ownerUserId,omitempty"`
-	CreatedByAgentID string    `json:"createdByAgentId,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                string    `json:"id"`
+	ConversationID    string    `json:"conversationId,omitempty"`
+	ProjectID         string    `json:"projectId,omitempty"`
+	CurrentRevisionID string    `json:"currentRevisionId,omitempty"`
+	Name              string    `json:"name"`
+	Description       string    `json:"description,omitempty"`
+	Language          string    `json:"language"`
+	OwnerUserID       string    `json:"ownerUserId,omitempty"`
+	CreatedByAgentID  string    `json:"createdByAgentId,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+	UpdatedAt         time.Time `json:"updatedAt"`
 }
 
 type Revision struct {
@@ -233,6 +234,7 @@ type DryRunReport struct {
 }
 
 type HookRun struct {
+	InvocationID  string          `json:"invocationId"`
 	Hook          Hook            `json:"hook"`
 	Action        string          `json:"action"`
 	DurationMS    int64           `json:"durationMs"`

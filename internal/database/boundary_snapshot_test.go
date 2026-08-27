@@ -620,7 +620,14 @@ func TestEnsureContainerRuntimeBoundarySnapshotsOnlyMigratesDurableRuntimes(t *t
 	policy := createSnapshotTestPolicy(t, db)
 	unused := createSnapshotTestConversation(t, db, policy.ID)
 	queued := createSnapshotTestConversation(t, db, policy.ID)
+	staleLocal := createSnapshotTestConversation(t, db, policy.ID)
 	if _, _, err := db.Queue(context.Background(), databaseRuntimeSpec(queued.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := db.Queue(context.Background(), databaseRuntimeSpec(staleLocal.ID), false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET runtime_mode = ? WHERE id = ?`, ConversationRuntimeModeHost, staleLocal.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.EnsureContainerRuntimeBoundarySnapshots(context.Background()); err != nil {
@@ -631,6 +638,9 @@ func TestEnsureContainerRuntimeBoundarySnapshotsOnlyMigratesDurableRuntimes(t *t
 	}
 	if _, err := db.GetConversationBoundarySnapshot(context.Background(), unused.ID); !errors.Is(err, ErrConversationBoundarySnapshotNotFound) {
 		t.Fatalf("unused conversation was frozen during migration: %v", err)
+	}
+	if _, err := db.GetConversationBoundarySnapshot(context.Background(), staleLocal.ID); !errors.Is(err, ErrConversationBoundarySnapshotNotFound) {
+		t.Fatalf("stale local runtime was frozen during migration: %v", err)
 	}
 	var selected string
 	if err := db.QueryRow(`SELECT policy_id FROM conversation_boundary_policy_selections WHERE conversation_id = ?`, unused.ID).Scan(&selected); err != nil || selected != policy.ID {

@@ -278,6 +278,40 @@ func TestWorkflowRunPermissionIsSeparateFromDefinitionManagement(t *testing.T) {
 	}
 }
 
+func TestTrafficTransformSourceUsesSeparateReadPermission(t *testing.T) {
+	if got := permissionForRequest(http.MethodGet, "/api/traffic-transforms"); got != "traffic_transform:read" {
+		t.Fatalf("dashboard permission = %q, want traffic_transform:read", got)
+	}
+	if got := permissionForRequest(http.MethodGet, "/api/traffic-transform-revisions/rev-1/source"); got != "traffic_transform:read_source" {
+		t.Fatalf("source permission = %q, want traffic_transform:read_source", got)
+	}
+	if got := permissionForRequest(http.MethodPost, "/api/traffic-transforms/manual"); got != "traffic_transform:write" {
+		t.Fatalf("manual authoring permission = %q, want traffic_transform:write", got)
+	}
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		if got := permissionForRequest(method, "/api/traffic-transforms/transform-1"); got != "traffic_transform:write" {
+			t.Fatalf("script lifecycle permission for %s = %q, want traffic_transform:write", method, got)
+		}
+	}
+	for _, request := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/traffic-transform-bindings"},
+		{http.MethodPut, "/api/traffic-transform-bindings/binding-1/scope"},
+		{http.MethodPost, "/api/traffic-transform-bindings/binding-1/activate"},
+		{http.MethodPost, "/api/traffic-transform-bindings/binding-1/disable"},
+		{http.MethodDelete, "/api/traffic-transform-bindings/binding-1"},
+	} {
+		if got := permissionForRequest(request.method, request.path); got != "traffic_transform:activate_observe" {
+			t.Fatalf("binding control permission for %s %s = %q", request.method, request.path, got)
+		}
+	}
+	if got := permissionForRequest(http.MethodPost, "/api/traffic-transactions/tx-1/replay"); got != "traffic:replay" {
+		t.Fatalf("replay permission = %q, want traffic:replay", got)
+	}
+}
+
 func TestRBACDenyHookReceivesDeniedDecision(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	called := false

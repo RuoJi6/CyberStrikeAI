@@ -95,9 +95,7 @@ func (hostExecutionBackend) Execute(ctx context.Context, request ExecutionReques
 	newCommand := func() *exec.Cmd {
 		cmd := exec.CommandContext(ctx, request.Command[0], request.Command[1:]...)
 		cmd.Dir = strings.TrimSpace(request.WorkingDir)
-		if len(request.Env) > 0 {
-			cmd.Env = append(os.Environ(), request.Env...)
-		}
+		cmd.Env = mergeExecutionEnvironment(os.Environ(), request.Env)
 		ConfigureShellCmdForAgentExecute(cmd)
 		return cmd
 	}
@@ -123,6 +121,31 @@ func (hostExecutionBackend) Execute(ctx context.Context, request ExecutionReques
 		}
 	}
 	return ExecutionResult{Output: output, ExitCode: exitCode, Location: "host"}, err
+}
+
+// mergeExecutionEnvironment applies request-scoped values exactly once. The
+// last override wins, which lets trusted execution wrappers enforce settings
+// such as a conversation-scoped proxy without inheriting a conflicting host
+// value earlier in the environment.
+func mergeExecutionEnvironment(base, overrides []string) []string {
+	last := make(map[string]int, len(base)+len(overrides))
+	combined := append(append([]string(nil), base...), overrides...)
+	for index, entry := range combined {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || name == "" {
+			continue
+		}
+		last[name] = index
+	}
+	result := make([]string, 0, len(last))
+	for index, entry := range combined {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok || name == "" || last[name] != index {
+			continue
+		}
+		result = append(result, entry)
+	}
+	return result
 }
 
 // CommandExitError preserves a container process exit code without pretending

@@ -93,6 +93,7 @@ type App struct {
 	containerTrafficSpool       *trafficspool.Collector
 	containerTrafficSpoolCancel context.CancelFunc
 	containerTrafficSpoolDone   chan struct{}
+	hostTrafficProxy            *hostTrafficProxyManager
 }
 
 // New 创建新应用
@@ -498,6 +499,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	auditHandler := handler.NewAuditHandler(db, auditSvc, log.Logger)
 	egressAuditHandler := handler.NewEgressAuditHandler(db)
 	trafficHandler := handler.NewTrafficHandler(db, log.Logger)
+	trafficHandler.SetTrafficTransformRunner(transformRunner)
 	egressAuditHandler.SetAudit(auditSvc)
 	robotHandler := handler.NewRobotHandler(cfg, db, agentHandler, log.Logger)
 	robotHandler.SetAudit(auditSvc)
@@ -686,9 +688,19 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	if containerManager != nil {
 		containerExecutor = containerManager
 	}
-	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle)
+	hostTrafficProxy := newHostTrafficProxyManager(db, transformRunner, log.Logger)
+	app.hostTrafficProxy = hostTrafficProxy
+	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle, hostTrafficProxy)
 	executor.SetExecutionBackendResolver(executionBackendResolver)
 	agent.SetExecutionBackendResolver(executionBackendResolver)
+	trafficHandler.SetTrafficReplayExecutor(func(ctx context.Context, conversationID string, request security.ExecutionRequest) (security.ExecutionResult, error) {
+		boundCtx := mcp.WithMCPConversationID(ctx, conversationID)
+		backend, err := executionBackendResolver.ResolveExecutionBackend(boundCtx)
+		if err != nil {
+			return security.ExecutionResult{ExitCode: -1}, err
+		}
+		return backend.Execute(boundCtx, request)
+	})
 	agentHandler.SetConversationWorkspaceUploadImporter(handler.ConversationWorkspaceUploadImporterFunc(func(ctx context.Context, conversationID, workspacePath string, content io.Reader, size int64) (string, error) {
 		backend, err := executionBackendResolver.ResolveExecutionBackend(mcp.WithMCPConversationID(ctx, conversationID))
 		if err != nil {
@@ -993,6 +1005,14 @@ func (a *App) Shutdown() {
 	a.robotMu.Unlock()
 
 	a.shutdownC2()
+	if a.hostTrafficProxy != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := a.hostTrafficProxy.Close(ctx); err != nil {
+			a.logger.Logger.Warn("关闭本机 MITM 流量代理失败", zap.Error(err))
+		}
+		cancel()
+		a.hostTrafficProxy = nil
+	}
 	if a.containerTrafficSpoolCancel != nil {
 		a.containerTrafficSpoolCancel()
 		a.containerTrafficSpoolCancel = nil
@@ -1420,6 +1440,17 @@ func setupRoutes(
 		protected.GET("/egress-audit-events/:id", egressAuditHandler.Get)
 		protected.GET("/traffic-transactions", trafficHandler.List)
 		protected.GET("/traffic-transactions/:id", trafficHandler.Get)
+		protected.POST("/traffic-transactions/:id/replay", trafficHandler.Replay)
+		protected.GET("/traffic-transforms", trafficHandler.ListTrafficTransformsDashboard)
+		protected.POST("/traffic-transforms/manual", trafficHandler.CreateManualTrafficTransform)
+		protected.PUT("/traffic-transforms/:id", trafficHandler.UpdateTrafficTransform)
+		protected.DELETE("/traffic-transforms/:id", trafficHandler.DeleteTrafficTransform)
+		protected.GET("/traffic-transform-revisions/:id/source", trafficHandler.GetTrafficTransformRevisionSource)
+		protected.POST("/traffic-transform-bindings", trafficHandler.CreateTrafficTransformBinding)
+		protected.PUT("/traffic-transform-bindings/:id/scope", trafficHandler.UpdateTrafficTransformBindingScope)
+		protected.POST("/traffic-transform-bindings/:id/activate", trafficHandler.ActivateTrafficTransformBinding)
+		protected.POST("/traffic-transform-bindings/:id/disable", trafficHandler.DisableTrafficTransformBinding)
+		protected.DELETE("/traffic-transform-bindings/:id", trafficHandler.DeleteTrafficTransformBinding)
 
 		// 外部MCP管理
 		protected.GET("/external-mcp", externalMCPHandler.GetExternalMCPs)

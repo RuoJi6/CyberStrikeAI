@@ -101,6 +101,22 @@ func mcpToolAuthorizer(db *database.DB) func(context.Context, string, map[string
 				return err
 			}
 			return conversationResource("traffic:read")
+		case builtin.ToolConfigureTrafficDecoder:
+			if err := conversationResource("traffic_transform:write"); err != nil {
+				return err
+			}
+			if err := require("traffic:read_sensitive"); err != nil {
+				return err
+			}
+			if boolArg(args, "activate") {
+				return conversationResource("traffic_transform:activate_observe")
+			}
+			return nil
+		case builtin.ToolManageTrafficTransform:
+			if strings.TrimSpace(mcpAuthorizationString(args, "action")) == "delete_script" {
+				return conversationResource("traffic_transform:write")
+			}
+			return conversationResource("traffic_transform:activate_observe")
 		case builtin.ToolCreateTrafficTransform, builtin.ToolValidateTrafficTransform:
 			return conversationResource("traffic_transform:write")
 		case builtin.ToolTestTrafficTransform:

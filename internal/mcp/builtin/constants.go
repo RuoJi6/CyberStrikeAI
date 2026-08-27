@@ -12,6 +12,8 @@ const (
 	ToolListTrafficTransactions    = "list_traffic_transactions"
 	ToolGetTrafficTransaction      = "get_traffic_transaction"
 	ToolLinkTrafficEvidence        = "link_traffic_evidence"
+	ToolConfigureTrafficDecoder    = "configure_traffic_decoder"
+	ToolManageTrafficTransform     = "manage_traffic_transform"
 	ToolCreateTrafficTransform     = "create_traffic_transform"
 	ToolValidateTrafficTransform   = "validate_traffic_transform"
 	ToolTestTrafficTransform       = "test_traffic_transform"
@@ -94,6 +96,8 @@ func IsBuiltinTool(toolName string) bool {
 		ToolListTrafficTransactions,
 		ToolGetTrafficTransaction,
 		ToolLinkTrafficEvidence,
+		ToolConfigureTrafficDecoder,
+		ToolManageTrafficTransform,
 		ToolCreateTrafficTransform,
 		ToolValidateTrafficTransform,
 		ToolTestTrafficTransform,
@@ -162,6 +166,8 @@ func GetAllBuiltinTools() []string {
 		ToolGetVulnerability,
 		ToolListTrafficTransactions,
 		ToolGetTrafficTransaction,
+		ToolConfigureTrafficDecoder,
+		ToolManageTrafficTransform,
 		ToolCreateTrafficTransform,
 		ToolValidateTrafficTransform,
 		ToolTestTrafficTransform,

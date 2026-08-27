@@ -159,9 +159,10 @@ func (p *Pipeline) DryRun(ctx context.Context, input DryRunInput) (DryRunReport,
 		result, invokeErr := p.client.Invoke(ctx, invocation)
 		duration := p.now().Sub(started).Milliseconds()
 		run := HookRun{
-			Hook:        hook,
-			DurationMS:  max(duration, 0),
-			InputSHA256: current.Body.SHA256,
+			InvocationID: invocation.InvocationID,
+			Hook:         hook,
+			DurationMS:   max(duration, 0),
+			InputSHA256:  current.Body.SHA256,
 		}
 		if invokeErr != nil {
 			run.Action = ActionError

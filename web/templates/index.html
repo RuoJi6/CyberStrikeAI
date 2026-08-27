@@ -31,11 +31,11 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260826-7">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260827-16">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
-    <script src="/static/js/router.js?v=20260822-5"></script>
+    <script src="/static/js/router.js?v=20260827-2"></script>
 </head>
 <body>
     <div id="login-overlay" class="login-overlay" style="display: none;">
@@ -256,12 +256,18 @@
                             <span data-i18n="nav.vulnerabilities">漏洞管理</span>
                         </div>
                     </div>
-                    <div class="nav-item" data-page="traffic-evidence" data-require-permission="traffic:read">
-                        <div class="nav-item-content" data-title="流量证据" onclick="switchPage('traffic-evidence')">
+                    <div class="nav-item nav-item-has-submenu" data-page="traffic" data-require-permission-any="traffic:read traffic:replay traffic_transform:read">
+                        <div class="nav-item-content" data-title="流量" onclick="window.toggleSubmenu('traffic')" data-i18n="nav.traffic" data-i18n-attr="data-title" data-i18n-skip-text="true">
                             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <path d="M4 7h11"></path><path d="m12 4 3 3-3 3"></path><path d="M20 17H9"></path><path d="m12 14-3 3 3 3"></path>
                             </svg>
-                            <span>流量证据</span>
+                            <span data-i18n="nav.traffic">流量</span>
+                            <svg class="submenu-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="m9 18 6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </div>
+                        <div class="nav-submenu">
+                            <div class="nav-submenu-item" data-page="traffic-evidence" data-require-permission="traffic:read" onclick="switchPage('traffic-evidence')" data-i18n="nav.trafficEvidence">流量证据</div>
+                            <div class="nav-submenu-item" data-page="traffic-replay" data-require-permission="traffic:replay" onclick="switchPage('traffic-replay')" data-i18n="nav.trafficReplay">重发包</div>
+                            <div class="nav-submenu-item" data-page="traffic-transforms" data-require-permission="traffic_transform:read" onclick="switchPage('traffic-transforms')" data-i18n="nav.trafficTransforms">加密解密</div>
                         </div>
                     </div>
                     <div class="nav-item" data-page="tasks">
@@ -2968,6 +2974,29 @@
                         <!-- 分页控件 -->
                         <div id="vulnerability-pagination" class="pagination-container pagination-fixed"></div>
                     </div>
+
+                    <div id="vulnerability-packet-modal" class="vulnerability-packet-modal" hidden role="dialog" aria-modal="true" aria-labelledby="vulnerability-packet-modal-title">
+                        <div class="vulnerability-packet-dialog">
+                            <div class="vulnerability-packet-head">
+                                <div>
+                                    <span class="traffic-evidence-eyebrow">VULNERABILITY PACKET EVIDENCE</span>
+                                    <h3 id="vulnerability-packet-modal-title">完整数据包证据</h3>
+                                    <p id="vulnerability-packet-modal-meta"></p>
+                                </div>
+                                <button id="vulnerability-packet-modal-close" type="button" class="modal-close" aria-label="关闭"></button>
+                            </div>
+                            <div class="vulnerability-packet-body">
+                                <aside class="vulnerability-packet-sidebar" aria-label="关联数据包">
+                                    <div class="vulnerability-packet-sidebar-title"><strong>关联事务</strong><span>选择一个数据包查看</span></div>
+                                    <div id="vulnerability-packet-transactions" class="vulnerability-packet-transactions"></div>
+                                </aside>
+                                <main class="vulnerability-packet-content">
+                                    <div id="vulnerability-packet-status" class="vulnerability-packet-status" role="status" aria-live="polite">请选择一个数据包</div>
+                                    <div id="vulnerability-packet-stages" class="vulnerability-packet-stages"></div>
+                                </main>
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
                 <!-- MITM 流量证据页面 -->
@@ -2981,10 +3010,6 @@
                         <button id="traffic-evidence-refresh" class="btn-secondary" type="button">刷新</button>
                     </div>
                     <div class="page-content traffic-evidence-content">
-                        <section class="traffic-evidence-notice" aria-label="安全提示">
-                            <span aria-hidden="true">!</span>
-                            <p><strong>目标内容不可信。</strong> 正文可能含凭据、二进制数据或提示注入文本；页面只作证据展示，不会执行其中内容。超过 10 MiB 的正文会明确标记为截断。</p>
-                        </section>
                         <section class="traffic-evidence-controls" aria-label="流量筛选">
                             <label class="traffic-evidence-search"><span>搜索</span><input id="traffic-evidence-search" type="search" maxlength="200" autocomplete="off" placeholder="事务 ID、主机、路径或方法…"></label>
                             <label><span>对话 ID</span><input id="traffic-evidence-conversation" type="text" maxlength="128" autocomplete="off" placeholder="全部已授权对话"></label>
@@ -2995,19 +3020,203 @@
                             <div class="traffic-evidence-results-head"><div><h3 id="traffic-evidence-results-title">捕获事务</h3><p id="traffic-evidence-status" role="status" aria-live="polite">正在加载…</p></div><div id="traffic-evidence-page-meta"></div></div>
                             <div class="traffic-evidence-table-wrap">
                                 <table class="traffic-evidence-table">
-                                    <thead><tr><th>时间</th><th>请求</th><th>目标</th><th>状态</th><th>执行来源</th><th>存储策略</th><th>捕获</th></tr></thead>
+                                    <thead><tr><th>时间</th><th>请求</th><th>目标</th><th>状态</th><th>脚本</th><th>运行位置</th><th>执行来源</th><th>存储策略</th><th>捕获</th></tr></thead>
                                     <tbody id="traffic-evidence-rows"></tbody>
                                 </table>
-                                <div id="traffic-evidence-empty" class="traffic-evidence-empty" hidden><strong>暂无符合条件的流量</strong><p>容器 Agent 产生 Web 请求后，MITM 网关会把事务导入到这里。</p></div>
+                                <div id="traffic-evidence-empty" class="traffic-evidence-empty" hidden><strong>暂无符合条件的流量</strong><p>Agent 产生 Web 请求后，容器强制网关或本机尽力代理会把事务导入到这里。</p></div>
                             </div>
                             <div class="traffic-evidence-pagination"><button id="traffic-evidence-prev" class="btn-secondary" type="button">上一页</button><button id="traffic-evidence-next" class="btn-secondary" type="button">下一页</button></div>
                         </section>
                     </div>
                     <div id="traffic-evidence-detail" class="traffic-evidence-detail" hidden role="dialog" aria-modal="true" aria-labelledby="traffic-evidence-detail-title">
                         <div class="traffic-evidence-detail-dialog">
-                            <div class="traffic-evidence-detail-head"><div><span class="traffic-evidence-eyebrow">UNTRUSTED PACKET</span><h3 id="traffic-evidence-detail-title">完整数据包</h3><p id="traffic-evidence-detail-meta"></p></div><button id="traffic-evidence-detail-close" type="button" class="modal-close" aria-label="关闭"></button></div>
+                            <div class="traffic-evidence-detail-head"><div><span class="traffic-evidence-eyebrow">UNTRUSTED PACKET</span><h3 id="traffic-evidence-detail-title">完整数据包</h3><p id="traffic-evidence-detail-meta"></p></div><div class="traffic-evidence-detail-actions"><button id="traffic-evidence-send-replay" type="button" class="btn-primary" data-require-permission="traffic:replay">发送到重发包</button><button id="traffic-evidence-detail-close" type="button" class="modal-close" aria-label="关闭"></button></div></div>
                             <div id="traffic-evidence-detail-stages" class="traffic-evidence-detail-stages"></div>
                         </div>
+                    </div>
+                </div>
+
+                <!-- 受控数据包重发页面 -->
+                <div id="page-traffic-replay" class="page traffic-replay-page" data-require-permission="traffic:replay">
+                    <div class="traffic-replay-commandbar">
+                        <div class="traffic-replay-commandbar-primary">
+                            <button id="traffic-replay-send" type="button" class="traffic-replay-send" disabled title="发送请求（Ctrl/⌘ + Enter）">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m22 2-7 20-4-9-9-4 20-7Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M22 2 11 13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                                <span>发送</span><kbd>⌘↵</kbd>
+                            </button>
+                            <div class="traffic-replay-picker">
+                                <label for="traffic-replay-transaction-id">事务 ID</label>
+                                <input id="traffic-replay-transaction-id" type="text" maxlength="128" autocomplete="off" placeholder="粘贴事务 ID，或从流量证据发送">
+                                <button id="traffic-replay-load" type="button">载入</button>
+                            </div>
+                        </div>
+                        <div class="traffic-replay-commandbar-secondary">
+                            <span id="traffic-replay-scheme" class="traffic-replay-badge">HTTP</span>
+                            <span id="traffic-replay-runtime" class="traffic-replay-badge">运行位置待载入</span>
+                            <span id="traffic-replay-origin-lock" class="traffic-replay-badge traffic-replay-badge-lock">
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="4" y="10" width="16" height="10" rx="2" stroke="currentColor" stroke-width="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3" stroke="currentColor" stroke-width="2"/></svg>
+                                同源锁定
+                            </span>
+                            <details id="traffic-replay-history-menu" class="traffic-replay-history-menu">
+                                <summary>
+                                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3 3v5h5M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                                    历史 <span id="traffic-replay-history-count">0</span>
+                                </summary>
+                                <div id="traffic-replay-history" class="traffic-replay-history" role="list"><p>本次页面尚无重发记录</p></div>
+                            </details>
+                        </div>
+                    </div>
+                    <div class="traffic-replay-contextbar">
+                        <p id="traffic-replay-meta">尚未选择数据包</p>
+                        <span id="traffic-replay-status" role="status" aria-live="polite">从流量证据选择请求后，可修改并在原执行位置重发。</span>
+                    </div>
+                    <div id="traffic-replay-workbench" class="traffic-replay-workbench">
+                        <section class="traffic-replay-pane traffic-replay-request-pane" aria-labelledby="traffic-replay-request-title">
+                            <header class="traffic-replay-pane-head">
+                                <div class="traffic-replay-pane-title">
+                                    <strong id="traffic-replay-request-title">Request</strong>
+                                    <span id="traffic-replay-request-summary">等待载入</span>
+                                </div>
+                                <div class="traffic-replay-pane-tools">
+                                    <button id="traffic-replay-format" type="button" disabled>美化 JSON</button>
+                                    <button id="traffic-replay-reset" type="button" disabled>还原</button>
+                                </div>
+                            </header>
+                            <div class="traffic-replay-editor-shell">
+                                <pre id="traffic-replay-request-lines" class="traffic-replay-line-numbers" aria-hidden="true">1</pre>
+                                <textarea id="traffic-replay-request" aria-label="原始 HTTP 请求" autocomplete="off" autocapitalize="off" spellcheck="false" wrap="off" disabled placeholder="METHOD /path HTTP/1.1&#10;Host: example.com&#10;&#10;body"></textarea>
+                            </div>
+                            <footer class="traffic-replay-pane-foot">
+                                <span>完整原始请求</span>
+                                <span>Host、协议与端口由原事务锁定</span>
+                            </footer>
+                        </section>
+                        <div id="traffic-replay-splitter" class="traffic-replay-splitter" role="separator" aria-label="调整请求与响应面板宽度" aria-orientation="vertical" tabindex="0"><span></span></div>
+                        <section class="traffic-replay-pane traffic-replay-response-pane" aria-labelledby="traffic-replay-response-title">
+                            <header class="traffic-replay-pane-head">
+                                <div class="traffic-replay-pane-title">
+                                    <strong id="traffic-replay-response-title">Response</strong>
+                                    <span id="traffic-replay-response-meta">等待重发</span>
+                                </div>
+                                <div class="traffic-replay-pane-tools traffic-replay-response-tabs" role="tablist" aria-label="响应视图">
+                                    <button id="traffic-replay-response-raw" class="is-active" type="button" role="tab" aria-selected="true" data-replay-response-view="raw">原始</button>
+                                    <button id="traffic-replay-response-body" type="button" role="tab" aria-selected="false" data-replay-response-view="body">正文</button>
+                                </div>
+                            </header>
+                            <div class="traffic-replay-editor-shell traffic-replay-response-editor">
+                                <pre id="traffic-replay-response-lines" class="traffic-replay-line-numbers" aria-hidden="true">1</pre>
+                                <pre id="traffic-replay-response" tabindex="0">选择数据包后即可编辑并重发。</pre>
+                            </div>
+                            <footer class="traffic-replay-pane-foot">
+                                <span id="traffic-replay-response-status">未发送</span>
+                                <span>响应仅展示，不执行内容</span>
+                            </footer>
+                        </section>
+                    </div>
+                </div>
+
+                <!-- Agent 可编程流量加密解密页面 -->
+                <div id="page-traffic-transforms" class="page traffic-transform-page" data-require-permission="traffic_transform:read">
+                    <div class="page-header traffic-transform-header">
+                        <div>
+                            <h2>加密解密</h2>
+                            <p>管理脚本、网站作用范围和已注入对话。</p>
+                        </div>
+                        <div class="traffic-transform-header-actions"><button id="traffic-transform-manual-open" class="btn-secondary" type="button" data-require-permission="traffic_transform:write">手写脚本</button><button class="btn-primary" type="button" onclick="switchPage('chat')">让 Agent 生成脚本</button></div>
+                    </div>
+                    <div class="page-content traffic-transform-content">
+                        <section class="traffic-transform-dashboard" aria-labelledby="traffic-transform-dashboard-title">
+                            <div class="traffic-transform-toolbar">
+                                <div class="traffic-transform-tabs" role="tablist" aria-label="加密解密管理视图">
+                                    <button id="traffic-transform-tab-scripts" class="traffic-transform-tab is-active" type="button" role="tab" aria-selected="true" data-transform-view="scripts">脚本 <span id="traffic-transform-count-scripts">0</span></button>
+                                    <button id="traffic-transform-tab-runner" class="traffic-transform-tab" type="button" role="tab" aria-selected="false" data-transform-view="runner">Runner <span id="traffic-transform-count-runner">0</span></button>
+                                    <button id="traffic-transform-tab-conversations" class="traffic-transform-tab" type="button" role="tab" aria-selected="false" data-transform-view="conversations">注入的对话 <span id="traffic-transform-count-conversations">0</span></button>
+                                </div>
+                                <div class="traffic-transform-actions">
+                                    <span id="traffic-transform-status" class="traffic-transform-status" role="status" aria-live="polite">正在加载…</span>
+                                    <button id="traffic-transform-refresh" class="btn-secondary" type="button">刷新</button>
+                                </div>
+                            </div>
+                            <h3 id="traffic-transform-dashboard-title" class="sr-only">Traffic Transform 管理</h3>
+                            <div id="traffic-transform-panel-scripts" class="traffic-transform-panel" role="tabpanel" aria-labelledby="traffic-transform-tab-scripts">
+                                <div class="traffic-transform-workspace">
+                                    <aside class="traffic-transform-script-rail" aria-label="脚本列表">
+                                        <label class="traffic-transform-search"><span class="sr-only">搜索脚本</span><input id="traffic-transform-search" type="search" maxlength="200" autocomplete="off" placeholder="搜索脚本…"></label>
+                                        <div id="traffic-transform-script-list" class="traffic-transform-script-list"></div>
+                                        <div id="traffic-transform-script-total" class="traffic-transform-script-total">共 0 个脚本</div>
+                                    </aside>
+                                    <div id="traffic-transform-script-detail" class="traffic-transform-script-detail"></div>
+                                </div>
+                            </div>
+                            <div id="traffic-transform-panel-runner" class="traffic-transform-panel" role="tabpanel" aria-labelledby="traffic-transform-tab-runner" hidden>
+                                <div id="traffic-transform-runner" class="traffic-transform-runner-list"></div>
+                            </div>
+                            <div id="traffic-transform-panel-conversations" class="traffic-transform-panel" role="tabpanel" aria-labelledby="traffic-transform-tab-conversations" hidden>
+                                <div id="traffic-transform-conversations" class="traffic-transform-conversation-list"></div>
+                            </div>
+                        </section>
+                    </div>
+                    <div id="traffic-transform-source-detail" class="traffic-transform-source-detail" hidden role="dialog" aria-modal="true" aria-labelledby="traffic-transform-source-title">
+                        <div class="traffic-transform-source-dialog">
+                            <div class="traffic-transform-source-head">
+                                <div><span class="traffic-evidence-eyebrow">IMMUTABLE TRANSFORM SCRIPT</span><h3 id="traffic-transform-source-title">不可变脚本版本</h3><p id="traffic-transform-source-meta"></p></div>
+                                <button id="traffic-transform-source-close" type="button" class="modal-close" aria-label="关闭"></button>
+                            </div>
+                            <div id="traffic-transform-source-code" class="traffic-transform-source-code" tabindex="0" role="document" aria-label="脚本源码"></div>
+                        </div>
+                    </div>
+                    <div id="traffic-transform-editor" class="traffic-transform-manual" hidden role="dialog" aria-modal="true" aria-labelledby="traffic-transform-editor-title">
+                        <form id="traffic-transform-editor-form" class="traffic-transform-manual-dialog">
+                            <div class="traffic-transform-source-head"><div><span class="traffic-evidence-eyebrow">NEW IMMUTABLE REVISION</span><h3 id="traffic-transform-editor-title">编辑脚本</h3><p>此处编辑脚本定义；网站、对话和启停在脚本详情的“作用范围”中独立管理。源码变更验证通过后会生成新版本。</p></div><button id="traffic-transform-editor-close" type="button" class="modal-close" aria-label="关闭"></button></div>
+                            <div class="traffic-transform-manual-fields">
+                                <label><span>脚本名称</span><input id="traffic-transform-editor-name" required maxlength="120"></label>
+                                <label class="is-wide"><span>说明</span><input id="traffic-transform-editor-description" maxlength="4000"></label>
+                                <label class="is-wide"><span>Python 源码</span><textarea id="traffic-transform-editor-source" required spellcheck="false"></textarea><small>已启用的旁路范围仅在新版本验证通过后切换；历史版本和流量证据会保留。</small></label>
+                            </div>
+                            <div class="traffic-transform-manual-result"><span id="traffic-transform-editor-status" role="status" aria-live="polite">正在读取当前版本…</span></div>
+                            <div class="traffic-transform-manual-actions"><button id="traffic-transform-editor-cancel" type="button" class="btn-secondary">取消</button><button id="traffic-transform-editor-submit" type="submit" class="btn-primary">保存并验证新版本</button></div>
+                        </form>
+                    </div>
+                    <div id="traffic-transform-manual" class="traffic-transform-manual" hidden role="dialog" aria-modal="true" aria-labelledby="traffic-transform-manual-title">
+                        <form id="traffic-transform-manual-form" class="traffic-transform-manual-dialog">
+                            <div class="traffic-transform-source-head"><div><span class="traffic-evidence-eyebrow">USER AUTHORED SCRIPT</span><h3 id="traffic-transform-manual-title">编写并测试脚本</h3><p>脚本先在隔离 Runner 验证，再对一个历史数据包离线测试；启用时只作用于指定网站。</p></div><button id="traffic-transform-manual-close" type="button" class="modal-close" aria-label="关闭"></button></div>
+                            <div class="traffic-transform-manual-fields">
+                                <label><span>对话 ID</span><input id="traffic-transform-manual-conversation" required maxlength="128" autocomplete="off"></label>
+                                <label><span>脚本名称</span><input id="traffic-transform-manual-name" required maxlength="120" value="最小请求解码示例"></label>
+                                <label class="is-wide"><span>说明</span><input id="traffic-transform-manual-description" maxlength="4000" value="用户手写的最小旁路解码脚本，用于验证 Runner 与站点匹配。"></label>
+                                <label><span>历史事务 ID（建议填写）</span><input id="traffic-transform-manual-transaction" maxlength="128" autocomplete="off"></label>
+                                <label><span>测试方向</span><select id="traffic-transform-manual-direction"><option value="request">请求</option><option value="response">响应</option></select></label>
+                                <label><span>目标网站</span><input id="traffic-transform-manual-host" required maxlength="253" placeholder="api.example.com"></label>
+                                <label><span>路径前缀（可选）</span><input id="traffic-transform-manual-path" maxlength="2048" placeholder="/api/"></label>
+                                <label class="is-wide"><span>Python 源码</span><textarea id="traffic-transform-manual-source" required spellcheck="false">from cyberstrike_transform import Message
+
+def decode_request(ctx, wire: Message) -> Message:
+    return wire.set_header("X-Traffic-Decoded", "true")</textarea></label>
+                                <label class="traffic-transform-manual-check is-wide"><input id="traffic-transform-manual-activate" type="checkbox" checked><span>验证与历史包测试通过后，按上述网站启用旁路解码</span></label>
+                            </div>
+                            <div class="traffic-transform-manual-result"><span id="traffic-transform-manual-status" role="status" aria-live="polite"></span><pre id="traffic-transform-manual-output" hidden></pre></div>
+                            <div class="traffic-transform-manual-actions"><button id="traffic-transform-manual-cancel" type="button" class="btn-secondary">取消</button><button id="traffic-transform-manual-submit" type="submit" class="btn-primary">保存、验证并测试</button></div>
+                        </form>
+                    </div>
+                    <div id="traffic-transform-scope-editor" class="traffic-transform-scope-editor" hidden role="dialog" aria-modal="true" aria-labelledby="traffic-transform-scope-title">
+                        <form id="traffic-transform-scope-form" class="traffic-transform-scope-dialog">
+                            <div class="traffic-transform-source-head">
+                                <div><span class="traffic-evidence-eyebrow">TRAFFIC BINDING SCOPE</span><h3 id="traffic-transform-scope-title">编辑作用范围</h3><p id="traffic-transform-scope-meta"></p></div>
+                                <button id="traffic-transform-scope-close" type="button" class="modal-close" aria-label="关闭"></button>
+                            </div>
+                            <div class="traffic-transform-scope-fields">
+                                <label id="traffic-transform-scope-conversation-field" class="is-wide" hidden><span>注入的对话 ID（必填）</span><input id="traffic-transform-scope-conversation-id" maxlength="128" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><small>对话级脚本会自动带入原对话；项目级脚本可填写同一项目中有权限访问的对话。</small></label>
+                                <label class="is-wide"><span>目标网站（必填）</span><textarea id="traffic-transform-scope-hosts" required maxlength="8192" rows="4" placeholder="api.example.com&#10;www.example.net"></textarea><small>每行或逗号分隔；按完整主机名匹配，只有命中的网站才会进入此脚本。</small></label>
+                                <label><span>协议</span><input id="traffic-transform-scope-schemes" maxlength="1024" placeholder="https, http"></label>
+                                <label><span>HTTP 方法</span><input id="traffic-transform-scope-methods" maxlength="2048" placeholder="GET, POST"></label>
+                                <label class="is-wide"><span>路径前缀</span><textarea id="traffic-transform-scope-paths" maxlength="8192" rows="3" placeholder="/wechat/api/&#10;/v1/private/"></textarea></label>
+                                <label><span>Content-Type</span><input id="traffic-transform-scope-types" maxlength="4096" placeholder="application/json"></label>
+                                <label><span>优先级</span><input id="traffic-transform-scope-priority" type="number" min="0" max="10000" step="1" value="0"></label>
+                                <label id="traffic-transform-scope-activate-field" class="traffic-transform-scope-check is-wide" hidden><input id="traffic-transform-scope-activate" type="checkbox" checked><span>创建后立即启用</span></label>
+                            </div>
+                            <div class="traffic-transform-scope-result"><span id="traffic-transform-scope-status" role="status" aria-live="polite"></span><small>此处只修改匹配规则，不读取或回传脚本密钥、IV 等 binding 配置。</small></div>
+                            <div class="traffic-transform-scope-actions"><button id="traffic-transform-scope-cancel" type="button" class="btn-secondary">取消</button><button id="traffic-transform-scope-submit" type="submit" class="btn-primary">保存作用范围</button></div>
+                        </form>
                     </div>
                 </div>
 
@@ -7417,8 +7626,10 @@
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
     <script src="/static/js/conversation-container-settings.js?v=20260826-4"></script>
-    <script src="/static/js/vulnerability.js?v=14"></script>
-    <script src="/static/js/traffic-evidence.js?v=1"></script>
+    <script src="/static/js/vulnerability.js?v=18"></script>
+    <script src="/static/js/traffic-evidence.js?v=5"></script>
+    <script src="/static/js/traffic-replay.js?v=5"></script>
+    <script src="/static/js/traffic-transforms.js?v=9"></script>
     <script src="/static/js/webshell.js"></script>
     <script src="/static/js/chat-files.js"></script>
     <script src="/static/js/tasks.js"></script>

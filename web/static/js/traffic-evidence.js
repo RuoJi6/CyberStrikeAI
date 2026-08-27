@@ -1,6 +1,8 @@
 (function (root) {
     'use strict';
 
+    const REQUEST_TIMEOUT_MS = 15000;
+
     const state = {
         active: false,
         bound: false,
@@ -12,6 +14,11 @@
         conversation: '',
         runtime: '',
         timer: null,
+        listController: null,
+        listRequestID: 0,
+        detailController: null,
+        detailRequestID: 0,
+        detailTransactionID: '',
     };
 
     function byId(id) {
@@ -47,6 +54,38 @@
         return params.toString();
     }
 
+    async function requestWithTimeout(url, controllerKey) {
+        if (state[controllerKey]) state[controllerKey].abort();
+        const controller = new root.AbortController();
+        state[controllerKey] = controller;
+        let timedOut = false;
+        const timeout = root.setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+        }, REQUEST_TIMEOUT_MS);
+        try {
+            return await root.apiFetch(url, { signal: controller.signal });
+        } catch (error) {
+            if (timedOut) throw new Error('请求超过 15 秒，请检查网络后重试');
+            throw error;
+        } finally {
+            root.clearTimeout(timeout);
+            if (state[controllerKey] === controller) state[controllerKey] = null;
+        }
+    }
+
+    function runtimeModeLabel(mode) {
+        if (mode === 'container') return '容器';
+        if (mode === 'host') return '本机';
+        return '未标注';
+    }
+
+    function transformResultLabel(result) {
+		if (result === 'observe_passed') return '脚本已解码';
+		if (result === 'replay_applied') return '脚本已处理';
+		return result ? '脚本已处理' : '';
+	}
+
     function renderRows(items) {
         const body = byId('traffic-evidence-rows');
         const empty = byId('traffic-evidence-empty');
@@ -74,7 +113,26 @@
             statusCell.appendChild(create('span', `traffic-evidence-status-code${status >= 400 ? ' is-error' : ''}`, status || '-'));
             row.appendChild(statusCell);
 
-            const source = [item.agent_id, item.execution_id, item.tool_call_id].filter(Boolean).join(' · ') || '未标注';
+			const transformCell = create('td');
+			const transformLabel = transformResultLabel(item.transform_result)
+				|| (item.transform_binding_id || item.transform_revision_id ? '脚本已处理' : '');
+			if (transformLabel) {
+				row.classList.add('is-transformed');
+				const badge = create('span', 'traffic-evidence-transform-badge', transformLabel);
+				badge.title = `规则 ${item.transform_binding_id || '-'} · 版本 ${item.transform_revision_id || '-'}`;
+				transformCell.appendChild(badge);
+			} else {
+				transformCell.appendChild(create('span', 'traffic-evidence-transform-empty', '—'));
+			}
+			row.appendChild(transformCell);
+
+            const runtimeMode = String(item.runtime_mode || 'unknown').toLowerCase();
+            const runtimeCell = create('td');
+            runtimeCell.appendChild(create('span', `traffic-evidence-runtime-badge is-${runtimeMode}`, runtimeModeLabel(runtimeMode)));
+            row.appendChild(runtimeCell);
+
+			const replayTransform = String(item.execution_id || '').startsWith('replay-transform:');
+            const source = replayTransform ? '重发包 · 脚本' : ([item.agent_id, item.execution_id, item.tool_call_id].filter(Boolean).join(' · ') || '未标注');
             const sourceCell = create('td', '', source);
             sourceCell.title = source;
             row.appendChild(sourceCell);
@@ -109,18 +167,21 @@
     }
 
     async function load(resetPage) {
-        if (state.loading || typeof root.apiFetch !== 'function') return;
+        if (typeof root.apiFetch !== 'function') return;
         if (resetPage) state.page = 1;
         state.query = value('traffic-evidence-search').slice(0, 200);
         state.conversation = value('traffic-evidence-conversation').slice(0, 128);
         state.runtime = value('traffic-evidence-runtime');
         state.pageSize = Number.parseInt(value('traffic-evidence-page-size'), 10) || 20;
         state.loading = true;
+        const requestID = ++state.listRequestID;
         setText(byId('traffic-evidence-status'), '正在加载流量事务…');
         try {
-            const response = await root.apiFetch(`/api/traffic-transactions?${queryString()}`);
+            const response = await requestWithTimeout(`/api/traffic-transactions?${queryString()}`, 'listController');
+            if (requestID !== state.listRequestID) return;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
+            if (requestID !== state.listRequestID) return;
             const items = Array.isArray(payload.items) ? payload.items : [];
             state.totalPages = Number(payload.total_pages || 0);
             renderRows(items);
@@ -131,10 +192,11 @@
             if (prev) prev.disabled = state.page <= 1;
             if (next) next.disabled = state.totalPages === 0 || state.page >= state.totalPages;
         } catch (error) {
+            if (requestID !== state.listRequestID || error?.name === 'AbortError') return;
             renderRows([]);
             setText(byId('traffic-evidence-status'), `加载失败：${error.message || error}`);
         } finally {
-            state.loading = false;
+            if (requestID === state.listRequestID) state.loading = false;
         }
     }
 
@@ -160,6 +222,16 @@
         const aggregateCount = Number(transaction.aggregate_count || 0);
         const aggregateMeta = aggregateCount > 1 ? ` · ${transaction.aggregate_kind || 'aggregate'} × ${aggregateCount}（当前为完整代表包）` : '';
         setText(byId('traffic-evidence-detail-meta'), `${transaction.id || '-'} · ${transaction.scheme || ''}://${transaction.host || ''}${transaction.path || ''}${aggregateMeta}`);
+		const transformed = Boolean(transaction.transform_result || transaction.transform_binding_id || transaction.transform_revision_id);
+		if (transformed) {
+			const transformCard = create('section', 'traffic-evidence-transform-summary');
+			const heading = create('div', 'traffic-evidence-transform-summary-head');
+			heading.appendChild(create('strong', '', transformResultLabel(transaction.transform_result) || '脚本已处理'));
+			heading.appendChild(create('span', '', 'Traffic Transform'));
+			transformCard.appendChild(heading);
+			transformCard.appendChild(create('p', '', `该事务已命中加解密规则；规则 ${transaction.transform_binding_id || '-'} · 脚本版本 ${transaction.transform_revision_id || '-'}`));
+			stages.appendChild(transformCard);
+		}
         if (aggregateCount > 1) {
             let summary = {};
             try { summary = JSON.parse(transaction.aggregate_summary_json || '{}'); } catch (error) { summary = {}; }
@@ -174,15 +246,26 @@
             stages.appendChild(summaryCard);
         }
         (Array.isArray(payload.messages) ? payload.messages : []).forEach((message) => {
-            const card = create('section', 'traffic-evidence-packet');
+			const decodedStage = message.stage === 'decoded_request' || message.stage === 'decoded_response';
+            const card = create('section', `traffic-evidence-packet${decodedStage ? ' is-transform-output' : ''}`);
             const head = create('div', 'traffic-evidence-packet-head');
-            head.appendChild(create('span', '', message.stage || message.kind || 'packet'));
+			const stageLabel = decodedStage ? `${message.stage} · 脚本输出` : (message.stage || message.kind || 'packet');
+            head.appendChild(create('span', '', stageLabel));
             const complete = message.complete !== false;
-            head.appendChild(create('span', complete ? '' : 'traffic-evidence-packet-note', complete ? `${message.body_length || 0} bytes` : `已截断 ${message.body_stored_bytes || 0}/${message.body_length || 0} bytes`));
+            head.appendChild(create('span', '', `${message.body_length || 0} bytes`));
             card.appendChild(head);
             const pre = create('pre');
             pre.textContent = packetText(message);
             card.appendChild(pre);
+            if (!complete) {
+                const storedBytes = Number(message.body_stored_bytes || 0);
+                const totalBytes = Number(message.body_length || 0);
+                const truncation = create('div', 'traffic-evidence-packet-truncation');
+                truncation.setAttribute('role', 'status');
+                truncation.appendChild(create('strong', '', '正文已截断'));
+                truncation.appendChild(create('span', '', `当前显示 ${storedBytes}/${totalBytes} bytes`));
+                card.appendChild(truncation);
+            }
             stages.appendChild(card);
         });
         if (!stages.childNodes.length) stages.appendChild(create('div', 'traffic-evidence-empty', '该事务没有可显示的数据包阶段'));
@@ -194,12 +277,17 @@
         const stages = byId('traffic-evidence-detail-stages');
         if (!modal || !stages) return;
         modal.hidden = false;
+        state.detailTransactionID = transactionId;
+        const requestID = ++state.detailRequestID;
         stages.replaceChildren(create('div', 'traffic-evidence-empty', '正在读取完整数据包…'));
         try {
-            const response = await root.apiFetch(`/api/traffic-transactions/${encodeURIComponent(transactionId)}`);
+            const response = await requestWithTimeout(`/api/traffic-transactions/${encodeURIComponent(transactionId)}`, 'detailController');
+            if (requestID !== state.detailRequestID) return;
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            renderDetail(await response.json());
+            const payload = await response.json();
+            if (requestID === state.detailRequestID) renderDetail(payload);
         } catch (error) {
+            if (requestID !== state.detailRequestID || error?.name === 'AbortError') return;
             stages.replaceChildren(create('div', 'traffic-evidence-empty', `读取失败：${error.message || error}`));
         }
     }
@@ -207,6 +295,20 @@
     function closeDetail() {
         const modal = byId('traffic-evidence-detail');
         if (modal) modal.hidden = true;
+        state.detailRequestID++;
+        if (state.detailController) state.detailController.abort();
+        state.detailController = null;
+    }
+
+    function sendDetailToReplay() {
+        if (!state.detailTransactionID) return;
+        if (typeof root.openTrafficReplayTransaction === 'function') {
+            root.openTrafficReplayTransaction(state.detailTransactionID);
+        } else {
+            root.pendingTrafficReplayTransaction = state.detailTransactionID;
+            if (typeof root.switchPage === 'function') root.switchPage('traffic-replay');
+        }
+        closeDetail();
     }
 
     function bind() {
@@ -223,6 +325,7 @@
             state.timer = root.setTimeout(() => void load(true), 250);
         });
         byId('traffic-evidence-detail-close')?.addEventListener('click', closeDetail);
+        byId('traffic-evidence-send-replay')?.addEventListener('click', sendDetailToReplay);
         byId('traffic-evidence-detail')?.addEventListener('click', (event) => { if (event.target === byId('traffic-evidence-detail')) closeDetail(); });
         root.document?.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeDetail(); });
     }

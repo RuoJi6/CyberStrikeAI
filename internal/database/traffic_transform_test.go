@@ -2,6 +2,8 @@ package database
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -87,6 +89,9 @@ func TestTrafficTransformRevisionBindingLifecycle(t *testing.T) {
 	if err != nil || len(active) != 1 || active[0].ID != binding.ID {
 		t.Fatalf("ListActiveTrafficTransformBindings = %#v / %v", active, err)
 	}
+	if err := db.DeleteTrafficTransformBinding(ctx, binding.ID); err == nil {
+		t.Fatal("active binding deletion should be rejected")
+	}
 	if _, err := db.DisableTrafficTransformBinding(ctx, binding.ID); err != nil {
 		t.Fatalf("DisableTrafficTransformBinding: %v", err)
 	}
@@ -98,6 +103,12 @@ func TestTrafficTransformRevisionBindingLifecycle(t *testing.T) {
 	list, err := db.ListTrafficTransformsForConversation(ctx, conversation.ID)
 	if err != nil || len(list) != 1 || list[0].ID != transform.ID {
 		t.Fatalf("ListTrafficTransformsForConversation = %#v / %v", list, err)
+	}
+	if err := db.DeleteTrafficTransformBinding(ctx, binding.ID); err != nil {
+		t.Fatalf("DeleteTrafficTransformBinding: %v", err)
+	}
+	if _, err := db.GetTrafficTransformBinding(ctx, binding.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("binding after delete error = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -132,5 +143,70 @@ func TestInlineTrafficTransformBindingRequiresApprovingUser(t *testing.T) {
 	activated, err := db.ActivateTrafficTransformBinding(ctx, binding.ID, "reviewer-1")
 	if err != nil || activated.ApprovedByUserID != "reviewer-1" || activated.ApprovedAt == nil {
 		t.Fatalf("approved inline binding = %#v / %v", activated, err)
+	}
+}
+
+func TestTrafficTransformEditAndSoftDeletePreserveEvidence(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "traffic-transform-edit.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	conversation, _ := db.CreateConversation("editable", ConversationCreateMeta{})
+	transform, _ := db.CreateTrafficTransform(ctx, &traffictransform.Transform{ConversationID: conversation.ID, Name: "codec v1"})
+	revision, report, err := db.CreateTrafficTransformRevision(ctx, &traffictransform.Revision{
+		TransformID: transform.ID, Source: testTransformSource, Hooks: []traffictransform.Hook{traffictransform.HookDecodeRequest},
+	}, traffictransform.DefaultRunnerInventory())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetTrafficTransformRevisionValidation(ctx, revision.ID, revision.SourceSHA256, traffictransform.ValidationPassed, report); err != nil {
+		t.Fatal(err)
+	}
+	transform, err = db.PromoteTrafficTransformRevision(ctx, transform.ID, revision.ID, "codec v1", "first")
+	if err != nil || transform.CurrentRevisionID != revision.ID {
+		t.Fatalf("promoted transform = %#v / %v", transform, err)
+	}
+	binding, err := db.CreateTrafficTransformBinding(ctx, &traffictransform.Binding{
+		ConversationID: conversation.ID, TransformID: transform.ID, RevisionID: revision.ID,
+		Mode: traffictransform.ModeObserve, Matcher: traffictransform.Matcher{Hosts: []string{"api.example.test"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateTrafficTransformRun(ctx, &traffictransform.Run{
+		BindingID: binding.ID, RevisionID: revision.ID, InvocationID: "edit-evidence", Kind: "online",
+		Hook: traffictransform.HookDecodeRequest, Mode: traffictransform.ModeObserve, Action: traffictransform.ActionPass,
+		InputSHA256: "input",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTrafficTransform(ctx, transform.ID); err == nil {
+		t.Fatal("script deletion with an attached scope should be rejected")
+	}
+	if _, err := db.DisableTrafficTransformBinding(ctx, binding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTrafficTransformBinding(ctx, binding.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeleteTrafficTransform(ctx, transform.ID); err != nil {
+		t.Fatalf("DeleteTrafficTransform: %v", err)
+	}
+	items, err := db.ListTrafficTransforms(ctx, 10)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("visible transforms after delete = %#v / %v", items, err)
+	}
+	if preserved, err := db.GetTrafficTransformRevision(ctx, revision.ID); err != nil || preserved.Source != testTransformSource {
+		t.Fatalf("preserved revision = %#v / %v", preserved, err)
+	}
+	summaries, err := db.ListTrafficTransformRunSummaries(ctx, 10)
+	if err != nil || len(summaries) != 1 || !summaries[0].TransformDeleted || summaries[0].TransformName != "codec v1" {
+		t.Fatalf("runner summaries after script delete = %#v / %v", summaries, err)
+	}
+	var runCount int
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM traffic_transform_runs WHERE invocation_id = 'edit-evidence'`).Scan(&runCount); err != nil || runCount != 1 {
+		t.Fatalf("preserved runs = %d / %v", runCount, err)
 	}
 }

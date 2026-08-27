@@ -1,6 +1,6 @@
 # Agent 可编程 MITM 与流量证据设计
 
-> 状态：阶段 1、3 与 observe 数据面已实现；Host/inline 仍在设计中  
+> 状态：阶段 1、Host 尽力捕获、阶段 3 与 observe 数据面已实现；inline 仍在设计中
 > 最后更新：2026-08-27  
 > 工作分支：`codex/mitm-traffic-evidence`  
 > 基线分支：`codex/docker-agent-runtime`
@@ -32,8 +32,9 @@
 - Agent MCP 已提供流量检索、详情读取、漏洞证据关联，以及 Transform 的创建、隔离验证、历史报文 dry-run、observe 激活和停用。
 - Python Transform Runner 使用私有 Docker internal network、随机 token、非 root、只读 rootfs、无 capabilities、无公网和 CPU/内存/PID 限制。
 - active observe binding 在证据导入后异步执行 decode，原始 wire message 不被修改；失败时原流量继续。
+- Host 对话通过带随机认证凭据的 loopback Gateway 和临时对话 CA 尽力捕获遵循代理环境的 HTTP/HTTPS 子进程流量，记录为 `best_effort`。
 
-当前没有实现 Host `ProxiedExecutionBackend`、实时 inline 改包/重新编码、管理员 inline 审批页面、每对话 Runner sidecar 和 blob/配额层。下文相应章节描述的是目标架构，不代表当前已交付能力。当前部署与验证方法见[流量证据与 Transform Runner 运维](traffic-evidence-operations.md)。
+当前没有实现 Host 每次执行的细粒度追踪令牌、实时 inline 改包/重新编码、管理员 inline 审批页面、每对话 Runner sidecar 和 blob/配额层。下文相应章节描述的是目标架构，不代表当前已交付能力。当前部署与验证方法见[流量证据与 Transform Runner 运维](traffic-evidence-operations.md)。
 
 ## 2. 已冻结的核心决策
 
@@ -283,25 +284,25 @@ Agent internal network   │       transform internal network
 
 当前阶段的抓包 spool 已按对话隔离；observe Runner 是控制面通过独立 private internal network 调用的共享无状态实例，且不与 Agent/Gateway 网络相连。目标版本再演进为上图所示的每对话 sidecar，并让 Gateway 直接调用 inline Hook。
 
-## 8. 本机执行目标拓扑（尚未实现）
+## 8. 本机执行拓扑（尽力捕获已实现）
 
 ```text
 Host ExecutionBackend 启动的 Agent 命令
-  │ 每次执行注入 HTTP(S)_PROXY、CA、追踪令牌
+  │ 每次执行注入 HTTP(S)_PROXY、CA
   ▼
 127.0.0.1 随机端口上的对话 Gateway
   │ loopback 有界 RPC
   ▼
-受管理的本地 Transform Worker 子进程
+控制面 SQLite 与受管理的 Transform Runner
 ```
 
 - 不修改操作系统全局代理、系统信任库或防火墙。
-- `ProxiedExecutionBackend` 包装现有 Host backend，为每次命令注入代理 URL、对话 CA 和短期执行令牌。
-- CA 和 runner 文件放在应用私有运行目录，按对话隔离，生命周期结束后清理。
-- 本地 Worker 使用固定 runner 程序和协议启动，不由网关拼接任意 shell 命令。
-- 本机模式本来就允许 Agent 在宿主机执行代码，因此 Worker 不扩大该模式权限；但仍需超时、内存、输出和熔断限制，避免拖垮网关。
+- `ProxiedExecutionBackend` 已包装现有 Host backend，为每次命令注入带认证的代理 URL、对话 CA 和常见客户端信任变量。
+- 系统根证书与对话 CA 组成的 CA bundle 放在权限为 `0700` 的临时目录，文件为 `0600`；代理只监听 `127.0.0.1` 随机端口，按对话隔离，应用关闭后清理。
+- HTTP/HTTPS 完整消息直接经过相同的高流量压缩后写入数据库，再异步触发已绑定的 observe Transform。
+- 当前共享 Transform Runner 仍使用固定程序和协议，不由网关拼接任意 shell 命令；后续再演进为受管理的每对话 Worker。
 - 本机程序可以忽略代理变量、证书固定或直接建立 socket，因此覆盖级别只能标记为 `best_effort`。
-- 管理员可以配置 `host_transform_mode=disabled|observe|inline`，生产默认建议 `observe`。
+- 后续管理员可配置 `host_transform_mode=disabled|observe|inline`，生产默认建议 `observe`。
 
 若以后要强制接管本机所有流量，需要单独设计具有管理员权限的 TUN/透明代理。首版不能静默修改系统全局网络配置，也不能宣称本机流量已被完全强制捕获。
 
@@ -401,7 +402,7 @@ inline 批准记录必须包含 revision SHA-256、匹配范围、方向、失�
 - 现有 `serveInterceptedTLS` 每个 CONNECT 只读取一个 HTTP 请求，并由 `interceptedResponseWriter` 强制 `Connection: close`。实现流量工作台前必须先支持一个 TLS 会话内的多请求循环、正确 body drain、每请求独立事务 ID 和连接关闭语义，否则 fuzz 会重复 TLS 握手并产生严重开销。
 - 当前 `egressaudit.Collector` 通过 `RuntimeActivityStreamer` 读取 Gateway Docker stdout，只适合有界摘要。完整正文使用独立 `TrafficEvidenceCollector`，不能复用日志通道。
 - 当前 `RuntimeSpec` 把 Agent 与 Egress Gateway 作为一个生命周期拓扑。Transform Runner 应有独立 generation 和 reconcile controller；激活脚本只滚动 Runner/Gateway，不得重建 Agent 容器或工作区。
-- 当前 Host `ExecutionBackend` 直接继承宿主环境。新增包装器只对本次子进程追加代理/CA/追踪变量，不修改 `os.Environ` 或系统配置。
+- 当前 Host `ExecutionBackend` 使用去重后的请求级环境覆盖；包装器只对本次子进程追加代理/CA 变量，不修改 `os.Environ` 或系统配置。
 
 ### 14.2 Evidence spool
 
@@ -418,7 +419,7 @@ spool 具有磁盘配额、文件数上限、单事务上限和启动恢复扫�
 
 ## 15. 实施阶段
 
-当前完成情况：阶段 1 的事务/页面/漏洞关联与高流量聚合已完成（blob 配额和 intercepted TLS keep-alive 除外）；阶段 3 已完成；阶段 4 已完成导入后的异步 observe 主路径。阶段 2 与阶段 5 尚未开始。
+当前完成情况：阶段 1 的事务/页面/漏洞关联与高流量聚合已完成（blob 配额和 intercepted TLS keep-alive 除外）；阶段 2 已完成 Host 对话级尽力捕获，尚缺每次执行的细粒度追踪令牌；阶段 3 已完成；阶段 4 已完成导入后的异步 observe 主路径。阶段 5 尚未开始。
 
 ### 阶段 1：事务与证据底座
 
@@ -431,9 +432,9 @@ spool 具有磁盘配额、文件数上限、单事务上限和启动恢复扫�
 
 ### 阶段 2：本机入口与执行追踪
 
-- 实现 Host loopback Gateway 和 `ProxiedExecutionBackend`。
-- 为 host/container 命令注入短期执行追踪令牌。
-- UI 明确显示 `enforced` 与 `best_effort`。
+- [x] 实现 Host loopback Gateway 和 `ProxiedExecutionBackend`。
+- [ ] 为 host/container 命令注入短期执行追踪令牌。
+- [x] UI 明确显示 `enforced` 与 `best_effort`。
 
 ### 阶段 3：脚本 revision 与离线测试
 

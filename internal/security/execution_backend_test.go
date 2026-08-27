@@ -126,6 +126,23 @@ func TestExecutionBackendsRecordTrustedAuditIdentity(t *testing.T) {
 	})
 }
 
+func TestHostExecutionBackendAppliesLastEnvironmentOverrideOnce(t *testing.T) {
+	backend := NewHostExecutionBackend()
+	result, err := backend.Execute(context.Background(), ExecutionRequest{
+		Command: []string{"/bin/sh", "-c", `printf '%s|%s' "$HTTP_PROXY" "$(env | grep -c '^HTTP_PROXY=')"`},
+		Env: []string{
+			"HTTP_PROXY=http://first.invalid:1",
+			"HTTP_PROXY=http://127.0.0.1:43210",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Output != "http://127.0.0.1:43210|1" {
+		t.Fatalf("environment override = %q", result.Output)
+	}
+}
+
 func TestContainerExecutionBackendNormalizesRelativeWorkingDirectory(t *testing.T) {
 	executor := &fakeContainerRuntimeExecutor{}
 	backend, err := NewContainerExecutionBackend(executor, executionBackendSpec())
