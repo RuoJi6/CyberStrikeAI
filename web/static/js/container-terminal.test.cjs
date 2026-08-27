@@ -123,7 +123,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         for (const key of chatKeys) assert.equal(typeof locale.chat[key], 'string', key);
         for (const key of managementKeys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
-    assert.match(template, /style\.css\?v=20260827-16/);
+    assert.match(template, /style\.css\?v=20260828-01/);
     assert.match(template, /chat\.js\?v=20260826-3/);
     assert.match(template, /container-management\.js\?v=20260826-1/);
 });

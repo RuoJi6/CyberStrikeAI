@@ -49,3 +49,10 @@ test('会话设置打开时提升整个输入区层级并遮住轮次导航', ()
     assert.match(styles, /\.chat-input-container\.is-session-settings-open\s*\{[\s\S]*?z-index:\s*121/);
     assert.match(styles, /\.chat-turn-rail\s*\{[\s\S]*?z-index:\s*20/);
 });
+
+test('发送按钮为箭头保留独立层级且不会被右侧工具栏压缩', () => {
+    assert.match(styles, /\.chat-composer-footer-trailing\s*\{[\s\S]*?flex:\s*0 0 auto[\s\S]*?min-width:\s*40px/);
+    assert.match(styles, /\.chat-input-container \.send-btn\s*\{[\s\S]*?isolation:\s*isolate/);
+    assert.match(styles, /\.chat-input-container \.send-btn svg\s*\{[\s\S]*?z-index:\s*2[\s\S]*?color:\s*#fff[\s\S]*?visibility:\s*visible/);
+    assert.match(styles, /\.chat-input-container \.send-btn svg path\s*\{[\s\S]*?stroke:\s*#fff/);
+});

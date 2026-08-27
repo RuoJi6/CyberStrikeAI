@@ -47829,8 +47829,10 @@ html[data-theme="dark"] .project-conversation-row:hover .project-conversation-it
 }
 
 .chat-composer-footer-trailing {
+    flex: 0 0 auto;
     justify-content: flex-end;
     gap: 5px;
+    min-width: 40px;
 }
 
 .chat-input-container .chat-upload-btn {
@@ -48160,6 +48162,7 @@ html[data-theme="dark"] .project-conversation-row:hover .project-conversation-it
 }
 
 .chat-input-container .send-btn {
+    isolation: isolate;
     width: 40px;
     min-width: 40px;
     height: 40px;
@@ -48180,10 +48183,19 @@ html[data-theme="dark"] .project-conversation-row:hover .project-conversation-it
     position: absolute;
     top: 50%;
     left: 50%;
+    z-index: 2;
     width: 18px;
     height: 18px;
+    color: #fff;
+    opacity: 1;
+    visibility: visible;
+    pointer-events: none;
     transform: translate(-50%, -50%);
     transition: transform 0.18s ease;
+}
+
+.chat-input-container .send-btn svg path {
+    stroke: #fff;
 }
 
 .chat-input-container .send-btn:hover svg {
