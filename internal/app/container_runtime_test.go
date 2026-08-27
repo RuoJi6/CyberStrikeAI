@@ -186,6 +186,10 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tlsAuthorityStore, err := egress.NewTLSAuthorityStore(filepath.Join(t.TempDir(), "tls-authorities"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	gateway := containerruntime.EgressGatewaySpec{
 		Image: containerruntime.ImageReference{
 			Repository: "ghcr.io/example/cyberstrike-egress",
@@ -198,7 +202,7 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 			LogMaxBytes: 2 << 20, LogMaxFiles: 2,
 		},
 	}
-	store := &boundarySnapshotInitializationStore{DB: db, SnapshotStore: snapshotStore, EgressGateway: &gateway}
+	store := &boundarySnapshotInitializationStore{DB: db, SnapshotStore: snapshotStore, TLSAuthorityStore: tlsAuthorityStore, EgressGateway: &gateway}
 	claimedRecord, claimed, err := store.Claim(context.Background(), conversation.ID)
 	if err != nil || !claimed {
 		t.Fatalf("claim = %v, %v", claimed, err)
@@ -217,7 +221,7 @@ func TestBoundarySnapshotInitializationStoreBindsBeforeWorkerClaim(t *testing.T)
 	if _, err := egress.LoadSnapshot(filepath.Join(snapshotStore.Root(), bound.SnapshotID+".json"), egress.SnapshotReference{ID: bound.SnapshotID, SHA256: bound.SHA256}); err != nil {
 		t.Fatalf("worker claim did not materialize snapshot first: %v", err)
 	}
-	if claimedRecord.Spec.Security.NetworkMode != containerruntime.NetworkInternal || claimedRecord.Spec.EgressGateway == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot.ID != bound.SnapshotID || claimedRecord.Spec.EgressGateway.BoundarySnapshot.SHA256 != bound.SHA256 {
+	if claimedRecord.Spec.Security.NetworkMode != containerruntime.NetworkInternal || claimedRecord.Spec.EgressGateway == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot == nil || claimedRecord.Spec.EgressGateway.BoundarySnapshot.ID != bound.SnapshotID || claimedRecord.Spec.EgressGateway.BoundarySnapshot.SHA256 != bound.SHA256 || claimedRecord.Spec.EgressGateway.TLSAuthority == nil || claimedRecord.Spec.EgressGateway.TLSAuthority.BoundarySnapshotID != bound.SnapshotID {
 		t.Fatalf("worker claim did not upgrade queued topology: %#v", claimedRecord.Spec)
 	}
 }

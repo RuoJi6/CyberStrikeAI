@@ -12,6 +12,7 @@ import (
 	"cyberstrike-ai/internal/einomcp"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/security"
+	"cyberstrike-ai/internal/skillpackage"
 	"cyberstrike-ai/internal/tooloutput"
 
 	localbk "github.com/cloudwego/eino-ext/adk/backend/local"
@@ -29,6 +30,7 @@ func prepareEinoAgenticSkills(
 	skillsDir string,
 	ma *config.MultiAgentConfig,
 	logger *zap.Logger,
+	executionBackends security.ExecutionBackendResolver,
 ) (loc *localbk.Local, skillMW adk.TypedChatModelAgentMiddleware[*schema.AgenticMessage], fsTools bool, skillsRoot string, err error) {
 	if ma == nil {
 		return nil, nil, false, "", nil
@@ -87,7 +89,11 @@ func prepareEinoAgenticSkills(
 		return nil, nil, false, "", fmt.Errorf("eino agentic skill filesystem backend: %w", err)
 	}
 
-	sc := &skill.TypedConfig[*schema.AgenticMessage]{Backend: skillBE}
+	normalizedBackend := &normalizedEinoSkillBackend{Backend: skillBE}
+	sc := &skill.TypedConfig[*schema.AgenticMessage]{
+		Backend:      normalizedBackend,
+		BuildContent: buildEinoSkillContent(abs, executionBackends),
+	}
 	if name := strings.TrimSpace(ma.EinoSkills.SkillToolName); name != "" {
 		sc.SkillToolName = &name
 	}
@@ -98,6 +104,95 @@ func prepareEinoAgenticSkills(
 
 	fsTools = ma.EinoSkills.EinoSkillFilesystemToolsEffective()
 	return loc, skillMW, fsTools, abs, nil
+}
+
+// normalizedEinoSkillBackend makes tool input tolerant of whitespace added by
+// a model while preserving the exact, validated package name on disk.
+type normalizedEinoSkillBackend struct {
+	skill.Backend
+}
+
+func (b *normalizedEinoSkillBackend) Get(ctx context.Context, name string) (skill.Skill, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return skill.Skill{}, fmt.Errorf("skill name is required")
+	}
+	return b.Backend.Get(ctx, name)
+}
+
+const containerSkillsDir = "/workspace/.cyberstrike/skills"
+
+// buildEinoSkillContent returns a base directory valid in the selected
+// execution environment. For container execution the package is copied into
+// /workspace before its instructions are exposed to the model, so supporting
+// scripts, references and assets are available through the same filesystem
+// tools as command execution.
+func buildEinoSkillContent(skillsRoot string, executionBackends security.ExecutionBackendResolver) func(context.Context, skill.Skill, string) (string, error) {
+	return func(ctx context.Context, loaded skill.Skill, _ string) (string, error) {
+		baseDir := loaded.BaseDirectory
+		if executionBackends != nil {
+			backend, err := executionBackends.ResolveExecutionBackend(ctx)
+			if err != nil {
+				return "", fmt.Errorf("resolve execution backend for skill %q: %w", loaded.Name, err)
+			}
+			if reporter, ok := backend.(security.ExecutionLocationReporter); ok && reporter.ExecutionLocation() == "container" {
+				writer, ok := backend.(security.WorkspaceFileWriter)
+				if !ok {
+					return "", fmt.Errorf("container workspace writer is unavailable for skill %q", loaded.Name)
+				}
+				containerDir, err := syncSkillPackageToWorkspace(ctx, writer, skillsRoot, loaded.Name)
+				if err != nil {
+					return "", err
+				}
+				baseDir = containerDir
+			}
+		}
+		return fmt.Sprintf("正在启动 Skill：%s\n此 Skill 的目录：%s\n\n%s", loaded.Name, baseDir, loaded.Content), nil
+	}
+}
+
+func syncSkillPackageToWorkspace(ctx context.Context, writer security.WorkspaceFileWriter, skillsRoot, skillName string) (string, error) {
+	skillName = strings.TrimSpace(skillName)
+	if skillName == "" || filepath.Base(skillName) != skillName {
+		return "", fmt.Errorf("invalid skill package name %q", skillName)
+	}
+	files, err := skillpackage.ListPackageFiles(skillsRoot, skillName)
+	if err != nil {
+		return "", fmt.Errorf("list skill package %q: %w", skillName, err)
+	}
+	hostRoot := skillpackage.SkillDir(skillsRoot, skillName)
+	containerRoot := filepath.ToSlash(filepath.Join(containerSkillsDir, skillName))
+	for _, file := range files {
+		if file.IsDir {
+			continue
+		}
+		hostPath, err := skillpackage.SafeRelPath(hostRoot, file.Path)
+		if err != nil {
+			return "", fmt.Errorf("resolve skill resource %q: %w", file.Path, err)
+		}
+		info, err := os.Lstat(hostPath)
+		if err != nil {
+			return "", fmt.Errorf("inspect skill resource %q: %w", file.Path, err)
+		}
+		// Never follow package symlinks into unrelated host paths.
+		if !info.Mode().IsRegular() {
+			continue
+		}
+		content, err := os.Open(hostPath)
+		if err != nil {
+			return "", fmt.Errorf("read skill resource %q: %w", file.Path, err)
+		}
+		containerPath := filepath.ToSlash(filepath.Join(containerRoot, filepath.FromSlash(file.Path)))
+		_, writeErr := writer.WriteWorkspaceFile(ctx, containerPath, content, info.Size())
+		closeErr := content.Close()
+		if writeErr != nil {
+			return "", fmt.Errorf("copy skill resource %q into container: %w", file.Path, writeErr)
+		}
+		if closeErr != nil {
+			return "", fmt.Errorf("close skill resource %q after container copy: %w", file.Path, closeErr)
+		}
+	}
+	return containerRoot, nil
 }
 
 func subAgentAgenticFilesystemMiddleware(

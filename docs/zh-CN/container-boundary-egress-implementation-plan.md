@@ -625,6 +625,13 @@ DNS 和出站网关必须各自检查解析结果，避免只依赖 DNS 名称�
 - [x] 真实传输通道：每对 Agent/网关增加内网限定 SOCKS5 `1080/tcp`，支持 CONNECT 和 UDP ASSOCIATE，Agent 注入 `ALL_PROXY=socks5h://<gateway>:1080`。通用 SOCKS 客户端可直接访问 SSH、MySQL 和其他 TCP/UDP 协议；不自动读取 `ALL_PROXY` 的原生命令需使用自身 SOCKS/ProxyCommand 选项，不伪装成透明代理。
 - [x] ARM64 虚拟机真实验收：无边界对话验证 HTTP POST、HTTPS、GitHub SSH 22/TCP、3306/TCP 判定和 123/UDP；显式策略对同一组目标命中正确 rule ID，未配置 HTTP/TCP 精确拒绝。Docker 集成矩阵同时验证 HTTP/HTTPS/TCP/UDP 默认放行与私网/保留地址继续阻断；全量 Go、`go vet`、相关 race、前端 168/168、JS/翻译/集成脚本语法及 `git diff --check` 通过。候选 ARM64 服务 SHA-256 为 `3f14f61b2c1e96cd3e79bd7bb27591b032ca2aa2a524d5f675ea1a0c60e4946`，出站网关摘要为 `sha256:967939268aed7e4a58db54f470652dbb1fd90f6ee413b51f8d8f6290dba51b06`，服务 `active/running`、`NRestarts=0`。
 
+#### HTTPS 默认完整审计补充（2026-08-27）
+
+- [x] 新建容器对话无论是否选择边界策略，HTTPS 完整审计均默认开启；界面不再提供关闭 TLS 解密的选项，只保留证书固定域名的不解密兼容列表。
+- [x] 未选择边界策略时生成 schema v4 不可变快照：外部目标、协议、端口和 HTTP 方法继续默认放行，同时携带 `tlsInspection.enabled=true`。历史 schema v3 无边界快照保持可验证、可加载且不被原地改写。
+- [x] 每个启用 HTTPS 审计的对话仍使用独立短期 CA；Agent 只挂载公开证书，私钥只挂载到对应出站网关。新配置在首次启动或受控重建时生效。
+- [x] Go 全仓测试、前端 177/177 和差异检查通过；新增测试同时覆盖 v4 默认放行与 TLS 解密，以及历史 v3 快照兼容。
+
 #### 边界策略目录与容器切换补充（2026-08-24）
 
 - [x] 删除旧的状态横幅和页面内草案堆叠，改为一行一个策略的目录；提供策略名/说明搜索、10/20/50 每页、服务端分页和 URL 状态恢复。

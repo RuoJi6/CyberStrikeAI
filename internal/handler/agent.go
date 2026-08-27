@@ -346,12 +346,13 @@ func (h *AgentHandler) SetHitlToolWhitelistSaver(s HitlToolWhitelistSaver) {
 	h.hitlWhitelistSaver = s
 }
 
-// HitlDefaultReviewerSaver 持久化全局默认审批方到 config.yaml。
+// HitlDefaultReviewerSaver 持久化全局默认人机协同配置到 config.yaml。
 type HitlDefaultReviewerSaver interface {
+	UpdateHitlDefaultConfig(mode, reviewer string, timeoutSeconds int) error
 	UpdateHitlDefaultReviewer(reviewer string) error
 }
 
-// SetHitlDefaultReviewerSaver 设置 HITL 默认审批方落盘。
+// SetHitlDefaultReviewerSaver 设置 HITL 默认配置落盘。
 func (h *AgentHandler) SetHitlDefaultReviewerSaver(s HitlDefaultReviewerSaver) {
 	h.hitlDefaultReviewerSaver = s
 }
@@ -361,6 +362,35 @@ func (h *AgentHandler) hitlEffectiveDefaultReviewer() string {
 		return normalizeHitlReviewer(h.config.Hitl.EffectiveDefaultReviewer())
 	}
 	return "human"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultMode() string {
+	if h != nil && h.config != nil {
+		return normalizeHitlDefaultMode(h.config.Hitl.EffectiveDefaultMode())
+	}
+	return "off"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultTimeoutSeconds() int {
+	if h != nil && h.config != nil {
+		timeout := h.config.Hitl.EffectiveDefaultTimeoutSeconds()
+		if timeout < 0 {
+			return 0
+		}
+		return timeout
+	}
+	return 300
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultRequest() *HITLRequest {
+	mode := h.hitlEffectiveDefaultMode()
+	return &HITLRequest{
+		Enabled:        mode != "off",
+		Mode:           mode,
+		Reviewer:       h.hitlEffectiveDefaultReviewer(),
+		SensitiveTools: []string{},
+		TimeoutSeconds: h.hitlEffectiveDefaultTimeoutSeconds(),
+	}
 }
 
 // HITLNeedsToolApproval 供 C2 危险任务门控：与会话侧人机协同及免审批白名单判定一致。
@@ -742,25 +772,26 @@ func (h *AgentHandler) mergeAssistantMessagePartialOnCancel(messageID, partial s
 
 // ChatResponse 聊天响应
 type ChatResponse struct {
-	Response            string    `json:"response"`
-	MCPExecutionIDs     []string  `json:"mcpExecutionIds,omitempty"` // 本次对话中执行的MCP调用ID列表
-	ConversationID      string    `json:"conversationId"`            // 对话ID
-	Time                time.Time `json:"time"`
-	Finalizable         bool      `json:"finalizable"`
-	Finalized           bool      `json:"finalized"`
-	Status              string    `json:"status,omitempty"`
-	CompletionReason    string    `json:"completionReason,omitempty"`
-	EvidenceVerified    bool      `json:"evidenceVerified"`
-	EvidenceRefs        []string  `json:"evidenceRefs,omitempty"`
-	PendingExecutionIDs []string  `json:"pendingExecutionIds,omitempty"`
-	MissingChecks       []string  `json:"missingChecks,omitempty"`
+	Response                         string    `json:"response"`
+	MCPExecutionIDs                  []string  `json:"mcpExecutionIds,omitempty"` // 本次对话中执行的MCP调用ID列表
+	ConversationID                   string    `json:"conversationId"`            // 对话ID
+	Time                             time.Time `json:"time"`
+	Finalizable                      bool      `json:"finalizable"`
+	Finalized                        bool      `json:"finalized"`
+	Status                           string    `json:"status,omitempty"`
+	CompletionReason                 string    `json:"completionReason,omitempty"`
+	EvidenceVerified                 bool      `json:"evidenceVerified"`
+	EvidenceRefs                     []string  `json:"evidenceRefs,omitempty"`
+	PendingExecutionIDs              []string  `json:"pendingExecutionIds,omitempty"`
+	MissingChecks                    []string  `json:"missingChecks,omitempty"`
+	AutoCancelledPendingExecutionIDs []string  `json:"autoCancelledPendingExecutionIds,omitempty"`
 }
 
 func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult, errMA error) (string, string, error) {
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
 	}
-	errMsg := "执行失败: " + errMA.Error()
+	errMsg := "执行失败: " + multiagent.EinoClientRunErrorMessage(errMA)
 	if assistantMessageID != "" {
 		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
@@ -768,8 +799,13 @@ func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMes
 	return "", conversationID, errMA
 }
 
-func (h *AgentHandler) finalizeRobotAgentSuccess(assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
-	decision := h.finalizeAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput), true)
+func (h *AgentHandler) finalizeRobotAgentSuccess(taskCtx context.Context, assistantMessageID, conversationID string, resultMA *multiagent.RunResult) (string, string, error) {
+	reasoningContent := multiagent.AggregatedReasoningFromTraceJSON(resultMA.LastAgentTraceInput)
+	decision := h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, true)
+	if cancelled := h.cleanupPendingToolExecutionsAfterIteration(taskCtx, conversationID, decision, nil); len(cancelled) > 0 {
+		decision = h.decideAgentRunForDeliveryWithPolicy(conversationID, assistantMessageID, "robot", resultMA, resultMA.MCPExecutionIDs, true)
+	}
+	h.persistFinalizationDecision(conversationID, assistantMessageID, "robot", resultMA.MCPExecutionIDs, reasoningContent, decision)
 	responseText := decision.FinalText
 	if !decision.Finalizable {
 		responseText = finalizationBlockedMessage(decision)
@@ -802,7 +838,7 @@ func (h *AgentHandler) runRobotEinoSingleWithRetry(
 		*taskStatus = "failed"
 		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
 	}
-	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+	return h.finalizeRobotAgentSuccess(taskCtx, assistantMessageID, conversationID, resultMA)
 }
 
 func (h *AgentHandler) runRobotMultiAgentWithRetry(
@@ -823,7 +859,7 @@ func (h *AgentHandler) runRobotMultiAgentWithRetry(
 		*taskStatus = "failed"
 		return h.finalizeRobotAgentError(taskCtx, assistantMessageID, conversationID, resultMA, errMA)
 	}
-	return h.finalizeRobotAgentSuccess(assistantMessageID, conversationID, resultMA)
+	return h.finalizeRobotAgentSuccess(taskCtx, assistantMessageID, conversationID, resultMA)
 }
 
 // ProcessMessageForRobot 供机器人（企业微信/钉钉/飞书）调用：Eino 单/多代理执行路径（含 progressCallback、过程详情），仅不发送 SSE，最后返回完整回复

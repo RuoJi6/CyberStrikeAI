@@ -103,7 +103,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	conversationRuntimeControlsSchema := conversationRuntimeControlsOpenAPISchema()
 	boundaryPolicyRequestSchema := map[string]interface{}{
 		"type":        "string",
-		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许。",
+		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许；HTTPS 仍默认解密并完整审计。",
 	}
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
@@ -113,7 +113,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
 			"name":                 map[string]interface{}{"type": "string", "maxLength": 128},
 			"description":          map[string]interface{}{"type": "string", "maxLength": 2048},
-			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
+			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": true, "readOnly": true, "description": "边界策略始终启用 HTTPS 完整审计。"},
 			"ruleCount":            map[string]interface{}{"type": "integer", "minimum": 0},
 			"protocols":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"any", "http", "https", "tcp", "udp", "icmp"}}},
 			"usageCount":           map[string]interface{}{"type": "integer", "minimum": 0, "description": "当前用户可见的使用中对话数"},
@@ -155,9 +155,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type": "object", "additionalProperties": false, "required": []string{"name"},
 		"properties": map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "maxLength": 128}, "description": map[string]interface{}{"type": "string", "maxLength": 2048},
-			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": false},
 			"tlsBypassDomains": map[string]interface{}{"type": "array", "maxItems": 128, "items": map[string]interface{}{"type": "string", "maxLength": 253},
-				"description": "证书固定兼容域名；仅在启用 HTTPS 完整审计时允许。",
+				"description": "证书固定兼容域名；HTTPS 完整审计始终开启，命中域名时仅校验 SNI/端口。",
 			},
 		},
 	}
@@ -1136,75 +1135,6 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"title": map[string]interface{}{
 							"type":        "string",
 							"description": "对话标题",
-						},
-					},
-				},
-				"Group": map[string]interface{}{
-					"type": "object",
-					"properties": map[string]interface{}{
-						"id": map[string]interface{}{
-							"type":        "string",
-							"description": "分组ID",
-						},
-						"name": map[string]interface{}{
-							"type":        "string",
-							"description": "分组名称",
-						},
-						"icon": map[string]interface{}{
-							"type":        "string",
-							"description": "分组图标",
-						},
-						"createdAt": map[string]interface{}{
-							"type":        "string",
-							"format":      "date-time",
-							"description": "创建时间",
-						},
-						"updatedAt": map[string]interface{}{
-							"type":        "string",
-							"format":      "date-time",
-							"description": "更新时间",
-						},
-					},
-				},
-				"CreateGroupRequest": map[string]interface{}{
-					"type":     "object",
-					"required": []string{"name"},
-					"properties": map[string]interface{}{
-						"name": map[string]interface{}{
-							"type":        "string",
-							"description": "分组名称",
-						},
-						"icon": map[string]interface{}{
-							"type":        "string",
-							"description": "分组图标（可选）",
-						},
-					},
-				},
-				"UpdateGroupRequest": map[string]interface{}{
-					"type":     "object",
-					"required": []string{"name"},
-					"properties": map[string]interface{}{
-						"name": map[string]interface{}{
-							"type":        "string",
-							"description": "分组名称",
-						},
-						"icon": map[string]interface{}{
-							"type":        "string",
-							"description": "分组图标",
-						},
-					},
-				},
-				"AddConversationToGroupRequest": map[string]interface{}{
-					"type":     "object",
-					"required": []string{"conversationId", "groupId"},
-					"properties": map[string]interface{}{
-						"conversationId": map[string]interface{}{
-							"type":        "string",
-							"description": "对话ID",
-						},
-						"groupId": map[string]interface{}{
-							"type":        "string",
-							"description": "分组ID",
 						},
 					},
 				},
@@ -2362,15 +2292,6 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"description": "按项目筛选；传 __none__ 表示仅未绑定项目的对话",
 							"schema": map[string]interface{}{
 								"type": "string",
-							},
-						},
-						{
-							"name":        "exclude_grouped",
-							"in":          "query",
-							"required":    false,
-							"description": "为 true 时排除已加入分组的对话（默认在未搜索且未按项目筛选时启用）",
-							"schema": map[string]interface{}{
-								"type": "boolean",
 							},
 						},
 						{
@@ -3757,290 +3678,6 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						},
 						"404": map[string]interface{}{
 							"description": "任务不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups": map[string]interface{}{
-				"post": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "创建分组",
-					"description": "创建一个新的对话分组",
-					"operationId": "createGroup",
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"$ref": "#/components/schemas/CreateGroupRequest",
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "创建成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"$ref": "#/components/schemas/Group",
-									},
-								},
-							},
-						},
-						"400": map[string]interface{}{
-							"description": "请求参数错误或分组名称已存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-				"get": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "列出分组",
-					"description": "获取所有对话分组",
-					"operationId": "listGroups",
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "获取成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"type": "array",
-										"items": map[string]interface{}{
-											"$ref": "#/components/schemas/Group",
-										},
-									},
-								},
-							},
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups/{id}": map[string]interface{}{
-				"get": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "获取分组",
-					"description": "获取指定分组的详细信息",
-					"operationId": "getGroup",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "获取成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"$ref": "#/components/schemas/Group",
-									},
-								},
-							},
-						},
-						"404": map[string]interface{}{
-							"description": "分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-				"put": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "更新分组",
-					"description": "更新分组信息",
-					"operationId": "updateGroup",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"$ref": "#/components/schemas/UpdateGroupRequest",
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "更新成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"$ref": "#/components/schemas/Group",
-									},
-								},
-							},
-						},
-						"400": map[string]interface{}{
-							"description": "请求参数错误或分组名称已存在",
-						},
-						"404": map[string]interface{}{
-							"description": "分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-				"delete": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "删除分组",
-					"description": "删除指定分组",
-					"operationId": "deleteGroup",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "删除成功",
-						},
-						"404": map[string]interface{}{
-							"description": "分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups/{id}/conversations": map[string]interface{}{
-				"get": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "获取分组中的对话",
-					"description": "获取指定分组中的所有对话",
-					"operationId": "getGroupConversations",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "获取成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"type": "array",
-										"items": map[string]interface{}{
-											"$ref": "#/components/schemas/Conversation",
-										},
-									},
-								},
-							},
-						},
-						"404": map[string]interface{}{
-							"description": "分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups/conversations": map[string]interface{}{
-				"post": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "添加对话到分组",
-					"description": "将对话添加到指定分组",
-					"operationId": "addConversationToGroup",
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"$ref": "#/components/schemas/AddConversationToGroupRequest",
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "添加成功",
-						},
-						"400": map[string]interface{}{
-							"description": "请求参数错误",
-						},
-						"404": map[string]interface{}{
-							"description": "对话或分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups/{id}/conversations/{conversationId}": map[string]interface{}{
-				"delete": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "从分组移除对话",
-					"description": "从指定分组中移除对话",
-					"operationId": "removeConversationFromGroup",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-						{
-							"name":        "conversationId",
-							"in":          "path",
-							"required":    true,
-							"description": "对话ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "移除成功",
-						},
-						"404": map[string]interface{}{
-							"description": "对话或分组不存在",
 						},
 						"401": map[string]interface{}{
 							"description": "未授权",
@@ -5715,109 +5352,6 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
-			"/api/groups/{id}/pinned": map[string]interface{}{
-				"put": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "设置分组置顶",
-					"description": "设置或取消分组的置顶状态",
-					"operationId": "updateGroupPinned",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"type":     "object",
-									"required": []string{"pinned"},
-									"properties": map[string]interface{}{
-										"pinned": map[string]interface{}{
-											"type":        "boolean",
-											"description": "是否置顶",
-										},
-									},
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "更新成功",
-						},
-						"404": map[string]interface{}{
-							"description": "分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
-			"/api/groups/{id}/conversations/{conversationId}/pinned": map[string]interface{}{
-				"put": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "设置分组中对话的置顶",
-					"description": "设置或取消分组中对话的置顶状态",
-					"operationId": "updateConversationPinnedInGroup",
-					"parameters": []map[string]interface{}{
-						{
-							"name":        "id",
-							"in":          "path",
-							"required":    true,
-							"description": "分组ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-						{
-							"name":        "conversationId",
-							"in":          "path",
-							"required":    true,
-							"description": "对话ID",
-							"schema": map[string]interface{}{
-								"type": "string",
-							},
-						},
-					},
-					"requestBody": map[string]interface{}{
-						"required": true,
-						"content": map[string]interface{}{
-							"application/json": map[string]interface{}{
-								"schema": map[string]interface{}{
-									"type":     "object",
-									"required": []string{"pinned"},
-									"properties": map[string]interface{}{
-										"pinned": map[string]interface{}{
-											"type":        "boolean",
-											"description": "是否置顶",
-										},
-									},
-								},
-							},
-						},
-					},
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "更新成功",
-						},
-						"404": map[string]interface{}{
-							"description": "对话或分组不存在",
-						},
-						"401": map[string]interface{}{
-							"description": "未授权",
-						},
-					},
-				},
-			},
 			"/api/knowledge/categories": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"知识库"},
@@ -6643,38 +6177,6 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
-
-			// ==================== 对话分组 - 缺失端点 ====================
-			"/api/groups/mappings": map[string]interface{}{
-				"get": map[string]interface{}{
-					"tags":        []string{"对话分组"},
-					"summary":     "获取所有分组映射",
-					"description": "获取所有对话与分组之间的映射关系列表。",
-					"operationId": "getAllGroupMappings",
-					"responses": map[string]interface{}{
-						"200": map[string]interface{}{
-							"description": "获取成功",
-							"content": map[string]interface{}{
-								"application/json": map[string]interface{}{
-									"schema": map[string]interface{}{
-										"type": "array",
-										"items": map[string]interface{}{
-											"type": "object",
-											"properties": map[string]interface{}{
-												"conversation_id": map[string]interface{}{"type": "string", "description": "对话ID"},
-												"group_id":        map[string]interface{}{"type": "string", "description": "分组ID"},
-												"pinned":          map[string]interface{}{"type": "boolean", "description": "是否置顶"},
-											},
-										},
-									},
-								},
-							},
-						},
-						"401": map[string]interface{}{"description": "未授权"},
-					},
-				},
-			},
-
 			// ==================== FOFA信息收集 ====================
 			"/api/fofa/search": map[string]interface{}{
 				"post": map[string]interface{}{

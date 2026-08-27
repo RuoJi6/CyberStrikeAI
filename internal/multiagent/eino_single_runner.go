@@ -51,7 +51,7 @@ func RunEinoSingleChatModelAgent(
 	ctx = ag.WithLocalToolExecutionAuditRecorder(ctx)
 	runtimeUserMessage := prepareLatestUserMessageForModel(userMessage, appCfg, &ma.EinoMiddleware, conversationID, logger)
 
-	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger)
+	einoLoc, einoSkillMW, einoFSTools, skillsRoot, einoErr := prepareEinoAgenticSkills(ctx, appCfg.SkillsDir, ma, logger, ag.ExecutionBackendResolver())
 	if einoErr != nil {
 		return nil, einoErr
 	}
@@ -208,15 +208,18 @@ func RunEinoSingleChatModelAgent(
 	}
 
 	return runEinoADKAgentLoop(ctx, &einoADKRunLoopArgs{
-		OrchMode:                "eino_single",
-		OrchestratorName:        einoSingleAgentName,
-		ConversationID:          conversationID,
-		Progress:                progress,
-		Logger:                  logger,
-		SnapshotMCPIDs:          snapshotMCPIDs,
-		StreamsMainAssistant:    streamsMainAssistant,
-		EinoRoleTag:             einoRoleTag,
-		CheckpointDir:           ma.EinoMiddleware.CheckpointDir,
+		OrchMode:             "eino_single",
+		OrchestratorName:     einoSingleAgentName,
+		ConversationID:       conversationID,
+		Progress:             progress,
+		Logger:               logger,
+		SnapshotMCPIDs:       snapshotMCPIDs,
+		StreamsMainAssistant: streamsMainAssistant,
+		EinoRoleTag:          einoRoleTag,
+		// Chat history recovery is intentionally centralized in last_react_*.
+		// ADK checkpoints are a second persisted model-state channel and make
+		// stale-context bugs hard to reason about across user turns.
+		CheckpointDir:           "",
 		RunRetryMaxAttempts:     RunRetryMaxAttemptsFromConfig(&ma.EinoMiddleware),
 		RunRetryMaxBackoffSec:   int(einoRunRetryMaxBackoffFromConfig(&ma.EinoMiddleware).Seconds()),
 		McpIDsMu:                &mcpIDsMu,

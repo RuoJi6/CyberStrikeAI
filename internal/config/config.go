@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -301,7 +302,8 @@ type MultiAgentEinoMiddlewareConfig struct {
 	PlanExecuteMaxStepResultRunes int `yaml:"plan_execute_max_step_result_runes,omitempty" json:"plan_execute_max_step_result_runes,omitempty"`
 	// PlanExecuteKeepLastSteps keeps only the tail steps in prompt view (default 8).
 	PlanExecuteKeepLastSteps int `yaml:"plan_execute_keep_last_steps,omitempty" json:"plan_execute_keep_last_steps,omitempty"`
-	// CheckpointDir when non-empty enables adk.Runner CheckPointStore (file-backed) for interrupt/resume persistence.
+	// CheckpointDir is retained for config compatibility. Chat agent runs do
+	// not consume it; cross-turn recovery is centralized in conversations.last_react_*.
 	CheckpointDir string `yaml:"checkpoint_dir,omitempty" json:"checkpoint_dir,omitempty"`
 	// DeepOutputKey passed to deep.Config OutputKey (session final text); empty = off.
 	DeepOutputKey string `yaml:"deep_output_key,omitempty" json:"deep_output_key,omitempty"`
@@ -948,10 +950,12 @@ func (c *Config) ApplyDefaultAIChannel() {
 	if c == nil {
 		return
 	}
+	c.NormalizeAIProviderProfiles()
 	c.AI.EnsureDefaultFromOpenAI(c.OpenAI)
 	if oa, _, ok := c.AI.ResolveChannel(c.AI.DefaultChannel); ok {
 		c.OpenAI = oa
 	}
+	c.NormalizeAIProviderProfiles()
 }
 
 func (c OpenAIConfig) MaxCompletionTokensEffective() int {
@@ -962,13 +966,56 @@ func (c OpenAIConfig) MaxCompletionTokensEffective() int {
 }
 
 // IsDeepSeekEndpointOrModel reports whether the channel targets DeepSeek's
-// official-compatible API or a DeepSeek model family. This is separate from the
-// reasoning profile: profile controls field mapping, while DeepSeek has provider
-// constraints such as default thinking mode and no tool_choice in thinking mode.
+// official-compatible API endpoint. The historical name is kept for compatibility;
+// model names alone are not enough to infer DeepSeek wire behavior behind
+// OpenAI-compatible gateways.
 func (c OpenAIConfig) IsDeepSeekEndpointOrModel() bool {
 	baseURL := strings.ToLower(strings.TrimSpace(c.BaseURL))
-	model := strings.ToLower(strings.TrimSpace(c.Model))
-	return strings.Contains(baseURL, "deepseek") || strings.Contains(model, "deepseek")
+	return strings.Contains(baseURL, "deepseek")
+}
+
+func (c OpenAIConfig) IsDeepSeekOfficialEndpoint() bool {
+	host := normalizedURLHost(c.BaseURL)
+	return host == "api.deepseek.com"
+}
+
+func normalizedURLHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		parsed, err = url.Parse("https://" + strings.TrimLeft(raw, "/"))
+		if err != nil {
+			return ""
+		}
+	}
+	return strings.ToLower(strings.TrimPrefix(parsed.Hostname(), "www."))
+}
+
+func NormalizeOpenAIProviderProfile(oa *OpenAIConfig) {
+	if oa == nil {
+		return
+	}
+	if oa.IsDeepSeekOfficialEndpoint() {
+		oa.Reasoning.Profile = "deepseek"
+	}
+}
+
+func (c *Config) NormalizeAIProviderProfiles() {
+	if c == nil {
+		return
+	}
+	NormalizeOpenAIProviderProfile(&c.OpenAI)
+	if c.AI.Channels != nil {
+		for id, ch := range c.AI.Channels {
+			oa := ch.ToOpenAIConfig()
+			NormalizeOpenAIProviderProfile(&oa)
+			ch.Reasoning = oa.Reasoning
+			c.AI.Channels[id] = ch
+		}
+	}
 }
 
 // OpenAIReasoningConfig 全局默认与网关 profile（对话页可通过 ChatRequest.reasoning 覆盖，受 AllowClientReasoning 约束）。
@@ -1385,8 +1432,24 @@ type HitlConfig struct {
 	AuditAgentPromptReviewEdit string `yaml:"audit_agent_prompt_review_edit,omitempty" json:"audit_agent_prompt_review_edit,omitempty"`
 	// RetentionDays 已决策审计日志（hitl_interrupts 非 pending）保留天数；省略时默认 90；0 表示不自动清理。
 	RetentionDays *int `yaml:"retention_days,omitempty" json:"retention_days,omitempty"`
-	// DefaultReviewer 全局默认审批方（human | audit_agent）；未选会话时切换会写入 config.yaml；新建会话无独立配置时沿用。
+	// DefaultMode 全局默认人机协同模式（off | approval | review_edit）；新建会话无独立配置时沿用。
+	DefaultMode string `yaml:"default_mode,omitempty" json:"default_mode,omitempty"`
+	// DefaultReviewer 全局默认审批方（human | audit_agent）；新建会话无独立配置时沿用。
 	DefaultReviewer string `yaml:"default_reviewer,omitempty" json:"default_reviewer,omitempty"`
+	// DefaultTimeoutSeconds 全局默认审批等待秒数；nil 表示使用前端历史默认 300 秒，0 表示不限时。
+	DefaultTimeoutSeconds *int `yaml:"default_timeout_seconds,omitempty" json:"default_timeout_seconds,omitempty"`
+}
+
+// EffectiveDefaultMode returns off, approval, or review_edit; omitted or unknown values default to off.
+func (h HitlConfig) EffectiveDefaultMode() string {
+	switch strings.ToLower(strings.TrimSpace(h.DefaultMode)) {
+	case "feedback", "followup":
+		return "approval"
+	case "approval", "review_edit":
+		return strings.ToLower(strings.TrimSpace(h.DefaultMode))
+	default:
+		return "off"
+	}
 }
 
 // EffectiveDefaultReviewer returns human or audit_agent; omitted or unknown values default to human.
@@ -1397,6 +1460,17 @@ func (h HitlConfig) EffectiveDefaultReviewer() string {
 	default:
 		return "human"
 	}
+}
+
+// EffectiveDefaultTimeoutSeconds returns the default HITL approval timeout; nil defaults to 5 minutes.
+func (h HitlConfig) EffectiveDefaultTimeoutSeconds() int {
+	if h.DefaultTimeoutSeconds == nil {
+		return 300
+	}
+	if *h.DefaultTimeoutSeconds < 0 {
+		return 0
+	}
+	return *h.DefaultTimeoutSeconds
 }
 
 // RetentionDaysEffective returns retention; 0 means keep forever; omitted defaults to 90.
@@ -1711,6 +1785,7 @@ func Load(path string) (*Config, error) {
 	if err := cfg.Container.validateEnabled(); err != nil {
 		return nil, err
 	}
+	cfg.NormalizeAIProviderProfiles()
 	cfg.ApplyDefaultAIChannel()
 	if err := validateOpenAIOutputLimits(cfg.OpenAI); err != nil {
 		return nil, err

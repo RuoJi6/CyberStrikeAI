@@ -135,7 +135,7 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 		"tlsBypassDomains": []string{},
 	})
 	if policyUpdated.Code != http.StatusOK || !strings.Contains(policyUpdated.Body.String(), "blocked.example") ||
-		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":false`) {
+		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":true`) {
 		t.Fatalf("update policy status = %d: %s", policyUpdated.Code, policyUpdated.Body.String())
 	}
 

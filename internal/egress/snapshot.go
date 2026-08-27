@@ -260,20 +260,22 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
 	}
-	if (document.SchemaVersion != 1 && document.SchemaVersion != 2 && document.SchemaVersion != 3) || document.Rules == nil {
+	if (document.SchemaVersion != 1 && document.SchemaVersion != 2 && document.SchemaVersion != 3 && document.SchemaVersion != 4) || document.Rules == nil {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
 	}
-	defaultAllow := document.SchemaVersion == 3 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection == nil && document.DefaultAction == "allow"
-	if document.SchemaVersion == 3 && !defaultAllow {
+	legacyDefaultAllow := document.SchemaVersion == 3 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection == nil && document.DefaultAction == "allow"
+	inspectedDefaultAllow := document.SchemaVersion == 4 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection != nil && document.DefaultAction == "allow"
+	defaultAllow := legacyDefaultAllow || inspectedDefaultAllow
+	if (document.SchemaVersion == 3 || document.SchemaVersion == 4) && !defaultAllow {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: no-boundary snapshot settings are inconsistent", ErrSnapshotIntegrity)
 	}
-	if document.SchemaVersion != 3 && document.DefaultAction != "" {
+	if document.SchemaVersion != 3 && document.SchemaVersion != 4 && document.DefaultAction != "" {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: policy snapshot declares a default action", ErrSnapshotIntegrity)
 	}
 	if document.PolicyID == "" && len(document.Rules) != 0 {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: no-boundary snapshot contains rules", ErrSnapshotIntegrity)
 	}
-	if (document.SchemaVersion == 1 && document.TLSInspection != nil) || (document.SchemaVersion == 2 && document.TLSInspection == nil) || (document.SchemaVersion == 3 && document.TLSInspection != nil) {
+	if (document.SchemaVersion == 1 && document.TLSInspection != nil) || (document.SchemaVersion == 2 && document.TLSInspection == nil) || (document.SchemaVersion == 3 && document.TLSInspection != nil) || (document.SchemaVersion == 4 && document.TLSInspection == nil) {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: TLS snapshot settings are inconsistent", ErrSnapshotIntegrity)
 	}
 	if document.TLSInspection != nil {

@@ -26,7 +26,6 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
         'boundary-policy-form',
         'boundary-policy-name',
         'boundary-policy-description',
-		'boundary-policy-tls-enabled',
 		'boundary-policy-tls-bypass',
         'boundary-policy-rule-list',
         'boundary-rule-form',
@@ -52,8 +51,9 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
 	assert.match(boundary, /boundary_page/);
 	assert.match(boundary, /boundary_page_size/);
 	assert.match(boundary, /boundary_q/);
-	assert.match(boundary, /tlsInspectionEnabled/);
+	assert.doesNotMatch(boundary, /tlsInspectionEnabled/);
 	assert.match(boundary, /tlsBypassDomains/);
+	assert.doesNotMatch(template, /id="boundary-policy-tls-enabled"/);
     assert.match(boundary, /state\.selectedUsage/);
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
 });
@@ -115,7 +115,7 @@ test('新管理页不注入非受信 HTML，也不把凭据写入浏览器存储
 test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     const keys = [
         'boundaryConversation', 'boundaryLoading', 'boundaryReady', 'boundarySnapshotHash',
-        'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations', 'boundaryTLSEnabled',
+        'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations',
         'boundaryAnyMethod', 'boundaryDefaultAllow',
         'boundaryTLSBypassDomains', 'boundaryTLSBypassHint', 'activityHTTPS',
         'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab', 'egressAuthTab',

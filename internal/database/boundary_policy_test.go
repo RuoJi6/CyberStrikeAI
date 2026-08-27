@@ -108,6 +108,51 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "boundary-policy-tls-default.db")
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	created, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{
+		Name: "HTTPS audit default", TLSInspectionEnabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !created.TLSInspectionEnabled {
+		t.Fatal("new boundary policy disabled mandatory HTTPS inspection")
+	}
+	updated, err := db.UpdateBoundaryPolicy(ctx, BoundaryPolicy{
+		ID: created.ID, Name: created.Name, TLSInspectionEnabled: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !updated.TLSInspectionEnabled {
+		t.Fatal("updated boundary policy disabled mandatory HTTPS inspection")
+	}
+	if _, err := db.ExecContext(ctx, `UPDATE boundary_policies SET tls_inspection_enabled = 0 WHERE id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err = NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	migrated, err := db.GetBoundaryPolicy(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !migrated.TLSInspectionEnabled {
+		t.Fatal("legacy boundary policy was not migrated to mandatory HTTPS inspection")
+	}
+}
+
 func TestBoundaryPolicyRuleEffectsFailClosedInAPIAndSQLite(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-checks.db"), zap.NewNop())
 	if err != nil {

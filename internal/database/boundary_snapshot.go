@@ -20,9 +20,10 @@ import (
 )
 
 const (
-	boundaryPolicySnapshotSchemaVersion     = 1
-	boundaryPolicyTLSSnapshotSchemaVersion  = 2
-	boundaryPolicyOpenSnapshotSchemaVersion = 3
+	boundaryPolicySnapshotSchemaVersion        = 1
+	boundaryPolicyTLSSnapshotSchemaVersion     = 2
+	boundaryPolicyOpenSnapshotSchemaVersion    = 3
+	boundaryPolicyOpenTLSSnapshotSchemaVersion = 4
 )
 
 var (
@@ -467,7 +468,8 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 		Rules:         []BoundaryPolicySnapshotRule{},
 	}
 	if document.PolicyID == "" {
-		document.SchemaVersion = boundaryPolicyOpenSnapshotSchemaVersion
+		document.SchemaVersion = boundaryPolicyOpenTLSSnapshotSchemaVersion
+		document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: []string{}}
 		document.DefaultAction = "allow"
 		return document, nil
 	}
@@ -593,11 +595,13 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) error {
-	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion {
+	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion {
 		return fmt.Errorf("unsupported boundary snapshot schema version %d", document.SchemaVersion)
 	}
-	if document.SchemaVersion == boundaryPolicyOpenSnapshotSchemaVersion {
-		if document.PolicyID != "" || len(document.Rules) != 0 || document.TLSInspection != nil || document.DefaultAction != "allow" {
+	if document.SchemaVersion == boundaryPolicyOpenSnapshotSchemaVersion || document.SchemaVersion == boundaryPolicyOpenTLSSnapshotSchemaVersion {
+		legacyOpen := document.SchemaVersion == boundaryPolicyOpenSnapshotSchemaVersion && document.TLSInspection == nil
+		inspectedOpen := document.SchemaVersion == boundaryPolicyOpenTLSSnapshotSchemaVersion && document.TLSInspection != nil
+		if document.PolicyID != "" || len(document.Rules) != 0 || document.DefaultAction != "allow" || (!legacyOpen && !inspectedOpen) {
 			return fmt.Errorf("no-boundary snapshot settings are inconsistent")
 		}
 	} else if document.DefaultAction != "" {
@@ -609,7 +613,7 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 		}
 	}
 	if document.TLSInspection != nil {
-		if document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion || !document.TLSInspection.Enabled {
+		if (document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion) || !document.TLSInspection.Enabled {
 			return fmt.Errorf("TLS inspection snapshot settings are inconsistent")
 		}
 		normalized, err := normalizeTLSBypassDomains(document.TLSInspection.BypassDomains)

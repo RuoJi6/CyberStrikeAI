@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS boundary_policies (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
-	tls_inspection_enabled INTEGER NOT NULL DEFAULT 0 CHECK (tls_inspection_enabled IN (0, 1)),
+	tls_inspection_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tls_inspection_enabled IN (0, 1)),
 	tls_bypass_domains_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tls_bypass_domains_json)),
 	owner_user_id TEXT,
 	created_at DATETIME NOT NULL,
@@ -173,12 +173,18 @@ func (db *DB) initBoundaryPolicyTables() error {
 		return err
 	}
 	for _, column := range []struct{ name, statement string }{
-		{"tls_inspection_enabled", "ALTER TABLE boundary_policies ADD COLUMN tls_inspection_enabled INTEGER NOT NULL DEFAULT 0 CHECK (tls_inspection_enabled IN (0, 1))"},
+		{"tls_inspection_enabled", "ALTER TABLE boundary_policies ADD COLUMN tls_inspection_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tls_inspection_enabled IN (0, 1))"},
 		{"tls_bypass_domains_json", "ALTER TABLE boundary_policies ADD COLUMN tls_bypass_domains_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tls_bypass_domains_json))"},
 	} {
 		if err := db.addColumnIfMissing("boundary_policies", column.name, column.statement); err != nil {
 			return err
 		}
+	}
+	// HTTPS full inspection is mandatory for boundary policies. Upgrade legacy
+	// drafts that were created while the UI exposed an opt-out checkbox. Bound
+	// immutable snapshots remain unchanged until the user explicitly rebuilds.
+	if _, err := db.Exec(`UPDATE boundary_policies SET tls_inspection_enabled = 1 WHERE tls_inspection_enabled = 0`); err != nil {
+		return err
 	}
 	if _, err := db.Exec(createBoundaryPolicyRulesTable); err != nil {
 		return err
@@ -261,6 +267,7 @@ func (db *DB) initBoundaryPolicyTables() error {
 }
 
 func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (BoundaryPolicy, error) {
+	policy.TLSInspectionEnabled = true
 	policy.ID = strings.TrimSpace(policy.ID)
 	if policy.ID == "" {
 		policy.ID = uuid.New().String()
@@ -278,9 +285,6 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	policy.TLSBypassDomains, err = normalizeTLSBypassDomains(policy.TLSBypassDomains)
 	if err != nil {
 		return BoundaryPolicy{}, err
-	}
-	if !policy.TLSInspectionEnabled && len(policy.TLSBypassDomains) != 0 {
-		return BoundaryPolicy{}, fmt.Errorf("TLS bypass domains require TLS inspection to be enabled")
 	}
 	bypassJSON, _ := json.Marshal(policy.TLSBypassDomains)
 	now := time.Now().UTC()
@@ -311,6 +315,7 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 // UpdateBoundaryPolicy edits only the source draft. Immutable snapshots already
 // bound to conversations are intentionally unaffected until an explicit rebuild.
 func (db *DB) UpdateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (BoundaryPolicy, error) {
+	policy.TLSInspectionEnabled = true
 	var err error
 	policy.ID = strings.TrimSpace(policy.ID)
 	policy.Name = strings.TrimSpace(policy.Name)
@@ -324,9 +329,6 @@ func (db *DB) UpdateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	policy.TLSBypassDomains, err = normalizeTLSBypassDomains(policy.TLSBypassDomains)
 	if err != nil {
 		return BoundaryPolicy{}, err
-	}
-	if !policy.TLSInspectionEnabled && len(policy.TLSBypassDomains) != 0 {
-		return BoundaryPolicy{}, fmt.Errorf("TLS bypass domains require TLS inspection to be enabled")
 	}
 	bypassJSON, _ := json.Marshal(policy.TLSBypassDomains)
 	existing, err := db.GetBoundaryPolicy(ctx, policy.ID)

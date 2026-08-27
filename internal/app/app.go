@@ -391,6 +391,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	}
 
 	skillsDir := skillpackage.SkillsRootFromConfig(cfg.SkillsDir, configPath)
+	skillsDir, err = filepath.Abs(skillsDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve skills directory: %w", err)
+	}
+	// Resolve skills_dir exactly once against the config file.  The web
+	// management API and the Eino runtime must use the same root even when the
+	// service process is started from a different working directory.
+	cfg.SkillsDir = skillsDir
 	log.Logger.Debug("Skills 目录（Eino ADK skill 中间件 + Web 管理 API）", zap.String("skillsDir", skillsDir))
 	configDir := filepath.Dir(configPath)
 	plantaskRel := strings.TrimSpace(cfg.MultiAgent.EinoMiddleware.PlantaskRelDir)
@@ -434,7 +442,6 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	monitorHandler.SetTaskManager(agentHandler.TaskManager())
 	monitorHandler.SetAgentHandler(agentHandler)
 	notificationHandler := handler.NewNotificationHandler(db, agentHandler, log.Logger)
-	groupHandler := handler.NewGroupHandler(db, log.Logger)
 	authHandler := handler.NewAuthHandler(authManager, cfg, configPath, log.Logger)
 	authHandler.SetAudit(auditSvc)
 	attackChainHandler := handler.NewAttackChainHandler(db, &cfg.OpenAI, log.Logger)
@@ -806,7 +813,6 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		conversationHandler,
 		robotHandler,
 		wechatRobotHandler,
-		groupHandler,
 		configHandler,
 		externalMCPHandler,
 		attackChainHandler,
@@ -1190,7 +1196,6 @@ func setupRoutes(
 	conversationHandler *handler.ConversationHandler,
 	robotHandler *handler.RobotHandler,
 	wechatRobotHandler *handler.WechatRobotHandler,
-	groupHandler *handler.GroupHandler,
 	configHandler *handler.ConfigHandler,
 	externalMCPHandler *handler.ExternalMCPHandler,
 	attackChainHandler *handler.AttackChainHandler,
@@ -1298,6 +1303,8 @@ func setupRoutes(
 		protected.GET("/hitl/tool-whitelist", agentHandler.GetHITLGlobalToolWhitelist)
 		protected.PUT("/hitl/tool-whitelist", agentHandler.SetHITLGlobalToolWhitelist)
 		protected.POST("/hitl/tool-whitelist", agentHandler.MergeHITLGlobalToolWhitelist)
+		protected.GET("/hitl/default-config", agentHandler.GetHITLDefaultConfig)
+		protected.PUT("/hitl/default-config", agentHandler.UpdateHITLDefaultConfig)
 		protected.GET("/hitl/default-reviewer", agentHandler.GetHITLDefaultReviewer)
 		protected.PUT("/hitl/default-reviewer", agentHandler.UpdateHITLDefaultReviewer)
 		protected.GET("/hitl/audit-strategy", agentHandler.GetHITLAuditStrategy)
@@ -1353,6 +1360,7 @@ func setupRoutes(
 		protected.DELETE("/batch-tasks/:queueId/tasks/:taskId", agentHandler.DeleteBatchTask)
 
 		// 对话历史
+		protected.GET("/usage/tokens", conversationHandler.GetTokenUsageStats)
 		protected.POST("/conversations", conversationHandler.CreateConversation)
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/container-runtimes", conversationHandler.ListContainerRuntimes)
@@ -1377,6 +1385,7 @@ func setupRoutes(
 		protected.GET("/conversations/:id/container/network-settings", conversationHandler.GetConversationContainerNetworkSettings)
 		protected.POST("/conversations/:id/container/reconcile", conversationHandler.ReconcileConversationContainer)
 		protected.DELETE("/conversations/:id/container", conversationHandler.DeleteConversationContainer)
+		protected.GET("/conversations/:id/token-usage", conversationHandler.GetConversationTokenUsageStats)
 		protected.GET("/conversations/:id/plan-tasks", conversationHandler.GetConversationPlanTasks)
 		protected.GET("/messages/:id/process-details", conversationHandler.GetMessageProcessDetails)
 		protected.GET("/process-details/:id", conversationHandler.GetProcessDetail)
@@ -1384,20 +1393,7 @@ func setupRoutes(
 		protected.PUT("/conversations/:id/project", conversationHandler.SetConversationProject)
 		protected.DELETE("/conversations/:id", conversationHandler.DeleteConversation)
 		protected.POST("/conversations/:id/delete-turn", conversationHandler.DeleteConversationTurn)
-		protected.PUT("/conversations/:id/pinned", groupHandler.UpdateConversationPinned)
-
-		// 对话分组
-		protected.POST("/groups", groupHandler.CreateGroup)
-		protected.GET("/groups", groupHandler.ListGroups)
-		protected.GET("/groups/:id", groupHandler.GetGroup)
-		protected.PUT("/groups/:id", groupHandler.UpdateGroup)
-		protected.DELETE("/groups/:id", groupHandler.DeleteGroup)
-		protected.PUT("/groups/:id/pinned", groupHandler.UpdateGroupPinned)
-		protected.GET("/groups/:id/conversations", groupHandler.GetGroupConversations)
-		protected.GET("/groups/mappings", groupHandler.GetAllMappings)
-		protected.POST("/groups/conversations", groupHandler.AddConversationToGroup)
-		protected.DELETE("/groups/:id/conversations/:conversationId", groupHandler.RemoveConversationFromGroup)
-		protected.PUT("/groups/:id/conversations/:conversationId/pinned", groupHandler.UpdateConversationPinnedInGroup)
+		protected.PUT("/conversations/:id/pinned", conversationHandler.UpdateConversationPinned)
 
 		// 监控
 		protected.GET("/monitor", monitorHandler.Monitor)

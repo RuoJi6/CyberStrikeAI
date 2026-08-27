@@ -563,6 +563,16 @@
                                         <span class="dashboard-kpi-sub-text" id="dashboard-kpi-rate-sub-text" data-i18n="dashboard.healthyStatus">运行平稳</span>
                                     </div>
                                 </div>
+                                <div class="dashboard-kpi-card" role="button" tabindex="0" onclick="switchPage('chat')" onkeydown="if(event.key==='Enter'||event.key===' ') { event.preventDefault(); switchPage('chat'); }" data-i18n="dashboard.clickToViewChat" data-i18n-attr="title" title="点击查看对话">
+                                    <div class="dashboard-kpi-head">
+                                        <div class="dashboard-kpi-label" data-i18n="dashboard.tokenUsage">Token 用量</div>
+                                        <span class="dashboard-kpi-icon dashboard-kpi-icon-tokens" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/><path d="M8 3 6 21"/><path d="m18 3-2 18"/></svg></span>
+                                    </div>
+                                    <div class="dashboard-kpi-value" id="dashboard-kpi-token-usage">-</div>
+                                    <div class="dashboard-kpi-sub">
+                                        <span class="dashboard-kpi-sub-text" id="dashboard-kpi-token-sub-text">-</span>
+                                    </div>
+                                </div>
                             </div>
                             <!-- 两列主内容区 -->
                             <div class="dashboard-grid">
@@ -1108,51 +1118,6 @@
 	                            </div>
 	                        </aside>
                         
-                        <!-- 分组详情页面 -->
-                        <div id="group-detail-page" class="group-detail-page" style="display: none;">
-                            <div class="group-detail-header">
-                                <button class="back-btn" onclick="exitGroupDetail()">
-                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                        <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                    </svg>
-                                </button>
-                                <h2 id="group-detail-title" class="group-detail-title"></h2>
-                                <div class="group-detail-actions">
-                                    <button class="group-action-btn" onclick="toggleGroupSearch()" data-i18n="chatGroup.search" data-i18n-attr="title" title="搜索" id="group-search-toggle-btn">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2"/>
-                                            <path d="m21 21-4.35-4.35" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                        </svg>
-                                    </button>
-                                    <button class="group-action-btn" data-require-permission="group:write" onclick="editGroup()" data-i18n="chatGroup.edit" data-i18n-attr="title" title="编辑">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                        </svg>
-                                    </button>
-                                    <button class="group-action-btn delete-btn" data-require-permission="group:delete" onclick="deleteGroup()" data-i18n="chatGroup.delete" data-i18n-attr="title" title="删除">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                        </svg>
-                                    </button>
-                                </div>
-                            </div>
-                            <div id="group-search-container" class="group-search-container" style="display: none;">
-                                <div class="group-search-input-wrapper">
-                                    <input type="text" id="group-search-input" class="group-search-input" data-i18n="chat.searchInGroup" data-i18n-attr="placeholder" placeholder="搜索分组中的对话..." onkeyup="handleGroupSearchInput(event)" oninput="handleGroupSearchInput(event)">
-                                    <button class="group-search-clear-btn" onclick="clearGroupSearch()" data-i18n="common.clearSearch" data-i18n-attr="title" title="清除搜索" id="group-search-clear-btn" style="display: none;">
-                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                            <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
-                                            <path d="m8 8 8 8M16 8l-8 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-                                        </svg>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="group-detail-content">
-                                <div id="group-conversations-list" class="group-conversations-list"></div>
-                            </div>
-                        </div>
-
                         <!-- 对话界面 -->
                         <div class="chat-container">
                             <!-- 会话顶部栏（只在有会话选中时显示） -->
@@ -1282,7 +1247,7 @@
                                                     <select id="boundary-policy-select" data-unified-select="single" onchange="syncConversationBoundarySelection()">
                                                         <option value="" data-i18n="chat.boundaryPolicyDefaultAllow">不设置边界（允许全部外部访问）</option>
                                                     </select>
-                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；Docker、宿主机与保留地址仍保持隔离。</span>
+                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；HTTPS 默认解密并完整审计，Docker、宿主机与保留地址仍保持隔离。</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="container-conversation-field-label" for="conversation-egress-mode-select" data-i18n="chat.egressModeLabel">上游出口</label>
@@ -1370,7 +1335,7 @@
                                     <!-- 角色选择下拉面板 -->
                                     <div id="role-selection-panel" class="role-selection-panel" style="display: none;">
                                         <div class="role-selection-panel-header">
-                                            <h3 class="role-selection-panel-title" data-i18n="chatGroup.rolePanelTitle">选择角色</h3>
+                                            <h3 class="role-selection-panel-title" data-i18n="chat.rolePanelTitle">选择角色</h3>
                                             <button class="role-selection-panel-close" onclick="closeRoleSelectionPanel()" data-i18n="common.close" data-i18n-attr="title" title="关闭">
                                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                                                     <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1383,7 +1348,7 @@
                                 <div id="agent-mode-wrapper" class="agent-mode-wrapper" style="display: none;">
                                     <div class="agent-mode-inner">
                                         <button type="button" id="agent-mode-btn" class="role-selector-btn agent-mode-btn" onclick="toggleAgentModePanel()" data-i18n="chat.agentModeSelectAria" data-i18n-attr="aria-label,title" data-i18n-skip-text="true" aria-label="选择对话执行模式" aria-haspopup="listbox" aria-expanded="false" title="选择对话执行模式">
-                                            <span id="agent-mode-icon" class="role-selector-icon" aria-hidden="true">🤖</span>
+                                            <span id="agent-mode-icon" class="role-selector-icon agent-mode-logo agent-mode-logo--default" aria-hidden="true"><svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></span>
                                             <span id="agent-mode-text" class="role-selector-text">单代理</span>
                                             <svg class="role-selector-arrow" width="10" height="10" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
                                                 <path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1400,7 +1365,7 @@
                                             </div>
                                             <div class="agent-mode-options">
                                                 <button type="button" class="role-selection-item-main agent-mode-option" data-value="eino_single" role="option" onclick="selectAgentMode('eino_single')" data-agent-mode-detail="CloudWeGo Eino ChatModelAgent + Runner，MCP 工具（/api/eino-agent）" data-i18n="chat.agentModeEinoSingleHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
-                                                    <div class="role-selection-item-icon-main" aria-hidden="true">⚡</div>
+                                                    <div class="role-selection-item-icon-main agent-mode-logo agent-mode-logo--eino" aria-hidden="true"><svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModeEinoSingle">Eino 单代理（ADK）</div>
                                                         <div class="role-selection-item-description-main" data-i18n="chat.agentModeEinoSingleHint">CloudWeGo Eino ChatModelAgent + Runner，MCP 工具（/api/eino-agent）</div>
@@ -1408,7 +1373,7 @@
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="eino_single">✓</div>
                                                 </button>
                                                 <button type="button" class="role-selection-item-main agent-mode-option" data-value="deep" role="option" onclick="selectAgentMode('deep')" data-agent-mode-detail="Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总" data-i18n="chat.agentModeDeepHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
-                                                    <div class="role-selection-item-icon-main" aria-hidden="true">🧩</div>
+                                                    <div class="role-selection-item-icon-main agent-mode-logo agent-mode-logo--deep" aria-hidden="true"><svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModeDeep">Deep（DeepAgent）</div>
                                                         <div class="role-selection-item-description-main" data-i18n="chat.agentModeDeepHint">Eino DeepAgent，适合复杂安全测试、多阶段 task 子代理委派与汇总</div>
@@ -1416,7 +1381,7 @@
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="deep">✓</div>
                                                 </button>
                                                 <button type="button" class="role-selection-item-main agent-mode-option" data-value="plan_execute" role="option" onclick="selectAgentMode('plan_execute')" data-agent-mode-detail="规划 → 执行 → 重规划（单执行器工具链）" data-i18n="chat.agentModePlanExecuteHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
-                                                    <div class="role-selection-item-icon-main" aria-hidden="true">📋</div>
+                                                    <div class="role-selection-item-icon-main agent-mode-logo agent-mode-logo--plan" aria-hidden="true"><svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModePlanExecuteLabel">Plan-Execute</div>
                                                         <div class="role-selection-item-description-main" data-i18n="chat.agentModePlanExecuteHint">规划 → 执行 → 重规划（单执行器工具链）</div>
@@ -1424,7 +1389,7 @@
                                                     <div class="role-selection-checkmark-main agent-mode-check" data-agent-mode-check="plan_execute">✓</div>
                                                 </button>
                                                 <button type="button" class="role-selection-item-main agent-mode-option" data-value="supervisor" role="option" onclick="selectAgentMode('supervisor')" data-agent-mode-detail="专家路由场景：监督者通过 transfer 动态分派多个专业子代理" data-i18n="chat.agentModeSupervisorHint" data-i18n-attr="data-agent-mode-detail" data-i18n-skip-text="true">
-                                                    <div class="role-selection-item-icon-main" aria-hidden="true">🎯</div>
+                                                    <div class="role-selection-item-icon-main agent-mode-logo agent-mode-logo--supervisor" aria-hidden="true"><svg class="agent-mode-logo__svg" viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><path d="M8 16h.01"/><path d="M16 16h.01"/></svg></div>
                                                     <div class="role-selection-item-content-main">
                                                         <div class="role-selection-item-name-main" data-i18n="chat.agentModeSupervisorLabel">Supervisor（专家路由）</div>
                                                         <div class="role-selection-item-description-main" data-i18n="chat.agentModeSupervisorHint">专家路由场景：监督者通过 transfer 动态分派多个专业子代理</div>
@@ -4142,6 +4107,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                                                 <label for="openai-reasoning-profile" data-i18n="settingsBasic.openaiReasoningProfile">线路</label>
                                                                 <select id="openai-reasoning-profile">
                                                                     <option value="auto">auto</option>
+                                                                    <option value="deepseek">deepseek</option>
                                                                     <option value="deepseek_compat">deepseek_compat</option>
                                                                     <option value="openai_compat">openai_compat</option>
                                                                     <option value="output_config_effort">output_config_effort</option>
@@ -5568,8 +5534,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                     <div class="boundary-form-grid">
                                         <label><span>策略名称</span><input id="boundary-policy-name" type="text" maxlength="128" required autocomplete="off" placeholder="例如：仅允许目标站点"></label>
                                         <label class="is-wide"><span>说明</span><input id="boundary-policy-description" type="text" maxlength="2048" autocomplete="off" placeholder="说明适用范围和授权依据"></label>
-										<label class="boundary-form-toggle is-wide"><input id="boundary-policy-tls-enabled" type="checkbox"><span data-i18n="containerManagement.boundaryTLSEnabled">启用 HTTPS 完整审计（默认关闭；为该对话注入独立短期 CA）</span></label>
-										<label id="boundary-policy-tls-bypass-field" class="is-wide" hidden><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
+										<label id="boundary-policy-tls-bypass-field" class="is-wide"><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">HTTPS 完整审计默认开启；命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
                                     </div>
                                     <div class="boundary-form-actions"><button id="boundary-policy-reset" class="btn-secondary" type="button">取消</button><button class="btn-primary" type="submit">保存策略</button></div>
                                 </form>
@@ -6648,10 +6613,6 @@ def decode_request(ctx, wire: Message) -> Message:
                         <option value="" data-i18n="chat.filterAllProjects">全部项目</option>
                         <option value="__none__" data-i18n="chat.filterUnboundProjects">未绑定项目</option>
                     </select>
-                    <select id="batch-group-filter" class="conversation-project-filter-native" onchange="applyBatchConversationFilters()" data-i18n="batchManageModal.filterByGroup" data-i18n-attr="title" title="按分组筛选">
-                        <option value="" data-i18n="batchManageModal.filterAllGroups">全部分组</option>
-                        <option value="__none__" data-i18n="batchManageModal.filterUngrouped">无分组</option>
-                    </select>
                     <div class="batch-search-box">
                         <input type="text" id="batch-search-input" data-i18n="batchManageModal.searchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索历史记录" oninput="filterBatchConversations(this.value)" />
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -6670,7 +6631,6 @@ def decode_request(ctx, wire: Message) -> Message:
                         </div>
                         <div class="batch-table-col-name" data-i18n="batchManageModal.conversationName">对话名称</div>
                         <div class="batch-table-col-project" data-i18n="batchManageModal.project">项目</div>
-                        <div class="batch-table-col-group" data-i18n="batchManageModal.group">对话分组</div>
                         <div class="batch-table-col-time" data-i18n="batchManageModal.lastTime">最近一次对话时间</div>
                         <div class="batch-table-col-action" data-i18n="batchManageModal.action">操作</div>
                     </div>
@@ -6678,79 +6638,10 @@ def decode_request(ctx, wire: Message) -> Message:
                 </div>
             </div>
             <div class="modal-footer batch-manage-footer">
-                <div class="batch-footer-move">
-                    <select id="batch-move-group-select" class="batch-move-group-select conversation-project-filter-native" data-i18n="batchManageModal.setGroup" data-i18n-attr="title" title="设置分组">
-                        <option value="__none__" data-i18n="batchManageModal.noGroupOption">无分组</option>
-                    </select>
-                    <button type="button" class="btn-secondary" onclick="applyBatchGroupChange()" data-i18n="batchManageModal.setGroup">设置分组</button>
-                </div>
                 <div class="batch-footer-actions">
                     <button class="btn-secondary" onclick="closeBatchManageModal()" data-i18n="common.cancel">取消</button>
                     <button class="btn-primary" data-require-permission="chat:delete" onclick="deleteSelectedConversations()" data-i18n="batchManageModal.deleteSelected">删除所选</button>
                 </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- 创建分组模态框 -->
-    <div id="create-group-modal" class="modal">
-        <div class="modal-content create-group-modal-content">
-            <div class="modal-header">
-                <h2 data-i18n="createGroupModal.title">创建分组</h2>
-                <span class="modal-close" onclick="closeCreateGroupModal()">&times;</span>
-            </div>
-            <div class="modal-body create-group-body">
-                <p class="create-group-description" data-i18n="createGroupModal.description">分组功能可将对话集中归类管理，让对话更加井然有序。</p>
-                <div class="create-group-input-wrapper">
-                    <button type="button" class="group-icon-input" id="create-group-icon-btn" onclick="toggleGroupIconPicker()" data-i18n="createGroupModal.selectIcon" data-i18n-attr="title" title="点击选择图标">📁</button>
-                    <input type="text" id="create-group-name-input" data-i18n="createGroupModal.groupNamePlaceholder" data-i18n-attr="placeholder" placeholder="请输入分组名称" />
-                    <!-- Emoji选择器面板 -->
-                    <div id="group-icon-picker" class="group-icon-picker" style="display: none;">
-                        <div class="icon-picker-header">
-                            <span data-i18n="createGroupModal.pickIcon">选择图标</span>
-                            <div class="icon-picker-custom">
-                                <input type="text" id="custom-icon-input" class="custom-icon-input" data-i18n="createGroupModal.customIcon" data-i18n-attr="placeholder" placeholder="自定义" maxlength="2" />
-                                <button type="button" class="custom-icon-btn" onclick="applyCustomIcon()" data-i18n="createGroupModal.confirmIcon">确定</button>
-                            </div>
-                        </div>
-                        <div class="icon-picker-grid">
-                            <span class="icon-option" onclick="selectGroupIcon('📁')">📁</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🔒')">🔒</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🛡️')">🛡️</span>
-                            <span class="icon-option" onclick="selectGroupIcon('⚔️')">⚔️</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🎯')">🎯</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🔍')">🔍</span>
-                            <span class="icon-option" onclick="selectGroupIcon('💻')">💻</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🐛')">🐛</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🚀')">🚀</span>
-                            <span class="icon-option" onclick="selectGroupIcon('⚡')">⚡</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🔥')">🔥</span>
-                            <span class="icon-option" onclick="selectGroupIcon('💡')">💡</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🎮')">🎮</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🏴‍☠️')">🏴‍☠️</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🕵️')">🕵️</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🔑')">🔑</span>
-                            <span class="icon-option" onclick="selectGroupIcon('📡')">📡</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🌐')">🌐</span>
-                            <span class="icon-option" onclick="selectGroupIcon('📊')">📊</span>
-                            <span class="icon-option" onclick="selectGroupIcon('📝')">📝</span>
-                            <span class="icon-option" onclick="selectGroupIcon('🗂️')">🗂️</span>
-                            <span class="icon-option" onclick="selectGroupIcon('📌')">📌</span>
-                            <span class="icon-option" onclick="selectGroupIcon('⭐')">⭐</span>
-                            <span class="icon-option" onclick="selectGroupIcon('💎')">💎</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="create-group-suggestions">
-                    <div class="suggestion-tag" data-i18n="createGroupModal.suggestionPenetrationTest" onclick="selectSuggestionByKey('createGroupModal.suggestionPenetrationTest')">渗透测试</div>
-                    <div class="suggestion-tag" data-i18n="createGroupModal.suggestionCtf" onclick="selectSuggestionByKey('createGroupModal.suggestionCtf')">CTF</div>
-                    <div class="suggestion-tag" data-i18n="createGroupModal.suggestionRedTeam" onclick="selectSuggestionByKey('createGroupModal.suggestionRedTeam')">红队</div>
-                    <div class="suggestion-tag" data-i18n="createGroupModal.suggestionVulnerabilityMining" onclick="selectSuggestionByKey('createGroupModal.suggestionVulnerabilityMining')">漏洞挖掘</div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeCreateGroupModal()" data-i18n="createGroupModal.cancel">取消</button>
-                <button class="btn-primary" data-require-permission="group:write" onclick="createGroup(event)" data-i18n="createGroupModal.create">创建</button>
             </div>
         </div>
     </div>
@@ -6841,45 +6732,12 @@ def decode_request(ctx, wire: Message) -> Message:
             </svg>
             <span data-i18n="contextMenu.batchManage">批量管理</span>
         </div>
-        <div class="context-menu-item context-menu-item-has-submenu" onmouseenter="handleMoveToGroupSubmenuEnter()" onmouseleave="handleMoveToGroupSubmenuLeave(event)">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span data-i18n="contextMenu.moveToGroup">移动到分组</span>
-            <svg class="submenu-arrow" width="12" height="12" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M9 18l6-6-6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <div id="move-to-group-submenu" class="context-submenu" style="display: none;" onmouseenter="clearSubmenuHideTimeout()" onmouseleave="hideMoveToGroupSubmenu()"></div>
-        </div>
         <div class="context-menu-divider"></div>
         <div class="context-menu-item context-menu-item-danger" data-require-permission="chat:delete" onclick="deleteConversationFromContext()">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
                 <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>
             <span data-i18n="contextMenu.deleteConversation">删除此对话</span>
-        </div>
-    </div>
-
-    <!-- 分组上下文菜单 -->
-    <div id="group-context-menu" class="context-menu" style="display: none;">
-        <div class="context-menu-item" onclick="renameGroupFromContext()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span data-i18n="contextMenu.rename">重命名</span>
-        </div>
-        <div class="context-menu-item" onclick="pinGroupFromContext()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 17v5M5 17h14l-1-7H6l-1 7zM9 10V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span id="pin-group-menu-text" data-i18n="contextMenu.pinGroup">置顶此分组</span>
-        </div>
-        <div class="context-menu-item context-menu-item-danger" data-require-permission="group:delete" onclick="deleteGroupFromContext()">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6h14z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            </svg>
-            <span data-i18n="contextMenu.deleteGroup">删除此分组</span>
         </div>
     </div>
 
@@ -7196,7 +7054,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <div id="role-select-modal" class="modal">
         <div class="modal-content role-select-modal-content">
             <div class="modal-header">
-                <h2 data-i18n="chatGroup.rolePanelTitle">选择角色</h2>
+                <h2 data-i18n="chat.rolePanelTitle">选择角色</h2>
                 <span class="modal-close" onclick="closeRoleSelectModal()">&times;</span>
             </div>
             <div class="modal-body role-select-body">
@@ -7625,7 +7483,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260826-4"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260827-1"></script>
     <script src="/static/js/vulnerability.js?v=18"></script>
     <script src="/static/js/traffic-evidence.js?v=5"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>
@@ -7640,7 +7498,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260826-1"></script>
     <script src="/static/js/egress-audit.js?v=20260826-3"></script>
-    <script src="/static/js/boundary-rules.js?v=20260824-3"></script>
+    <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
     <script src="/static/js/container-management.js?v=20260826-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>

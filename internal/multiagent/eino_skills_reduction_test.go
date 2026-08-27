@@ -14,7 +14,7 @@ func TestPrepareEinoAgenticSkillsStillCreatesReductionBackendWhenSkillsDisabled(
 			ReductionEnable: true,
 		},
 	}
-	loc, skillMW, fsTools, skillsRoot, err := prepareEinoAgenticSkills(context.Background(), "", ma, nil)
+	loc, skillMW, fsTools, skillsRoot, err := prepareEinoAgenticSkills(context.Background(), "", ma, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
