@@ -10,7 +10,7 @@
 # ============================================
 
 # 前端显示的版本号（可选，不填则显示默认版本）
-version: "v1.7.16"
+version: "v1.7.17"
 # 服务器配置
 server:
   host: 0.0.0.0 # 监听地址，0.0.0.0 表示监听所有网络接口
@@ -135,8 +135,12 @@ agent:
 #   approval → audit_agent_prompt
 #   review_edit → audit_agent_prompt_review_edit（可改参后放行）
 hitl:
-  # 全局默认审批方：human=人工审批，audit_agent=审计 Agent；未选会话时切换会写入本项，重启后仍生效
+  # 全局默认人机协同模式：off=关闭，approval=审批模式，review_edit=审查编辑；新建会话无独立配置时沿用
+  default_mode: off
+  # 全局默认审批方：human=人工审批，audit_agent=审计 Agent；新建会话无独立配置时沿用
   default_reviewer: human
+  # 全局默认审批等待时限（秒）：300=5分钟，0=不限时；新建会话无独立配置时沿用
+  default_timeout_seconds: 300
   # 审计 Agent 专用模型；字段留空则复用上方 openai 配置。建议 model 填小模型，用于降低审批成本。
   audit_model:
     provider: "" # openai / claude；留空跟随 openai.provider
@@ -304,7 +308,7 @@ multi_agent:
     plan_execute_executed_steps_budget_ratio: 0.2 # plan_execute 中 executed_steps 预算比例
     plan_execute_max_step_result_runes: 4000 # plan_execute 每步结果最大字符数（超出截断）
     plan_execute_keep_last_steps: 8 # plan_execute 仅保留最近 N 步正文，早期步骤折叠为标题
-    checkpoint_dir: data/eino-checkpoints # P0：进程崩溃/OOM 后同会话自动 ADK Resume；正常结束会删 .ckpt；与「中断并继续」(last_react_*) 是两套机制
+    checkpoint_dir: "" # 聊天链路不再使用 ADK checkpoint；跨轮模型态统一走 conversations.last_react_*，便于排查 stale context
     model_retry_max_retries: 0 # Eino 原生 ChatModel retry；408/409/425/429/5xx/网络抖动/空流式输出会重试；0=默认 4（永久性 4xx 不重试）
     model_retry_max_backoff_sec: 0 # Eino 原生 ChatModel retry 单次退避上限秒数；0=默认 30
     model_failover_channels: [] # Eino 原生 ChatModel failover；填写 ai.channels ID，例如 [qwen-plus]；retry 耗尽后按顺序切换

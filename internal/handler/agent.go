@@ -315,12 +315,13 @@ func (h *AgentHandler) SetHitlToolWhitelistSaver(s HitlToolWhitelistSaver) {
 	h.hitlWhitelistSaver = s
 }
 
-// HitlDefaultReviewerSaver 持久化全局默认审批方到 config.yaml。
+// HitlDefaultReviewerSaver 持久化全局默认人机协同配置到 config.yaml。
 type HitlDefaultReviewerSaver interface {
+	UpdateHitlDefaultConfig(mode, reviewer string, timeoutSeconds int) error
 	UpdateHitlDefaultReviewer(reviewer string) error
 }
 
-// SetHitlDefaultReviewerSaver 设置 HITL 默认审批方落盘。
+// SetHitlDefaultReviewerSaver 设置 HITL 默认配置落盘。
 func (h *AgentHandler) SetHitlDefaultReviewerSaver(s HitlDefaultReviewerSaver) {
 	h.hitlDefaultReviewerSaver = s
 }
@@ -330,6 +331,35 @@ func (h *AgentHandler) hitlEffectiveDefaultReviewer() string {
 		return normalizeHitlReviewer(h.config.Hitl.EffectiveDefaultReviewer())
 	}
 	return "human"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultMode() string {
+	if h != nil && h.config != nil {
+		return normalizeHitlDefaultMode(h.config.Hitl.EffectiveDefaultMode())
+	}
+	return "off"
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultTimeoutSeconds() int {
+	if h != nil && h.config != nil {
+		timeout := h.config.Hitl.EffectiveDefaultTimeoutSeconds()
+		if timeout < 0 {
+			return 0
+		}
+		return timeout
+	}
+	return 300
+}
+
+func (h *AgentHandler) hitlEffectiveDefaultRequest() *HITLRequest {
+	mode := h.hitlEffectiveDefaultMode()
+	return &HITLRequest{
+		Enabled:        mode != "off",
+		Mode:           mode,
+		Reviewer:       h.hitlEffectiveDefaultReviewer(),
+		SensitiveTools: []string{},
+		TimeoutSeconds: h.hitlEffectiveDefaultTimeoutSeconds(),
+	}
 }
 
 // HITLNeedsToolApproval 供 C2 危险任务门控：与会话侧人机协同及免审批白名单判定一致。
@@ -717,7 +747,7 @@ func (h *AgentHandler) finalizeRobotAgentError(ctx context.Context, assistantMes
 	if shouldPersistEinoAgentTraceAfterRunError(ctx) {
 		h.persistEinoAgentTraceForResume(conversationID, resultMA)
 	}
-	errMsg := "执行失败: " + errMA.Error()
+	errMsg := "执行失败: " + multiagent.EinoClientRunErrorMessage(errMA)
 	if assistantMessageID != "" {
 		_, _ = h.db.Exec("UPDATE messages SET content = ?, updated_at = ? WHERE id = ?", errMsg, time.Now(), assistantMessageID)
 		_ = h.db.AddProcessDetail(assistantMessageID, conversationID, "error", errMsg, nil)
