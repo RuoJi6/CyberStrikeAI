@@ -53,11 +53,22 @@ func (m *DockerManager) ensureOwnedEgressNetwork(ctx context.Context, spec Runti
 		return ManagedResource{}, false, fmt.Errorf("inspect egress network %s: %w", name, err)
 	}
 	enableIPv4, enableIPv6 := true, false
-	created, err := m.networkAPI.NetworkCreate(ctx, name, mobyclient.NetworkCreateOptions{
+	options := mobyclient.NetworkCreateOptions{
 		Driver: "bridge", Scope: "local", EnableIPv4: &enableIPv4, EnableIPv6: &enableIPv6,
 		Internal: false, Attachable: false, Ingress: false, Labels: egressNetworkLabels(m.ownerID, spec),
-	})
+	}
+	var created mobyclient.NetworkCreateResult
+	for attempt := 0; attempt < managedNetworkCreateAttempts; attempt++ {
+		options.IPAM = managedNetworkIPAM(ResourceKindEgressNetwork, string(spec.ID), attempt)
+		created, err = m.networkAPI.NetworkCreate(ctx, name, options)
+		if err == nil || !managedNetworkAddressConflict(err) {
+			break
+		}
+	}
 	if err != nil {
+		if managedNetworkAddressConflict(err) {
+			return ManagedResource{}, false, managedNetworkAllocationError(name, err)
+		}
 		if containerderrdefs.IsConflict(err) {
 			return ManagedResource{}, false, fmt.Errorf("%w: egress network %s already exists", ErrAlreadyExists, name)
 		}

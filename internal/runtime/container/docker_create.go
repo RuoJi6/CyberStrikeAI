@@ -399,12 +399,23 @@ func (m *DockerManager) ensureOwnedConversationNetwork(ctx context.Context, spec
 		return ManagedResource{}, false, fmt.Errorf("inspect conversation network %s: %w", name, err)
 	}
 	enableIPv4, enableIPv6 := true, false
-	created, err := m.networkAPI.NetworkCreate(ctx, name, mobyclient.NetworkCreateOptions{
+	options := mobyclient.NetworkCreateOptions{
 		Driver: "bridge", Scope: "local", EnableIPv4: &enableIPv4, EnableIPv6: &enableIPv6,
 		Internal: true, Attachable: false, Ingress: false, Options: conversationNetworkOptions(),
 		Labels: conversationNetworkLabels(m.ownerID, spec),
-	})
+	}
+	var created mobyclient.NetworkCreateResult
+	for attempt := 0; attempt < managedNetworkCreateAttempts; attempt++ {
+		options.IPAM = managedNetworkIPAM(ResourceKindConversationNetwork, string(spec.ID), attempt)
+		created, err = m.networkAPI.NetworkCreate(ctx, name, options)
+		if err == nil || !managedNetworkAddressConflict(err) {
+			break
+		}
+	}
 	if err != nil {
+		if managedNetworkAddressConflict(err) {
+			return ManagedResource{}, false, managedNetworkAllocationError(name, err)
+		}
 		if containerderrdefs.IsConflict(err) {
 			return ManagedResource{}, false, fmt.Errorf("%w: conversation network %s already exists", ErrAlreadyExists, name)
 		}
