@@ -13,7 +13,10 @@ import (
 
 const interactiveExecWrapperScript = `pidfile=$1
 printf '%s\n' "$$" > "$pidfile" || exit 70
-exec /bin/sh`
+if [ -x /bin/bash ]; then
+	exec /bin/bash --noprofile --norc -i
+fi
+exec /bin/sh -i`
 
 type dockerInteractiveExecAPI interface {
 	dockerExecAPI

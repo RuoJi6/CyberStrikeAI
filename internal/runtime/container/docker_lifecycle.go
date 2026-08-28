@@ -365,7 +365,7 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 		}
 		cancel()
 	}
-	if options.RemoveWorkspace && options.Spec.Workspace.Persistent {
+	if options.RemoveWorkspace && options.Spec.Workspace.Persistent && !options.Spec.Workspace.Shared {
 		operationCtx, cancel, contextErr := m.operationContext(ctx)
 		if contextErr != nil {
 			return Runtime{}, contextErr
@@ -458,7 +458,7 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 			return fmt.Errorf("delete runtime %s conversation network: %w", id, err)
 		}
 	}
-	if options.RemoveWorkspace && securitySpec.Workspace.Persistent {
+	if options.RemoveWorkspace && securitySpec.Workspace.Persistent && !securitySpec.Workspace.Shared {
 		if err := m.deleteOwnedVolumeResource(operationCtx, workspaceManagedResource(securitySpec)); err != nil && !errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("delete runtime %s workspace: %w", id, err)
 		}
@@ -658,6 +658,47 @@ func (m *DockerManager) deleteOwnedWorkspaceVolumeByRuntimeID(ctx context.Contex
 		return false, err
 	}
 	return true, nil
+}
+
+// DeleteSharedWorkspace removes one control-plane-owned shared workspace
+// volume. The independent workspace labels are verified before deletion; a
+// caller can never supply an arbitrary Docker volume name.
+func (m *DockerManager) DeleteSharedWorkspace(ctx context.Context, workspaceID string) error {
+	operationCtx, cancel, err := m.operationContext(ctx)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	if m.volumeAPI == nil {
+		return fmt.Errorf("%w: engine volume client is not configured", ErrEngineUnavailable)
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if !generatedNamePattern.MatchString(workspaceID) {
+		return invalidSpec("workspace id is invalid")
+	}
+	volumeName := WorkspaceVolumeNameForID(workspaceID)
+	spec := RuntimeSpec{Workspace: WorkspaceSpec{
+		Persistent: true,
+		ID:         workspaceID,
+		Shared:     true,
+		VolumeName: volumeName,
+		MountPath:  "/workspace",
+	}}
+	result, inspectErr := m.volumeAPI.VolumeInspect(operationCtx, volumeName, mobyclient.VolumeInspectOptions{})
+	if inspectErr != nil {
+		if containerderrdefs.IsNotFound(inspectErr) {
+			return nil
+		}
+		return fmt.Errorf("inspect shared workspace volume %s: %w", volumeName, inspectErr)
+	}
+	observed, observeErr := m.resourceFromLabels(ResourceKindWorkspaceVolume, result.Volume.Name, result.Volume.Name, result.Volume.Labels, parseVolumeCreatedAt(result.Volume))
+	if observeErr != nil || !sameManagedResource(workspaceManagedResource(spec), observed) || result.Volume.Labels[LabelWorkspaceShared] != "true" {
+		return fmt.Errorf("%w: shared workspace volume ownership mismatch", ErrRuntimeStateConflict)
+	}
+	if err := m.deleteOwnedVolumeResource(operationCtx, workspaceManagedResource(spec)); err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	return nil
 }
 
 func (m *DockerManager) operationContext(ctx context.Context) (context.Context, context.CancelFunc, error) {
@@ -931,7 +972,18 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 	}
 	persistent := persistentLabel == "true"
 	volumeName := strings.TrimSpace(labels[LabelWorkspaceVolume])
-	if persistent && volumeName != WorkspaceVolumeName(runtimeID) {
+	workspaceID := strings.TrimSpace(labels[LabelWorkspaceID])
+	shared, sharedErr := strconv.ParseBool(strings.TrimSpace(labels[LabelWorkspaceShared]))
+	if strings.TrimSpace(labels[LabelWorkspaceShared]) == "" {
+		shared, sharedErr = false, nil
+	}
+	if sharedErr != nil {
+		return RuntimeSpec{}, errors.New("invalid shared workspace label")
+	}
+	if persistent && workspaceID == "" {
+		workspaceID = string(runtimeID)
+	}
+	if persistent && volumeName != WorkspaceVolumeNameForID(workspaceID) {
 		return RuntimeSpec{}, errors.New("invalid workspace volume label")
 	}
 	if !persistent && volumeName != "" {
@@ -958,7 +1010,7 @@ func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error
 			WorkspaceBytes: workspaceBytes, LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles64),
 		},
 		Security:      SecurityProfile{NetworkMode: networkMode, TmpfsBytes: tmpfsBytes},
-		Workspace:     WorkspaceSpec{Persistent: persistent, VolumeName: volumeName, MountPath: workspacePath},
+		Workspace:     WorkspaceSpec{Persistent: persistent, ID: workspaceID, Shared: shared, VolumeName: volumeName, MountPath: workspacePath},
 		EgressGateway: gateway,
 	}, nil
 }

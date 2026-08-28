@@ -534,6 +534,19 @@ func logContainerIdleStop(logger *zap.Logger, report containerruntime.IdleStopRe
 // conversationContainerSpec converts trusted configuration into the immutable
 // specification used when phase 2 requests a container for first execution.
 func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec) (containerruntime.RuntimeSpec, error) {
+	binding := database.ConversationWorkspaceBinding{ConversationID: conversationID, Mode: database.ConversationWorkspaceModeEphemeral}
+	if workspacePersistent {
+		workspaceID := "conversation-" + strings.TrimSpace(conversationID)
+		binding.Mode = database.ConversationWorkspaceModeDedicated
+		binding.Workspace = &database.ContainerWorkspace{
+			ID: workspaceID, Kind: database.ContainerWorkspaceKindDedicated,
+			VolumeName: containerruntime.WorkspaceVolumeNameForID(workspaceID),
+		}
+	}
+	return conversationContainerSpecWithWorkspace(cfg, conversationID, binding, snapshot, upstreamRoute, authProfiles, tlsAuthority)
+}
+
+func conversationContainerSpecWithWorkspace(cfg *config.Config, conversationID string, binding database.ConversationWorkspaceBinding, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec) (containerruntime.RuntimeSpec, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return containerruntime.RuntimeSpec{}, fmt.Errorf("%w: conversation container runtime is disabled", containerruntime.ErrEngineUnavailable)
 	}
@@ -567,8 +580,7 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			TmpfsBytes:          cfg.Container.TmpfsBytes,
 		},
 		Workspace: containerruntime.WorkspaceSpec{
-			Persistent: workspacePersistent,
-			MountPath:  "/workspace",
+			MountPath: "/workspace",
 		},
 		Readiness: containerruntime.ReadinessPolicy{
 			Enabled:         true,
@@ -584,8 +596,11 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			return &gateway
 		}(),
 	}
-	if workspacePersistent {
-		spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeName(spec.ID)
+	if binding.Workspace != nil {
+		spec.Workspace.Persistent = true
+		spec.Workspace.ID = strings.TrimSpace(binding.Workspace.ID)
+		spec.Workspace.Shared = binding.Workspace.Kind == database.ContainerWorkspaceKindShared
+		spec.Workspace.VolumeName = containerruntime.WorkspaceVolumeNameForID(spec.Workspace.ID)
 	}
 	if err := containerruntime.ValidateSpec(spec); err != nil {
 		return containerruntime.RuntimeSpec{}, err

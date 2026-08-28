@@ -48,6 +48,33 @@ func TestValidateSpec(t *testing.T) {
 	}
 }
 
+func TestValidateSpecAcceptsSharedWorkspaceAcrossConversationRuntimes(t *testing.T) {
+	first := validSpec()
+	first.Workspace.ID = "shared-12345678-1234-1234-1234-123456789abc"
+	first.Workspace.Shared = true
+	first.Workspace.VolumeName = container.WorkspaceVolumeNameForID(first.Workspace.ID)
+	if err := container.ValidateSpec(first); err != nil {
+		t.Fatalf("first shared workspace spec rejected: %v", err)
+	}
+
+	second := first
+	second.ID = "runtime-2"
+	second.ConversationID = "conversation-2"
+	if err := container.ValidateSpec(second); err != nil {
+		t.Fatalf("second shared workspace spec rejected: %v", err)
+	}
+	if first.Workspace.VolumeName != second.Workspace.VolumeName {
+		t.Fatalf("shared volume names differ: %q != %q", first.Workspace.VolumeName, second.Workspace.VolumeName)
+	}
+
+	missingID := first
+	missingID.Workspace.ID = ""
+	missingID.Workspace.VolumeName = container.WorkspaceVolumeName(missingID.ID)
+	if err := container.ValidateSpec(missingID); !errors.Is(err, container.ErrInvalidSpecification) {
+		t.Fatalf("shared workspace without explicit id error = %v", err)
+	}
+}
+
 func TestValidateSpecRequiresPinnedLimitedGatewayOnInternalNetwork(t *testing.T) {
 	spec := validSpec()
 	spec.Security.NetworkMode = container.NetworkInternal

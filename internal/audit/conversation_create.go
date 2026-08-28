@@ -24,6 +24,9 @@ func RegisterConversationCreateHook(s *Service) {
 		if meta.WebShellConnectionID != "" {
 			detail["webshell_connection_id"] = meta.WebShellConnectionID
 		}
+		if meta.WorkspaceID != "" {
+			detail["workspace_id"] = meta.WorkspaceID
+		}
 		if meta.EgressMode != "" {
 			detail["egress_mode"] = meta.EgressMode
 		}

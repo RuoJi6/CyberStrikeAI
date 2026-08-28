@@ -47,7 +47,7 @@ const rbacScopeMeta = {
 const rbacResourceLabels = {
     user: '平台用户',
 	project: '项目', conversation: '对话', vulnerability: '漏洞', webshell: 'WebShell 连接',
-	batch_task: '批量任务', c2_listener: 'C2 监听器', egress_proxy: '出站代理', asset: '资产',
+	container_workspace: '容器工作区', batch_task: '批量任务', c2_listener: 'C2 监听器', egress_proxy: '出站代理', asset: '资产',
 };
 
 function rbacText(value, fallback = '') {

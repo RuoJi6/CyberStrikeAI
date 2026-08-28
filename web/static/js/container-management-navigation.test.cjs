@@ -131,7 +131,7 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260828-01/);
+    assert.match(template, /style\.css\?v=20260828-3/);
     assert.match(template, /router\.js\?v=20260827-2/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);

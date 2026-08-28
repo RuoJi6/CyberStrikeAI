@@ -570,11 +570,11 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if tlsErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("materialize conversation TLS authority: %w", tlsErr)
 			}
-			workspacePersistent, policyErr := db.GetConversationWorkspacePersistent(conversationID)
+			workspaceBinding, policyErr := db.GetConversationWorkspaceBinding(ctx, conversationID)
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpec(cfg, conversationID, workspacePersistent, snapshotSpec, upstreamRoute, authProfiles, tlsAuthority)
+			spec, specErr := conversationContainerSpecWithWorkspace(cfg, conversationID, workspaceBinding, snapshotSpec, upstreamRoute, authProfiles, tlsAuthority)
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
@@ -619,6 +619,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			NanoCPUs: cfg.Container.NanoCPUs, MemoryBytes: cfg.Container.MemoryBytes,
 		})
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
+		conversationHandler.SetSharedWorkspaceController(containerManager)
 		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger)
 		if auditErr != nil {
 			log.Logger.Error("对话出站持久审计采集器启动失败", zap.Error(auditErr))
@@ -1365,8 +1366,14 @@ func setupRoutes(
 		protected.GET("/conversations", conversationHandler.ListConversations)
 		protected.GET("/container-runtimes", conversationHandler.ListContainerRuntimes)
 		protected.GET("/container-runtime-rollout", conversationHandler.GetContainerRuntimeRollout)
+		protected.GET("/container-workspaces", conversationHandler.ListContainerWorkspaces)
+		protected.POST("/container-workspaces", conversationHandler.CreateContainerWorkspace)
+		protected.GET("/container-workspaces/:id", conversationHandler.GetContainerWorkspace)
+		protected.DELETE("/container-workspaces/:id", conversationHandler.DeleteContainerWorkspace)
 		protected.GET("/conversations/:id", conversationHandler.GetConversation)
 		protected.PUT("/conversations/:id/runtime-mode", conversationHandler.SetConversationRuntimeMode)
+		protected.GET("/conversations/:id/workspace-binding", conversationHandler.GetConversationWorkspaceBinding)
+		protected.PUT("/conversations/:id/workspace-binding", conversationHandler.UpdateConversationWorkspaceBinding)
 		protected.GET("/conversations/:id/boundary", boundaryPolicyHandler.GetConversationSnapshot)
 		protected.GET("/conversations/:id/egress", conversationHandler.GetConversationEgress)
 		protected.PUT("/conversations/:id/egress", conversationHandler.UpdateConversationEgress)

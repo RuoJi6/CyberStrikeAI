@@ -266,8 +266,15 @@ func resourceIsClaimed(resource ManagedResource, claims []ManagedResourceClaim) 
 }
 
 func validateManagedResource(resource ManagedResource) error {
-	if !validManagedResourceKind(resource.Kind) || !generatedNamePattern.MatchString(strings.TrimSpace(resource.LogicalID)) ||
-		!generatedNamePattern.MatchString(strings.TrimSpace(resource.ConversationID)) || strings.TrimSpace(resource.ProviderID) == "" || strings.TrimSpace(resource.Name) == "" {
+	logicalID := strings.TrimSpace(resource.LogicalID)
+	conversationID := strings.TrimSpace(resource.ConversationID)
+	sharedWorkspace := resource.Kind == ResourceKindWorkspaceVolume && strings.HasPrefix(logicalID, "shared-")
+	conversationValid := generatedNamePattern.MatchString(conversationID)
+	if sharedWorkspace {
+		conversationValid = conversationID == ""
+	}
+	if !validManagedResourceKind(resource.Kind) || !generatedNamePattern.MatchString(logicalID) ||
+		!conversationValid || strings.TrimSpace(resource.ProviderID) == "" || strings.TrimSpace(resource.Name) == "" {
 		return fmt.Errorf("%w: managed resource identity is invalid", ErrInvalidSpecification)
 	}
 	return nil

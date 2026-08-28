@@ -122,6 +122,8 @@ func permissionForRequest(method, fullPath string) string {
 		return "chat:write"
 	case path == "/container-runtimes", path == "/container-runtime-rollout":
 		return "chat:read"
+	case strings.HasPrefix(path, "/container-workspaces"):
+		return crudPermission(method, "chat")
 	case path == "/usage/tokens":
 		return "dashboard:read"
 	case strings.HasPrefix(path, "/conversations"), strings.HasPrefix(path, "/messages"), strings.HasPrefix(path, "/process-details"):

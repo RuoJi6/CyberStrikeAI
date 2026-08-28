@@ -121,6 +121,11 @@ type SecurityProfile struct {
 // user as an arbitrary host path.
 type WorkspaceSpec struct {
 	Persistent bool
+	// ID is the control-plane workspace resource identifier. It equals the
+	// runtime ID for legacy/dedicated workspaces and is shared by every runtime
+	// attached to a shared named volume.
+	ID         string `json:"ID,omitempty"`
+	Shared     bool   `json:"Shared,omitempty"`
 	VolumeName string
 	MountPath  string
 }

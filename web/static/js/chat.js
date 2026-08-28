@@ -912,7 +912,6 @@ function setChatRuntimeModeLocked(locked) {
     if (!button) return;
     const runtimeInput = document.getElementById('runtime-mode-select');
     const taskLocked = !!locked || chatRuntimeModeSwitchPending;
-    const existingConversation = !!String(currentConversationId || '').trim();
     const lockedContainerSettings = taskLocked
         && normalizeConversationRuntimeModeForUI(runtimeInput && runtimeInput.value) === CHAT_RUNTIME_MODE_CONTAINER;
     button.disabled = taskLocked && !lockedContainerSettings;
@@ -932,9 +931,9 @@ function setChatRuntimeModeLocked(locked) {
         option.setAttribute('aria-disabled', taskLocked ? 'true' : 'false');
     });
     const persistence = document.getElementById('workspace-persistence-toggle');
-    if (persistence) persistence.disabled = taskLocked || existingConversation;
+    if (persistence) persistence.disabled = taskLocked;
     const persistenceOption = document.getElementById('workspace-persistence-option');
-    if (persistenceOption) persistenceOption.classList.toggle('locked', taskLocked || existingConversation);
+    if (persistenceOption) persistenceOption.classList.toggle('locked', taskLocked);
     if (typeof window.setConversationContainerControlsLocked === 'function') {
         window.setConversationContainerControlsLocked(taskLocked);
     }
@@ -2396,7 +2395,7 @@ document.addEventListener('languagechange', function () {
         syncRuntimeModeFromValue(runtimeMode.value);
         const persistence = document.getElementById('workspace-persistence-toggle');
         syncWorkspacePersistenceFromValue(persistence && persistence.checked);
-        setChatRuntimeModeLocked(!!currentConversationId);
+        setChatRuntimeModeLocked(isCurrentChatTaskActive());
     }
 });
 

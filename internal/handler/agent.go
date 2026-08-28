@@ -430,6 +430,7 @@ type ChatRequest struct {
 	ProjectID            string                  `json:"projectId,omitempty"`           // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
 	RuntimeMode          string                  `json:"runtimeMode,omitempty"`         // 新对话执行位置：host | container；存量对话忽略请求值
 	WorkspacePersistent  bool                    `json:"workspacePersistent,omitempty"` // 新容器对话是否使用专属 named volume；存量对话忽略请求值
+	WorkspaceID          string                  `json:"workspaceId,omitempty"`         // 新容器对话要附加的共享工作区；空表示专属或临时
 	BoundaryPolicyID     string                  `json:"boundaryPolicyId,omitempty"`    // 新容器对话首次启动时锁定的边界策略草案；存量对话忽略
 	EgressMode           string                  `json:"egressMode,omitempty"`          // 新容器对话上游出口：none | proxy | group；存量对话忽略
 	EgressProxyID        string                  `json:"egressProxyId,omitempty"`       // mode=proxy 时必填

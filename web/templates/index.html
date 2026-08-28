@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260828-01">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260828-3">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1225,14 +1225,23 @@
                                                 </button>
                                             </div>
                                             <div id="workspace-persistence-option" class="workspace-persistence-option" hidden>
-                                                <label class="workspace-persistence-toggle" for="workspace-persistence-toggle">
-                                                    <span class="workspace-persistence-toggle-copy">
-                                                        <span class="workspace-persistence-toggle-title" data-i18n="chat.workspacePersistenceLabel">保留容器工作区文件</span>
-                                                        <span id="workspace-persistence-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.workspacePersistenceHintEphemeral">临时工作区：删除容器会永久删除 /workspace 中的全部文件</span>
-                                                    </span>
-                                                    <input type="checkbox" id="workspace-persistence-toggle" onchange="syncWorkspacePersistenceFromValue(this.checked)" aria-describedby="workspace-persistence-hint">
-                                                    <span class="workspace-persistence-switch" aria-hidden="true"></span>
-                                                </label>
+                                                <label class="container-conversation-field-label" for="conversation-workspace-mode" data-i18n="chat.workspaceModeLabel">工作目录</label>
+                                                <select id="conversation-workspace-mode" data-unified-select="single" onchange="syncConversationWorkspaceMode(this.value)">
+                                                    <option value="ephemeral" data-i18n="chat.workspaceModeEphemeral">临时工作区</option>
+                                                    <option value="dedicated" data-i18n="chat.workspaceModeDedicated">专属持久工作区</option>
+                                                    <option value="shared" data-i18n="chat.workspaceModeShared">共享工作区</option>
+                                                </select>
+                                                <span id="workspace-persistence-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.workspacePersistenceHintEphemeral">临时工作区：删除容器会永久删除 /workspace 中的全部文件</span>
+                                                <div id="conversation-shared-workspace-field" class="container-conversation-field conversation-shared-workspace-field" hidden>
+                                                    <label class="container-conversation-field-label" for="conversation-shared-workspace-select" data-i18n="chat.sharedWorkspaceSelectLabel">选择共享工作区</label>
+                                                    <select id="conversation-shared-workspace-select" data-unified-select="single" onchange="syncConversationSharedWorkspace(this.value)"></select>
+                                                    <div class="conversation-shared-workspace-create">
+                                                        <input id="conversation-shared-workspace-name" type="text" maxlength="80" autocomplete="off" data-i18n="chat.sharedWorkspaceNamePlaceholder" data-i18n-attr="placeholder" placeholder="新共享工作区名称">
+                                                        <button type="button" id="conversation-shared-workspace-create" class="btn-secondary" onclick="createConversationSharedWorkspace()" data-i18n="chat.sharedWorkspaceCreate">创建</button>
+                                                    </div>
+                                                    <span id="conversation-shared-workspace-hint" class="container-conversation-field-hint" data-i18n="chat.sharedWorkspaceHint">多个容器对话将读写同一个 /workspace；请避免同时修改同一文件。</span>
+                                                </div>
+                                                <input type="checkbox" id="workspace-persistence-toggle" hidden aria-hidden="true" tabindex="-1">
                                             </div>
                                             <section id="container-conversation-options" class="container-conversation-options" hidden aria-labelledby="container-conversation-options-title">
                                                 <div class="container-conversation-options-heading">
@@ -1318,11 +1327,7 @@
                                     <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">
                                 </div>
                                 <button type="button" id="chat-container-workspace-btn" class="role-selector-btn chat-container-workspace-btn" hidden onclick="toggleChatContainerWorkspacePanel()" aria-expanded="false" aria-controls="chat-container-workspace-panel" data-i18n="chat.containerWorkspaceButton" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="工作目录与容器终端" aria-label="工作目录与容器终端">
-                                    <span class="role-selector-icon" aria-hidden="true">
-                                        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="4.5" width="17" height="15" rx="3" stroke="currentColor" stroke-width="1.7"/><path d="m7.5 9 2.5 2.5L7.5 14M12.5 14h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                                    </span>
                                     <span id="chat-container-runtime-state" class="chat-container-runtime-state is-starting" role="status" aria-live="polite"><span class="chat-container-runtime-state-dot" aria-hidden="true"></span><span id="chat-container-runtime-state-label">启动中</span></span>
-                                    <span class="role-selector-text" data-i18n="chat.containerWorkspaceShort">工作区</span>
                                 </button>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
                                     <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="选择角色">
@@ -1530,6 +1535,12 @@
                                             <div><span data-i18n="chat.containerWorkspacePath">容器工作目录</span><code id="chat-container-path">—</code></div>
                                             <div><span data-i18n="chat.hostWorkspacePath">宿主机工作目录</span><code id="chat-container-host-path">—</code></div>
                                         </div>
+                                        <div class="container-workspace-sharing-summary">
+                                            <div><span data-i18n="chat.workspaceType">工作区类型</span><strong id="chat-container-workspace-mode">—</strong></div>
+                                            <div><span data-i18n="chat.workspaceName">工作区名称</span><strong id="chat-container-workspace-name">—</strong></div>
+                                            <div><span data-i18n="chat.workspaceSharedCount">使用对话</span><strong id="chat-container-workspace-shared-count">—</strong></div>
+                                        </div>
+                                        <div id="chat-container-workspace-attachments" class="container-workspace-attachments" hidden></div>
                                         <div class="container-terminal-actions">
                                             <span id="chat-container-terminal-status" role="status" aria-live="polite" data-i18n="chat.containerWorkspaceLoading">正在读取容器工作目录…</span>
                                             <button type="button" id="chat-container-terminal-open" class="btn-primary" data-require-permission="terminal:execute" onclick="openChatContainerShell()" disabled data-i18n="chat.openContainerShell">打开交互式 Shell</button>
@@ -1555,6 +1566,12 @@
                                 <div><span data-i18n="chat.containerWorkspacePath">容器工作目录</span><code id="conversation-container-path">—</code></div>
                                 <div><span data-i18n="chat.hostWorkspacePath">宿主机工作目录</span><code id="conversation-container-host-path">—</code></div>
                             </div>
+                            <div class="container-workspace-sharing-summary">
+                                <div><span data-i18n="chat.workspaceType">工作区类型</span><strong id="conversation-container-workspace-mode">—</strong></div>
+                                <div><span data-i18n="chat.workspaceName">工作区名称</span><strong id="conversation-container-workspace-name">—</strong></div>
+                                <div><span data-i18n="chat.workspaceSharedCount">使用对话</span><strong id="conversation-container-workspace-shared-count">—</strong></div>
+                            </div>
+                            <div id="conversation-container-workspace-attachments" class="container-workspace-attachments" hidden></div>
                             <div class="container-terminal-actions">
                                 <span id="conversation-container-terminal-status" role="status" aria-live="polite" data-i18n="chat.containerWorkspaceLoading">正在读取容器工作目录…</span>
                                 <button type="button" id="conversation-container-terminal-open" class="btn-primary" data-require-permission="terminal:execute" onclick="openConversationContainerShell()" disabled data-i18n="chat.openContainerShell">打开交互式 Shell</button>
@@ -5817,6 +5834,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                                         <div class="rbac-assignment-filterbar rbac-resource-filterbar">
                                                             <select id="rbac-assignment-type" class="form-select rbac-form-select" onchange="changeRbacResourceType()">
                                                                 <option value="conversation" data-i18n="rbac.resourceTypes.conversation">对话</option>
+                                                                <option value="container_workspace" data-i18n="rbac.resourceTypes.container_workspace">容器工作区</option>
                                                                 <option value="project" data-i18n="rbac.resourceTypes.project">项目</option>
                                                                 <option value="batch_task" data-i18n="rbac.resourceTypes.batch_task">批量任务</option>
                                                                 <option value="vulnerability" data-i18n="rbac.resourceTypes.vulnerability">漏洞</option>
@@ -5846,6 +5864,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                                                 <select id="rbac-assignment-filter-type" class="form-select rbac-form-select" onchange="changeRbacAssignmentFilter(this.value)" aria-label="筛选资源类型">
                                                                     <option value="all" data-i18n="rbac.allResourceTypes">全部类型</option>
                                                                     <option value="conversation" data-i18n="rbac.resourceTypes.conversation">对话</option>
+                                                                    <option value="container_workspace" data-i18n="rbac.resourceTypes.container_workspace">容器工作区</option>
                                                                     <option value="project" data-i18n="rbac.resourceTypes.project">项目</option>
                                                                     <option value="batch_task" data-i18n="rbac.resourceTypes.batch_task">批量任务</option>
                                                                     <option value="vulnerability" data-i18n="rbac.resourceTypes.vulnerability">漏洞</option>
@@ -5889,6 +5908,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                                                 <option value="user" data-i18n="rbac.resourceTypes.user">平台用户</option>
                                                                 <option value="project" data-i18n="rbac.resourceTypes.project">项目</option>
                                                                 <option value="conversation" data-i18n="rbac.resourceTypes.conversation">对话</option>
+                                                                <option value="container_workspace" data-i18n="rbac.resourceTypes.container_workspace">容器工作区</option>
                                                                 <option value="vulnerability" data-i18n="rbac.resourceTypes.vulnerability">漏洞</option>
                                                                 <option value="asset" data-i18n="rbac.resourceTypes.asset">资产</option>
                                                                 <option value="webshell" data-i18n="rbac.resourceTypes.webshell">WebShell 连接</option>
@@ -7468,7 +7488,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
     <script src="/static/js/monitor.js?v=20260824-2"></script>
-    <script src="/static/js/chat.js?v=20260826-3"></script>
+    <script src="/static/js/chat.js?v=20260828-3"></script>
     <script src="/static/js/chat-plan-progress.js?v=20260815-1"></script>
     <script src="/static/js/hitl.js?v=20260819-1"></script>
     <script src="/static/js/settings.js?v=20260717-1"></script>
@@ -7477,13 +7497,13 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/wechat-robot.js"></script>
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
-    <script src="/static/js/terminal.js?v=20260824-1"></script>
-    <script src="/static/js/container-terminal.js?v=20260827-1"></script>
+    <script src="/static/js/terminal.js?v=20260828-3"></script>
+    <script src="/static/js/container-terminal.js?v=20260828-3"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260827-1"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260828-3"></script>
     <script src="/static/js/vulnerability.js?v=18"></script>
     <script src="/static/js/traffic-evidence.js?v=5"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>

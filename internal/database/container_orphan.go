@@ -74,16 +74,25 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 			)
 		}
 		if spec.Workspace.Persistent {
-			expectedName := containerruntime.WorkspaceVolumeName(containerruntime.RuntimeID(claim.LogicalID))
+			workspaceID := strings.TrimSpace(spec.Workspace.ID)
+			if workspaceID == "" {
+				workspaceID = claim.LogicalID
+			}
+			expectedName := containerruntime.WorkspaceVolumeNameForID(workspaceID)
 			if spec.Workspace.VolumeName != expectedName {
 				_ = rows.Close()
 				return nil, fmt.Errorf("%w: persistent workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
 			}
 			claims = append(claims, containerruntime.ManagedResourceClaim{
-				Kind: containerruntime.ResourceKindWorkspaceVolume, LogicalID: claim.LogicalID,
-				ProviderID: expectedName, ConversationID: claim.ConversationID,
+				Kind: containerruntime.ResourceKindWorkspaceVolume, LogicalID: workspaceID,
+				ProviderID: expectedName, ConversationID: func() string {
+					if spec.Workspace.Shared {
+						return ""
+					}
+					return claim.ConversationID
+				}(),
 			})
-			workspaceClaims[claim.ConversationID] = struct{}{}
+			workspaceClaims[workspaceID] = struct{}{}
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -94,36 +103,41 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 		return nil, err
 	}
 
-	// A persistent workspace outlives its container lifecycle record. Keep a
-	// control-plane claim for every persistent container conversation so the
-	// orphan scanner cannot delete a deliberately retained named volume between
-	// container deletion and recreation.
+	// Workspace resources outlive an individual runtime record. Shared
+	// workspaces remain claimed even with no current attachment until an
+	// administrator explicitly deletes the workspace resource.
 	persistentRows, err := db.QueryContext(ctx, `
-		SELECT id
-		FROM conversations
-		WHERE runtime_mode = ? AND workspace_persistent = 1
-		ORDER BY id
+		SELECT w.id, w.volume_name, w.kind, COALESCE(MIN(c.id), '')
+		FROM container_workspaces w
+		LEFT JOIN conversations c ON c.workspace_id = w.id AND c.runtime_mode = ?
+		GROUP BY w.id, w.volume_name, w.kind
+		ORDER BY w.id
 	`, ConversationRuntimeModeContainer)
 	if err != nil {
 		return nil, fmt.Errorf("list retained workspace claims: %w", err)
 	}
 	defer persistentRows.Close()
 	for persistentRows.Next() {
-		var conversationID string
-		if err := persistentRows.Scan(&conversationID); err != nil {
+		var workspaceID, volumeName, kind, conversationID string
+		if err := persistentRows.Scan(&workspaceID, &volumeName, &kind, &conversationID); err != nil {
 			return nil, err
 		}
-		if _, exists := workspaceClaims[conversationID]; exists {
+		if _, exists := workspaceClaims[workspaceID]; exists {
 			continue
 		}
-		runtimeID := containerruntime.RuntimeID("conversation-" + conversationID)
+		if volumeName != containerruntime.WorkspaceVolumeNameForID(workspaceID) {
+			return nil, fmt.Errorf("%w: workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
+		}
+		if kind == ContainerWorkspaceKindShared {
+			conversationID = ""
+		}
 		claims = append(claims, containerruntime.ManagedResourceClaim{
 			Kind:           containerruntime.ResourceKindWorkspaceVolume,
-			LogicalID:      string(runtimeID),
-			ProviderID:     containerruntime.WorkspaceVolumeName(runtimeID),
+			LogicalID:      workspaceID,
+			ProviderID:     volumeName,
 			ConversationID: conversationID,
 		})
-		workspaceClaims[conversationID] = struct{}{}
+		workspaceClaims[workspaceID] = struct{}{}
 	}
 	if err := persistentRows.Err(); err != nil {
 		return nil, err
@@ -151,7 +165,7 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 		if runtimeID != string(expectedRuntimeID) || volumeName != expectedVolumeName {
 			return nil, fmt.Errorf("%w: retained workspace claim identity mismatch", containerruntime.ErrRuntimeStateConflict)
 		}
-		if _, exists := workspaceClaims[conversationID]; exists {
+		if _, exists := workspaceClaims[runtimeID]; exists {
 			continue
 		}
 		claims = append(claims, containerruntime.ManagedResourceClaim{
@@ -160,6 +174,7 @@ func (db *DB) ListManagedResourceClaims(ctx context.Context) ([]containerruntime
 			ProviderID:     volumeName,
 			ConversationID: conversationID,
 		})
+		workspaceClaims[runtimeID] = struct{}{}
 	}
 	return claims, retainedRows.Err()
 }

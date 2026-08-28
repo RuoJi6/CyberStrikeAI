@@ -102,6 +102,7 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.AgentMode = chatRequestAgentMode(req, source)
 		meta.RuntimeMode = runtimeMode
 		meta.WorkspacePersistent = req.WorkspacePersistent
+		meta.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
 		meta.BoundaryPolicyID = boundaryPolicyID
 		meta.EgressMode = egressMode
 		meta.EgressProxyID = egressProxyID

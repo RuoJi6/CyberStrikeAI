@@ -17,10 +17,16 @@ const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
 test('对话执行栏提供工作区入口并在右侧抽屉承载共享终端', () => {
     assert.match(template, /id="runtime-mode-wrapper"[\s\S]*?id="chat-container-workspace-btn"/);
     assert.match(template, /id="chat-container-workspace-panel"/);
-    assert.match(template, /id="chat-container-runtime-state"[\s\S]*?id="chat-container-runtime-state-label"[\s\S]*?chat\.containerWorkspaceShort/);
+    assert.match(template, /id="chat-container-runtime-state"[\s\S]*?id="chat-container-runtime-state-label"/);
+    assert.doesNotMatch(template.match(/id="chat-container-workspace-btn"[\s\S]*?<\/button>/)?.[0] || '', /chat\.containerWorkspaceShort|>\s*工作区\s*</);
+    assert.doesNotMatch(template.match(/id="chat-container-workspace-btn"[\s\S]*?<\/button>/)?.[0] || '', /role-selector-text|role-selector-icon/);
     assert.match(template, /id="chat-container-path"/);
     assert.match(template, /id="chat-container-host-path"/);
     assert.match(template, /id="chat-container-terminal-root"/);
+    assert.match(template, /id="chat-container-workspace-mode"/);
+    assert.match(template, /id="chat-container-workspace-name"/);
+    assert.match(template, /id="chat-container-workspace-shared-count"/);
+    assert.match(template, /id="chat-container-workspace-attachments"/);
     assert.match(chat, /syncChatContainerWorkspaceButton/);
     assert.match(containerTerminal, /toggleChatContainerWorkspacePanel/);
     assert.match(containerTerminal, /openChatContainerShell/);
@@ -37,6 +43,8 @@ test('新建容器对话无需刷新即可显示工作区入口和实时容器�
     assert.match(containerTerminal, /window\.addEventListener\('conversation-changed', syncChatContainerWorkspaceButton\)/);
     assert.match(containerTerminal, /\/container-initialization/);
     assert.match(containerTerminal, /\?observe=1/);
+    assert.match(containerTerminal, /chatStatusPollAttempts === 0/);
+    assert.match(containerTerminal, /lifecycleState === 'in_progress'/);
     assert.match(containerTerminal, /observedAgentStatus === 'running'/);
     assert.match(containerTerminal, /taskStatus === 'running'[\s\S]*?readiness === 'ready'/);
     assert.match(containerTerminal, /runtimeStatus === 'running'[\s\S]*?\? 'running'/);
@@ -53,8 +61,11 @@ test('系统设置终端与容器终端复用同一 xterm 会话和多标签代�
     assert.match(terminal, /createTerminalInContainer\(container, tab\)/);
     assert.match(terminal, /window\.CyberStrikeTerminal/);
     assert.match(containerTerminal, /CyberStrikeTerminal\.createEmbeddedTerminal/);
-    assert.match(template, /terminal\.js\?v=20260824-1/);
-    assert.match(template, /container-terminal\.js\?v=20260827-1/);
+    assert.match(terminal, /attachCustomKeyEventHandler/);
+    assert.match(terminal, /event\.key !== 'Tab'/);
+    assert.match(terminal, /sendToWS\(event\.shiftKey \? '\\x1b\[Z' : '\\t'\)/);
+    assert.match(template, /terminal\.js\?v=20260828-3/);
+    assert.match(template, /container-terminal\.js\?v=20260828-3/);
 });
 
 test('容器终端只连接会话容器端点且不会回退宿主机终端', () => {
@@ -77,7 +88,8 @@ test('对话容器详情使用右侧栏并保留已停止容器的只读路径�
 
 test('宿主机长路径完整换行，已停止容器明确禁用终端按钮', () => {
     assert.match(styles, /\.container-terminal-workspace-grid code\s*\{[\s\S]*?overflow-wrap: anywhere;[\s\S]*?user-select: text;[\s\S]*?white-space: normal;/);
-    assert.doesNotMatch(styles, /\.container-terminal-workspace-grid code\s*\{[\s\S]*?text-overflow: ellipsis;[\s\S]*?\}/);
+    const pathRule = styles.match(/\.container-terminal-workspace-grid code\s*\{([^}]*)\}/)?.[1] || '';
+    assert.doesNotMatch(pathRule, /text-overflow:\s*ellipsis/);
     assert.match(styles, /\.container-terminal-actions \.btn-primary:disabled\s*\{[\s\S]*?cursor: not-allowed;/);
     assert.match(containerTerminal, /button\.setAttribute\('aria-disabled', available \? 'false' : 'true'\)/);
     assert.match(containerTerminal, /chat\.containerShellUnavailableButton/);
@@ -123,7 +135,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         for (const key of chatKeys) assert.equal(typeof locale.chat[key], 'string', key);
         for (const key of managementKeys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
-    assert.match(template, /style\.css\?v=20260828-01/);
-    assert.match(template, /chat\.js\?v=20260826-3/);
+    assert.match(template, /style\.css\?v=20260828-3/);
+    assert.match(template, /chat\.js\?v=20260828-3/);
     assert.match(template, /container-management\.js\?v=20260826-1/);
 });

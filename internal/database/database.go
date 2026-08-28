@@ -206,6 +206,7 @@ func (db *DB) initTables() error {
 		agent_mode TEXT NOT NULL DEFAULT 'eino_single',
 		runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container')),
 		workspace_persistent INTEGER NOT NULL DEFAULT 0 CHECK (workspace_persistent IN (0, 1)),
+		workspace_id TEXT,
 		scan_rate_enabled INTEGER NOT NULL DEFAULT 0 CHECK (scan_rate_enabled IN (0, 1)),
 		scan_http_rps INTEGER NOT NULL DEFAULT 0,
 		scan_tcp_cps INTEGER NOT NULL DEFAULT 0,
@@ -1000,6 +1001,9 @@ func (db *DB) initTables() error {
 
 	if err := db.migrateProjectsTable(); err != nil {
 		db.logger.Warn("迁移projects相关表失败", zap.Error(err))
+	}
+	if err := db.initConversationWorkspaceTables(); err != nil {
+		return fmt.Errorf("创建对话容器工作区表失败: %w", err)
 	}
 	if err := db.dropProjectFactVersionsTable(); err != nil {
 		db.logger.Warn("清理project_fact_versions表失败", zap.Error(err))
