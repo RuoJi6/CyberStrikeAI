@@ -77,6 +77,9 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if meta.WorkspacePersistent && runtimeMode != ConversationRuntimeModeContainer {
 		return nil, fmt.Errorf("持久化工作区只能用于 container 对话")
 	}
+	if strings.TrimSpace(meta.WorkspaceID) != "" && runtimeMode != ConversationRuntimeModeContainer {
+		return nil, fmt.Errorf("共享工作区只能用于 container 对话")
+	}
 	runtimeControls, err := NormalizeConversationRuntimeControls(meta.RuntimeControls)
 	if err != nil {
 		return nil, err
@@ -113,26 +116,33 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 		return nil, fmt.Errorf("开始创建对话事务失败: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	workspaceID, workspacePersistent, err := resolveNewConversationWorkspaceTx(
+		context.Background(), tx, id, title, projectID, runtimeMode,
+		meta.WorkspacePersistent, meta.WorkspaceID, now,
+	)
+	if err != nil {
+		return nil, err
+	}
 	switch {
 	case wsID != "" && projectID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
+			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
 		)
 	case wsID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, wsID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
+			id, title, now, now, wsID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
 		)
 	case projectID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, projectID, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
+			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
+			id, title, now, now, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
 		)
 	default:
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode, workspace_persistent) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-			id, title, now, now, roleName, agentMode, runtimeMode, meta.WorkspacePersistent,
+			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
+			id, title, now, now, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
 		)
 	}
 	if err != nil {
@@ -195,7 +205,7 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 		RoleName:            roleName,
 		AgentMode:           agentMode,
 		RuntimeMode:         runtimeMode,
-		WorkspacePersistent: meta.WorkspacePersistent,
+		WorkspacePersistent: workspacePersistent,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
@@ -207,6 +217,8 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	meta.EgressProxyID = egressProxyID
 	meta.EgressProxyGroupID = egressProxyGroupID
 	meta.RuntimeControls = runtimeControls
+	meta.WorkspacePersistent = workspacePersistent
+	meta.WorkspaceID = workspaceID
 	notifyConversationCreated(conv, meta)
 	return conv, nil
 }
@@ -938,11 +950,12 @@ func (db *DB) DeleteConversationWithWorkspaceRetention(id string, retainWorkspac
 
 	var title, runtimeMode string
 	var projectID sql.NullString
+	var workspaceID sql.NullString
 	var workspacePersistent bool
 	if err := tx.QueryRow(`
-		SELECT title, project_id, runtime_mode, workspace_persistent
+		SELECT title, project_id, runtime_mode, workspace_persistent, workspace_id
 		FROM conversations WHERE id = ?
-	`, id).Scan(&title, &projectID, &runtimeMode, &workspacePersistent); err != nil {
+	`, id).Scan(&title, &projectID, &runtimeMode, &workspacePersistent, &workspaceID); err != nil {
 		if err == sql.ErrNoRows {
 			return errors.New("对话不存在")
 		}
@@ -950,6 +963,15 @@ func (db *DB) DeleteConversationWithWorkspaceRetention(id string, retainWorkspac
 	}
 	if retainWorkspace && (runtimeMode != ConversationRuntimeModeContainer || !workspacePersistent) {
 		return errors.New("只有启用持久工作区的容器对话可保留工作区")
+	}
+	workspaceKind := ""
+	if strings.TrimSpace(workspaceID.String) != "" {
+		if err := tx.QueryRow("SELECT kind FROM container_workspaces WHERE id = ?", workspaceID.String).Scan(&workspaceKind); err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("查询对话工作区类型失败: %w", err)
+		}
+	}
+	if retainWorkspace && workspaceKind == ContainerWorkspaceKindShared {
+		return errors.New("共享工作区不随单个对话保留或删除")
 	}
 
 	// 删除对话前补全漏洞来源标签，便于在漏洞库中追溯已删除会话的发现。
@@ -967,6 +989,9 @@ func (db *DB) DeleteConversationWithWorkspaceRetention(id string, retainWorkspac
 	if retainWorkspace {
 		runtimeID := containerruntime.RuntimeID("conversation-" + id)
 		volumeName := containerruntime.WorkspaceVolumeName(runtimeID)
+		if strings.TrimSpace(workspaceID.String) != "" {
+			volumeName = containerruntime.WorkspaceVolumeNameForID(workspaceID.String)
+		}
 		if _, err := tx.Exec(`
 			INSERT INTO retained_container_workspaces (
 				original_conversation_id, conversation_title, runtime_id, volume_name, retained_at
@@ -989,6 +1014,14 @@ func (db *DB) DeleteConversationWithWorkspaceRetention(id string, retainWorkspac
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return errors.New("对话不存在")
+	}
+	// Dedicated workspace resources belong to this conversation. Retained
+	// volumes are represented by retained_container_workspaces after deletion;
+	// shared workspace resources remain independent and attached elsewhere.
+	if workspaceKind == ContainerWorkspaceKindDedicated && strings.TrimSpace(workspaceID.String) != "" {
+		if _, err := tx.Exec("DELETE FROM container_workspaces WHERE id = ?", workspaceID.String); err != nil {
+			return fmt.Errorf("清理专属工作区资源失败: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交删除对话事务失败: %w", err)

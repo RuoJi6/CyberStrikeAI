@@ -153,7 +153,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260826-7/);
+    assert.match(template, /style\.css\?v=20260828-2/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(template, /container-management\.js\?v=20260826-1/);
 });

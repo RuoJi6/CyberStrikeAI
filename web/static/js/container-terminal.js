@@ -120,6 +120,38 @@
             hostPath.textContent = hostWorkspaceLabel(info);
             hostPath.title = hostPath.textContent;
         }
+        const mode = String(info && info.workspaceMode || (info && info.persistent ? 'dedicated' : 'ephemeral')).trim().toLowerCase();
+        const modeLabels = {
+            ephemeral: translate('chat.workspaceModeEphemeral', '临时工作区'),
+            dedicated: translate('chat.workspaceModeDedicated', '专属持久工作区'),
+            shared: translate('chat.workspaceModeShared', '共享工作区'),
+        };
+        const modeElement = element(`${prefix}-workspace-mode`);
+        const nameElement = element(`${prefix}-workspace-name`);
+        const countElement = element(`${prefix}-workspace-shared-count`);
+        const attachmentsElement = element(`${prefix}-workspace-attachments`);
+        const attachments = Array.isArray(info && info.attachments) ? info.attachments : [];
+        if (modeElement) modeElement.textContent = modeLabels[mode] || modeLabels.ephemeral;
+        if (nameElement) nameElement.textContent = info && info.workspaceName
+            ? String(info.workspaceName)
+            : (mode === 'ephemeral' ? translate('chat.workspaceNotNamed', '不保留') : '—');
+        if (countElement) countElement.textContent = String(Number(info && info.sharedWith || attachments.length || (mode === 'ephemeral' ? 0 : 1)));
+        if (attachmentsElement) {
+            attachmentsElement.replaceChildren();
+            attachmentsElement.hidden = mode !== 'shared' || attachments.length === 0;
+            if (!attachmentsElement.hidden) {
+                const heading = document.createElement('strong');
+                heading.textContent = translate('chat.workspaceAttachedConversations', '正在使用此工作区的对话');
+                attachmentsElement.appendChild(heading);
+                const list = document.createElement('ul');
+                attachments.forEach(function (attachment) {
+                    const item = document.createElement('li');
+                    item.textContent = String(attachment && attachment.conversationTitle || attachment && attachment.conversationId || '—');
+                    list.appendChild(item);
+                });
+                attachmentsElement.appendChild(list);
+            }
+        }
         const available = !!(info && info.interactiveAvailable);
         if (viewName === 'chat' && info && info.runtimeStatus) {
             renderChatContainerState(String(info.runtimeStatus));
@@ -167,12 +199,15 @@
         const initStatus = String(payload && payload.status || '').trim().toLowerCase();
         const readiness = String(payload && payload.readinessStatus || '').trim().toLowerCase();
         const runtimeStatus = String(payload && payload.runtimeStatus || '').trim().toLowerCase();
+        const lifecycleState = String(payload && payload.lifecycleState || '').trim().toLowerCase();
+        const lifecycleOperation = String(payload && payload.lifecycleOperation || '').trim().toLowerCase();
         const observedAgentStatus = String(payload && payload.observation && payload.observation.agent && payload.observation.agent.status || '').trim().toLowerCase();
         const taskStatus = typeof window.getConversationExecutionStatus === 'function'
             ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
             : '';
         if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed' || observedAgentStatus === 'failed') return 'failed';
         if (runtimeStatus === 'running' || observedAgentStatus === 'running') return 'running';
+        if (lifecycleState === 'in_progress' && ['start', 'rebuild', 'reconcile'].includes(lifecycleOperation)) return 'starting';
         // A ready runtime is necessarily usable by an already-running turn. This
         // closes the short persistence/event ordering window where chat output is
         // visible while the lightweight runtimeStatus field is still stale.
@@ -189,10 +224,12 @@
             const taskStatus = typeof window.getConversationExecutionStatus === 'function'
                 ? String(window.getConversationExecutionStatus(id) || '').trim().toLowerCase()
                 : '';
-            // While a turn is active, request one authoritative Docker observation.
-            // The loop ends immediately once running is confirmed, so this does not
-            // turn the normal 1-second lightweight poll into continuous Docker work.
-            const observe = taskStatus === 'running' || taskStatus === 'initializing';
+            // Always make the first refresh authoritative. Turns can finish before
+            // the final lifecycle write reaches the browser, so trusting only the
+            // durable field after a completed turn can leave a running container
+            // displayed as stopped. Later polls stay lightweight unless a turn is
+            // active; the loop ends once a terminal state is confirmed.
+            const observe = chatStatusPollAttempts === 0 || taskStatus === 'running' || taskStatus === 'initializing';
             const suffix = observe ? '?observe=1' : '';
             const response = await window.apiFetch(`/api/conversations/${encodeURIComponent(id)}/container-initialization${suffix}`);
             const payload = await response.json().catch(() => ({}));

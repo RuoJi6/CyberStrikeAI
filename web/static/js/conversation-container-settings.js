@@ -8,6 +8,7 @@
         policies: [],
         proxies: [],
         groups: [],
+        workspaces: [],
         preview: null,
         errors: Object.create(null),
         auditSettingRequestId: 0,
@@ -15,6 +16,9 @@
         activeNetworkSignature: '',
         loadingActiveNetwork: false,
         applyingNetwork: false,
+        workspaceBindingRequestId: 0,
+        loadingWorkspaceBinding: false,
+        applyingWorkspace: false,
         taskLocked: false,
     };
 
@@ -64,6 +68,165 @@
         }
         refreshEnhancedSelect(select);
         return select.value;
+    }
+
+    function workspaceModeHint(mode) {
+        if (mode === 'shared') {
+            return translate('chat.workspacePersistenceHintShared', '共享工作区：多个容器对话共同读写同一个 Docker named volume');
+        }
+        if (mode === 'dedicated') {
+            return translate('chat.workspacePersistenceHintPersistent', '持久工作区：使用该对话专属 Docker named volume');
+        }
+        return translate('chat.workspacePersistenceHintEphemeral', '临时工作区：删除容器会永久删除 /workspace 中的全部文件');
+    }
+
+    function renderWorkspaceOptions(preferredValue) {
+        const select = selectElement('conversation-shared-workspace-select');
+        if (!select) return;
+        const selected = preferredValue !== undefined ? preferredValue : select.value;
+        const options = [];
+        state.workspaces.forEach(function (workspace) {
+            if (!workspace || !workspace.id) return;
+            const count = Number(workspace.attachedConversations || 0);
+            const suffix = count > 0
+                ? translate('chat.sharedWorkspaceUseCountSuffix', ' · {{count}} 个对话', { count: count })
+                : '';
+            options.push(createOption(String(workspace.id), String(workspace.name || workspace.id) + suffix));
+        });
+        if (!options.length) {
+            options.push(createOption('', state.errors.workspaces
+                ? translate('chat.sharedWorkspacesUnavailable', '共享工作区不可用或无读取权限')
+                : translate('chat.sharedWorkspaceEmpty', '暂无共享工作区，请先创建'), true));
+        }
+        replaceOptions(select, options, selected);
+    }
+
+    function applyWorkspaceModeToControls(mode, workspaceID) {
+        const normalized = mode === 'shared' || mode === 'dedicated' ? mode : 'ephemeral';
+        const modeSelect = selectElement('conversation-workspace-mode');
+        const sharedField = selectElement('conversation-shared-workspace-field');
+        const sharedSelect = selectElement('conversation-shared-workspace-select');
+        const legacyToggle = selectElement('workspace-persistence-toggle');
+        const hint = selectElement('workspace-persistence-hint');
+        if (modeSelect) modeSelect.value = normalized;
+        if (sharedField) sharedField.hidden = normalized !== 'shared';
+        if (legacyToggle) legacyToggle.checked = normalized !== 'ephemeral';
+        if (hint) hint.textContent = workspaceModeHint(normalized);
+        if (sharedSelect && workspaceID) sharedSelect.value = String(workspaceID);
+        refreshEnhancedSelect(modeSelect);
+        refreshEnhancedSelect(sharedSelect);
+    }
+
+    function selectedWorkspaceBinding() {
+        const modeSelect = selectElement('conversation-workspace-mode');
+        const sharedSelect = selectElement('conversation-shared-workspace-select');
+        const mode = String(modeSelect && modeSelect.value || 'ephemeral').trim().toLowerCase();
+        const normalized = mode === 'shared' || mode === 'dedicated' ? mode : 'ephemeral';
+        const workspaceId = normalized === 'shared' ? String(sharedSelect && sharedSelect.value || '').trim() : '';
+        if (normalized === 'shared' && !workspaceId) {
+            throw new Error(translate('chat.sharedWorkspaceRequired', '请选择或创建一个共享工作区。'));
+        }
+        return { mode: normalized, workspaceId: workspaceId };
+    }
+
+    async function loadConversationWorkspaceBinding() {
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!conversationId) {
+            applyWorkspaceModeToControls('ephemeral', '');
+            return;
+        }
+        const requestId = ++state.workspaceBindingRequestId;
+        state.loadingWorkspaceBinding = true;
+        try {
+            const payload = await fetchJSON('/api/conversations/' + encodeURIComponent(conversationId) + '/workspace-binding');
+            if (requestId !== state.workspaceBindingRequestId || conversationId !== String(window.currentConversationId || '').trim()) return;
+            const binding = payload && payload.binding || {};
+            const workspace = binding.workspace || {};
+            if (workspace.id && !state.workspaces.some(function (item) { return item && item.id === workspace.id; }) && workspace.kind === 'shared') {
+                state.workspaces.unshift(workspace);
+                renderWorkspaceOptions(workspace.id);
+            }
+            applyWorkspaceModeToControls(binding.mode, workspace.id || '');
+        } catch (error) {
+            if (requestId === state.workspaceBindingRequestId) {
+                notify(translate('chat.workspaceBindingLoadFailed', '读取当前工作区配置失败。'), 'error');
+            }
+        } finally {
+            if (requestId === state.workspaceBindingRequestId) state.loadingWorkspaceBinding = false;
+        }
+    }
+
+    async function applyConversationWorkspaceBinding() {
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!conversationId || state.loadingWorkspaceBinding) return true;
+        if (state.taskLocked || state.applyingWorkspace) return false;
+        let binding;
+        try {
+            binding = selectedWorkspaceBinding();
+        } catch (error) {
+            notify(error.message, 'error');
+            return false;
+        }
+        state.applyingWorkspace = true;
+        setConversationContainerControlsLocked(state.taskLocked);
+        try {
+            const response = await window.apiFetch('/api/conversations/' + encodeURIComponent(conversationId) + '/workspace-binding', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(binding),
+            });
+            const payload = await response.json().catch(function () { return {}; });
+            if (!response.ok) throw new Error(payload && payload.error ? String(payload.error) : 'HTTP ' + response.status);
+            await loadConversationWorkspaceBinding();
+            window.dispatchEvent(new CustomEvent('conversation-container-state-changed', { detail: { conversationId: conversationId, state: 'stopped' } }));
+            notify(translate('chat.workspaceBindingSaved', '工作区已切换，将在下次对话时自动生效。'), 'success');
+            return true;
+        } catch (error) {
+            notify(translate('chat.workspaceBindingSaveFailed', '切换工作区失败：{{message}}', { message: error && error.message ? error.message : '' }), 'error');
+            await loadConversationWorkspaceBinding();
+            return false;
+        } finally {
+            state.applyingWorkspace = false;
+            setConversationContainerControlsLocked(state.taskLocked);
+        }
+    }
+
+    async function syncConversationWorkspaceMode(mode) {
+        applyWorkspaceModeToControls(mode, '');
+        if (String(window.currentConversationId || '').trim()) await applyConversationWorkspaceBinding();
+    }
+
+    async function syncConversationSharedWorkspace(value) {
+        const select = selectElement('conversation-shared-workspace-select');
+        if (select) select.value = String(value || '');
+        if (String(window.currentConversationId || '').trim()) await applyConversationWorkspaceBinding();
+    }
+
+    async function createConversationSharedWorkspace() {
+        if (state.taskLocked || state.applyingWorkspace) return;
+        const input = selectElement('conversation-shared-workspace-name');
+        const name = String(input && input.value || '').trim();
+        if (!name) {
+            notify(translate('chat.sharedWorkspaceNameRequired', '请输入共享工作区名称。'), 'error');
+            return;
+        }
+        try {
+            const response = await window.apiFetch('/api/container-workspaces', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: name, projectId: activeProjectId() }),
+            });
+            const workspace = await response.json().catch(function () { return {}; });
+            if (!response.ok) throw new Error(workspace && workspace.error ? String(workspace.error) : 'HTTP ' + response.status);
+            state.workspaces.unshift(workspace);
+            renderWorkspaceOptions(workspace.id);
+            applyWorkspaceModeToControls('shared', workspace.id);
+            if (input) input.value = '';
+            if (String(window.currentConversationId || '').trim()) await applyConversationWorkspaceBinding();
+            else notify(translate('chat.sharedWorkspaceCreated', '共享工作区已创建。'), 'success');
+        } catch (error) {
+            notify(translate('chat.sharedWorkspaceCreateFailed', '创建共享工作区失败：{{message}}', { message: error && error.message ? error.message : '' }), 'error');
+        }
     }
 
     function setLoadStatus() {
@@ -501,8 +664,12 @@
         if (!force && state.loaded && state.loadKey === key) {
             renderBoundaryOptions();
             renderEgressModeAvailability();
+            renderWorkspaceOptions();
             setLoadStatus();
-            if (String(window.currentConversationId || '').trim()) loadActiveConversationNetworkSettings();
+            if (String(window.currentConversationId || '').trim()) {
+                loadActiveConversationNetworkSettings();
+                loadConversationWorkspaceBinding();
+            }
             return;
         }
         const requestId = ++state.requestId;
@@ -518,9 +685,10 @@
             fetchJSON('/api/egress-proxies?limit=100&offset=0'),
             fetchJSON('/api/egress-proxy-groups'),
             fetchJSON(previewPath),
+            fetchJSON('/api/container-workspaces?project_id=' + encodeURIComponent(projectId) + '&page_size=100'),
         ]);
         if (requestId !== state.requestId) return;
-        const names = ['policies', 'proxies', 'groups', 'preview'];
+        const names = ['policies', 'proxies', 'groups', 'preview', 'workspaces'];
         results.forEach(function (result, index) {
             const name = names[index];
             if (result.status === 'fulfilled') {
@@ -535,7 +703,9 @@
         state.loaded = true;
         renderBoundaryOptions();
         renderEgressModeAvailability();
+        renderWorkspaceOptions();
         setLoadStatus();
+        if (String(window.currentConversationId || '').trim()) loadConversationWorkspaceBinding();
     }
 
     function syncConversationContainerControlsVisibility(runtimeMode) {
@@ -563,6 +733,16 @@
                 refreshEnhancedSelect(control);
             }
         });
+        const workspaceLocked = !!locked || state.applyingWorkspace;
+        ['conversation-workspace-mode', 'conversation-shared-workspace-select', 'conversation-shared-workspace-name'].forEach(function (id) {
+            const control = selectElement(id);
+            if (control) {
+                control.disabled = workspaceLocked;
+                refreshEnhancedSelect(control);
+            }
+        });
+        const workspaceCreate = selectElement('conversation-shared-workspace-create');
+        if (workspaceCreate) workspaceCreate.disabled = workspaceLocked;
         if (locked && container && !container.hidden) loadConversationEgressAuditSetting();
     }
 
@@ -579,6 +759,7 @@
         const resourceToggle = selectElement('conversation-resource-limit-toggle');
         if (rateToggle) rateToggle.checked = false;
         if (resourceToggle) resourceToggle.checked = false;
+        applyWorkspaceModeToControls('ephemeral', '');
         refreshEnhancedSelect(boundary);
         refreshEnhancedSelect(mode);
         syncConversationBoundarySelection();
@@ -591,6 +772,9 @@
     function readNewConversationContainerControls(runtimeMode) {
         if (String(runtimeMode || '').trim().toLowerCase() !== 'container') return {};
         const result = {};
+        const workspace = selectedWorkspaceBinding();
+        result.workspacePersistent = workspace.mode !== 'ephemeral';
+        if (workspace.mode === 'shared') result.workspaceId = workspace.workspaceId;
         const auditToggle = selectElement('conversation-egress-audit-toggle');
         const auditMode = selectElement('conversation-egress-audit-mode');
         result.egressAuditEnabled = !auditToggle || auditToggle.checked;
@@ -624,6 +808,10 @@
     window.syncConversationEgressAudit = syncConversationEgressAudit;
     window.syncConversationEgressAuditMode = syncConversationEgressAuditMode;
     window.syncConversationRuntimeControls = syncConversationRuntimeControls;
+    window.syncConversationWorkspaceMode = syncConversationWorkspaceMode;
+    window.syncConversationSharedWorkspace = syncConversationSharedWorkspace;
+    window.createConversationSharedWorkspace = createConversationSharedWorkspace;
+    window.loadConversationWorkspaceBinding = loadConversationWorkspaceBinding;
     window.loadConversationContainerChoices = loadConversationContainerChoices;
     window.syncConversationContainerControlsVisibility = syncConversationContainerControlsVisibility;
     window.setConversationContainerControlsLocked = setConversationContainerControlsLocked;
@@ -634,7 +822,8 @@
 
     document.addEventListener('DOMContentLoaded', function () {
         syncConversationContainerControlsVisibility('host');
-        setConversationContainerControlsLocked(!!window.currentConversationId);
+        applyWorkspaceModeToControls('ephemeral', '');
+        setConversationContainerControlsLocked(false);
         setLoadStatus();
     });
 

@@ -23,6 +23,7 @@ type fakeConversationContainerLifecycle struct {
 	action          string
 	conversationID  string
 	removeWorkspace bool
+	deleteCalls     int
 	rebuild         func(context.Context, string) (containerruntime.InitializationRecord, error)
 	actions         []string
 }
@@ -56,6 +57,7 @@ func (f *fakeConversationContainerLifecycle) Delete(_ context.Context, id string
 	f.action = "delete"
 	f.conversationID = id
 	f.removeWorkspace = removeWorkspace
+	f.deleteCalls++
 	return f.err
 }
 

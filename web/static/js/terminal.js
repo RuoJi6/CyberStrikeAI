@@ -275,6 +275,22 @@
             }
         }
 
+        // xterm normally turns Tab into \t, but browsers can consume it as
+        // focus navigation before onData fires (especially inside a drawer).
+        // Handle it explicitly and send the completion key to the container
+        // PTY. Shift+Tab keeps the standard reverse-completion sequence.
+        if (typeof term.attachCustomKeyEventHandler === 'function') {
+            term.attachCustomKeyEventHandler(function (event) {
+                if (!event || event.key !== 'Tab') return true;
+                if (event.type === 'keydown') {
+                    if (typeof event.preventDefault === 'function') event.preventDefault();
+                    if (typeof event.stopPropagation === 'function') event.stopPropagation();
+                    sendToWS(event.shiftKey ? '\x1b[Z' : '\t');
+                }
+                return false;
+            });
+        }
+
         term.onData(function (data) {
             // Ctrl+L：本地清屏，同时把 ^L 也发给后端
             if (data === '\x0c') {

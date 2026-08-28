@@ -137,6 +137,59 @@ func TestDockerManagerListsGatewayTopologyAsIndependentlyOwnedResources(t *testi
 	}
 }
 
+func TestDockerManagerListsSharedWorkspaceWithoutConversationOwnership(t *testing.T) {
+	ownerID := "instance-01"
+	workspaceID := "shared-00000000-0000-4000-8000-000000000001"
+	volumeName := WorkspaceVolumeNameForID(workspaceID)
+	labels := managedTestLabels(ownerID, ResourceKindWorkspaceVolume, workspaceID, "")
+	labels[LabelWorkspaceID] = workspaceID
+	labels[LabelWorkspaceShared] = "true"
+	volume := mobyvolume.Volume{
+		Name: volumeName, Labels: labels,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	creationAPI := newSuccessfulCreationAPI(creationSpec(), ownerID, "provider-container-1", "")
+	creationAPI.listResult = mobyclient.ContainerListResult{}
+	api := &fakeDockerManagedResourceAPI{
+		fakeDockerCreationAPI: creationAPI,
+		volumeListResult:      mobyclient.VolumeListResult{Items: []mobyvolume.Volume{volume}},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := manager.ListOwnedResources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resources) != 1 || resources[0].LogicalID != workspaceID || resources[0].ConversationID != "" {
+		t.Fatalf("shared workspace resources = %#v", resources)
+	}
+}
+
+func TestDockerManagerRejectsSharedWorkspaceWithConversationOwnership(t *testing.T) {
+	ownerID := "instance-01"
+	workspaceID := "shared-00000000-0000-4000-8000-000000000002"
+	volumeName := WorkspaceVolumeNameForID(workspaceID)
+	labels := managedTestLabels(ownerID, ResourceKindWorkspaceVolume, workspaceID, "conversation-01")
+	labels[LabelWorkspaceID] = workspaceID
+	labels[LabelWorkspaceShared] = "true"
+	volume := mobyvolume.Volume{Name: volumeName, Labels: labels}
+	creationAPI := newSuccessfulCreationAPI(creationSpec(), ownerID, "provider-container-1", "")
+	creationAPI.listResult = mobyclient.ContainerListResult{}
+	api := &fakeDockerManagedResourceAPI{
+		fakeDockerCreationAPI: creationAPI,
+		volumeListResult:      mobyclient.VolumeListResult{Items: []mobyvolume.Volume{volume}},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ListOwnedResources(context.Background()); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("shared workspace identity error = %v", err)
+	}
+}
+
 func TestDockerManagerOrphanDeletionRevalidatesLabelsAndAttachments(t *testing.T) {
 	ownerID := "instance-01"
 	logicalID := "network-unsafe"

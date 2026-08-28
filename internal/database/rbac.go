@@ -26,6 +26,7 @@ const (
 var rbacAssignableResourceTables = map[string]string{
 	"project":             "projects",
 	"conversation":        "conversations",
+	"container_workspace": "container_workspaces",
 	"vulnerability":       "vulnerabilities",
 	"asset":               "assets",
 	"webshell":            "webshell_connections",
@@ -769,6 +770,10 @@ func (db *DB) ListAssignableRBACResourcesPage(resourceType, search string, limit
 		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), '未命名对话'), COALESCE(project_id, '') FROM conversations
 			WHERE LOWER(COALESCE(NULLIF(TRIM(title), ''), id)) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
 			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
+	case "container_workspace":
+		query = `SELECT id, name, CASE kind WHEN 'shared' THEN '共享工作区' ELSE '专属工作区' END FROM container_workspaces
+			WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
+			ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	case "vulnerability":
 		query = `SELECT id, title, severity FROM vulnerabilities
 			WHERE LOWER(title) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'
@@ -840,6 +845,8 @@ func (db *DB) CountAssignableRBACResources(resourceType, search string) (int, er
 		query = `SELECT COUNT(*) FROM projects WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "conversation":
 		query = `SELECT COUNT(*) FROM conversations WHERE LOWER(COALESCE(NULLIF(TRIM(title), ''), id)) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
+	case "container_workspace":
+		query = `SELECT COUNT(*) FROM container_workspaces WHERE LOWER(name) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "vulnerability":
 		query = `SELECT COUNT(*) FROM vulnerabilities WHERE LOWER(title) LIKE ? ESCAPE '\' OR LOWER(id) LIKE ? ESCAPE '\'`
 	case "asset":
@@ -940,6 +947,8 @@ func (db *DB) lookupRBACResourceOptionsByIDs(resourceType string, ids []string) 
 		query = `SELECT id, name, status FROM projects WHERE id IN (` + placeholders + `)`
 	case "conversation":
 		query = `SELECT id, COALESCE(NULLIF(TRIM(title), ''), '未命名对话'), COALESCE(project_id, '') FROM conversations WHERE id IN (` + placeholders + `)`
+	case "container_workspace":
+		query = `SELECT id, name, CASE kind WHEN 'shared' THEN '共享工作区' ELSE '专属工作区' END FROM container_workspaces WHERE id IN (` + placeholders + `)`
 	case "vulnerability":
 		query = `SELECT id, title, severity FROM vulnerabilities WHERE id IN (` + placeholders + `)`
 	case "asset":
@@ -1119,6 +1128,7 @@ func (db *DB) AssignResourcesToUserAuto(userID string, resourceIDs []string) (in
 
 	typeTablePairs := []struct{ resourceType, table string }{
 		{"project", "projects"}, {"conversation", "conversations"},
+		{"container_workspace", "container_workspaces"},
 		{"vulnerability", "vulnerabilities"}, {"webshell", "webshell_connections"},
 		{"asset", "assets"},
 		{"batch_task", "batch_task_queues"}, {"c2_listener", "c2_listeners"},

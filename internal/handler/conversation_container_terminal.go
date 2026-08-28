@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/database"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 
@@ -25,15 +26,20 @@ const (
 )
 
 type conversationContainerWorkspaceResponse struct {
-	ConversationID       string                     `json:"conversationId"`
-	RuntimeID            containerruntime.RuntimeID `json:"runtimeId"`
-	RuntimeStatus        containerruntime.Status    `json:"runtimeStatus"`
-	ContainerPath        string                     `json:"containerPath"`
-	HostPath             string                     `json:"hostPath,omitempty"`
-	Storage              string                     `json:"storage"`
-	Persistent           bool                       `json:"persistent"`
-	InteractiveAvailable bool                       `json:"interactiveAvailable"`
-	InteractiveReason    string                     `json:"interactiveReason,omitempty"`
+	ConversationID       string                                  `json:"conversationId"`
+	RuntimeID            containerruntime.RuntimeID              `json:"runtimeId"`
+	RuntimeStatus        containerruntime.Status                 `json:"runtimeStatus"`
+	ContainerPath        string                                  `json:"containerPath"`
+	HostPath             string                                  `json:"hostPath,omitempty"`
+	Storage              string                                  `json:"storage"`
+	Persistent           bool                                    `json:"persistent"`
+	WorkspaceID          string                                  `json:"workspaceId,omitempty"`
+	WorkspaceName        string                                  `json:"workspaceName,omitempty"`
+	WorkspaceMode        string                                  `json:"workspaceMode"`
+	SharedWith           int                                     `json:"sharedWith"`
+	Attachments          []database.ContainerWorkspaceAttachment `json:"attachments,omitempty"`
+	InteractiveAvailable bool                                    `json:"interactiveAvailable"`
+	InteractiveReason    string                                  `json:"interactiveReason,omitempty"`
 }
 
 type conversationTerminalResize struct {
@@ -99,11 +105,25 @@ func (h *ConversationHandler) GetConversationContainerWorkspace(c *gin.Context) 
 	if !interactive {
 		reason = "container_not_running"
 	}
+	binding, bindingErr := h.db.GetConversationWorkspaceBinding(c.Request.Context(), id)
+	if bindingErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取对话工作区绑定失败"})
+		return
+	}
+	attachments := []database.ContainerWorkspaceAttachment{}
+	workspaceID, workspaceName, sharedWith := "", "", 0
+	if binding.Workspace != nil {
+		workspaceID, workspaceName = binding.Workspace.ID, binding.Workspace.Name
+		attachments, _ = h.db.ListContainerWorkspaceAttachments(c.Request.Context(), binding.Workspace.ID)
+		sharedWith = len(attachments)
+	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, conversationContainerWorkspaceResponse{
 		ConversationID: id, RuntimeID: record.RuntimeID, RuntimeStatus: record.RuntimeStatus,
 		ContainerPath: info.ContainerPath, HostPath: info.HostPath, Storage: info.Storage,
-		Persistent: info.Persistent, InteractiveAvailable: interactive, InteractiveReason: reason,
+		Persistent: info.Persistent, WorkspaceID: workspaceID, WorkspaceName: workspaceName,
+		WorkspaceMode: binding.Mode, SharedWith: sharedWith, Attachments: attachments,
+		InteractiveAvailable: interactive, InteractiveReason: reason,
 	})
 }
 

@@ -76,6 +76,10 @@ type ConversationRetainedWorkspaceController interface {
 	DeleteRetainedWorkspace(ctx context.Context, conversationID string) error
 }
 
+type ConversationSharedWorkspaceController interface {
+	DeleteSharedWorkspace(ctx context.Context, workspaceID string) error
+}
+
 // ConversationHandler 对话处理器
 type ConversationHandler struct {
 	db                        *database.DB
@@ -94,6 +98,7 @@ type ConversationHandler struct {
 	containerLifecycle        ConversationContainerLifecycleController
 	containerResourceDefaults containerruntime.ResourceLimits
 	retainedWorkspace         ConversationRetainedWorkspaceController
+	sharedWorkspace           ConversationSharedWorkspaceController
 	containerRollout          func(userID, projectID string) (enabled, allowed bool)
 }
 
@@ -157,6 +162,10 @@ func (h *ConversationHandler) SetRetainedWorkspaceController(controller Conversa
 	h.retainedWorkspace = controller
 }
 
+func (h *ConversationHandler) SetSharedWorkspaceController(controller ConversationSharedWorkspaceController) {
+	h.sharedWorkspace = controller
+}
+
 func (h *ConversationHandler) SetContainerRolloutAuthorizer(authorizer func(userID, projectID string) (enabled, allowed bool)) {
 	h.containerRollout = authorizer
 }
@@ -175,6 +184,7 @@ type CreateConversationRequest struct {
 	ProjectID           string                                `json:"projectId,omitempty"`
 	RuntimeMode         string                                `json:"runtimeMode,omitempty"`
 	WorkspacePersistent bool                                  `json:"workspacePersistent,omitempty"`
+	WorkspaceID         string                                `json:"workspaceId,omitempty"`
 	BoundaryPolicyID    string                                `json:"boundaryPolicyId,omitempty"`
 	EgressMode          string                                `json:"egressMode,omitempty"`
 	EgressProxyID       string                                `json:"egressProxyId,omitempty"`
@@ -219,6 +229,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.WorkspacePersistent = req.WorkspacePersistent
+	meta.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
 	if req.RuntimeControls != nil {
 		if runtimeMode != database.ConversationRuntimeModeContainer {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeControls 只能用于 container 对话"})
@@ -713,6 +724,7 @@ func (h *ConversationHandler) GetConversation(c *gin.Context) {
 // GetContainerInitialization returns durable background creation state without
 // loading conversation messages or waiting for Docker operations.
 func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
 	id := strings.TrimSpace(c.Param("id"))
 	session, ok := security.CurrentSession(c)
 	if !ok || !h.db.UserCanAccessResource(session.UserID, session.Scope, "conversation", id) {
@@ -1211,12 +1223,18 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 		return
 	}
 	workspacePersistent := conversation.RuntimeMode == database.ConversationRuntimeModeContainer && conversation.WorkspacePersistent
+	workspaceShared := false
+	if workspacePersistent {
+		if binding, bindingErr := h.db.GetConversationWorkspaceBinding(c.Request.Context(), id); bindingErr == nil {
+			workspaceShared = binding.Mode == database.ConversationWorkspaceModeShared
+		}
+	}
 	workspaceAction := strings.ToLower(strings.TrimSpace(c.Query("workspace_action")))
 	if workspaceAction != "" && workspaceAction != "retain" && workspaceAction != "delete" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "workspace_action 必须为 retain 或 delete"})
 		return
 	}
-	if workspacePersistent && workspaceAction == "" {
+	if workspacePersistent && !workspaceShared && workspaceAction == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "删除持久工作区对话时必须明确选择 workspace_action=retain 或 delete"})
 		return
 	}
@@ -1226,6 +1244,11 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 	}
 	if workspaceAction == "" {
 		workspaceAction = "delete"
+	}
+	if workspaceShared {
+		// A shared workspace is an independent resource. Removing one chat only
+		// detaches it and must never delete the volume used by other chats.
+		workspaceAction = "retain"
 	}
 
 	if h.taskStopper != nil {
@@ -1240,7 +1263,8 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 		}
 	}
 
-	if err := h.db.DeleteConversationWithWorkspaceRetention(id, workspacePersistent && !removeWorkspace); err != nil {
+	retainDedicatedWorkspace := workspacePersistent && !workspaceShared && !removeWorkspace
+	if err := h.db.DeleteConversationWithWorkspaceRetention(id, retainDedicatedWorkspace); err != nil {
 		h.logger.Error("删除对话失败", zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -1270,6 +1294,7 @@ func (h *ConversationHandler) DeleteConversation(c *gin.Context) {
 		"workspacePersistent": workspacePersistent,
 		"workspaceRetained":   workspacePersistent && !removeWorkspace,
 		"workspaceDeleted":    workspacePersistent && removeWorkspace,
+		"workspaceShared":     workspaceShared,
 	})
 }
 

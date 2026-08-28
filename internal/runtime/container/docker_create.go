@@ -41,6 +41,8 @@ const (
 	LabelLogMaxFiles           = "com.cyberstrike.limit.log-max-files"
 	LabelWorkspacePath         = "com.cyberstrike.workspace-path"
 	LabelWorkspacePersistent   = "com.cyberstrike.workspace-persistent"
+	LabelWorkspaceID           = "com.cyberstrike.workspace-id"
+	LabelWorkspaceShared       = "com.cyberstrike.workspace-shared"
 	LabelWorkspaceVolume       = "com.cyberstrike.workspace-volume"
 	LabelNetworkMode           = "com.cyberstrike.network-mode"
 	LabelCapabilityProfile     = "com.cyberstrike.capability-profile"
@@ -517,7 +519,7 @@ func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolum
 		return fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
 	}
 	for key, value := range workspaceVolumeLabels(m.ownerID, spec) {
-		if key == LabelSpecDigest && workspaceVolumeSpecDigestMatches(spec, actual.Labels[key], authorizedSpecDigest) {
+		if key == LabelSpecDigest && !spec.Workspace.Shared && workspaceVolumeSpecDigestMatches(spec, actual.Labels[key], authorizedSpecDigest) {
 			continue
 		}
 		if actual.Labels[key] != value {
@@ -580,7 +582,7 @@ func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual, authorized strin
 }
 
 func (m *DockerManager) rollbackNewWorkspaceVolume(created bool, spec RuntimeSpec, cause error) error {
-	if !created || !spec.Workspace.Persistent || m.volumeAPI == nil {
+	if !created || !spec.Workspace.Persistent || spec.Workspace.Shared || m.volumeAPI == nil {
 		return cause
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), rollbackTimeout)
@@ -619,21 +621,39 @@ func (m *DockerManager) rollbackCreatedResources(networkCreated, egressNetworkCr
 }
 
 func workspaceVolumeLabels(ownerID string, spec RuntimeSpec) map[string]string {
-	return map[string]string{
+	labels := map[string]string{
 		LabelManaged: "true", LabelOwner: ownerID,
-		LabelResourceKind: ResourceKindWorkspaceVolume,
-		LabelResourceID:   string(spec.ID), LabelRuntimeID: string(spec.ID),
-		LabelConversationID: spec.ConversationID,
-		LabelSpecDigest:     RuntimeSpecDigest(spec),
+		LabelResourceKind:    ResourceKindWorkspaceVolume,
+		LabelResourceID:      workspaceResourceID(spec),
+		LabelWorkspaceID:     workspaceResourceID(spec),
+		LabelWorkspaceShared: strconv.FormatBool(spec.Workspace.Shared),
 	}
+	if !spec.Workspace.Shared {
+		labels[LabelRuntimeID] = string(spec.ID)
+		labels[LabelConversationID] = spec.ConversationID
+		labels[LabelSpecDigest] = RuntimeSpecDigest(spec)
+	}
+	return labels
 }
 
 func workspaceManagedResource(spec RuntimeSpec) ManagedResource {
-	return ManagedResource{
-		Kind: ResourceKindWorkspaceVolume, LogicalID: string(spec.ID),
-		ProviderID: spec.Workspace.VolumeName, Name: spec.Workspace.VolumeName,
-		ConversationID: spec.ConversationID,
+	conversationID := spec.ConversationID
+	if spec.Workspace.Shared {
+		conversationID = ""
 	}
+	return ManagedResource{
+		Kind: ResourceKindWorkspaceVolume, LogicalID: workspaceResourceID(spec),
+		ProviderID: spec.Workspace.VolumeName, Name: spec.Workspace.VolumeName,
+		ConversationID: conversationID,
+	}
+}
+
+func workspaceResourceID(spec RuntimeSpec) string {
+	id := strings.TrimSpace(spec.Workspace.ID)
+	if id == "" {
+		return string(spec.ID)
+	}
+	return id
 }
 
 func (m *DockerManager) verifyCreatedRuntime(ctx context.Context, spec RuntimeSpec, name string, expectedLabels map[string]string, gatewayAddress string, createResult mobyclient.ContainerCreateResult) (Runtime, error) {
@@ -1147,6 +1167,8 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 		LabelLogMaxFiles:         strconv.Itoa(spec.Resources.LogMaxFiles),
 		LabelWorkspacePath:       spec.Workspace.MountPath,
 		LabelWorkspacePersistent: strconv.FormatBool(spec.Workspace.Persistent),
+		LabelWorkspaceID:         strings.TrimSpace(spec.Workspace.ID),
+		LabelWorkspaceShared:     strconv.FormatBool(spec.Workspace.Shared),
 		LabelWorkspaceVolume:     spec.Workspace.VolumeName,
 		LabelNetworkMode:         string(spec.Security.NetworkMode),
 		LabelCapabilityProfile:   runtimeCapabilityProfile,

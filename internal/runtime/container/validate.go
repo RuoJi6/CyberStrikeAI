@@ -68,11 +68,21 @@ func ValidateSpec(spec RuntimeSpec) error {
 	if spec.Workspace.Persistent && strings.TrimSpace(spec.Workspace.VolumeName) == "" {
 		return invalidSpec("persistent workspace requires a named volume")
 	}
-	if spec.Workspace.Persistent && spec.Workspace.VolumeName != WorkspaceVolumeName(spec.ID) {
-		return invalidSpec("persistent workspace volume name must be derived from the runtime id")
+	workspaceID := strings.TrimSpace(spec.Workspace.ID)
+	if spec.Workspace.Persistent && workspaceID == "" {
+		workspaceID = string(spec.ID)
 	}
-	if !spec.Workspace.Persistent && strings.TrimSpace(spec.Workspace.VolumeName) != "" {
-		return invalidSpec("ephemeral workspace cannot declare a named volume")
+	if spec.Workspace.Persistent && !generatedNamePattern.MatchString(workspaceID) {
+		return invalidSpec("persistent workspace id contains unsupported characters")
+	}
+	if spec.Workspace.Persistent && spec.Workspace.VolumeName != WorkspaceVolumeNameForID(workspaceID) {
+		return invalidSpec("persistent workspace volume name must be derived from the workspace id")
+	}
+	if spec.Workspace.Shared && (!spec.Workspace.Persistent || strings.TrimSpace(spec.Workspace.ID) == "") {
+		return invalidSpec("shared workspace requires a persistent workspace id")
+	}
+	if !spec.Workspace.Persistent && (strings.TrimSpace(spec.Workspace.ID) != "" || spec.Workspace.Shared || strings.TrimSpace(spec.Workspace.VolumeName) != "") {
+		return invalidSpec("ephemeral workspace cannot declare a workspace resource")
 	}
 	if err := ValidateReadinessPolicy(spec.Readiness, spec.Image); err != nil {
 		return err
