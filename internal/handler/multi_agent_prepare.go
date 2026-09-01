@@ -65,8 +65,30 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		if runtimeModeErr != nil {
 			return nil, fmt.Errorf("新对话 runtimeMode 必须为 host 或 container")
 		}
-		if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
+		if req.WorkspacePersistent != nil && *req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
 			return nil, fmt.Errorf("新对话 workspacePersistent 只能用于 container")
+		}
+		workspaceMode := strings.ToLower(strings.TrimSpace(req.WorkspaceMode))
+		if workspaceMode == "" && req.WorkspacePersistent != nil {
+			if *req.WorkspacePersistent {
+				workspaceMode = database.ConversationWorkspaceModeDedicated
+			} else {
+				workspaceMode = database.ConversationWorkspaceModeEphemeral
+			}
+		}
+		if workspaceMode != "" && runtimeMode != database.ConversationRuntimeModeContainer {
+			return nil, fmt.Errorf("新对话 workspaceMode 只能用于 container")
+		}
+		var idlePolicy *database.ConversationIdlePolicy
+		if req.IdlePolicy != nil {
+			if runtimeMode != database.ConversationRuntimeModeContainer {
+				return nil, fmt.Errorf("新对话 idlePolicy 只能用于 container")
+			}
+			normalized, idleErr := database.NormalizeConversationIdlePolicy(*req.IdlePolicy)
+			if idleErr != nil {
+				return nil, idleErr
+			}
+			idlePolicy = &normalized
 		}
 		if runtimeMode == database.ConversationRuntimeModeContainer && h.config != nil &&
 			!h.config.Container.AllowsRollout(session.UserID, projectID) {
@@ -101,8 +123,10 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.RoleName = req.Role
 		meta.AgentMode = chatRequestAgentMode(req, source)
 		meta.RuntimeMode = runtimeMode
-		meta.WorkspacePersistent = req.WorkspacePersistent
+		meta.WorkspaceMode = workspaceMode
+		meta.WorkspacePersistent = workspaceMode == database.ConversationWorkspaceModeDedicated || workspaceMode == database.ConversationWorkspaceModeShared
 		meta.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
+		meta.IdlePolicy = idlePolicy
 		meta.BoundaryPolicyID = boundaryPolicyID
 		meta.EgressMode = egressMode
 		meta.EgressProxyID = egressProxyID

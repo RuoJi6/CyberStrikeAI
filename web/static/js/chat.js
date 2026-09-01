@@ -2268,6 +2268,10 @@ async function selectRuntimeMode(mode) {
         }
         return;
     }
+    if (normalized === CHAT_RUNTIME_MODE_CONTAINER && previousMode !== CHAT_RUNTIME_MODE_CONTAINER &&
+        typeof window.resetNewConversationContainerControls === 'function') {
+        window.resetNewConversationContainerControls();
+    }
     syncRuntimeModeFromValue(normalized);
     if (normalized !== CHAT_RUNTIME_MODE_CONTAINER) syncWorkspacePersistenceFromValue(false);
     if (normalized === CHAT_RUNTIME_MODE_CONTAINER) {

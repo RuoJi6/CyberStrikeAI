@@ -8,8 +8,10 @@ type ConversationCreateMeta struct {
 	RoleName             string
 	AgentMode            string
 	RuntimeMode          string
+	WorkspaceMode        string
 	WorkspacePersistent  bool
 	WorkspaceID          string
+	IdlePolicy           *ConversationIdlePolicy
 	BoundaryPolicyID     string
 	EgressMode           string
 	EgressProxyID        string

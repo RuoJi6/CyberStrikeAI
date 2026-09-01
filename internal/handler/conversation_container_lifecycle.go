@@ -68,18 +68,20 @@ func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Con
 		proxyGroupID = binding.ProxyGroup.ID
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"conversationId":       id,
-		"boundaryPolicyId":     snapshot.PolicyID,
-		"egressMode":           binding.Mode,
-		"egressSource":         binding.Source,
-		"egressProxyId":        proxyID,
-		"egressProxyGroupId":   proxyGroupID,
-		"runtimeStatus":        record.RuntimeStatus,
-		"lifecycleState":       record.LifecycleState,
-		"runtimeGeneration":    record.RuntimeGeneration,
-		"runtimeControls":      runtimeControls,
-		"effectiveNanoCpus":    record.Spec.Resources.NanoCPUs,
-		"effectiveMemoryBytes": record.Spec.Resources.MemoryBytes,
+		"conversationId":        id,
+		"boundaryPolicyId":      snapshot.PolicyID,
+		"boundarySnapshotId":    snapshot.SnapshotID,
+		"boundaryDefaultAction": snapshot.Document.DefaultAction,
+		"egressMode":            binding.Mode,
+		"egressSource":          binding.Source,
+		"egressProxyId":         proxyID,
+		"egressProxyGroupId":    proxyGroupID,
+		"runtimeStatus":         record.RuntimeStatus,
+		"lifecycleState":        record.LifecycleState,
+		"runtimeGeneration":     record.RuntimeGeneration,
+		"runtimeControls":       runtimeControls,
+		"effectiveNanoCpus":     record.Spec.Resources.NanoCPUs,
+		"effectiveMemoryBytes":  record.Spec.Resources.MemoryBytes,
 	})
 }
 
@@ -108,11 +110,6 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 	var staged *database.ConversationBoundarySnapshot
 	var previous database.ConversationBoundarySnapshot
 	if len(request.BoundaryPolicyID) != 0 {
-		session, hasSession := security.CurrentSession(c)
-		if !hasSession || !session.Permissions["boundary:read"] {
-			c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
-			return
-		}
 		if bytes.Equal(bytes.TrimSpace(request.BoundaryPolicyID), []byte("null")) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
 			return
@@ -123,8 +120,15 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 			return
 		}
 		policyID := strings.TrimSpace(requestedPolicyID)
-		if policyID != "" && !h.conversationBoundaryPolicyAllowed(c, policyID) {
-			return
+		if policyID != "" {
+			session, hasSession := security.CurrentSession(c)
+			if !hasSession || !session.Permissions["boundary:read"] {
+				c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
+				return
+			}
+			if !h.conversationBoundaryPolicyAllowed(c, policyID) {
+				return
+			}
 		}
 		var err error
 		previous, err = h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
@@ -413,7 +417,13 @@ func (h *ConversationHandler) DeleteConversationContainer(c *gin.Context) {
 		return
 	}
 	removeWorkspace := queryBoolean(c.Query("remove_workspace"))
-	if err := h.containerLifecycle.Delete(c.Request.Context(), id, removeWorkspace); err != nil {
+	if err := h.runContainerMutationWhenTaskIdle(c, id, func() error {
+		return h.containerLifecycle.Delete(c.Request.Context(), id, removeWorkspace)
+	}); err != nil {
+		if errors.Is(err, ErrTaskAlreadyRunning) {
+			c.JSON(http.StatusConflict, gin.H{"error": "对话仍有活动任务；确认中断后请使用 interrupt=1 重试", "taskActive": true})
+			return
+		}
 		h.writeContainerLifecycleError(c, id, "delete", err)
 		return
 	}
@@ -435,9 +445,9 @@ func (h *ConversationHandler) DeleteConversationContainer(c *gin.Context) {
 
 func workspaceDeletionWarning(persistent bool) string {
 	if persistent {
-		return "该对话使用专属 Docker named volume；删除容器默认保留工作区，remove_workspace=true 时一并删除"
+		return "该对话使用 Docker named volume；删除容器默认保留专属或共享工作区，remove_workspace=true 时按工作区规则处理"
 	}
-	return "该对话未启用持久化；删除容器会永久删除 /workspace 中的全部文件"
+	return "该对话使用 Docker tmpfs 临时工作区；删除容器会永久删除 /workspace 中的全部文件"
 }
 
 type conversationContainerLifecycleCall func(context.Context, string) (containerruntime.InitializationRecord, error)
@@ -451,8 +461,17 @@ func (h *ConversationHandler) runConversationContainerLifecycle(c *gin.Context, 
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "容器生命周期服务未配置"})
 		return
 	}
-	record, err := call(c.Request.Context(), id)
+	var record containerruntime.InitializationRecord
+	var callErr error
+	err := h.runContainerMutationWhenTaskIdle(c, id, func() error {
+		record, callErr = call(c.Request.Context(), id)
+		return callErr
+	})
 	if err != nil {
+		if errors.Is(err, ErrTaskAlreadyRunning) {
+			c.JSON(http.StatusConflict, gin.H{"error": "对话仍有活动任务；确认中断后请使用 interrupt=1 重试", "taskActive": true})
+			return
+		}
 		h.writeContainerLifecycleError(c, id, action, err)
 		return
 	}
@@ -472,6 +491,41 @@ func (h *ConversationHandler) runConversationContainerLifecycle(c *gin.Context, 
 		})
 	}
 	c.JSON(http.StatusOK, record)
+}
+
+func (h *ConversationHandler) runContainerMutationWhenTaskIdle(c *gin.Context, conversationID string, fn func() error) error {
+	if fn == nil {
+		return errors.New("container lifecycle callback is required")
+	}
+	interrupt := queryBoolean(c.Query("interrupt"))
+	if h.taskState != nil {
+		if running, _ := h.taskState.ConversationTaskRuntimeState(conversationID); running {
+			if !interrupt {
+				return ErrTaskAlreadyRunning
+			}
+			if h.taskStopper != nil {
+				h.taskStopper.CancelRunningTaskForConversation(conversationID)
+			}
+		}
+	}
+	if h.taskIdle == nil {
+		return fn()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err := h.taskIdle.RunWhenConversationTaskIdle(conversationID, fn)
+		if !errors.Is(err, ErrTaskAlreadyRunning) || !interrupt {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return ErrTaskAlreadyRunning
+		}
+		select {
+		case <-c.Request.Context().Done():
+			return c.Request.Context().Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 func (h *ConversationHandler) authorizeConversationContainer(c *gin.Context) (string, bool) {
@@ -494,6 +548,25 @@ func (h *ConversationHandler) containerLifecycleStart(ctx context.Context, id st
 	}
 	if _, err := h.db.EnsureConversationBoundarySnapshot(ctx, id); err != nil {
 		return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation boundary snapshot: %w", err)
+	}
+	if h.containerInitializations != nil {
+		record, err := h.containerInitializations.Get(ctx, id)
+		switch {
+		case errors.Is(err, containerruntime.ErrNotFound):
+			if h.containerStarter == nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: container initializer is not configured", containerruntime.ErrEngineUnavailable)
+			}
+			return h.containerStarter.StartConversationAsync(ctx, id)
+		case err != nil:
+			return containerruntime.InitializationRecord{}, err
+		case record.Status == containerruntime.InitializationQueued || record.Status == containerruntime.InitializationCreating:
+			return record, nil
+		case record.Status == containerruntime.InitializationFailed || record.ReadinessStatus == containerruntime.ReadinessFailed:
+			if h.containerStarter == nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("%w: container initializer is not configured", containerruntime.ErrEngineUnavailable)
+			}
+			return h.containerStarter.StartConversationAsync(ctx, id)
+		}
 	}
 	return h.containerLifecycle.Start(ctx, id)
 }

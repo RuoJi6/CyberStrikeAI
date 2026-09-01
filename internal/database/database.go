@@ -207,6 +207,8 @@ func (db *DB) initTables() error {
 		runtime_mode TEXT NOT NULL DEFAULT 'host' CHECK (runtime_mode IN ('host', 'container')),
 		workspace_persistent INTEGER NOT NULL DEFAULT 0 CHECK (workspace_persistent IN (0, 1)),
 		workspace_id TEXT,
+		idle_action TEXT CHECK (idle_action IN ('delete', 'stop', 'none')),
+		idle_timeout_seconds INTEGER CHECK (idle_timeout_seconds BETWEEN 60 AND 2592000),
 		scan_rate_enabled INTEGER NOT NULL DEFAULT 0 CHECK (scan_rate_enabled IN (0, 1)),
 		scan_http_rps INTEGER NOT NULL DEFAULT 0,
 		scan_tcp_cps INTEGER NOT NULL DEFAULT 0,
@@ -998,6 +1000,9 @@ func (db *DB) initTables() error {
 	}
 	if err := db.initConversationWorkspaceTables(); err != nil {
 		return fmt.Errorf("创建对话容器工作区表失败: %w", err)
+	}
+	if err := db.initConversationIdlePolicyColumns(); err != nil {
+		return fmt.Errorf("创建对话容器空闲策略字段失败: %w", err)
 	}
 	if err := db.dropProjectFactVersionsTable(); err != nil {
 		db.logger.Warn("清理project_fact_versions表失败", zap.Error(err))

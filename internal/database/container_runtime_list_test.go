@@ -13,8 +13,12 @@ func TestContainerRuntimeListPaginatesSearchesAndFiltersOnServer(t *testing.T) {
 	ctx := context.Background()
 
 	create := func(title string, persistent bool) *Conversation {
+		workspaceMode := ConversationWorkspaceModeEphemeral
+		if persistent {
+			workspaceMode = ConversationWorkspaceModeDedicated
+		}
 		conversation, err := db.CreateConversation(title, ConversationCreateMeta{
-			RuntimeMode: ConversationRuntimeModeContainer, WorkspacePersistent: persistent,
+			RuntimeMode: ConversationRuntimeModeContainer, WorkspaceMode: workspaceMode,
 		})
 		if err != nil {
 			t.Fatal(err)

@@ -47933,8 +47933,136 @@ html[data-theme="dark"] .chat-composer-surface > .chat-session-settings-popover 
 .chat-container-runtime-state.is-starting { color: #d98c12; }
 .chat-container-runtime-state.is-running { color: #19a75a; }
 .chat-container-runtime-state.is-failed { color: #df3d4c; }
+.chat-container-runtime-state.is-checking,
+.chat-container-runtime-state.is-stopping,
+.chat-container-runtime-state.is-deleting { color: #d98c12; }
+.chat-container-runtime-state.is-unavailable { color: #b45309; }
 .chat-container-runtime-state.is-stopped,
 .chat-container-runtime-state.is-idle { color: var(--text-secondary); }
+
+.container-idle-timeout-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(96px, 140px);
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.container-idle-timeout-field[hidden] { display: none; }
+
+.container-idle-timeout-field input,
+.container-idle-policy-minutes {
+    width: 100%;
+    min-width: 0;
+    min-height: 38px;
+    padding: 7px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 9px;
+    background: #fff;
+    color: #0f172a;
+    font: inherit;
+    font-size: 12px;
+    box-sizing: border-box;
+}
+
+.container-idle-timeout-field input:focus-visible,
+.container-idle-policy-minutes:focus-visible {
+    border-color: #2563eb;
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+}
+
+html[data-theme="dark"] .container-idle-timeout-field input {
+    border-color: #475569;
+    background: #0f172a;
+    color: #e2e8f0;
+}
+
+.container-runtime-lifecycle-controls {
+    align-items: flex-start;
+}
+
+.container-runtime-lifecycle-controls .container-boundary-policy-switch-copy {
+    flex: 1 1 320px;
+}
+
+.container-runtime-lifecycle-form {
+    display: grid;
+    flex: 0 1 640px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    gap: 12px;
+    min-width: 0;
+}
+
+.container-runtime-idle-fields {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(120px, 160px);
+    align-items: end;
+    gap: 10px;
+    min-width: 0;
+}
+
+.container-runtime-idle-fields:has(.container-runtime-idle-minutes-field[hidden]) {
+    grid-template-columns: minmax(180px, 1fr);
+}
+
+.container-runtime-idle-field {
+    display: grid;
+    gap: 7px;
+    min-width: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.container-runtime-idle-field[hidden] {
+    display: none;
+}
+
+.container-runtime-idle-field-label {
+    min-height: 17px;
+}
+
+.container-runtime-idle-field > .unified-select {
+    width: 100%;
+    min-width: 0;
+}
+
+.container-idle-policy-select,
+.container-runtime-lifecycle-form .container-idle-policy-minutes {
+    width: 100%;
+    min-width: 0;
+    min-height: 42px;
+    padding: 0 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    box-sizing: border-box;
+}
+
+.container-runtime-idle-actions {
+    display: flex;
+    align-items: flex-end;
+}
+
+.container-idle-policy-save {
+    min-height: 42px;
+    white-space: nowrap;
+}
+
+.container-runtime-lifecycle-buttons {
+    display: flex;
+    grid-column: 1 / -1;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border-color);
+}
 
 .container-terminal-panel-header {
     display: flex;
@@ -48344,12 +48472,39 @@ body.is-resizing-container-terminal-height * {
 
     .container-boundary-policy-switch-controls { width: 100%; grid-template-columns: 1fr; }
 
+    .container-runtime-lifecycle-form {
+        width: 100%;
+        flex-basis: auto;
+    }
+
     .container-terminal-drawer {
         width: 100vw;
     }
 
     .container-terminal-drawer-width-handle {
         display: none;
+    }
+}
+
+@media (max-width: 520px) {
+    .container-idle-timeout-field {
+        grid-template-columns: 1fr;
+    }
+
+    .container-runtime-lifecycle-form,
+    .container-runtime-idle-fields {
+        grid-template-columns: 1fr;
+    }
+
+    .container-runtime-idle-actions,
+    .container-runtime-idle-actions .container-idle-policy-save,
+    .container-runtime-lifecycle-buttons,
+    .container-runtime-lifecycle-buttons > button {
+        width: 100%;
+    }
+
+    .container-runtime-lifecycle-buttons {
+        flex-direction: column;
     }
 }
 

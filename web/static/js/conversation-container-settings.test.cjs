@@ -86,8 +86,10 @@ test('shared workspace selection is included in container conversation creation'
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
         {
+            workspaceMode: 'shared',
             workspacePersistent: true,
             workspaceId: 'workspace-shared-1',
+            idlePolicy: { action: 'delete', timeoutSeconds: 1800 },
             egressAuditEnabled: true,
             egressAuditMode: 'compact',
             runtimeControls: {
@@ -105,6 +107,7 @@ test('shared workspace selection is included in container conversation creation'
 
 test('new conversation request sends exact immutable selection fields only for container mode', () => {
     const elements = {
+        'conversation-workspace-mode': { value: 'dedicated' },
         'boundary-policy-select': { value: 'policy-1' },
         'conversation-egress-mode-select': { value: 'proxy' },
         'conversation-egress-target-select': { value: 'proxy-1' },
@@ -123,7 +126,7 @@ test('new conversation request sends exact immutable selection fields only for c
 
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ workspacePersistent: false, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
+		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		} },
@@ -132,7 +135,7 @@ test('new conversation request sends exact immutable selection fields only for c
     elements['conversation-egress-target-select'].value = 'group-1';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ workspacePersistent: false, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
+		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		} },
@@ -140,7 +143,7 @@ test('new conversation request sends exact immutable selection fields only for c
     elements['conversation-egress-mode-select'].value = '';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ workspacePersistent: false, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', runtimeControls: {
+		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		} },
@@ -160,6 +163,8 @@ test('container creation copy is bilingual and cache-busted', () => {
             'containerNetworkAutoApplying', 'containerNetworkAutoApplied', 'containerNetworkAutoApplyFailed',
 			'scanRateLimitLabel', 'scanRateLimitHint', 'httpRateLabel', 'tcpRateLabel', 'udpRateLabel',
 			'customResourcesLabel', 'customResourcesHint', 'cpuLimitLabel', 'memoryLimitLabel',
+			'containerIdleActionLabel', 'containerIdleDelete', 'containerIdleStop', 'containerIdleNone',
+			'containerIdleTimeoutLabel', 'containerIdleDeleteHint', 'containerIdleStopHint', 'containerIdleNoneHint',
         ]) {
             assert.equal(typeof locale.chat[key], 'string', key);
             assert.ok(locale.chat[key].trim(), key);
@@ -170,10 +175,10 @@ test('container creation copy is bilingual and cache-busted', () => {
 	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /HTTPS is decrypted and fully audited by default/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260828-2/);
-    assert.match(template, /chat\.js\?v=20260828-2/);
+    assert.match(template, /style\.css\?v=20260901-2/);
+	assert.match(template, /chat\.js\?v=20260901-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-    assert.match(template, /conversation-container-settings\.js\?v=20260828-2/);
+	assert.match(template, /conversation-container-settings\.js\?v=20260901-1/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {
@@ -191,10 +196,19 @@ test('completed container conversations apply changed boundary and upstream sett
     assert.ok(send.indexOf('await window.ensureConversationContainerNetworkSettings()') < send.indexOf("addMessage('user'"));
 });
 
-test('next-send network preparation rebuilds only a changed completed container conversation', async () => {
-    const boundary = { value: '', disabled: false, selectedOptions: [{ dataset: {} }] };
-    const mode = { value: 'none', disabled: false };
-    const target = { value: '', disabled: false };
+test('next-send network preparation rebuilds and verifies the active generation before sending', async () => {
+    function select(value) {
+        return {
+            value, disabled: false, options: [],
+            replaceChildren(...options) { this.options = options; if (!options.some((option) => option.value === this.value)) this.value = options[0]?.value || ''; },
+            set selectedIndex(index) { this.value = this.options[index]?.value || ''; },
+            get selectedOptions() { return this.options.filter((option) => option.value === this.value); },
+            querySelector() { return null; },
+        };
+    }
+    const boundary = select('');
+    const mode = select('none');
+    const target = select('');
     const elements = {
         'runtime-mode-select': { value: 'container' },
         'boundary-policy-select': boundary,
@@ -205,9 +219,10 @@ test('next-send network preparation rebuilds only a changed completed container 
     const document = {
         getElementById(id) { return elements[id] || null; },
         addEventListener() {},
-        createElement() { return {}; },
+        createElement() { return { value: '', textContent: '', disabled: false, dataset: {} }; },
     };
     let activeBoundary = 'policy-a';
+    let generation = 3;
     let rebuilds = 0;
     let failRebuild = false;
     const notifications = [];
@@ -220,7 +235,15 @@ test('next-send network preparation rebuilds only a changed completed container 
                 return {
                     ok: true,
                     async json() {
-                        return { boundaryPolicyId: activeBoundary, egressMode: 'none', egressSource: 'conversation' };
+                        return {
+                            boundaryPolicyId: activeBoundary,
+                            boundaryDefaultAction: activeBoundary ? '' : 'allow',
+                            egressMode: 'none', egressSource: 'conversation', runtimeGeneration: generation,
+                            runtimeControls: {
+                                scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
+                                customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
+                            },
+                        };
                     },
                 };
             }
@@ -228,6 +251,7 @@ test('next-send network preparation rebuilds only a changed completed container 
                 rebuilds++;
                 if (failRebuild) return { ok: false, status: 409, async json() { return { error: 'conflict' }; } };
                 activeBoundary = JSON.parse(options.body).boundaryPolicyId;
+                generation++;
                 return { ok: true, async json() { return {}; } };
             }
             throw new Error(`unexpected request: ${path}`);
@@ -248,4 +272,12 @@ test('next-send network preparation rebuilds only a changed completed container 
     assert.equal(await window.ensureConversationContainerNetworkSettings(), false);
     assert.equal(rebuilds, 2);
     assert.ok(notifications.some((item) => item.type === 'error'));
+});
+
+test('clearing a stale boundary requires an allow snapshot and a new runtime generation', async () => {
+    assert.match(settings, /boundaryPolicyId:\s*selection\.boundaryPolicyId/);
+    assert.match(settings, /active && active\.boundaryDefaultAction[\s\S]{0,180}!== 'allow'/);
+    assert.match(settings, /Number\(active && active\.runtimeGeneration \|\| 0\)/);
+    assert.match(settings, /activeGeneration <= previousGeneration/);
+    assert.match(settings, /if \(!loaded \|\| !state\.activeNetworkSignature\)[\s\S]{0,180}return false/);
 });

@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const vm = require('node:vm');
 
 const root = path.resolve(__dirname, '../../..');
 const read = (...parts) => fs.readFileSync(path.join(root, ...parts), 'utf8');
@@ -13,6 +14,54 @@ const chat = read('web', 'static', 'js', 'chat.js');
 const styles = read('web', 'static', 'css', 'style.css');
 const zh = JSON.parse(read('web', 'static', 'i18n', 'zh-CN.json'));
 const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
+
+function containerStatusHarness(apiFetch, conversationId = 'conversation-a') {
+    const listeners = new Map();
+    const timers = [];
+    const elements = {
+        'runtime-mode-select': { value: 'container' },
+        'chat-container-workspace-btn': { hidden: false, disabled: false, setAttribute() {} },
+        'chat-container-runtime-state': { dataset: {}, className: '', title: '' },
+        'chat-container-runtime-state-label': { textContent: '' },
+    };
+    const classList = { add() {}, remove() {}, toggle() {} };
+    const document = {
+        body: { classList },
+        getElementById(id) { return elements[id] || null; },
+        querySelectorAll() { return []; },
+        addEventListener(type, fn) { listeners.set(`document:${type}`, fn); },
+        createElement() { return { appendChild() {}, replaceChildren() {}, setAttribute() {}, classList }; },
+    };
+    const window = {
+        currentConversationId: conversationId,
+        apiFetch,
+        addEventListener(type, fn) { listeners.set(type, fn); },
+        setTimeout(fn, delay) { timers.push({ fn, delay }); return timers.length; },
+        clearTimeout() {},
+        requestAnimationFrame(fn) { fn(); },
+        innerWidth: 1280,
+        innerHeight: 800,
+    };
+    vm.runInNewContext(containerTerminal, {
+        window,
+        document,
+        Promise,
+        Object,
+        String,
+        Array,
+        Error,
+        Math,
+        Number,
+        encodeURIComponent,
+        requestAnimationFrame: window.requestAnimationFrame,
+    });
+    return { window, elements, listeners, timers };
+}
+
+async function flushStatusPromises() {
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+}
 
 test('对话执行栏提供工作区入口并在右侧抽屉承载共享终端', () => {
     assert.match(template, /id="runtime-mode-wrapper"[\s\S]*?id="chat-container-workspace-btn"/);
@@ -55,6 +104,41 @@ test('新建容器对话无需刷新即可显示工作区入口和实时容器�
     assert.match(styles, /\.chat-container-runtime-state\.is-running/);
 });
 
+test('未知状态不会显示为启动中，首次状态失败可自动恢复', async () => {
+    let calls = 0;
+    const harness = containerStatusHarness(async (url) => {
+        calls += 1;
+        assert.match(url, /\?observe=1$/);
+        if (calls === 1) throw new Error('temporary failure');
+        return { ok: true, async json() { return { status: 'created', runtimeStatus: 'running' }; } };
+    });
+    harness.window.renderChatContainerState('unexpected-state');
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'unavailable');
+    assert.doesNotMatch(harness.elements['chat-container-runtime-state-label'].textContent, /启动中/);
+
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'checking');
+    assert.equal(harness.timers.length, 1);
+    await harness.timers.shift().fn();
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'running');
+});
+
+test('快速切换对话时旧状态响应不能覆盖当前对话', async () => {
+    const pending = new Map();
+    const harness = containerStatusHarness((url) => new Promise((resolve) => {
+        pending.set(url.includes('conversation-a') ? 'a' : 'b', resolve);
+    }));
+    harness.window.currentConversationId = 'conversation-b';
+    harness.listeners.get('conversation-changed')();
+    pending.get('b')({ ok: true, async json() { return { status: 'created', runtimeStatus: 'stopped' }; } });
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'stopped');
+    pending.get('a')({ ok: true, async json() { return { status: 'created', runtimeStatus: 'running' }; } });
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'stopped');
+});
+
 test('系统设置终端与容器终端复用同一 xterm 会话和多标签代码', () => {
     assert.match(terminal, /function createTerminalInContainer\(container, tab\)/);
     assert.match(terminal, /function createEmbeddedTerminal\(root, options\)/);
@@ -65,7 +149,7 @@ test('系统设置终端与容器终端复用同一 xterm 会话和多标签代�
     assert.match(terminal, /event\.key !== 'Tab'/);
     assert.match(terminal, /sendToWS\(event\.shiftKey \? '\\x1b\[Z' : '\\t'\)/);
     assert.match(template, /terminal\.js\?v=20260828-3/);
-    assert.match(template, /container-terminal\.js\?v=20260828-3/);
+    assert.match(template, /container-terminal\.js\?v=20260901-1/);
 });
 
 test('容器终端只连接会话容器端点且不会回退宿主机终端', () => {
@@ -127,6 +211,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         'containerWorkspaceLoading', 'openContainerShell', 'containerShellUnavailableButton', 'focusContainerShell', 'reconnectContainerShell', 'containerShellReady', 'containerShellStopped',
         'containerTerminalWelcome', 'containerTerminalConnected', 'containerTerminalConnectionFailed',
         'containerStateStarting', 'containerStateRunning', 'containerStateStopped', 'containerStateFailed', 'containerStateNotStarted',
+        'containerStateChecking', 'containerStateRetrying', 'containerStateUnavailable', 'containerStateStopping', 'containerStateDeleting',
     ];
     const managementKeys = [
         'workspaceAndTerminal', 'workspaceTerminalReadyHint', 'workspaceTerminalStoppedHint', 'openWorkspaceTerminal',
@@ -135,7 +220,8 @@ test('容器终端中英文文案和缓存版本完整', () => {
         for (const key of chatKeys) assert.equal(typeof locale.chat[key], 'string', key);
         for (const key of managementKeys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
-    assert.match(template, /style\.css\?v=20260828-2/);
-    assert.match(template, /chat\.js\?v=20260828-2/);
-    assert.match(template, /container-management\.js\?v=20260826-1/);
+    assert.match(template, /style\.css\?v=20260901-2/);
+	assert.match(template, /chat\.js\?v=20260901-1/);
+	assert.match(template, /container-terminal\.js\?v=20260901-1/);
+	assert.match(template, /container-management\.js\?v=20260901-2/);
 });

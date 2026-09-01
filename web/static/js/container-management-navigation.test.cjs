@@ -41,7 +41,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
     assert.match(template, /network-activity\.js\?v=20260826-1/);
     assert.match(template, /boundary-rules\.js\?v=20260827-1/);
     assert.match(template, /egress-management\.js\?v=20260826-1/);
-    assert.match(template, /container-management\.js\?v=20260826-1/);
+    assert.match(template, /container-management\.js\?v=20260901-2/);
 });
 
 test('hash 路由把 7 个子页归入容器管理并初始化目标页', () => {
@@ -131,7 +131,7 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260828-2/);
+    assert.match(template, /style\.css\?v=20260901-2/);
     assert.match(template, /router\.js\?v=20260822-5/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);
@@ -187,4 +187,22 @@ test('容器管理视图使用安全观测端点和服务端分页筛选', () =>
     assert.match(styles, /\.container-runtime-filter-bar\s*\{/);
     assert.match(styles, /\.container-runtime-pagination\s*\{/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.container-runtime-status-grid/);
+});
+
+test('空闲策略表单使用带标签的稳定布局且数字输入不回退为原生样式', () => {
+    assert.match(template, /id="conversation-idle-timeout-minutes"[^>]+type="number"/);
+    assert.match(management, /container-runtime-idle-fields/);
+    assert.match(management, /container-runtime-idle-field-label/);
+    assert.match(management, /container-runtime-idle-actions/);
+    assert.match(management, /container-idle-policy-save/);
+    assert.match(management, /idleMinutesField\.hidden = idleAction\.value === 'none'/);
+    assert.match(styles, /\.container-idle-timeout-field input,[\s\S]*?\.container-idle-policy-minutes\s*\{[\s\S]*?box-sizing: border-box/);
+    assert.match(styles, /\.container-runtime-lifecycle-form\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) auto/);
+    assert.match(styles, /\.container-runtime-lifecycle-buttons\s*\{[\s\S]*?grid-column: 1 \/ -1/);
+    assert.match(styles, /@media \(max-width: 520px\)[\s\S]*?\.container-runtime-lifecycle-form,[\s\S]*?grid-template-columns: 1fr/);
+    for (const locale of [zh, en]) {
+        assert.equal(typeof locale.containerManagement.idleActionLabel, 'string');
+        assert.ok(locale.containerManagement.idleActionLabel.trim());
+        assert.match(locale.containerManagement.idleMinutes, /分钟|minutes/i);
+    }
 });

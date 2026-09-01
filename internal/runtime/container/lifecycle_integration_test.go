@@ -62,6 +62,38 @@ func TestLifecycleControllerPersistsStartStopRebuildAndDelete(t *testing.T) {
 	}
 }
 
+func TestLifecycleControllerIdleDeleteRetainsDedicatedWorkspace(t *testing.T) {
+	db, manager, controller, conversationID := lifecycleFixture(t)
+	if _, err := controller.Start(context.Background(), conversationID); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	policy := database.ConversationIdlePolicy{Action: database.ConversationIdleActionDelete, TimeoutSeconds: 60}
+	if _, err := db.SetConversationIdlePolicy(context.Background(), conversationID, policy); err != nil {
+		t.Fatal(err)
+	}
+	lastActivity := time.Now().UTC().Add(-2 * time.Minute)
+	if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, lastActivity.Format(time.RFC3339Nano), conversationID); err != nil {
+		t.Fatal(err)
+	}
+	candidates, err := db.ListIdleRuntimeCandidates(context.Background(), time.Now().UTC(), 10)
+	if err != nil || len(candidates) != 1 {
+		t.Fatalf("idle candidates = %#v, %v", candidates, err)
+	}
+	if _, err := controller.ApplyIdle(context.Background(), candidates[0], time.Now().UTC()); err != nil {
+		t.Fatalf("idle delete: %v", err)
+	}
+	if _, err := db.GetContainerInitialization(context.Background(), conversationID); !errors.Is(err, container.ErrNotFound) {
+		t.Fatalf("runtime record survived idle delete: %v", err)
+	}
+	if _, err := manager.Inspect(context.Background(), container.RuntimeID("runtime-"+conversationID)); !errors.Is(err, container.ErrNotFound) {
+		t.Fatalf("provider survived idle delete: %v", err)
+	}
+	binding, err := db.GetConversationWorkspaceBinding(context.Background(), conversationID)
+	if err != nil || binding.Mode != database.ConversationWorkspaceModeDedicated || binding.Workspace == nil {
+		t.Fatalf("dedicated workspace was not retained: %#v, %v", binding, err)
+	}
+}
+
 func TestLifecycleControllerExplicitRebuildAddsPinnedEgressGateway(t *testing.T) {
 	db, manager, _, conversationID := lifecycleFixture(t)
 	gateway := lifecycleGatewaySpec()

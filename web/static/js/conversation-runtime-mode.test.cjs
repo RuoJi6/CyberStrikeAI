@@ -78,8 +78,12 @@ test('中英文文案明确区分执行位置与 Agent 编排', () => {
     assert.match(en.chat.runtimeContainerSettingsAria, /auditing can be toggled at any time/i);
     assert.doesNotMatch(zh.chat.runtimeModeContainer + zh.chat.runtimeModeContainerHint, /待接入|后端未接入/);
     assert.doesNotMatch(en.chat.runtimeModeContainer + en.chat.runtimeModeContainerHint, /pending|not wired/i);
-    assert.match(zh.chat.workspacePersistenceHintEphemeral, /删除容器会永久删除/);
+    assert.match(zh.chat.workspacePersistenceHintEphemeral, /Docker tmpfs/);
+    assert.match(zh.chat.workspacePersistenceHintEphemeral, /占用容器内存/);
+    assert.match(zh.chat.workspacePersistenceHintEphemeral, /销毁容器后文件永久丢失/);
     assert.match(zh.chat.workspacePersistenceHintPersistent, /每对话|该对话专属/);
-    assert.match(en.chat.workspacePersistenceHintEphemeral, /deleting the container permanently deletes/i);
+    assert.match(en.chat.workspacePersistenceHintEphemeral, /Docker tmpfs/i);
+    assert.match(en.chat.workspacePersistenceHintEphemeral, /container memory/i);
+    assert.match(en.chat.workspacePersistenceHintEphemeral, /permanently lost/i);
     assert.match(en.chat.workspacePersistenceHintPersistent, /dedicated Docker named volume/i);
 });

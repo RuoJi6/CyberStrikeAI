@@ -28,6 +28,17 @@ type fakeConversationContainerLifecycle struct {
 	actions         []string
 }
 
+type fakeConversationContainerInitializationStarter struct {
+	record containerruntime.InitializationRecord
+	err    error
+	calls  int
+}
+
+func (f *fakeConversationContainerInitializationStarter) StartConversationAsync(_ context.Context, _ string) (containerruntime.InitializationRecord, error) {
+	f.calls++
+	return f.record, f.err
+}
+
 func (f *fakeConversationContainerLifecycle) call(_ context.Context, action, conversationID string) (containerruntime.InitializationRecord, error) {
 	f.action = action
 	f.actions = append(f.actions, action)
@@ -122,6 +133,34 @@ func TestConversationContainerLifecycleIsRBACScopedAndSanitized(t *testing.T) {
 	}
 }
 
+func TestConversationContainerManualStartRecreatesDeletedRuntime(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("recreate deleted runtime", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	starter := &fakeConversationContainerInitializationStarter{record: containerruntime.InitializationRecord{
+		ConversationID: conversation.ID,
+		Status:         containerruntime.InitializationQueued,
+	}}
+	controller := &fakeConversationContainerLifecycle{}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerInitializationProvider(db)
+	handler.SetContainerInitializationStarter(starter)
+	handler.SetContainerLifecycleController(controller)
+
+	response := performConversationRequest(owner, http.MethodPost, "/api/conversations/"+conversation.ID+"/container/start", nil, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+		handler.StartConversationContainer(c)
+	})
+	if response.Code != http.StatusOK || starter.calls != 1 || controller.action != "" {
+		t.Fatalf("start response=%d %s starter=%d lifecycle=%s", response.Code, response.Body.String(), starter.calls, controller.action)
+	}
+}
+
 func TestConversationContainerStartFailsClosedBeforeControllerWhenEgressBindingFails(t *testing.T) {
 	db, owner := setupConversationRBACTest(t)
 	conversation, err := db.CreateConversation("egress binding failure", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
@@ -154,7 +193,10 @@ func TestConversationContainerStartFailsClosedBeforeControllerWhenEgressBindingF
 
 func TestDeleteConversationContainerReportsWorkspacePolicy(t *testing.T) {
 	db, owner := setupConversationRBACTest(t)
-	conversation, err := db.CreateConversation("delete runtime", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	conversation, err := db.CreateConversation("delete runtime", database.ConversationCreateMeta{
+		RuntimeMode:   database.ConversationRuntimeModeContainer,
+		WorkspaceMode: database.ConversationWorkspaceModeEphemeral,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

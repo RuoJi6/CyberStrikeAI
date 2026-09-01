@@ -26,17 +26,19 @@ const (
 
 // Conversation 对话
 type Conversation struct {
-	ID                  string    `json:"id"`
-	Title               string    `json:"title"`
-	ProjectID           string    `json:"projectId,omitempty"`
-	RoleName            string    `json:"roleName,omitempty"`
-	AgentMode           string    `json:"agentMode,omitempty"`
-	RuntimeMode         string    `json:"runtimeMode"`
-	WorkspacePersistent bool      `json:"workspacePersistent"`
-	Pinned              bool      `json:"pinned"`
-	CreatedAt           time.Time `json:"createdAt"`
-	UpdatedAt           time.Time `json:"updatedAt"`
-	Messages            []Message `json:"messages,omitempty"`
+	ID                  string                  `json:"id"`
+	Title               string                  `json:"title"`
+	ProjectID           string                  `json:"projectId,omitempty"`
+	RoleName            string                  `json:"roleName,omitempty"`
+	AgentMode           string                  `json:"agentMode,omitempty"`
+	RuntimeMode         string                  `json:"runtimeMode"`
+	WorkspaceMode       string                  `json:"workspaceMode,omitempty"`
+	WorkspacePersistent bool                    `json:"workspacePersistent"`
+	IdlePolicy          *ConversationIdlePolicy `json:"idlePolicy,omitempty"`
+	Pinned              bool                    `json:"pinned"`
+	CreatedAt           time.Time               `json:"createdAt"`
+	UpdatedAt           time.Time               `json:"updatedAt"`
+	Messages            []Message               `json:"messages,omitempty"`
 }
 
 // Message 消息
@@ -74,11 +76,46 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if err != nil {
 		return nil, err
 	}
-	if meta.WorkspacePersistent && runtimeMode != ConversationRuntimeModeContainer {
-		return nil, fmt.Errorf("持久化工作区只能用于 container 对话")
+	workspaceMode := strings.ToLower(strings.TrimSpace(meta.WorkspaceMode))
+	requestedWorkspaceID := strings.TrimSpace(meta.WorkspaceID)
+	if runtimeMode == ConversationRuntimeModeContainer {
+		if workspaceMode == "" {
+			switch {
+			case requestedWorkspaceID != "":
+				workspaceMode = ConversationWorkspaceModeShared
+			case meta.WorkspacePersistent:
+				workspaceMode = ConversationWorkspaceModeDedicated
+			default:
+				workspaceMode = ConversationWorkspaceModeDedicated
+			}
+		}
+		if workspaceMode != ConversationWorkspaceModeEphemeral && workspaceMode != ConversationWorkspaceModeDedicated && workspaceMode != ConversationWorkspaceModeShared {
+			return nil, fmt.Errorf("workspaceMode 必须为 ephemeral、dedicated 或 shared")
+		}
+		if workspaceMode == ConversationWorkspaceModeShared && requestedWorkspaceID == "" {
+			return nil, fmt.Errorf("共享工作区必须指定 workspaceId")
+		}
+		if workspaceMode != ConversationWorkspaceModeShared && requestedWorkspaceID != "" {
+			return nil, fmt.Errorf("只有 shared 工作区可以指定 workspaceId")
+		}
+	} else if workspaceMode != "" || meta.WorkspacePersistent || requestedWorkspaceID != "" {
+		return nil, fmt.Errorf("容器工作区只能用于 container 对话")
 	}
-	if strings.TrimSpace(meta.WorkspaceID) != "" && runtimeMode != ConversationRuntimeModeContainer {
-		return nil, fmt.Errorf("共享工作区只能用于 container 对话")
+	idlePolicy := ConversationIdlePolicy{Action: ConversationIdleActionNone, TimeoutSeconds: ConversationIdleTimeoutDefaultSeconds}
+	var idleActionValue interface{}
+	var idleTimeoutValue interface{}
+	if runtimeMode == ConversationRuntimeModeContainer {
+		idlePolicy = DefaultNewConversationIdlePolicy()
+		if meta.IdlePolicy != nil {
+			idlePolicy, err = NormalizeConversationIdlePolicy(*meta.IdlePolicy)
+			if err != nil {
+				return nil, err
+			}
+		}
+		idleActionValue = idlePolicy.Action
+		idleTimeoutValue = idlePolicy.TimeoutSeconds
+	} else if meta.IdlePolicy != nil {
+		return nil, fmt.Errorf("idlePolicy 只能用于 container 对话")
 	}
 	runtimeControls, err := NormalizeConversationRuntimeControls(meta.RuntimeControls)
 	if err != nil {
@@ -118,7 +155,7 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	defer func() { _ = tx.Rollback() }()
 	workspaceID, workspacePersistent, err := resolveNewConversationWorkspaceTx(
 		context.Background(), tx, id, title, projectID, runtimeMode,
-		meta.WorkspacePersistent, meta.WorkspaceID, now,
+		runtimeMode == ConversationRuntimeModeContainer && workspaceMode != ConversationWorkspaceModeEphemeral, requestedWorkspaceID, now,
 	)
 	if err != nil {
 		return nil, err
@@ -126,23 +163,23 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	switch {
 	case wsID != "" && projectID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
-			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id, idle_action, idle_timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)",
+			id, title, now, now, wsID, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID, idleActionValue, idleTimeoutValue,
 		)
 	case wsID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
-			id, title, now, now, wsID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
+			"INSERT INTO conversations (id, title, created_at, updated_at, webshell_connection_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id, idle_action, idle_timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)",
+			id, title, now, now, wsID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID, idleActionValue, idleTimeoutValue,
 		)
 	case projectID != "":
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
-			id, title, now, now, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
+			"INSERT INTO conversations (id, title, created_at, updated_at, project_id, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id, idle_action, idle_timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)",
+			id, title, now, now, projectID, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID, idleActionValue, idleTimeoutValue,
 		)
 	default:
 		_, err = tx.Exec(
-			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''))",
-			id, title, now, now, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID,
+			"INSERT INTO conversations (id, title, created_at, updated_at, role_name, agent_mode, runtime_mode, workspace_persistent, workspace_id, idle_action, idle_timeout_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?)",
+			id, title, now, now, roleName, agentMode, runtimeMode, workspacePersistent, workspaceID, idleActionValue, idleTimeoutValue,
 		)
 	}
 	if err != nil {
@@ -205,7 +242,9 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 		RoleName:            roleName,
 		AgentMode:           agentMode,
 		RuntimeMode:         runtimeMode,
+		WorkspaceMode:       workspaceMode,
 		WorkspacePersistent: workspacePersistent,
+		IdlePolicy:          nil,
 		CreatedAt:           now,
 		UpdatedAt:           now,
 	}
@@ -218,7 +257,14 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	meta.EgressProxyGroupID = egressProxyGroupID
 	meta.RuntimeControls = runtimeControls
 	meta.WorkspacePersistent = workspacePersistent
+	meta.WorkspaceMode = workspaceMode
 	meta.WorkspaceID = workspaceID
+	if runtimeMode == ConversationRuntimeModeContainer {
+		conv.IdlePolicy = &idlePolicy
+		meta.IdlePolicy = &idlePolicy
+	} else {
+		meta.IdlePolicy = nil
+	}
 	notifyConversationCreated(conv, meta)
 	return conv, nil
 }
@@ -404,6 +450,9 @@ func (db *DB) GetConversation(id string) (*Conversation, error) {
 	}
 
 	conv.Pinned = pinned != 0
+	if err := db.populateConversationContainerMetadata(context.Background(), &conv); err != nil {
+		return nil, fmt.Errorf("加载对话容器设置失败: %w", err)
+	}
 
 	// 加载消息
 	messages, err := db.GetMessages(id)
@@ -500,6 +549,9 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	}
 
 	conv.Pinned = pinned != 0
+	if err := db.populateConversationContainerMetadata(context.Background(), &conv); err != nil {
+		return nil, fmt.Errorf("加载对话容器设置失败: %w", err)
+	}
 
 	// 加载消息（不加载 process_details / reasoning_content，减少历史会话切换 payload）
 	messages, err := db.GetMessagesLite(id)
@@ -508,6 +560,23 @@ func (db *DB) GetConversationLite(id string) (*Conversation, error) {
 	}
 	conv.Messages = messages
 	return &conv, nil
+}
+
+func (db *DB) populateConversationContainerMetadata(ctx context.Context, conversation *Conversation) error {
+	if conversation == nil || conversation.RuntimeMode != ConversationRuntimeModeContainer {
+		return nil
+	}
+	binding, err := db.GetConversationWorkspaceBinding(ctx, conversation.ID)
+	if err != nil {
+		return err
+	}
+	conversation.WorkspaceMode = binding.Mode
+	policy, err := db.GetConversationIdlePolicy(ctx, conversation.ID)
+	if err != nil {
+		return err
+	}
+	conversation.IdlePolicy = &policy
+	return nil
 }
 
 // GetConversationRuntimeMode reads the execution location currently selected for future turns. Tool
@@ -543,15 +612,63 @@ func (db *DB) SetConversationRuntimeMode(id, runtimeMode string) error {
 	if err != nil || strings.TrimSpace(runtimeMode) == "" {
 		return fmt.Errorf("更新对话执行位置失败: runtime mode must be host or container")
 	}
-	result, err := db.Exec(
-		"UPDATE conversations SET runtime_mode = ?, updated_at = ? WHERE id = ?",
-		mode, time.Now(), strings.TrimSpace(id),
-	)
+	id = strings.TrimSpace(id)
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("开始更新对话执行位置事务失败: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var previousMode, title string
+	var projectID, workspaceID, idleAction sql.NullString
+	var workspacePersistent bool
+	if err := tx.QueryRow(`
+		SELECT runtime_mode, title, project_id, workspace_persistent, workspace_id, idle_action
+		FROM conversations WHERE id = ?
+	`, id).Scan(&previousMode, &title, &projectID, &workspacePersistent, &workspaceID, &idleAction); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("对话不存在")
+		}
+		return fmt.Errorf("查询对话执行位置失败: %w", err)
+	}
+	now := time.Now().UTC()
+	// A host-only conversation has never made a container workspace choice. On
+	// its first switch to container execution, apply the same durable defaults
+	// as a newly-created container conversation. Conversations that previously
+	// chose ephemeral storage retain that explicit choice when switching back.
+	initializeContainerDefaults := mode == ConversationRuntimeModeContainer &&
+		previousMode != ConversationRuntimeModeContainer && !workspacePersistent &&
+		strings.TrimSpace(workspaceID.String) == "" &&
+		(!idleAction.Valid || strings.TrimSpace(idleAction.String) == "")
+	if initializeContainerDefaults {
+		workspaceIDValue := dedicatedWorkspaceID(id)
+		var exists int
+		if err := tx.QueryRow("SELECT COUNT(*) FROM container_workspaces WHERE id = ?", workspaceIDValue).Scan(&exists); err != nil {
+			return fmt.Errorf("查询专属工作区失败: %w", err)
+		}
+		if exists == 0 {
+			if _, err := createContainerWorkspaceTx(tx, workspaceIDValue, title+" 工作区", ContainerWorkspaceKindDedicated, projectID.String, now); err != nil {
+				return fmt.Errorf("创建专属工作区失败: %w", err)
+			}
+		}
+		workspaceID.String, workspaceID.Valid = workspaceIDValue, true
+		idleAction.String, idleAction.Valid = ConversationIdleActionDelete, true
+	}
+	idleTimeout := ConversationIdleTimeoutDefaultSeconds
+	if initializeContainerDefaults {
+		_, err = tx.Exec(`
+			UPDATE conversations
+			SET runtime_mode = ?, workspace_persistent = 1, workspace_id = ?,
+				idle_action = ?, idle_timeout_seconds = ?, updated_at = ?
+			WHERE id = ?
+		`, mode, workspaceID.String, idleAction.String, idleTimeout, formatSQLiteUTC(now), id)
+	} else {
+		_, err = tx.Exec("UPDATE conversations SET runtime_mode = ?, updated_at = ? WHERE id = ?", mode, formatSQLiteUTC(now), id)
+	}
 	if err != nil {
 		return fmt.Errorf("更新对话执行位置失败: %w", err)
 	}
-	if affected, affectedErr := result.RowsAffected(); affectedErr == nil && affected != 1 {
-		return fmt.Errorf("对话不存在")
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交对话执行位置失败: %w", err)
 	}
 	return nil
 }

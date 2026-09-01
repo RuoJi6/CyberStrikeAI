@@ -139,7 +139,10 @@ async function containerRuntimeRequestJSON(url, options = {}) {
     }
     if (!response.ok) {
         const message = payload && payload.error ? payload.error : containerManagementT('loadFailed', '加载容器管理数据失败');
-        throw new Error(message);
+        const error = new Error(message);
+        error.status = response.status;
+        error.payload = payload;
+        throw error;
     }
     return payload || {};
 }
@@ -442,6 +445,66 @@ function renderConversationContainerDetail() {
         else if (typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(policySelect);
     }
 
+    const lifecycle = containerRuntimeElement('section', 'container-boundary-policy-switch container-runtime-lifecycle-controls');
+    const lifecycleCopy = containerRuntimeElement('div', 'container-boundary-policy-switch-copy');
+    lifecycleCopy.append(
+        containerRuntimeElement('strong', '', containerManagementT('lifecycleTitle', '容器生命周期')),
+        containerRuntimeElement('p', '', containerManagementT('lifecycleHint', '设置空闲处理方式，或手动启动、停止和销毁当前对话容器。销毁默认保留持久工作区。')),
+    );
+    const lifecycleControls = containerRuntimeElement('div', 'container-runtime-lifecycle-form');
+    const idleFields = containerRuntimeElement('div', 'container-runtime-idle-fields');
+    const idleActionField = containerRuntimeElement('label', 'container-runtime-idle-field');
+    idleActionField.append(containerRuntimeElement('span', 'container-runtime-idle-field-label', containerManagementT('idleActionLabel', '空闲处理')));
+    const idleAction = containerRuntimeElement('select', 'container-idle-policy-select');
+    idleAction.dataset.unifiedSelect = 'single';
+    [
+        ['delete', containerManagementT('idleDelete', '自动销毁')],
+        ['stop', containerManagementT('idleStop', '自动停止')],
+        ['none', containerManagementT('idleNone', '不自动处理')],
+    ].forEach(([value, label]) => {
+        const option = containerRuntimeElement('option', '', label);
+        option.value = value;
+        idleAction.append(option);
+    });
+    idleAction.value = record.idlePolicy?.action || 'delete';
+    idleActionField.append(idleAction);
+    const idleMinutesField = containerRuntimeElement('label', 'container-runtime-idle-field container-runtime-idle-minutes-field');
+    idleMinutesField.append(containerRuntimeElement('span', 'container-runtime-idle-field-label', containerManagementT('idleMinutes', '空闲分钟数')));
+    const idleMinutes = containerRuntimeElement('input', 'container-idle-policy-minutes');
+    idleMinutes.type = 'number';
+    idleMinutes.min = '1';
+    idleMinutes.max = '43200';
+    idleMinutes.step = '1';
+    idleMinutes.value = String(Math.max(1, Math.round(Number(record.idlePolicy?.timeoutSeconds || 1800) / 60)));
+    idleMinutes.setAttribute('aria-label', containerManagementT('idleMinutes', '空闲分钟数'));
+    idleMinutesField.append(idleMinutes);
+    idleMinutesField.hidden = idleAction.value === 'none';
+    idleAction.addEventListener('change', () => { idleMinutesField.hidden = idleAction.value === 'none'; });
+    idleFields.append(idleActionField, idleMinutesField);
+    const idleSave = containerRuntimeElement('button', 'btn-secondary container-idle-policy-save', containerManagementT('saveIdlePolicy', '保存空闲策略'));
+    idleSave.type = 'button';
+    idleSave.addEventListener('click', () => saveContainerIdlePolicy(record, idleAction, idleMinutes, idleSave));
+    const idleActions = containerRuntimeElement('div', 'container-runtime-idle-actions');
+    idleActions.append(idleSave);
+    const lifecycleButtons = containerRuntimeElement('div', 'container-runtime-lifecycle-buttons');
+    const startButton = containerRuntimeElement('button', 'btn-secondary', containerManagementT('startContainer', '启动'));
+    startButton.type = 'button';
+    startButton.disabled = record.runtimeStatus === 'running' || record.lifecycleState === 'in_progress';
+    startButton.addEventListener('click', () => runConversationContainerLifecycle(record, 'start', startButton));
+    const stopButton = containerRuntimeElement('button', 'btn-secondary', containerManagementT('stopContainer', '停止'));
+    stopButton.type = 'button';
+    stopButton.disabled = record.runtimeStatus !== 'running' || record.lifecycleState === 'in_progress';
+    stopButton.addEventListener('click', () => runConversationContainerLifecycle(record, 'stop', stopButton));
+    const deleteButton = containerRuntimeElement('button', 'btn-danger', containerManagementT('deleteContainer', '销毁容器'));
+    deleteButton.type = 'button';
+    deleteButton.disabled = record.status === 'not_requested' || record.lifecycleState === 'in_progress';
+    deleteButton.addEventListener('click', () => runConversationContainerLifecycle(record, 'delete', deleteButton));
+    lifecycleButtons.append(startButton, stopButton, deleteButton);
+    lifecycleControls.append(idleFields, idleActions, lifecycleButtons);
+    lifecycle.append(lifecycleCopy, lifecycleControls);
+    root.append(lifecycle);
+    if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.enhance === 'function') window.CyberStrikeSelect.enhance(idleAction);
+
     if (record.status === 'created') {
         const workspaceActions = containerRuntimeElement('div', 'container-runtime-workspace-actions');
         const workspaceCopy = containerRuntimeElement('div');
@@ -467,6 +530,72 @@ function renderConversationContainerDetail() {
         const error = containerRuntimeElement('div', 'container-runtime-error');
         error.append(containerRuntimeElement('strong', '', containerManagementT('latestError', '最后错误')), containerRuntimeElement('p', '', latestError));
         root.append(error);
+    }
+}
+
+async function saveContainerIdlePolicy(record, actionSelect, minutesInput, button) {
+    if (!record || !button || button.disabled) return;
+    const minutes = Math.round(Number(minutesInput.value));
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 43200) {
+        if (typeof window.showNotification === 'function') window.showNotification(containerManagementT('idleTimeoutInvalid', '空闲时间必须在 1 分钟到 30 天之间'), 'error');
+        return;
+    }
+    button.disabled = true;
+    try {
+        const payload = await containerRuntimeRequestJSON(`/api/conversations/${encodeURIComponent(record.conversationId)}/container/idle-policy`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: actionSelect.value, timeoutSeconds: minutes * 60 }),
+        });
+        record.idlePolicy = payload.idlePolicy;
+        record.idleExpiresAt = payload.idleExpiresAt;
+        if (typeof window.showNotification === 'function') window.showNotification(containerManagementT('idlePolicySaved', '空闲策略已保存'), 'success');
+    } catch (error) {
+        if (typeof window.showNotification === 'function') window.showNotification(error.message || '保存失败', 'error');
+    } finally {
+        button.disabled = false;
+    }
+}
+
+async function runConversationContainerLifecycle(record, action, button) {
+    if (!record || !button || button.disabled) return;
+    const actionLabel = action === 'delete'
+        ? containerManagementT('deleteContainer', '销毁容器')
+        : (action === 'stop' ? containerManagementT('stopContainer', '停止容器') : containerManagementT('startContainer', '启动容器'));
+    let warning = containerManagementT('lifecycleConfirm', '确定要{{action}}“{{conversation}}”吗？', { action: actionLabel, conversation: containerRuntimeRowTitle(record) });
+    if (action === 'delete' && !record.workspacePersistent) {
+        warning += '\n' + containerManagementT('ephemeralDeleteWarning', '当前为临时 tmpfs 工作区，销毁后 /workspace 文件将永久丢失。');
+    } else if (action === 'delete') {
+        warning += '\n' + containerManagementT('persistentDeleteHint', '专属/共享工作区将保留。');
+    }
+    if (!window.confirm(warning)) return;
+    button.disabled = true;
+    const path = `/api/conversations/${encodeURIComponent(record.conversationId)}/container`;
+    const request = async (interrupt) => containerRuntimeRequestJSON(
+        action === 'delete' ? `${path}${interrupt ? '?interrupt=1' : ''}` : `${path}/${action}${interrupt ? '?interrupt=1' : ''}`,
+        { method: action === 'delete' ? 'DELETE' : 'POST' },
+    );
+    try {
+        let payload;
+        try {
+            payload = await request(false);
+        } catch (error) {
+            if (error.status !== 409 || !(error.payload && error.payload.taskActive)) throw error;
+            if (!window.confirm(containerManagementT('interruptTaskConfirm', '该对话仍有活动任务。继续会先中断任务，再执行容器操作，是否继续？'))) return;
+            payload = await request(true);
+        }
+        const startState = String(payload && (payload.runtimeStatus || payload.status) || '').trim().toLowerCase();
+        window.dispatchEvent(new CustomEvent('conversation-container-state-changed', {
+            detail: {
+                conversationId: record.conversationId,
+                state: action === 'delete' ? 'not_requested' : (action === 'stop' ? 'stopped' : (startState === 'running' ? 'running' : 'starting')),
+                runtimeStatus: startState === 'running' ? 'running' : '',
+            },
+        }));
+        await refreshContainerManagementData();
+    } catch (error) {
+        if (typeof window.showNotification === 'function') window.showNotification(error.message || `${actionLabel}失败`, 'error');
+    } finally {
+        button.disabled = false;
     }
 }
 
