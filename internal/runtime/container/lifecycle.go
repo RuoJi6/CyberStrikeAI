@@ -145,6 +145,7 @@ type LifecycleStore interface {
 	Get(ctx context.Context, conversationID string) (InitializationRecord, error)
 	BeginLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation) (InitializationRecord, error)
 	BeginIdleStop(ctx context.Context, conversationID string, inactiveBefore time.Time) (InitializationRecord, error)
+	BeginIdleAction(ctx context.Context, candidate IdleRuntimeCandidate, now time.Time) (InitializationRecord, error)
 	CompleteLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation, completion LifecycleCompletion) (InitializationRecord, error)
 	FailLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation, failure LifecycleFailure) (InitializationRecord, error)
 	DeleteLifecycle(ctx context.Context, conversationID string, operation LifecycleOperation) error
@@ -255,6 +256,41 @@ func (c *LifecycleController) StopIdle(ctx context.Context, conversationID strin
 		return record, err
 	}
 	return c.stopPrepared(ctx, record)
+}
+
+// ApplyIdle atomically claims and executes the per-conversation idle policy.
+// Automatic deletion always retains named workspaces; an ephemeral tmpfs is
+// removed together with the containers by Docker.
+func (c *LifecycleController) ApplyIdle(ctx context.Context, candidate IdleRuntimeCandidate, now time.Time) (InitializationRecord, error) {
+	if ctx == nil || now.IsZero() {
+		return InitializationRecord{}, invalidSpec("context and idle evaluation time are required")
+	}
+	if candidate.Action != "stop" && candidate.Action != "delete" {
+		return InitializationRecord{}, invalidSpec("idle action must be stop or delete")
+	}
+	record, err := c.store.BeginIdleAction(ctx, candidate, now.UTC())
+	if err != nil {
+		return record, err
+	}
+	if candidate.Action == "stop" {
+		return c.stopPrepared(ctx, record)
+	}
+	_, err = c.verifyBeforeMutation(ctx, record, true)
+	if err != nil {
+		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
+		return record, errors.Join(err, failErr)
+	}
+	err = c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: false})
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
+		return record, errors.Join(err, failErr)
+	}
+	writeCtx, cancel := lifecycleWriteContext()
+	defer cancel()
+	if err := c.store.DeleteLifecycle(writeCtx, record.ConversationID, LifecycleOperationDelete); err != nil {
+		return record, err
+	}
+	return record, nil
 }
 
 func (c *LifecycleController) stopPrepared(ctx context.Context, record InitializationRecord) (InitializationRecord, error) {

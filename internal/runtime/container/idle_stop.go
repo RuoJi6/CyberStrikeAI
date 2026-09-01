@@ -11,18 +11,22 @@ import (
 type IdleRuntimeCandidate struct {
 	ConversationID string    `json:"conversationId"`
 	LastActivityAt time.Time `json:"lastActivityAt"`
+	Action         string    `json:"action"`
+	TimeoutSeconds int       `json:"timeoutSeconds"`
+	ExpiresAt      time.Time `json:"expiresAt"`
 }
 
 type IdleStopReport struct {
 	Candidates  int `json:"candidates"`
 	ActiveTasks int `json:"activeTasks"`
 	Stopped     int `json:"stopped"`
+	Deleted     int `json:"deleted"`
 	Skipped     int `json:"skipped"`
 	Failed      int `json:"failed"`
 }
 
 type IdleRuntimeStore interface {
-	ListIdleRuntimeCandidates(ctx context.Context, inactiveBefore time.Time, limit int) ([]IdleRuntimeCandidate, error)
+	ListIdleRuntimeCandidates(ctx context.Context, now time.Time, limit int) ([]IdleRuntimeCandidate, error)
 }
 
 type ConversationTaskActivity interface {
@@ -30,18 +34,18 @@ type ConversationTaskActivity interface {
 }
 
 type IdleStopLifecycle interface {
-	StopIdle(ctx context.Context, conversationID string, inactiveBefore time.Time) (InitializationRecord, error)
+	ApplyIdle(ctx context.Context, candidate IdleRuntimeCandidate, now time.Time) (InitializationRecord, error)
 }
 
 type IdleStopSchedulerOptions struct {
-	IdleAfter        time.Duration
 	BatchSize        int
 	OperationTimeout time.Duration
 	Clock            func() time.Time
 }
 
-// IdleStopScheduler only requests the existing stop lifecycle operation. It
-// has no delete or workspace-removal dependency by construction.
+// IdleStopScheduler applies each conversation's durable stop/delete policy.
+// Delete operations are still constrained by LifecycleController to retain
+// named workspaces; ephemeral tmpfs storage follows the deleted containers.
 type IdleStopScheduler struct {
 	store     IdleRuntimeStore
 	lifecycle IdleStopLifecycle
@@ -62,8 +66,8 @@ func NewIdleStopScheduler(store IdleRuntimeStore, lifecycle IdleStopLifecycle, a
 	if options.Clock == nil {
 		options.Clock = time.Now
 	}
-	if options.IdleAfter <= 0 || options.BatchSize < 1 || options.BatchSize > 4096 || options.OperationTimeout <= 0 {
-		return nil, invalidSpec("idle stop duration, batch size and operation timeout must be positive")
+	if options.BatchSize < 1 || options.BatchSize > 4096 || options.OperationTimeout <= 0 {
+		return nil, invalidSpec("idle batch size and operation timeout must be positive")
 	}
 	return &IdleStopScheduler{store: store, lifecycle: lifecycle, activity: activity, options: options}, nil
 }
@@ -76,8 +80,8 @@ func (s *IdleStopScheduler) Reconcile(ctx context.Context) (IdleStopReport, erro
 	if err := ctx.Err(); err != nil {
 		return report, err
 	}
-	cutoff := s.options.Clock().UTC().Add(-s.options.IdleAfter)
-	candidates, err := s.store.ListIdleRuntimeCandidates(ctx, cutoff, s.options.BatchSize)
+	now := s.options.Clock().UTC()
+	candidates, err := s.store.ListIdleRuntimeCandidates(ctx, now, s.options.BatchSize)
 	if err != nil {
 		return report, fmt.Errorf("list idle container candidates: %w", err)
 	}
@@ -95,10 +99,14 @@ func (s *IdleStopScheduler) Reconcile(ctx context.Context) (IdleStopReport, erro
 			continue
 		}
 		operationCtx, cancel := context.WithTimeout(ctx, s.options.OperationTimeout)
-		_, stopErr := s.lifecycle.StopIdle(operationCtx, conversationID, cutoff)
+		_, stopErr := s.lifecycle.ApplyIdle(operationCtx, candidate, now)
 		cancel()
 		if stopErr == nil {
-			report.Stopped++
+			if candidate.Action == "delete" {
+				report.Deleted++
+			} else {
+				report.Stopped++
+			}
 			continue
 		}
 		if errors.Is(stopErr, ErrRuntimeStateConflict) || errors.Is(stopErr, ErrNotFound) {
@@ -106,7 +114,7 @@ func (s *IdleStopScheduler) Reconcile(ctx context.Context) (IdleStopReport, erro
 			continue
 		}
 		report.Failed++
-		stopErrors = append(stopErrors, fmt.Errorf("stop idle conversation %s: %w", conversationID, stopErr))
+		stopErrors = append(stopErrors, fmt.Errorf("apply idle policy for conversation %s: %w", conversationID, stopErr))
 	}
 	return report, errors.Join(stopErrors...)
 }

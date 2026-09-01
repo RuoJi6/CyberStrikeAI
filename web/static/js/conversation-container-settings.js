@@ -14,11 +14,15 @@
         auditSettingRequestId: 0,
         networkSettingRequestId: 0,
         activeNetworkSignature: '',
+        activeNetworkPayload: null,
         loadingActiveNetwork: false,
         applyingNetwork: false,
         workspaceBindingRequestId: 0,
         loadingWorkspaceBinding: false,
         applyingWorkspace: false,
+        idlePolicyRequestId: 0,
+        loadingIdlePolicy: false,
+        applyingIdlePolicy: false,
         taskLocked: false,
     };
 
@@ -77,7 +81,7 @@
         if (mode === 'dedicated') {
             return translate('chat.workspacePersistenceHintPersistent', '持久工作区：使用该对话专属 Docker named volume');
         }
-        return translate('chat.workspacePersistenceHintEphemeral', '临时工作区：删除容器会永久删除 /workspace 中的全部文件');
+        return translate('chat.workspacePersistenceHintEphemeral', '临时工作区：/workspace 使用 Docker tmpfs 并占用容器内存；销毁容器后文件永久丢失');
     }
 
     function renderWorkspaceOptions(preferredValue) {
@@ -120,7 +124,7 @@
     function selectedWorkspaceBinding() {
         const modeSelect = selectElement('conversation-workspace-mode');
         const sharedSelect = selectElement('conversation-shared-workspace-select');
-        const mode = String(modeSelect && modeSelect.value || 'ephemeral').trim().toLowerCase();
+        const mode = String(modeSelect && modeSelect.value || 'dedicated').trim().toLowerCase();
         const normalized = mode === 'shared' || mode === 'dedicated' ? mode : 'ephemeral';
         const workspaceId = normalized === 'shared' ? String(sharedSelect && sharedSelect.value || '').trim() : '';
         if (normalized === 'shared' && !workspaceId) {
@@ -132,7 +136,7 @@
     async function loadConversationWorkspaceBinding() {
         const conversationId = String(window.currentConversationId || '').trim();
         if (!conversationId) {
-            applyWorkspaceModeToControls('ephemeral', '');
+            applyWorkspaceModeToControls('dedicated', '');
             return;
         }
         const requestId = ++state.workspaceBindingRequestId;
@@ -248,7 +252,7 @@
         const select = selectElement('boundary-policy-select');
         if (!select) return;
         const selected = select.value;
-        const options = [createOption('', translate('chat.boundaryPolicyDefaultAllow', '不设置边界（允许全部外部访问）'))];
+        const options = [createOption('', translate('chat.boundaryPolicyDefaultAllow', '不设置边界（允许公网访问）'))];
         state.policies.forEach(function (policy) {
             if (!policy || !policy.id) return;
             const option = createOption(String(policy.id), String(policy.name || policy.id));
@@ -257,6 +261,12 @@
         });
         if (state.errors.policies && !state.policies.length) {
             options.push(createOption('__unavailable__', translate('chat.boundaryPoliciesUnavailable', '边界策略不可用或无读取权限'), true));
+        }
+        const activePolicyId = String(state.activeNetworkPayload && state.activeNetworkPayload.boundaryPolicyId || '').trim();
+        if (activePolicyId && !state.policies.some(function (policy) { return policy && String(policy.id) === activePolicyId; })) {
+            const unavailable = createOption(activePolicyId, translate('chat.activeBoundaryPolicyUnavailable', '当前已激活策略（不可见）') + ' · ' + activePolicyId, true);
+            unavailable.dataset.activeUnavailable = 'true';
+            options.push(unavailable);
         }
         replaceOptions(select, options, selected);
         syncConversationBoundarySelection();
@@ -450,12 +460,27 @@
         return [value.boundaryPolicyId, value.egressMode, value.egressProxyId, value.egressProxyGroupId, JSON.stringify(value.runtimeControls || {})].join('\u0000');
     }
 
+    function activeNetworkSelection(payload) {
+        const value = payload || {};
+        const inherited = value.egressSource && value.egressSource !== 'conversation';
+        const mode = inherited ? '' : String(value.egressMode || 'none').trim();
+        return {
+            boundaryPolicyId: String(value.boundaryPolicyId || '').trim(),
+            egressMode: mode,
+            egressProxyId: mode === 'proxy' ? String(value.egressProxyId || '').trim() : '',
+            egressProxyGroupId: mode === 'group' ? String(value.egressProxyGroupId || '').trim() : '',
+            runtimeControls: value.runtimeControls || {},
+        };
+    }
+
     function applyActiveNetworkSettings(payload) {
         const boundary = selectElement('boundary-policy-select');
         const modeSelect = selectElement('conversation-egress-mode-select');
         const targetSelect = selectElement('conversation-egress-target-select');
         if (!boundary || !modeSelect) return;
         state.loadingActiveNetwork = true;
+        state.activeNetworkPayload = payload || {};
+        renderBoundaryOptions();
         boundary.value = String(payload.boundaryPolicyId || '');
         const inherited = payload.egressSource && payload.egressSource !== 'conversation';
         modeSelect.value = inherited ? '' : String(payload.egressMode || 'none');
@@ -481,7 +506,7 @@
         };
         Object.keys(values).forEach(function (id) { const element = selectElement(id); if (element) element.value = String(values[id]); });
         syncConversationRuntimeControls();
-        state.activeNetworkSignature = networkSelectionSignature();
+        state.activeNetworkSignature = networkSelectionSignature(activeNetworkSelection(payload));
         state.loadingActiveNetwork = false;
     }
 
@@ -489,6 +514,7 @@
         const conversationId = String(window.currentConversationId || '').trim();
         if (!conversationId) {
             state.activeNetworkSignature = '';
+            state.activeNetworkPayload = null;
             return;
         }
         const requestId = ++state.networkSettingRequestId;
@@ -497,6 +523,7 @@
             const payload = await fetchJSON('/api/conversations/' + encodeURIComponent(conversationId) + '/container/network-settings');
             if (requestId !== state.networkSettingRequestId || conversationId !== String(window.currentConversationId || '').trim()) return;
             applyActiveNetworkSettings(payload || {});
+            return payload || {};
         } catch (error) {
             if (requestId === state.networkSettingRequestId) notify(translate('chat.containerNetworkLoadFailed', '读取当前容器网络配置失败。'), 'error');
         } finally {
@@ -511,9 +538,16 @@
         const runtimeMode = selectElement('runtime-mode-select');
         if (!conversationId || String(runtimeMode && runtimeMode.value || '').trim().toLowerCase() !== 'container') return true;
         if (state.taskLocked || state.applyingNetwork || state.loadingActiveNetwork) return false;
+        if (!state.activeNetworkSignature) {
+            const loaded = await loadActiveConversationNetworkSettings();
+            if (!loaded || !state.activeNetworkSignature) {
+                notify(translate('chat.containerNetworkLoadFailed', '读取当前容器网络配置失败，本次消息未发送。'), 'error');
+                return false;
+            }
+        }
         const selection = currentNetworkSelection();
         try { validateRuntimeControls(selection.runtimeControls); } catch (error) { notify(error.message, 'error'); return false; }
-        if (!state.activeNetworkSignature || networkSelectionSignature(selection) === state.activeNetworkSignature) return true;
+        if (networkSelectionSignature(selection) === state.activeNetworkSignature) return true;
         if ((selection.egressMode === 'proxy' && !selection.egressProxyId) || (selection.egressMode === 'group' && !selection.egressProxyGroupId)) {
             notify(selection.egressMode === 'proxy'
                 ? translate('chat.egressProxyRequired', '请选择可用代理。')
@@ -528,6 +562,7 @@
             egressMode: selection.egressMode,
             runtimeControls: selection.runtimeControls,
         };
+        const previousGeneration = Number(state.activeNetworkPayload && state.activeNetworkPayload.runtimeGeneration || 0);
         if (selection.egressProxyId) body.egressProxyId = selection.egressProxyId;
         if (selection.egressProxyGroupId) body.egressProxyGroupId = selection.egressProxyGroupId;
         try {
@@ -536,7 +571,15 @@
             });
             const payload = await response.json().catch(function () { return {}; });
             if (!response.ok) throw new Error(payload && payload.error ? String(payload.error) : 'HTTP ' + response.status);
-            await loadActiveConversationNetworkSettings();
+            const active = await loadActiveConversationNetworkSettings();
+            const activeSelection = activeNetworkSelection(active || {});
+            const expectedPolicy = String(selection.boundaryPolicyId || '').trim();
+            const activeGeneration = Number(active && active.runtimeGeneration || 0);
+            if (activeSelection.boundaryPolicyId !== expectedPolicy ||
+                (!expectedPolicy && String(active && active.boundaryDefaultAction || '').trim().toLowerCase() !== 'allow') ||
+                activeGeneration <= previousGeneration) {
+                throw new Error(translate('chat.containerNetworkVerificationFailed', '容器已重建，但激活的边界快照未通过确认。'));
+            }
             notify(translate('chat.containerNetworkAutoApplied', '新的边界策略和上游出口已应用。'), 'success');
             return true;
         } catch (error) {
@@ -658,6 +701,88 @@
         await syncConversationEgressAudit(true);
     }
 
+    function idlePolicyFromControls() {
+        const actionSelect = selectElement('conversation-idle-action');
+        const timeoutInput = selectElement('conversation-idle-timeout-minutes');
+        const action = String(actionSelect && actionSelect.value || 'delete').trim().toLowerCase();
+        const minutes = Math.round(Number(timeoutInput && timeoutInput.value || 30));
+        if (!['delete', 'stop', 'none'].includes(action)) throw new Error(translate('chat.containerIdleActionInvalid', '空闲动作无效。'));
+        if (!Number.isFinite(minutes) || minutes < 1 || minutes > 43200) throw new Error(translate('chat.containerIdleTimeoutInvalid', '空闲时间必须在 1 分钟到 30 天之间。'));
+        return { action: action, timeoutSeconds: minutes * 60 };
+    }
+
+    function applyIdlePolicyToControls(policy) {
+        const value = policy || { action: 'delete', timeoutSeconds: 1800 };
+        const action = ['delete', 'stop', 'none'].includes(String(value.action)) ? String(value.action) : 'delete';
+        const seconds = Math.max(60, Math.min(2592000, Number(value.timeoutSeconds || 1800)));
+        const actionSelect = selectElement('conversation-idle-action');
+        const timeoutInput = selectElement('conversation-idle-timeout-minutes');
+        const timeoutField = selectElement('conversation-idle-timeout-field');
+        const hint = selectElement('conversation-idle-policy-hint');
+        if (actionSelect) actionSelect.value = action;
+        if (timeoutInput) timeoutInput.value = String(Math.max(1, Math.round(seconds / 60)));
+        if (timeoutField) timeoutField.hidden = action === 'none';
+        if (hint) {
+            hint.textContent = action === 'delete'
+                ? translate('chat.containerIdleDeleteHint', '到期后销毁 Agent、网关和网络；专属/共享工作区仍保留，临时工作区会丢失。')
+                : (action === 'stop'
+                    ? translate('chat.containerIdleStopHint', '到期后停止容器；容器和工作区都会保留，可稍后手动启动。')
+                    : translate('chat.containerIdleNoneHint', '该对话的容器不会因空闲而自动停止或销毁。'));
+        }
+        refreshEnhancedSelect(actionSelect);
+    }
+
+    async function loadConversationIdlePolicy() {
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!conversationId) {
+            applyIdlePolicyToControls({ action: 'delete', timeoutSeconds: 1800 });
+            return;
+        }
+        const requestId = ++state.idlePolicyRequestId;
+        state.loadingIdlePolicy = true;
+        try {
+            const payload = await fetchJSON('/api/conversations/' + encodeURIComponent(conversationId) + '/container/idle-policy');
+            if (requestId !== state.idlePolicyRequestId || conversationId !== String(window.currentConversationId || '').trim()) return;
+            applyIdlePolicyToControls(payload && payload.idlePolicy);
+        } catch (error) {
+            if (requestId === state.idlePolicyRequestId) notify(translate('chat.containerIdleLoadFailed', '读取容器空闲策略失败。'), 'error');
+        } finally {
+            if (requestId === state.idlePolicyRequestId) state.loadingIdlePolicy = false;
+        }
+    }
+
+    async function syncConversationIdlePolicy() {
+        let policy;
+        try {
+            policy = idlePolicyFromControls();
+        } catch (error) {
+            notify(error.message, 'error');
+            return false;
+        }
+        applyIdlePolicyToControls(policy);
+        const conversationId = String(window.currentConversationId || '').trim();
+        if (!conversationId || state.loadingIdlePolicy || state.applyingIdlePolicy) return true;
+        state.applyingIdlePolicy = true;
+        setConversationContainerControlsLocked(state.taskLocked);
+        try {
+            const response = await window.apiFetch('/api/conversations/' + encodeURIComponent(conversationId) + '/container/idle-policy', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(policy),
+            });
+            const payload = await response.json().catch(function () { return {}; });
+            if (!response.ok) throw new Error(payload && payload.error ? String(payload.error) : 'HTTP ' + response.status);
+            applyIdlePolicyToControls(payload.idlePolicy || policy);
+            notify(translate('chat.containerIdleSaved', '容器空闲策略已更新。'), 'success');
+            return true;
+        } catch (error) {
+            notify(translate('chat.containerIdleSaveFailed', '保存容器空闲策略失败：{{message}}', { message: error && error.message ? error.message : '' }), 'error');
+            await loadConversationIdlePolicy();
+            return false;
+        } finally {
+            state.applyingIdlePolicy = false;
+            setConversationContainerControlsLocked(state.taskLocked);
+        }
+    }
+
     async function loadConversationContainerChoices(force) {
         const projectId = activeProjectId();
         const key = projectId || '__none__';
@@ -667,8 +792,9 @@
             renderWorkspaceOptions();
             setLoadStatus();
             if (String(window.currentConversationId || '').trim()) {
-                loadActiveConversationNetworkSettings();
+                await loadActiveConversationNetworkSettings();
                 loadConversationWorkspaceBinding();
+                loadConversationIdlePolicy();
             }
             return;
         }
@@ -677,7 +803,6 @@
         state.loaded = false;
         state.errors = Object.create(null);
         setLoadStatus();
-        if (String(window.currentConversationId || '').trim()) loadActiveConversationNetworkSettings();
         updateEgressPreview();
         const previewPath = '/api/egress-defaults/preview' + (projectId ? '?projectId=' + encodeURIComponent(projectId) : '');
         const results = await Promise.allSettled([
@@ -705,7 +830,11 @@
         renderEgressModeAvailability();
         renderWorkspaceOptions();
         setLoadStatus();
-        if (String(window.currentConversationId || '').trim()) loadConversationWorkspaceBinding();
+        if (String(window.currentConversationId || '').trim()) {
+            await loadActiveConversationNetworkSettings();
+            loadConversationWorkspaceBinding();
+            loadConversationIdlePolicy();
+        }
     }
 
     function syncConversationContainerControlsVisibility(runtimeMode) {
@@ -743,6 +872,11 @@
         });
         const workspaceCreate = selectElement('conversation-shared-workspace-create');
         if (workspaceCreate) workspaceCreate.disabled = workspaceLocked;
+        ['conversation-idle-action', 'conversation-idle-timeout-minutes'].forEach(function (id) {
+            const control = selectElement(id);
+            if (control) control.disabled = state.applyingIdlePolicy;
+            refreshEnhancedSelect(control);
+        });
         if (locked && container && !container.hidden) loadConversationEgressAuditSetting();
     }
 
@@ -759,7 +893,8 @@
         const resourceToggle = selectElement('conversation-resource-limit-toggle');
         if (rateToggle) rateToggle.checked = false;
         if (resourceToggle) resourceToggle.checked = false;
-        applyWorkspaceModeToControls('ephemeral', '');
+        applyWorkspaceModeToControls('dedicated', '');
+        applyIdlePolicyToControls({ action: 'delete', timeoutSeconds: 1800 });
         refreshEnhancedSelect(boundary);
         refreshEnhancedSelect(mode);
         syncConversationBoundarySelection();
@@ -773,8 +908,10 @@
         if (String(runtimeMode || '').trim().toLowerCase() !== 'container') return {};
         const result = {};
         const workspace = selectedWorkspaceBinding();
+        result.workspaceMode = workspace.mode;
         result.workspacePersistent = workspace.mode !== 'ephemeral';
         if (workspace.mode === 'shared') result.workspaceId = workspace.workspaceId;
+        result.idlePolicy = idlePolicyFromControls();
         const auditToggle = selectElement('conversation-egress-audit-toggle');
         const auditMode = selectElement('conversation-egress-audit-mode');
         result.egressAuditEnabled = !auditToggle || auditToggle.checked;
@@ -808,6 +945,7 @@
     window.syncConversationEgressAudit = syncConversationEgressAudit;
     window.syncConversationEgressAuditMode = syncConversationEgressAuditMode;
     window.syncConversationRuntimeControls = syncConversationRuntimeControls;
+    window.syncConversationIdlePolicy = syncConversationIdlePolicy;
     window.syncConversationWorkspaceMode = syncConversationWorkspaceMode;
     window.syncConversationSharedWorkspace = syncConversationSharedWorkspace;
     window.createConversationSharedWorkspace = createConversationSharedWorkspace;
@@ -822,7 +960,8 @@
 
     document.addEventListener('DOMContentLoaded', function () {
         syncConversationContainerControlsVisibility('host');
-        applyWorkspaceModeToControls('ephemeral', '');
+        applyWorkspaceModeToControls('dedicated', '');
+        applyIdlePolicyToControls({ action: 'delete', timeoutSeconds: 1800 });
         setConversationContainerControlsLocked(false);
         setLoadStatus();
     });

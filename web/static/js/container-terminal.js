@@ -8,6 +8,7 @@
     let chatStatusGeneration = 0;
     let chatStatusTimer = null;
     let chatStatusPollAttempts = 0;
+    let chatStatusRequestFailures = 0;
 
     function translate(key, fallback, values) {
         let value = typeof window.t === 'function' ? window.t(key, values || {}) : fallback;
@@ -168,8 +169,23 @@
         if (state === 'running' || state === 'ready') {
             return { state: 'running', key: 'chat.containerStateRunning', fallback: '运行中' };
         }
-        if (state === 'failed' || state === 'unavailable' || state === 'error') {
+        if (state === 'failed' || state === 'error') {
             return { state: 'failed', key: 'chat.containerStateFailed', fallback: '启动失败' };
+        }
+        if (state === 'unavailable') {
+            return { state: 'unavailable', key: 'chat.containerStateUnavailable', fallback: '状态不可用 · 点击重试' };
+        }
+        if (state === 'retrying') {
+            return { state: 'checking', key: 'chat.containerStateRetrying', fallback: '状态暂不可用 · 正在重试' };
+        }
+        if (state === 'checking' || state === 'syncing') {
+            return { state: 'checking', key: 'chat.containerStateChecking', fallback: '正在同步状态' };
+        }
+        if (state === 'stopping') {
+            return { state: 'stopping', key: 'chat.containerStateStopping', fallback: '停止中' };
+        }
+        if (state === 'deleting') {
+            return { state: 'deleting', key: 'chat.containerStateDeleting', fallback: '销毁中' };
         }
         if (state === 'stopped' || state === 'exited') {
             return { state: 'stopped', key: 'chat.containerStateStopped', fallback: '已停止' };
@@ -177,7 +193,10 @@
         if (state === 'not_requested' || state === 'idle') {
             return { state: 'idle', key: 'chat.containerStateNotStarted', fallback: '未启动' };
         }
-        return { state: 'starting', key: 'chat.containerStateStarting', fallback: '启动中' };
+        if (state === 'starting' || state === 'creating' || state === 'queued') {
+            return { state: 'starting', key: 'chat.containerStateStarting', fallback: '启动中' };
+        }
+        return { state: 'unavailable', key: 'chat.containerStateUnavailable', fallback: '状态不可用 · 点击重试' };
     }
 
     function renderChatContainerState(rawState) {
@@ -188,6 +207,9 @@
         badge.className = `chat-container-runtime-state is-${presentation.state}`;
         badge.dataset.state = presentation.state;
         label.textContent = translate(presentation.key, presentation.fallback);
+        badge.title = presentation.state === 'unavailable'
+            ? translate('chat.containerStateRetryTitle', '点击重新同步容器状态')
+            : label.textContent;
     }
 
     function clearChatContainerStatusPoll() {
@@ -202,19 +224,34 @@
         const lifecycleState = String(payload && payload.lifecycleState || '').trim().toLowerCase();
         const lifecycleOperation = String(payload && payload.lifecycleOperation || '').trim().toLowerCase();
         const observedAgentStatus = String(payload && payload.observation && payload.observation.agent && payload.observation.agent.status || '').trim().toLowerCase();
+        const observationError = String(payload && payload.observationError || '').trim().toLowerCase();
+        const runtimeDrift = String(payload && payload.runtimeDrift || '').trim().toLowerCase();
         const taskStatus = typeof window.getConversationExecutionStatus === 'function'
             ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
             : '';
-        if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed' || observedAgentStatus === 'failed') return 'failed';
-        if (runtimeStatus === 'running' || observedAgentStatus === 'running') return 'running';
+        if (lifecycleState === 'in_progress' && lifecycleOperation === 'stop') return 'stopping';
+        if (lifecycleState === 'in_progress' && lifecycleOperation === 'delete') return 'deleting';
+        if (observationError === 'provider_missing' || observationError === 'runtime_drift') return 'failed';
+        if (observationError) return 'unavailable';
+        if (observedAgentStatus === 'running') return 'running';
+        if (observedAgentStatus === 'stopped' || observedAgentStatus === 'exited') return 'stopped';
+        if (observedAgentStatus === 'failed') return 'failed';
+        if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed' || runtimeDrift) return 'failed';
+        if (runtimeStatus === 'running') return 'running';
+        if (runtimeStatus === 'stopped' || runtimeStatus === 'exited') return 'stopped';
+        if (initStatus === 'not_requested') return 'idle';
         if (lifecycleState === 'in_progress' && ['start', 'rebuild', 'reconcile'].includes(lifecycleOperation)) return 'starting';
         // A ready runtime is necessarily usable by an already-running turn. This
         // closes the short persistence/event ordering window where chat output is
         // visible while the lightweight runtimeStatus field is still stale.
-        if (taskStatus === 'running' && initStatus === 'created' && (readiness === 'ready' || readiness === 'not_required')) return 'running';
+        if (taskStatus === 'running' && initStatus === 'created' && !runtimeStatus && (readiness === 'ready' || readiness === 'not_required')) return 'running';
         if (initStatus === 'queued' || initStatus === 'creating' || readiness === 'pending' || readiness === 'validating' || taskStatus === 'initializing') return 'starting';
-        if (runtimeStatus === 'stopped') return taskStatus === 'running' ? 'starting' : 'stopped';
-        return 'starting';
+        return 'unavailable';
+    }
+
+    function scheduleChatContainerStatusRefresh(id, generation, delay) {
+        clearChatContainerStatusPoll();
+        chatStatusTimer = window.setTimeout(() => refreshChatContainerState(id, generation), delay);
     }
 
     async function refreshChatContainerState(conversationId, generation) {
@@ -237,23 +274,38 @@
             if (generation !== chatStatusGeneration || id !== String(window.currentConversationId || '').trim()) return;
             const nextState = initializationState(payload, id);
             renderChatContainerState(nextState);
-            if (nextState === 'starting' && chatStatusPollAttempts < 120) {
-                chatStatusPollAttempts += 1;
+            chatStatusRequestFailures = 0;
+            if (['starting', 'stopping', 'deleting', 'checking'].includes(nextState)) {
+                if (chatStatusPollAttempts < 120) {
+                    chatStatusPollAttempts += 1;
+                    scheduleChatContainerStatusRefresh(id, generation, 1000);
+                } else {
+                    clearChatContainerStatusPoll();
+                    renderChatContainerState('unavailable');
+                }
+            } else {
                 clearChatContainerStatusPoll();
-                chatStatusTimer = window.setTimeout(() => refreshChatContainerState(id, generation), 1000);
             }
         } catch (error) {
-            // Keep the last known state. A transient status request must not
-            // make a running/stopped badge flash back to "starting".
+            if (generation !== chatStatusGeneration || id !== String(window.currentConversationId || '').trim()) return;
+            chatStatusRequestFailures += 1;
+            if (chatStatusRequestFailures <= 5) {
+                renderChatContainerState('retrying');
+                scheduleChatContainerStatusRefresh(id, generation, Math.min(8000, 500 * Math.pow(2, chatStatusRequestFailures - 1)));
+            } else {
+                clearChatContainerStatusPoll();
+                renderChatContainerState('unavailable');
+            }
         }
     }
 
-    function startChatContainerStatusSync(conversationId, showStarting) {
+    function startChatContainerStatusSync(conversationId, preserveState) {
         clearChatContainerStatusPoll();
         chatStatusGeneration += 1;
         chatStatusPollAttempts = 0;
+        chatStatusRequestFailures = 0;
         const generation = chatStatusGeneration;
-        if (showStarting !== false) renderChatContainerState('starting');
+        if (preserveState !== true) renderChatContainerState('checking');
         refreshChatContainerState(conversationId, generation);
     }
 
@@ -489,6 +541,11 @@
         const button = element('chat-container-workspace-btn');
         const conversationId = String(window.currentConversationId || '').trim();
         if (!panel || !button || !conversationId) return;
+        const badge = element('chat-container-runtime-state');
+        if (badge && badge.dataset.state === 'unavailable') {
+            startChatContainerStatusSync(conversationId, false);
+            return;
+        }
         if (!panel.hidden) {
             closeChatContainerWorkspacePanel();
             return;
@@ -526,7 +583,7 @@
             renderChatContainerState('idle');
         } else if (conversationChanged || !views.chat.conversationId) {
             views.chat.conversationId = conversationId;
-            startChatContainerStatusSync(conversationId, true);
+            startChatContainerStatusSync(conversationId, false);
         }
     }
 
@@ -562,13 +619,13 @@
         if (views.chat.info) renderWorkspaceInfo('chat', views.chat.info);
         if (views.conversation.info) renderWorkspaceInfo('conversation', views.conversation.info);
         const badge = element('chat-container-runtime-state');
-        if (badge) renderChatContainerState(badge.dataset.state || 'starting');
+        if (badge) renderChatContainerState(badge.dataset.state || 'checking');
     });
     window.addEventListener('conversation-changed', syncChatContainerWorkspaceButton);
     window.addEventListener('conversation-task-state-changed', () => {
         const id = String(window.currentConversationId || '').trim();
         if (id && String((element('runtime-mode-select') || {}).value || '').trim().toLowerCase() === 'container') {
-            startChatContainerStatusSync(id, false);
+            startChatContainerStatusSync(id, true);
         }
     });
     window.addEventListener('conversation-container-state-changed', (event) => {
@@ -580,9 +637,11 @@
             ? 'running'
             : String(detail.state || runtimeStatus || '').trim().toLowerCase();
         renderChatContainerState(state === 'ready' ? 'running' : state);
-        if (state === 'ready' || state === 'running' || state === 'failed' || state === 'unavailable') {
+        if (state === 'ready' || state === 'running' || state === 'failed' || state === 'unavailable' || state === 'stopped' || state === 'idle' || state === 'not_requested') {
             clearChatContainerStatusPoll();
             chatStatusGeneration += 1;
+        } else {
+            startChatContainerStatusSync(id, true);
         }
     });
 

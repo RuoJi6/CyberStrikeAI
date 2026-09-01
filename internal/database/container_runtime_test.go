@@ -383,15 +383,18 @@ func TestContainerLifecycleFailurePersistsAppliedNetworkMigration(t *testing.T) 
 	}
 }
 
-func TestIdleContainerCandidatesAndAtomicStopClaim(t *testing.T) {
+func TestIdleContainerCandidatesAndAtomicPolicyClaim(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()
 	old := time.Date(2026, 8, 20, 6, 0, 0, 0, time.UTC)
 	cutoff := old.Add(time.Hour)
 
-	createRunning := func(title string) string {
+	createRunning := func(title, action string, timeoutSeconds int) string {
 		t.Helper()
-		conversation, err := db.CreateConversation(title, ConversationCreateMeta{})
+		idlePolicy := ConversationIdlePolicy{Action: action, TimeoutSeconds: timeoutSeconds}
+		conversation, err := db.CreateConversation(title, ConversationCreateMeta{
+			RuntimeMode: ConversationRuntimeModeContainer, WorkspaceMode: ConversationWorkspaceModeEphemeral, IdlePolicy: &idlePolicy,
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -411,8 +414,10 @@ func TestIdleContainerCandidatesAndAtomicStopClaim(t *testing.T) {
 		return conversation.ID
 	}
 
-	idleID := createRunning("idle")
-	busyID := createRunning("busy")
+	idleID := createRunning("idle stop", ConversationIdleActionStop, 3600)
+	deleteID := createRunning("idle delete", ConversationIdleActionDelete, 60)
+	noneID := createRunning("idle none", ConversationIdleActionNone, 60)
+	busyID := createRunning("busy", ConversationIdleActionStop, 3600)
 	if _, err := db.Exec(`
 		INSERT INTO tool_executions (id, tool_name, arguments, status, start_time, conversation_id)
 		VALUES (?, 'execute', '{}', 'running', ?, ?)
@@ -424,26 +429,47 @@ func TestIdleContainerCandidatesAndAtomicStopClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(candidates) != 1 || candidates[0].ConversationID != idleID || !candidates[0].LastActivityAt.Equal(old) {
+	if len(candidates) != 2 || candidates[0].ConversationID != deleteID && candidates[0].ConversationID != idleID || candidates[1].ConversationID != deleteID && candidates[1].ConversationID != idleID {
 		t.Fatalf("idle candidates = %#v", candidates)
 	}
+	for _, candidate := range candidates {
+		if candidate.ConversationID == noneID || !candidate.LastActivityAt.Equal(old) {
+			t.Fatalf("invalid idle candidate = %#v", candidate)
+		}
+	}
 
-	claimed, err := db.BeginIdleStop(ctx, idleID, cutoff)
+	var stopCandidate, deleteCandidate containerruntime.IdleRuntimeCandidate
+	for _, candidate := range candidates {
+		if candidate.ConversationID == idleID {
+			stopCandidate = candidate
+		} else if candidate.ConversationID == deleteID {
+			deleteCandidate = candidate
+		}
+	}
+	claimed, err := db.BeginIdleAction(ctx, stopCandidate, cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if claimed.LifecycleOperation != containerruntime.LifecycleOperationStop || claimed.LifecycleState != containerruntime.LifecycleInProgress {
 		t.Fatalf("idle stop claim = %#v", claimed)
 	}
-	if _, err := db.BeginIdleStop(ctx, busyID, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+	claimed, err = db.BeginIdleAction(ctx, deleteCandidate, cutoff)
+	if err != nil || claimed.LifecycleOperation != containerruntime.LifecycleOperationDelete || claimed.LifecycleState != containerruntime.LifecycleInProgress {
+		t.Fatalf("idle delete claim = %#v, %v", claimed, err)
+	}
+	if _, err := db.BeginIdleAction(ctx, containerruntime.IdleRuntimeCandidate{
+		ConversationID: busyID, Action: ConversationIdleActionStop, TimeoutSeconds: 3600, LastActivityAt: old,
+	}, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
 		t.Fatalf("busy stop claim = %v", err)
 	}
 
-	recentID := createRunning("recent")
+	recentID := createRunning("recent", ConversationIdleActionStop, 3600)
 	if _, err := db.Exec(`UPDATE conversations SET updated_at = ? WHERE id = ?`, formatSQLiteUTC(cutoff.Add(time.Second)), recentID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.BeginIdleStop(ctx, recentID, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+	if _, err := db.BeginIdleAction(ctx, containerruntime.IdleRuntimeCandidate{
+		ConversationID: recentID, Action: ConversationIdleActionStop, TimeoutSeconds: 3600, LastActivityAt: old,
+	}, cutoff); !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
 		t.Fatalf("recent stop claim = %v", err)
 	}
 }

@@ -97,8 +97,28 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	}
 	workspacePersistenceRequestSchema := map[string]interface{}{
 		"type":        "boolean",
-		"default":     false,
-		"description": "仅在新建 container 对话时生效。false 使用临时 /workspace，删除容器即删除文件；true 使用系统生成的每对话 Docker named volume。创建后不可修改。",
+		"deprecated":  true,
+		"description": "workspaceMode 的兼容字段。显式 false 表示临时 tmpfs；显式 true 表示专属持久工作区。字段缺省时 container 对话默认 dedicated。",
+	}
+	workspaceModeRequestSchema := map[string]interface{}{
+		"type":        "string",
+		"enum":        []string{"ephemeral", "dedicated", "shared"},
+		"default":     "dedicated",
+		"description": "仅在新建 container 对话时生效。ephemeral 使用占用容器内存的 Docker tmpfs；dedicated 使用对话专属 named volume；shared 需要 workspaceId。",
+	}
+	workspaceIDRequestSchema := map[string]interface{}{
+		"type":        "string",
+		"description": "workspaceMode=shared 时必填的共享工作区 ID。",
+	}
+	idlePolicySchema := map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []string{"action", "timeoutSeconds"},
+		"properties": map[string]interface{}{
+			"action":         map[string]interface{}{"type": "string", "enum": []string{"delete", "stop", "none"}, "default": "delete"},
+			"timeoutSeconds": map[string]interface{}{"type": "integer", "minimum": 60, "maximum": 2592000, "default": 1800},
+		},
+		"description": "每对话容器空闲策略。none 不自动处理；delete 默认保留专属或共享工作区。",
 	}
 	conversationRuntimeControlsSchema := conversationRuntimeControlsOpenAPISchema()
 	boundaryPolicyRequestSchema := map[string]interface{}{
@@ -559,7 +579,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"default":     "host",
 							"description": "对话创建时选定的执行位置；存量对话空闲时可切换",
 						},
+						"workspaceMode":       workspaceModeRequestSchema,
 						"workspacePersistent": workspacePersistenceRequestSchema,
+						"workspaceId":         workspaceIDRequestSchema,
+						"idlePolicy":          idlePolicySchema,
 						"boundaryPolicyId":    boundaryPolicyRequestSchema,
 						"egressMode":          conversationEgressModeRequestSchema,
 						"egressProxyId":       conversationEgressProxyIDRequestSchema,
@@ -569,6 +592,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"runtimeControls":     conversationRuntimeControlsSchema,
 					},
 				},
+				"ConversationIdlePolicy": idlePolicySchema,
 				"SetConversationProjectRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -689,6 +713,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":        "boolean",
 							"description": "是否使用该对话专属 Docker named volume；false 表示容器删除时临时工作区文件随之删除",
 						},
+						"workspaceMode": map[string]interface{}{"type": "string", "enum": []string{"ephemeral", "dedicated", "shared"}},
+						"idlePolicy":    idlePolicySchema,
 					},
 				},
 				"ConversationBoundarySnapshot": map[string]interface{}{
@@ -807,7 +833,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"conversationId":      map[string]interface{}{"type": "string"},
 						"conversationTitle":   map[string]interface{}{"type": "string"},
 						"runtimeMode":         map[string]interface{}{"type": "string", "enum": []string{"host", "container"}},
+						"workspaceMode":       map[string]interface{}{"type": "string", "enum": []string{"ephemeral", "dedicated", "shared"}},
 						"workspacePersistent": map[string]interface{}{"type": "boolean"},
+						"idlePolicy":          idlePolicySchema,
+						"idleExpiresAt":       map[string]interface{}{"type": "string", "format": "date-time", "nullable": true},
 						"runtimeId":           map[string]interface{}{"type": "string"},
 						"status": map[string]interface{}{
 							"type": "string",
@@ -2834,6 +2863,19 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					},
 				},
 			},
+			"/api/conversations/{id}/container/idle-policy": map[string]interface{}{
+				"get": map[string]interface{}{
+					"tags": []string{"对话管理"}, "summary": "读取对话容器空闲策略", "operationId": "getConversationContainerIdlePolicy",
+					"parameters": []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"responses":  map[string]interface{}{"200": map[string]interface{}{"description": "有效空闲策略及预计到期时间"}, "403": map[string]interface{}{"description": "无权访问"}, "404": map[string]interface{}{"description": "对话不存在"}},
+				},
+				"put": map[string]interface{}{
+					"tags": []string{"对话管理"}, "summary": "更新对话容器空闲策略", "operationId": "updateConversationContainerIdlePolicy",
+					"parameters":  []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
+					"requestBody": map[string]interface{}{"required": true, "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": idlePolicySchema}}},
+					"responses":   map[string]interface{}{"200": map[string]interface{}{"description": "策略已立即生效"}, "400": map[string]interface{}{"description": "动作或时间范围无效"}, "403": map[string]interface{}{"description": "无权访问"}, "404": map[string]interface{}{"description": "对话不存在"}},
+				},
+			},
 			"/api/conversations/{id}/container/terminal/ws": map[string]interface{}{
 				"get": map[string]interface{}{
 					"tags":        []string{"对话管理", "终端"},
@@ -2976,7 +3018,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspaceMode":        workspaceModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"workspaceId":          workspaceIDRequestSchema,
+										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,
@@ -3035,7 +3080,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspaceMode":        workspaceModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"workspaceId":          workspaceIDRequestSchema,
+										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,
@@ -3089,7 +3137,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 											"description": "对话 ID（可选，不提供则新建）",
 										},
 										"runtimeMode":         runtimeModeRequestSchema,
+										"workspaceMode":       workspaceModeRequestSchema,
 										"workspacePersistent": workspacePersistenceRequestSchema,
+										"workspaceId":         workspaceIDRequestSchema,
+										"idlePolicy":          idlePolicySchema,
 										"boundaryPolicyId":    boundaryPolicyRequestSchema,
 										"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":     conversationEgressAuditModeRequestSchema,
@@ -3160,7 +3211,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"message":              map[string]interface{}{"type": "string"},
 										"conversationId":       map[string]interface{}{"type": "string"},
 										"runtimeMode":          runtimeModeRequestSchema,
+										"workspaceMode":        workspaceModeRequestSchema,
 										"workspacePersistent":  workspacePersistenceRequestSchema,
+										"workspaceId":          workspaceIDRequestSchema,
+										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,

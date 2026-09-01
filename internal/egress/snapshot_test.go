@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,13 +151,17 @@ func TestLoadNoBoundarySnapshotDefaultsExternalTrafficToAllow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	httpDecision, err := policy.Evaluate("https://example.com/write", http.MethodDelete, nil, time.Now().UTC())
+	httpDecision, err := policy.Evaluate("http://example.com:18080/write", http.MethodDelete, []netip.Addr{netip.MustParseAddr("93.184.216.34")}, time.Now().UTC())
 	if err != nil || !httpDecision.Allowed {
 		t.Fatalf("HTTP default decision = %#v, %v", httpDecision, err)
 	}
-	tcpDecision, err := policy.EvaluateNetwork("mysql.example", 3306, "tcp", nil, time.Now().UTC())
+	tcpDecision, err := policy.EvaluateNetwork("service.example", 18080, "tcp", []netip.Addr{netip.MustParseAddr("93.184.216.34")}, time.Now().UTC())
 	if err != nil || !tcpDecision.Allowed {
 		t.Fatalf("TCP default decision = %#v, %v", tcpDecision, err)
+	}
+	privateDecision, err := policy.EvaluateNetwork("private.example", 18080, "tcp", []netip.Addr{netip.MustParseAddr("192.168.1.10")}, time.Now().UTC())
+	if err != nil || privateDecision.Allowed || privateDecision.Reason != boundary.ReasonDNSRebinding {
+		t.Fatalf("private baseline decision = %#v, %v", privateDecision, err)
 	}
 }
 

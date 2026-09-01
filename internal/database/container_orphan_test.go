@@ -156,7 +156,8 @@ func TestContainerResourceClaimsIncludePersistentWorkspaceVolume(t *testing.T) {
 func TestContainerResourceClaimsIncludeConversationNetwork(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	conversation, err := db.CreateConversation("internal network claims", ConversationCreateMeta{
-		RuntimeMode: ConversationRuntimeModeContainer,
+		RuntimeMode:   ConversationRuntimeModeContainer,
+		WorkspaceMode: ConversationWorkspaceModeEphemeral,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +182,10 @@ func TestContainerResourceClaimsIncludeConversationNetwork(t *testing.T) {
 
 func TestContainerResourceClaimsIncludeGatewayAndBothNetworks(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
-	conversation, err := db.CreateConversation("gateway topology claims", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+	conversation, err := db.CreateConversation("gateway topology claims", ConversationCreateMeta{
+		RuntimeMode:   ConversationRuntimeModeContainer,
+		WorkspaceMode: ConversationWorkspaceModeEphemeral,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +214,8 @@ func TestContainerResourceClaimsProtectLegacyNetworkDuringRebuildMigration(t *te
 	db := newContainerRuntimeTestDB(t)
 	ctx := context.Background()
 	conversation, err := db.CreateConversation("legacy migration claims", ConversationCreateMeta{
-		RuntimeMode: ConversationRuntimeModeContainer,
+		RuntimeMode:   ConversationRuntimeModeContainer,
+		WorkspaceMode: ConversationWorkspaceModeEphemeral,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -27,29 +27,29 @@ type idleStopTestLifecycle struct {
 	calls  []string
 }
 
-func (l *idleStopTestLifecycle) StopIdle(_ context.Context, conversationID string, _ time.Time) (InitializationRecord, error) {
-	l.calls = append(l.calls, conversationID)
-	if err := l.errors[conversationID]; err != nil {
+func (l *idleStopTestLifecycle) ApplyIdle(_ context.Context, candidate IdleRuntimeCandidate, _ time.Time) (InitializationRecord, error) {
+	l.calls = append(l.calls, candidate.ConversationID)
+	if err := l.errors[candidate.ConversationID]; err != nil {
 		return InitializationRecord{}, err
 	}
-	return InitializationRecord{ConversationID: conversationID, RuntimeStatus: StatusStopped}, nil
+	return InitializationRecord{ConversationID: candidate.ConversationID, RuntimeStatus: StatusStopped}, nil
 }
 
 func TestIdleStopSchedulerStopsOnlyInactiveTaskFreeCandidates(t *testing.T) {
 	clock := time.Date(2026, 8, 20, 8, 0, 0, 0, time.UTC)
 	store := idleStopTestStore{candidates: []IdleRuntimeCandidate{
-		{ConversationID: "stopped"},
-		{ConversationID: "active"},
-		{ConversationID: "changed"},
-		{ConversationID: "failed"},
+		{ConversationID: "stopped", Action: "stop"},
+		{ConversationID: "deleted", Action: "delete"},
+		{ConversationID: "active", Action: "stop"},
+		{ConversationID: "changed", Action: "delete"},
+		{ConversationID: "failed", Action: "delete"},
 	}}
 	lifecycle := &idleStopTestLifecycle{errors: map[string]error{
 		"changed": ErrRuntimeStateConflict,
 		"failed":  ErrEngineUnavailable,
 	}}
 	scheduler, err := NewIdleStopScheduler(store, lifecycle, idleStopTestActivity{"active": true}, IdleStopSchedulerOptions{
-		IdleAfter: time.Hour,
-		Clock:     func() time.Time { return clock },
+		Clock: func() time.Time { return clock },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -58,10 +58,10 @@ func TestIdleStopSchedulerStopsOnlyInactiveTaskFreeCandidates(t *testing.T) {
 	if !errors.Is(err, ErrEngineUnavailable) {
 		t.Fatalf("reconcile error = %v", err)
 	}
-	if report.Candidates != 4 || report.ActiveTasks != 1 || report.Stopped != 1 || report.Skipped != 1 || report.Failed != 1 {
+	if report.Candidates != 5 || report.ActiveTasks != 1 || report.Stopped != 1 || report.Deleted != 1 || report.Skipped != 1 || report.Failed != 1 {
 		t.Fatalf("report = %#v", report)
 	}
-	wantCalls := []string{"stopped", "changed", "failed"}
+	wantCalls := []string{"stopped", "deleted", "changed", "failed"}
 	if len(lifecycle.calls) != len(wantCalls) {
 		t.Fatalf("lifecycle calls = %#v", lifecycle.calls)
 	}
@@ -73,7 +73,7 @@ func TestIdleStopSchedulerStopsOnlyInactiveTaskFreeCandidates(t *testing.T) {
 }
 
 func TestIdleStopSchedulerPeriodicStopsOnCancellation(t *testing.T) {
-	scheduler, err := NewIdleStopScheduler(idleStopTestStore{}, &idleStopTestLifecycle{}, idleStopTestActivity{}, IdleStopSchedulerOptions{IdleAfter: time.Hour})
+	scheduler, err := NewIdleStopScheduler(idleStopTestStore{}, &idleStopTestLifecycle{}, idleStopTestActivity{}, IdleStopSchedulerOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

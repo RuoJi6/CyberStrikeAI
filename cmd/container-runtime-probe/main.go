@@ -267,9 +267,9 @@ type probeIdleLifecycle struct {
 	runtimeID containerruntime.RuntimeID
 }
 
-func (l probeIdleLifecycle) StopIdle(ctx context.Context, conversationID string, _ time.Time) (containerruntime.InitializationRecord, error) {
+func (l probeIdleLifecycle) ApplyIdle(ctx context.Context, candidate containerruntime.IdleRuntimeCandidate, _ time.Time) (containerruntime.InitializationRecord, error) {
 	runtime, err := l.manager.Stop(ctx, l.runtimeID, containerruntime.StopOptions{})
-	return containerruntime.InitializationRecord{ConversationID: conversationID, RuntimeID: l.runtimeID, RuntimeStatus: runtime.Status}, err
+	return containerruntime.InitializationRecord{ConversationID: candidate.ConversationID, RuntimeID: l.runtimeID, RuntimeStatus: runtime.Status}, err
 }
 
 type probeIdleActivity struct{}
@@ -287,9 +287,15 @@ func exerciseRuntimeIdleStop(ctx context.Context, manager containerruntime.Runti
 		return result, fmt.Errorf("start idle acceptance runtime: %w", err)
 	}
 	scheduler, err := containerruntime.NewIdleStopScheduler(
-		probeIdleStore{candidate: containerruntime.IdleRuntimeCandidate{ConversationID: spec.ConversationID, LastActivityAt: time.Now().UTC().Add(-time.Hour)}},
+		probeIdleStore{candidate: containerruntime.IdleRuntimeCandidate{
+			ConversationID: spec.ConversationID,
+			LastActivityAt: time.Now().UTC().Add(-time.Hour),
+			Action:         "stop",
+			TimeoutSeconds: 60,
+			ExpiresAt:      time.Now().UTC().Add(-time.Minute),
+		}},
 		probeIdleLifecycle{manager: manager, runtimeID: spec.ID}, probeIdleActivity{},
-		containerruntime.IdleStopSchedulerOptions{IdleAfter: time.Minute},
+		containerruntime.IdleStopSchedulerOptions{},
 	)
 	if err != nil {
 		return result, err

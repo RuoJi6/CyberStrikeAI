@@ -42,6 +42,20 @@ type ConversationContainerInitializationProvider interface {
 	Get(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
 }
 
+// ConversationContainerInitializationStarter recreates a deleted runtime or
+// explicitly retries a failed initialization using a server-built trusted
+// specification. The handler never accepts image or Docker fields from the
+// client.
+type ConversationContainerInitializationStarter interface {
+	StartConversationAsync(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error)
+}
+
+type ConversationContainerInitializationStarterFunc func(context.Context, string) (containerruntime.InitializationRecord, error)
+
+func (f ConversationContainerInitializationStarterFunc) StartConversationAsync(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+	return f(ctx, conversationID)
+}
+
 type ConversationContainerRuntimeObserver interface {
 	Observe(ctx context.Context, spec containerruntime.RuntimeSpec) (containerruntime.RuntimeObservation, error)
 }
@@ -89,6 +103,7 @@ type ConversationHandler struct {
 	taskState                 ConversationTaskStateProvider
 	taskIdle                  ConversationTaskIdleRunner
 	containerInitializations  ConversationContainerInitializationProvider
+	containerStarter          ConversationContainerInitializationStarter
 	containerObserver         ConversationContainerRuntimeObserver
 	containerWorkspace        ConversationContainerWorkspaceInspector
 	containerInteractive      ConversationContainerInteractiveExecutor
@@ -124,6 +139,10 @@ func (h *ConversationHandler) SetTaskIdleRunner(runner ConversationTaskIdleRunne
 
 func (h *ConversationHandler) SetContainerInitializationProvider(provider ConversationContainerInitializationProvider) {
 	h.containerInitializations = provider
+}
+
+func (h *ConversationHandler) SetContainerInitializationStarter(starter ConversationContainerInitializationStarter) {
+	h.containerStarter = starter
 }
 
 func (h *ConversationHandler) SetContainerRuntimeObserver(observer ConversationContainerRuntimeObserver) {
@@ -183,8 +202,10 @@ type CreateConversationRequest struct {
 	Title               string                                `json:"title"`
 	ProjectID           string                                `json:"projectId,omitempty"`
 	RuntimeMode         string                                `json:"runtimeMode,omitempty"`
-	WorkspacePersistent bool                                  `json:"workspacePersistent,omitempty"`
+	WorkspaceMode       string                                `json:"workspaceMode,omitempty"`
+	WorkspacePersistent *bool                                 `json:"workspacePersistent,omitempty"`
 	WorkspaceID         string                                `json:"workspaceId,omitempty"`
+	IdlePolicy          *database.ConversationIdlePolicy      `json:"idlePolicy,omitempty"`
 	BoundaryPolicyID    string                                `json:"boundaryPolicyId,omitempty"`
 	EgressMode          string                                `json:"egressMode,omitempty"`
 	EgressProxyID       string                                `json:"egressProxyId,omitempty"`
@@ -224,12 +245,36 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		return
 	}
 	meta.RuntimeMode = runtimeMode
-	if req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
+	if req.WorkspacePersistent != nil && *req.WorkspacePersistent && runtimeMode != database.ConversationRuntimeModeContainer {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "workspacePersistent 只能用于 container 对话"})
 		return
 	}
-	meta.WorkspacePersistent = req.WorkspacePersistent
+	meta.WorkspaceMode = strings.ToLower(strings.TrimSpace(req.WorkspaceMode))
+	if meta.WorkspaceMode == "" && req.WorkspacePersistent != nil {
+		if *req.WorkspacePersistent {
+			meta.WorkspaceMode = database.ConversationWorkspaceModeDedicated
+		} else {
+			meta.WorkspaceMode = database.ConversationWorkspaceModeEphemeral
+		}
+	}
+	if meta.WorkspaceMode != "" && runtimeMode != database.ConversationRuntimeModeContainer {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "workspaceMode 只能用于 container 对话"})
+		return
+	}
+	meta.WorkspacePersistent = meta.WorkspaceMode == database.ConversationWorkspaceModeDedicated || meta.WorkspaceMode == database.ConversationWorkspaceModeShared
 	meta.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
+	if req.IdlePolicy != nil {
+		if runtimeMode != database.ConversationRuntimeModeContainer {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "idlePolicy 只能用于 container 对话"})
+			return
+		}
+		normalizedIdle, idleErr := database.NormalizeConversationIdlePolicy(*req.IdlePolicy)
+		if idleErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": idleErr.Error()})
+			return
+		}
+		meta.IdlePolicy = &normalizedIdle
+	}
 	if req.RuntimeControls != nil {
 		if runtimeMode != database.ConversationRuntimeModeContainer {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "runtimeControls 只能用于 container 对话"})
@@ -381,10 +426,19 @@ func (h *ConversationHandler) SetConversationRuntimeMode(c *gin.Context) {
 			Detail: map[string]interface{}{"from": conversation.RuntimeMode, "to": mode},
 		})
 	}
+	updatedConversation, err := h.db.GetConversationLite(id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "切换成功但读取最新工作区失败"})
+		return
+	}
+	binding, _ := h.db.GetConversationWorkspaceBinding(c.Request.Context(), id)
+	idlePolicy, _ := h.db.GetConversationIdlePolicy(c.Request.Context(), id)
 	c.JSON(http.StatusOK, gin.H{
 		"conversationId":      id,
 		"runtimeMode":         mode,
-		"workspacePersistent": conversation.WorkspacePersistent,
+		"workspacePersistent": updatedConversation.WorkspacePersistent,
+		"workspaceMode":       binding.Mode,
+		"idlePolicy":          idlePolicy,
 	})
 }
 
@@ -583,6 +637,9 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 			RuntimeMode: conversation.RuntimeMode, WorkspacePersistent: conversation.WorkspacePersistent,
 			Status: "not_requested", UpdatedAt: conversation.UpdatedAt,
 		}
+		if binding, bindingErr := h.db.GetConversationWorkspaceBinding(c.Request.Context(), conversation.ID); bindingErr == nil {
+			item.WorkspaceMode = binding.Mode
+		}
 		record, getErr := h.containerInitializations.Get(c.Request.Context(), conversation.ID)
 		if getErr == nil {
 			item.apply(record)
@@ -607,6 +664,8 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 				item.BoundaryPolicyName = policy.Name
 			}
 		}
+		item.IdlePolicy, _ = h.db.GetConversationIdlePolicy(c.Request.Context(), conversation.ID)
+		item.IdleExpiresAt = database.ConversationIdleExpiresAt(conversation.UpdatedAt, item.IdlePolicy)
 		items = append(items, item)
 	}
 	totalPages := 0
@@ -624,6 +683,7 @@ type containerRuntimeListItemView struct {
 	ConversationID      string                              `json:"conversationId"`
 	ConversationTitle   string                              `json:"conversationTitle"`
 	RuntimeMode         string                              `json:"runtimeMode"`
+	WorkspaceMode       string                              `json:"workspaceMode"`
 	WorkspacePersistent bool                                `json:"workspacePersistent"`
 	Status              string                              `json:"status"`
 	RuntimeStatus       containerruntime.Status             `json:"runtimeStatus,omitempty"`
@@ -645,6 +705,8 @@ type containerRuntimeListItemView struct {
 	BoundaryPolicyID    string                              `json:"boundaryPolicyId"`
 	BoundaryPolicyName  string                              `json:"boundaryPolicyName"`
 	BoundarySnapshotID  string                              `json:"boundarySnapshotId,omitempty"`
+	IdlePolicy          database.ConversationIdlePolicy     `json:"idlePolicy"`
+	IdleExpiresAt       *time.Time                          `json:"idleExpiresAt,omitempty"`
 }
 
 func (item *containerRuntimeListItemView) apply(record containerruntime.InitializationRecord) {
@@ -742,12 +804,16 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 	}
 	record, err := h.containerInitializations.Get(c.Request.Context(), id)
 	if errors.Is(err, containerruntime.ErrNotFound) {
+		idlePolicy, _ := h.db.GetConversationIdlePolicy(c.Request.Context(), id)
 		c.JSON(http.StatusOK, gin.H{
 			"conversationId":      id,
 			"conversationTitle":   conversation.Title,
 			"runtimeMode":         conversation.RuntimeMode,
+			"workspaceMode":       conversation.WorkspaceMode,
 			"workspacePersistent": conversation.WorkspacePersistent,
 			"status":              "not_requested",
+			"idlePolicy":          idlePolicy,
+			"idleExpiresAt":       database.ConversationIdleExpiresAt(conversation.UpdatedAt, idlePolicy),
 		})
 		return
 	}
@@ -760,9 +826,12 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 		InitializationRecord: record,
 		ConversationTitle:    conversation.Title,
 		RuntimeMode:          conversation.RuntimeMode,
+		WorkspaceMode:        conversation.WorkspaceMode,
 		WorkspacePersistent:  conversation.WorkspacePersistent,
 		Desired:              desiredConversationContainerView(record.Spec),
 	}
+	view.IdlePolicy, _ = h.db.GetConversationIdlePolicy(c.Request.Context(), id)
+	view.IdleExpiresAt = database.ConversationIdleExpiresAt(conversation.UpdatedAt, view.IdlePolicy)
 	observe := c.Query("observe") == "1" || strings.EqualFold(c.Query("observe"), "true")
 	if observe && record.Status == containerruntime.InitializationCreated {
 		if h.containerObserver == nil {
@@ -783,10 +852,13 @@ type conversationContainerInitializationView struct {
 	containerruntime.InitializationRecord
 	ConversationTitle   string                               `json:"conversationTitle"`
 	RuntimeMode         string                               `json:"runtimeMode"`
+	WorkspaceMode       string                               `json:"workspaceMode"`
 	WorkspacePersistent bool                                 `json:"workspacePersistent"`
 	Desired             *conversationContainerDesiredView    `json:"desired,omitempty"`
 	Observation         *containerruntime.RuntimeObservation `json:"observation,omitempty"`
 	ObservationError    string                               `json:"observationError,omitempty"`
+	IdlePolicy          database.ConversationIdlePolicy      `json:"idlePolicy"`
+	IdleExpiresAt       *time.Time                           `json:"idleExpiresAt,omitempty"`
 }
 
 type conversationContainerDesiredView struct {

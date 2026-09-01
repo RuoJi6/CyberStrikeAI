@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260828-3">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260901-3">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1228,10 +1228,10 @@
                                                 <label class="container-conversation-field-label" for="conversation-workspace-mode" data-i18n="chat.workspaceModeLabel">工作目录</label>
                                                 <select id="conversation-workspace-mode" data-unified-select="single" onchange="syncConversationWorkspaceMode(this.value)">
                                                     <option value="ephemeral" data-i18n="chat.workspaceModeEphemeral">临时工作区</option>
-                                                    <option value="dedicated" data-i18n="chat.workspaceModeDedicated">专属持久工作区</option>
+                                                    <option value="dedicated" selected data-i18n="chat.workspaceModeDedicated">专属持久工作区</option>
                                                     <option value="shared" data-i18n="chat.workspaceModeShared">共享工作区</option>
                                                 </select>
-                                                <span id="workspace-persistence-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.workspacePersistenceHintEphemeral">临时工作区：删除容器会永久删除 /workspace 中的全部文件</span>
+                                                <span id="workspace-persistence-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.workspacePersistenceHintPersistent">专属持久工作区：使用该对话专属 Docker named volume，销毁容器后仍保留文件</span>
                                                 <div id="conversation-shared-workspace-field" class="container-conversation-field conversation-shared-workspace-field" hidden>
                                                     <label class="container-conversation-field-label" for="conversation-shared-workspace-select" data-i18n="chat.sharedWorkspaceSelectLabel">选择共享工作区</label>
                                                     <select id="conversation-shared-workspace-select" data-unified-select="single" onchange="syncConversationSharedWorkspace(this.value)"></select>
@@ -1272,6 +1272,19 @@
                                                     <label id="conversation-egress-target-label" class="container-conversation-field-label" for="conversation-egress-target-select" data-i18n="chat.egressProxyLabel">选择代理</label>
                                                     <select id="conversation-egress-target-select" data-unified-select="single" onchange="syncConversationEgressTarget()"></select>
                                                     <span id="conversation-egress-target-hint" class="container-conversation-field-hint" data-i18n="chat.egressTargetHint">仅显示当前账号可访问且已脱敏的资源。</span>
+                                                </div>
+                                                <div class="container-conversation-field is-runtime-editable">
+                                                    <label class="container-conversation-field-label" for="conversation-idle-action" data-i18n="chat.containerIdleActionLabel">空闲容器处理</label>
+                                                    <select id="conversation-idle-action" data-unified-select="single" onchange="syncConversationIdlePolicy()">
+                                                        <option value="delete" selected data-i18n="chat.containerIdleDelete">自动销毁</option>
+                                                        <option value="stop" data-i18n="chat.containerIdleStop">自动停止</option>
+                                                        <option value="none" data-i18n="chat.containerIdleNone">不自动处理</option>
+                                                    </select>
+                                                    <label id="conversation-idle-timeout-field" class="container-idle-timeout-field" for="conversation-idle-timeout-minutes">
+                                                        <span data-i18n="chat.containerIdleTimeoutLabel">空闲时间（分钟）</span>
+                                                        <input id="conversation-idle-timeout-minutes" type="number" min="1" max="43200" step="1" value="30" inputmode="numeric" onchange="syncConversationIdlePolicy()">
+                                                    </label>
+                                                    <span id="conversation-idle-policy-hint" class="container-conversation-field-hint" data-i18n="chat.containerIdleDeleteHint">默认空闲 30 分钟后销毁 Agent、网关和网络；专属/共享工作区仍保留。</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="workspace-persistence-toggle" for="conversation-scan-rate-toggle">
@@ -1327,7 +1340,7 @@
                                     <input type="hidden" id="runtime-mode-select" value="host" autocomplete="off">
                                 </div>
                                 <button type="button" id="chat-container-workspace-btn" class="role-selector-btn chat-container-workspace-btn" hidden onclick="toggleChatContainerWorkspacePanel()" aria-expanded="false" aria-controls="chat-container-workspace-panel" data-i18n="chat.containerWorkspaceButton" data-i18n-attr="title,aria-label" data-i18n-skip-text="true" title="工作目录与容器终端" aria-label="工作目录与容器终端">
-                                    <span id="chat-container-runtime-state" class="chat-container-runtime-state is-starting" role="status" aria-live="polite"><span class="chat-container-runtime-state-dot" aria-hidden="true"></span><span id="chat-container-runtime-state-label">启动中</span></span>
+                                    <span id="chat-container-runtime-state" class="chat-container-runtime-state is-checking" role="status" aria-live="polite"><span class="chat-container-runtime-state-dot" aria-hidden="true"></span><span id="chat-container-runtime-state-label">正在同步状态</span></span>
                                 </button>
                                 <div id="role-selector-wrapper" class="role-selector-wrapper">
                                     <button type="button" id="role-selector-btn" class="role-selector-btn" onclick="toggleRoleSelectionPanel()" data-i18n="chat.selectRole" data-i18n-attr="title" title="选择角色">
@@ -7488,7 +7501,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/dashboard.js"></script>
     <script src="/static/js/chat-scroll.js?v=20260815-1"></script>
     <script src="/static/js/monitor.js?v=20260824-2"></script>
-    <script src="/static/js/chat.js?v=20260828-3"></script>
+    <script src="/static/js/chat.js?v=20260901-2"></script>
     <script src="/static/js/chat-plan-progress.js?v=20260815-1"></script>
     <script src="/static/js/hitl.js?v=20260819-1"></script>
     <script src="/static/js/settings.js?v=20260717-1"></script>
@@ -7498,12 +7511,12 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/vendor/xterm.js"></script>
     <script src="/static/vendor/xterm-addon-fit.js"></script>
     <script src="/static/js/terminal.js?v=20260828-3"></script>
-    <script src="/static/js/container-terminal.js?v=20260828-3"></script>
+    <script src="/static/js/container-terminal.js?v=20260901-1"></script>
     <script src="/static/js/knowledge.js"></script>
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260828-3"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260901-2"></script>
     <script src="/static/js/vulnerability.js?v=18"></script>
     <script src="/static/js/traffic-evidence.js?v=5"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>
@@ -7520,7 +7533,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/egress-audit.js?v=20260826-3"></script>
     <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
-    <script src="/static/js/container-management.js?v=20260826-1"></script>
+    <script src="/static/js/container-management.js?v=20260901-2"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

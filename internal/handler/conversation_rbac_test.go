@@ -146,6 +146,14 @@ func TestSetConversationRuntimeModeOnlyWhenTaskIsIdle(t *testing.T) {
 	if stored.RuntimeMode != database.ConversationRuntimeModeContainer {
 		t.Fatalf("stored runtime mode = %q", stored.RuntimeMode)
 	}
+	binding, err := db.GetConversationWorkspaceBinding(context.Background(), conversation.ID)
+	if err != nil || binding.Mode != database.ConversationWorkspaceModeDedicated || binding.Workspace == nil {
+		t.Fatalf("first container switch workspace = %#v, %v", binding, err)
+	}
+	idlePolicy, err := db.GetConversationIdlePolicy(context.Background(), conversation.ID)
+	if err != nil || idlePolicy.Action != database.ConversationIdleActionDelete || idlePolicy.TimeoutSeconds != 1800 {
+		t.Fatalf("first container switch idle policy = %#v, %v", idlePolicy, err)
+	}
 
 	handler.SetTaskIdleRunner(conversationRuntimeModeIdleRunner{busy: true})
 	w = switchRequest(database.ConversationRuntimeModeHost)

@@ -545,7 +545,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerManager = containerManager
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
-		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+		scheduleConversationContainer := func(ctx context.Context, conversationID string, retryFailed bool) (containerruntime.InitializationRecord, error) {
 			binding, egressErr := db.EnsureConversationEgressBinding(ctx, conversationID)
 			if egressErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation upstream egress: %w", egressErr)
@@ -586,7 +586,16 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if specErr = containerruntime.ValidateSpec(spec); specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
+			if retryFailed {
+				return containerInitializer.RetryAsync(ctx, spec)
+			}
 			return containerInitializer.EnsureAsync(ctx, spec)
+		}
+		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+			return scheduleConversationContainer(ctx, conversationID, false)
+		}))
+		conversationHandler.SetContainerInitializationStarter(handler.ConversationContainerInitializationStarterFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+			return scheduleConversationContainer(ctx, conversationID, true)
 		}))
 		conversationHandler.SetContainerInitializationProvider(containerInitializer)
 		conversationHandler.SetContainerRuntimeObserver(containerManager)
@@ -670,12 +679,12 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 				})
 			}()
 		}
-		if cfg.Container.IdleStopSeconds > 0 {
-			idleStop, idleErr := containerruntime.NewIdleStopScheduler(db, containerLifecycle, agentHandler, containerruntime.IdleStopSchedulerOptions{
-				IdleAfter: time.Duration(cfg.Container.IdleStopSeconds) * time.Second,
-			})
+		if migrateErr := db.MigrateLegacyConversationIdlePolicies(context.Background(), cfg.Container.IdleStopSeconds); migrateErr != nil {
+			log.Logger.Error("迁移存量对话容器空闲策略失败", zap.Error(migrateErr))
+		} else {
+			idleStop, idleErr := containerruntime.NewIdleStopScheduler(db, containerLifecycle, agentHandler, containerruntime.IdleStopSchedulerOptions{})
 			if idleErr != nil {
-				log.Logger.Error("对话容器空闲自动停止调度器启动失败", zap.Error(idleErr))
+				log.Logger.Error("对话容器空闲生命周期调度器启动失败", zap.Error(idleErr))
 			} else {
 				idleCtx, idleCancel := context.WithCancel(context.Background())
 				app.containerIdleStop = idleStop
@@ -1388,6 +1397,8 @@ func setupRoutes(
 		protected.POST("/conversations/:id/egress-health/recover", conversationHandler.RecoverConversationEgressHealth)
 		protected.POST("/conversations/:id/container/start", conversationHandler.StartConversationContainer)
 		protected.POST("/conversations/:id/container/stop", conversationHandler.StopConversationContainer)
+		protected.GET("/conversations/:id/container/idle-policy", conversationHandler.GetConversationContainerIdlePolicy)
+		protected.PUT("/conversations/:id/container/idle-policy", conversationHandler.UpdateConversationContainerIdlePolicy)
 		protected.POST("/conversations/:id/container/rebuild", conversationHandler.RebuildConversationContainer)
 		protected.GET("/conversations/:id/container/network-settings", conversationHandler.GetConversationContainerNetworkSettings)
 		protected.POST("/conversations/:id/container/reconcile", conversationHandler.ReconcileConversationContainer)
