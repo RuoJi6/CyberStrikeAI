@@ -147,13 +147,14 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-filter-grid\s*\{/);
     assert.match(styles, /\.egress-audit-summary\s*\{/);
     assert.match(styles, /\.egress-audit-table-wrap\s*\{[\s\S]*?overflow-x: auto/);
+    assert.match(styles, /\.egress-audit-table td\.is-trace strong,[\s\S]*?overflow-wrap: anywhere; white-space: normal/);
     assert.match(styles, /@media \(max-width: 760px\)[\s\S]*?\.egress-audit-table tr\s*\{[\s\S]*?display: grid/);
     assert.match(styles, /\.egress-audit-table td::before[\s\S]*?content: attr\(data-label\)/);
     assert.match(styles, /\.egress-audit-packet-modal\s*\{/);
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-    assert.match(template, /style\.css\?v=20260903-2/);
+    assert.match(template, /style\.css\?v=20260904-1/);
     assert.match(template, /router\.js\?v=20260827-2/);
     assert.match(template, /container-management\.js\?v=20260903-1/);
 });

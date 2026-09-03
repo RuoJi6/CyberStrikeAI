@@ -5508,6 +5508,7 @@ html[data-theme="dark"] .traffic-transform-script-item.is-active { background: #
 .egress-audit-table td.is-packet strong,
 .egress-audit-table td.is-packet span,
 .egress-audit-table td.is-decision span,
+.egress-audit-table td.is-trace strong,
 .egress-audit-table td.is-trace span,
 .egress-audit-table td.is-result strong { overflow-wrap: anywhere; white-space: normal; }
 .egress-audit-table td.is-decision.is-allowed strong,
