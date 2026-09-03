@@ -196,14 +196,15 @@ type AgentHandler struct {
 	agentsMarkdownDir string // 多代理：Markdown 子 Agent 目录（绝对路径，空则不从磁盘合并）
 	batchCronParser   cron.Parser
 	// hitlWhitelistSaver 侧栏「应用」HITL 时将会话增量白名单合并写入 config.yaml（可选）
-	hitlWhitelistSaver       HitlToolWhitelistSaver
-	hitlStrategySaver        HitlAuditStrategySaver
-	hitlDefaultReviewerSaver HitlDefaultReviewerSaver
-	auditLLM                 *openai.Client
-	audit                    *audit.Service
-	containerInitializer     ConversationContainerInitializationScheduler
-	containerExecutionReady  bool
-	containerUploadImporter  ConversationWorkspaceUploadImporter
+	hitlWhitelistSaver         HitlToolWhitelistSaver
+	hitlStrategySaver          HitlAuditStrategySaver
+	hitlDefaultReviewerSaver   HitlDefaultReviewerSaver
+	auditLLM                   *openai.Client
+	audit                      *audit.Service
+	containerInitializer       ConversationContainerInitializationScheduler
+	containerExecutionPreparer ConversationContainerExecutionPreparer
+	containerExecutionReady    bool
+	containerUploadImporter    ConversationWorkspaceUploadImporter
 }
 
 // SetAudit wires platform audit logging.
@@ -220,6 +221,10 @@ func (h *AgentHandler) SetConversationContainerInitializationScheduler(s Convers
 
 func (h *AgentHandler) SetConversationContainerExecutionReady(ready bool) {
 	h.containerExecutionReady = ready
+}
+
+func (h *AgentHandler) SetConversationContainerExecutionPreparer(preparer ConversationContainerExecutionPreparer) {
+	h.containerExecutionPreparer = preparer
 }
 
 func (h *AgentHandler) SetConversationWorkspaceUploadImporter(importer ConversationWorkspaceUploadImporter) {

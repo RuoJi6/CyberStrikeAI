@@ -6,6 +6,8 @@ pycparser==2.22
 bloodhound==1.8.0
 colorama==0.4.6
 cprint==1.2.2
+h2==4.3.0
+httpx==0.28.1
 kube-hunter==0.6.8
 parliament==1.6.4
 policyuniverse==1.5.1.20231109
@@ -13,6 +15,7 @@ pycryptodomex==3.23.0
 pwntools==4.14.1
 ropgadget==7.6
 scoutsuite==5.14.0
+socksio==1.0.0
 termcolor==2.3.0
 requests==2.32.4
 urllib3==2.5.0

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,7 +115,19 @@ func TestDockerManagerValidateReadinessRequiresOwnedInternalNetwork(t *testing.T
 	}
 	name := ConversationNetworkName(spec.ID)
 	network := api.networks[name]
-	network.Internal = false
+	network.IPAM.Config[0].Gateway = netip.MustParseAddr("172.30.0.1")
+	api.networks[name] = network
+	endpoint := api.containerResult.Container.NetworkSettings.Networks[name]
+	endpoint.Gateway = network.IPAM.Config[0].Gateway
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); err != nil {
+		t.Fatalf("matching inhibited gateway metadata: %v", err)
+	}
+	endpoint.Gateway = netip.MustParseAddr("172.30.0.254")
+	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); !errors.Is(err, ErrRuntimeNotReady) || !strings.Contains(err.Error(), "gateway metadata") {
+		t.Fatalf("drifted gateway metadata readiness error = %v", err)
+	}
+	endpoint.Gateway = network.IPAM.Config[0].Gateway
+	network.Options[conversationNetworkGatewayModeIPv4] = "nat"
 	api.networks[name] = network
 	if _, err := manager.ValidateReadiness(context.Background(), runtime, spec); !errors.Is(err, ErrRuntimeNotReady) || !strings.Contains(err.Error(), "conversation network isolation") {
 		t.Fatalf("drifted internal network readiness error = %v", err)

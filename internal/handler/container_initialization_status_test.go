@@ -161,6 +161,61 @@ func TestGetContainerInitializationObservationIsOptInAndSafe(t *testing.T) {
 	}
 }
 
+func TestGetContainerInitializationSkipsObservationDuringLifecycleTransition(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("starting container", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer, WorkspacePersistent: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetResourceOwner("conversation", conversation.ID, owner.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerInitializationSpec(conversation.ID)
+	record := containerruntime.InitializationRecord{
+		ConversationID:     conversation.ID,
+		RuntimeID:          spec.ID,
+		Status:             containerruntime.InitializationCreated,
+		RuntimeStatus:      containerruntime.StatusStopped,
+		ReadinessStatus:    containerruntime.ReadinessReady,
+		LifecycleOperation: containerruntime.LifecycleOperationStart,
+		LifecycleState:     containerruntime.LifecycleInProgress,
+		Spec:               spec,
+	}
+	observer := &fakeContainerRuntimeObserver{observation: containerruntime.RuntimeObservation{
+		Agent: containerruntime.RuntimeComponentObservation{Status: containerruntime.StatusRunning},
+	}}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerInitializationProvider(fakeContainerInitializationProvider{record: record})
+	handler.SetContainerRuntimeObserver(observer)
+
+	response := performConversationRequest(owner, http.MethodGet, "/api/conversations/"+conversation.ID+"/container-initialization?observe=1", nil, func(c *gin.Context) {
+		c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+		handler.GetContainerInitialization(c)
+	})
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if observer.calls != 0 {
+		t.Fatalf("observer calls = %d, want 0 during lifecycle transition", observer.calls)
+	}
+	if payload["observation"] != nil || payload["observationError"] != nil {
+		t.Fatalf("transition payload must not expose a terminal observation: %#v", payload)
+	}
+	if payload["lifecycleOperation"] != string(containerruntime.LifecycleOperationStart) ||
+		payload["lifecycleState"] != string(containerruntime.LifecycleInProgress) {
+		t.Fatalf("transition payload = %#v", payload)
+	}
+}
+
 func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

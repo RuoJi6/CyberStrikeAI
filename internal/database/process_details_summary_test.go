@@ -217,6 +217,45 @@ func TestProcessDetailsSummaryIncludesPersistedTurnTiming(t *testing.T) {
 	}
 }
 
+func TestProcessDetailsSummarySeparatesContainerInitializationFromExecution(t *testing.T) {
+	db, conversationID, messageID := setupProcessDetailsSummaryTest(t)
+	if _, err := db.Exec(
+		"UPDATE messages SET content = ?, created_at = ?, updated_at = ? WHERE id = ?",
+		"done", "2026-08-10T08:00:00Z", "2026-08-10T08:00:25Z", messageID,
+	); err != nil {
+		t.Fatalf("update message timing: %v", err)
+	}
+	for _, detail := range []struct {
+		id, state, createdAt string
+	}{
+		{"container-starting", "initializing", "2026-08-10T08:00:00Z"},
+		{"container-ready", "ready", "2026-08-10T08:00:05Z"},
+	} {
+		if _, err := db.Exec(`
+INSERT INTO process_details (id, message_id, conversation_id, event_type, message, data, created_at)
+VALUES (?, ?, ?, 'container_initialization', '', ?, ?)`, detail.id, messageID, conversationID, `{"state":"`+detail.state+`"}`, detail.createdAt); err != nil {
+			t.Fatalf("insert %s: %v", detail.state, err)
+		}
+	}
+
+	summary, err := db.GetProcessDetailsSummary(messageID)
+	if err != nil {
+		t.Fatalf("GetProcessDetailsSummary: %v", err)
+	}
+	if summary.ContainerInitializationMs == nil || *summary.ContainerInitializationMs != 5_000 {
+		t.Fatalf("containerInitializationMs = %#v, want 5000", summary.ContainerInitializationMs)
+	}
+	if summary.ExecutionStartedAt == nil || !summary.ExecutionStartedAt.Equal(time.Date(2026, 8, 10, 8, 0, 5, 0, time.UTC)) {
+		t.Fatalf("executionStartedAt = %#v", summary.ExecutionStartedAt)
+	}
+	if summary.ExecutionDurationMs == nil || *summary.ExecutionDurationMs != 20_000 {
+		t.Fatalf("executionDurationMs = %#v, want 20000", summary.ExecutionDurationMs)
+	}
+	if summary.DurationMs != 25_000 {
+		t.Fatalf("durationMs = %d, want compatible total 25000", summary.DurationMs)
+	}
+}
+
 func TestProcessDetailsSummaryIncludesRunningElapsedTime(t *testing.T) {
 	db, _, messageID := setupProcessDetailsSummaryTest(t)
 	startedAt := time.Now().Add(-65 * time.Second)

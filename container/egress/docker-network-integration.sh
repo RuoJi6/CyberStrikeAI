@@ -62,7 +62,7 @@ agent_workspace_env=(
   --env VIRTUAL_ENV=/workspace/.venv
   --env PATH=/workspace/.venv/bin:/workspace/.local/bin:/opt/tools-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 )
-agent_keepalive_script="umask 077; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; trap 'exit 0' TERM INT; while :; do sleep 3600; done"
+agent_keepalive_script="umask 077; ready_file=/tmp/.cyberstrike-runtime-ready; rm -f \$ready_file; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; runtime_start=\$(awk '{print \$22}' /proc/1/stat) || exit 73; printf '%s\\n' \"\$runtime_start\" >\$ready_file || exit 74; trap 'rm -f \$ready_file; exit 0' TERM INT; while :; do sleep 3600; done"
 
 configure_agent_route() {
   local container=$1 gateway=$2
@@ -87,7 +87,12 @@ assert_agent_security() {
   [[ "$(docker inspect --format '{{json .HostConfig.CapAdd}}' "$container")" == "$expected" ]] || fail "Agent capability add set drifted"
   [[ "$(docker exec "$container" id -u)" != 0 ]] || fail "Agent keepalive user unexpectedly has root identity"
   [[ "$(docker exec --user 0:0 "$container" id -u)" == 0 ]] || fail "trusted Agent exec cannot enter root"
-  docker exec "$container" test -x /workspace/.venv/bin/python3 || fail "workspace virtual environment was not initialized"
+  attempt=0
+  until docker exec "$container" sh -c 'test "$(cat /tmp/.cyberstrike-runtime-ready 2>/dev/null)" = "$(awk '\''{print $22}'\'' /proc/1/stat)" && test -x /workspace/.venv/bin/python3'; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -lt 300 ] || fail "workspace virtual environment was not initialized"
+    sleep 0.1
+  done
   expect_failure docker exec "$container" sudo -n true
 }
 
@@ -139,7 +144,11 @@ printf '%s  %s\n' "${snapshot_sha#sha256:}" "$snapshot_path" | sha256sum --check
 
 docker image inspect "$CYBERSTRIKE_EGRESS_IMAGE" >/dev/null
 docker image inspect "$CYBERSTRIKE_AGENT_IMAGE" >/dev/null
-docker network create --driver bridge --internal --opt com.docker.network.bridge.inhibit_ipv4=true "$internal_network" >/dev/null
+docker network create --driver bridge \
+  --opt com.docker.network.bridge.inhibit_ipv4=true \
+  --opt com.docker.network.bridge.enable_ip_masquerade=false \
+  --opt com.docker.network.bridge.gateway_mode_ipv4=nat-unprotected \
+  "$internal_network" >/dev/null
 docker network create --driver bridge "$egress_network" >/dev/null
 
 docker run -d --name "$gateway_container" --network "$internal_network" \
@@ -149,7 +158,7 @@ docker run -d --name "$gateway_container" --network "$internal_network" \
   --snapshot-path /etc/cyberstrike/boundary.json \
   --snapshot-id "$snapshot_id" \
   --snapshot-sha256 "$snapshot_sha" >/dev/null
-docker network connect "$egress_network" "$gateway_container"
+docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
@@ -181,8 +190,9 @@ assert_gateway_security "$gateway_container"
 assert_agent_security "$agent_container"
 
 [[ "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.inhibit_ipv4"}}' "$internal_network")" == true ]] || fail "internal bridge inhibit_ipv4 drifted"
-internal_gateway=$(docker network inspect --format '{{with index .IPAM.Config 0}}{{.Gateway}}{{end}}' "$internal_network")
-gateway_is_absent "$internal_gateway" || fail "internal network exposes gateway $internal_gateway"
+[[ "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.enable_ip_masquerade"}}' "$internal_network")" == false ]] || fail "internal bridge masquerade drifted"
+[[ "$(docker network inspect --format '{{index .Options "com.docker.network.bridge.gateway_mode_ipv4"}}' "$internal_network")" == nat-unprotected ]] || fail "internal bridge gateway mode cannot forward raw protocols to egress"
+[[ "$(docker network inspect --format '{{.Internal}}' "$internal_network")" == false ]] || fail "internal bridge unexpectedly uses Docker's non-routable internal mode"
 network_id=$(docker network inspect --format '{{.Id}}' "$internal_network")
 bridge_name="br-${network_id:0:12}"
 if ip -4 -o addr show dev "$bridge_name" 2>/dev/null | grep -q ' inet '; then
@@ -190,10 +200,13 @@ if ip -4 -o addr show dev "$bridge_name" 2>/dev/null | grep -q ' inet '; then
 fi
 [[ "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$agent_container")" == 1 ]] || fail "agent is not attached to exactly one network"
 [[ "$(docker inspect --format '{{len .NetworkSettings.Networks}}' "$gateway_container")" == 2 ]] || fail "gateway is not attached to exactly two networks"
+[[ "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.GwPriority}}{{end}}" "$gateway_container")" == 0 ]] || fail "gateway internal route priority drifted"
+[[ "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$egress_network\"}}{{.GwPriority}}{{end}}" "$gateway_container")" == 1 ]] || fail "gateway egress route priority drifted"
 [[ "$(docker network inspect --format '{{len .Containers}}' "$internal_network")" == 2 ]] || fail "internal network attachment count drifted"
 [[ "$(docker network inspect --format '{{len .Containers}}' "$egress_network")" == 1 ]] || fail "egress network attachment count drifted"
-gateway_is_absent "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.Gateway}}{{end}}" "$agent_container")" || fail "agent endpoint exposes a gateway"
-gateway_is_absent "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.Gateway}}{{end}}" "$gateway_container")" || fail "gateway internal endpoint exposes a gateway"
+internal_ipam_gateway=$(docker network inspect --format '{{with index .IPAM.Config 0}}{{.Gateway}}{{end}}' "$internal_network")
+[[ "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.Gateway}}{{end}}" "$agent_container")" == "$internal_ipam_gateway" ]] || fail "agent endpoint gateway metadata does not match IPAM"
+[[ "$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.Gateway}}{{end}}" "$gateway_container")" == "$internal_ipam_gateway" ]] || fail "gateway endpoint gateway metadata does not match IPAM"
 
 for key in HTTP_PROXY HTTPS_PROXY http_proxy https_proxy; do
   [[ "$(docker exec "$agent_container" printenv "$key")" == "$proxy" ]] || fail "$key does not point to the gateway"
@@ -290,7 +303,7 @@ docker run -d --name "$gateway_container" --network "$internal_network" \
   --snapshot-path /etc/cyberstrike/boundary.json \
   --snapshot-id "$open_snapshot_id" \
   --snapshot-sha256 "$open_snapshot_sha" >/dev/null
-docker network connect "$egress_network" "$gateway_container"
+docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
   sleep 0.1
@@ -349,7 +362,7 @@ docker run -d --name "$gateway_container" --network "$internal_network" \
   --upstream-route-path /etc/cyberstrike/upstream.json \
   --upstream-route-id "$route_id" \
   --upstream-route-sha256 "$route_sha" >/dev/null
-docker network connect "$egress_network" "$gateway_container"
+docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
@@ -439,7 +452,7 @@ docker run -d --name "$gateway_container" --network "$internal_network" \
   --auth-profiles-path /etc/cyberstrike/auth-profiles.json \
   --auth-profiles-id "$auth_profiles_id" \
   --auth-profiles-sha256 "$auth_profiles_sha" >/dev/null
-docker network connect "$egress_network" "$gateway_container"
+docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break

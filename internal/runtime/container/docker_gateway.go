@@ -806,13 +806,13 @@ func healthySnapshotReport(health *mobycontainer.Health, reference egress.Snapsh
 }
 
 func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource, policyDNSAddress string) *mobynetwork.NetworkingConfig {
-	internalEndpoint := &mobynetwork.EndpointSettings{NetworkID: conversationNetwork.ProviderID}
+	internalEndpoint := &mobynetwork.EndpointSettings{NetworkID: conversationNetwork.ProviderID, GwPriority: 0}
 	if strings.TrimSpace(policyDNSAddress) != "" {
 		internalEndpoint.IPAMConfig = &mobynetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr(policyDNSAddress)}
 	}
 	return &mobynetwork.NetworkingConfig{EndpointsConfig: map[string]*mobynetwork.EndpointSettings{
 		ConversationNetworkName(spec.ID): internalEndpoint,
-		EgressNetworkName(spec.ID):       {NetworkID: egressNetwork.ProviderID},
+		EgressNetworkName(spec.ID):       {NetworkID: egressNetwork.ProviderID, GwPriority: 1},
 	}}
 }
 
@@ -825,8 +825,8 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 	if internalEndpoint == nil || egressEndpoint == nil || strings.TrimSpace(internalEndpoint.NetworkID) == "" || strings.TrimSpace(egressEndpoint.NetworkID) == "" {
 		return fmt.Errorf("%w: egress gateway network endpoints are incomplete", ErrRuntimeStateConflict)
 	}
-	if internalEndpoint.Gateway.IsValid() || internalEndpoint.IPv6Gateway.IsValid() {
-		return fmt.Errorf("%w: egress gateway internal network exposes a host gateway", ErrRuntimeStateConflict)
+	if internalEndpoint.GwPriority >= egressEndpoint.GwPriority {
+		return fmt.Errorf("%w: egress gateway default route does not prefer the egress network", ErrRuntimeStateConflict)
 	}
 	internalResult, err := m.networkAPI.NetworkInspect(ctx, internalEndpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {
@@ -834,6 +834,9 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 	}
 	if _, err := m.verifyConversationNetwork(spec, gateway.Config.Labels[LabelSpecDigest], internalResult.Network, internalEndpoint.NetworkID, false); err != nil {
 		return err
+	}
+	if !validConversationEndpointGateway(internalEndpoint, internalResult.Network) {
+		return fmt.Errorf("%w: egress gateway internal network gateway metadata mismatch", ErrRuntimeStateConflict)
 	}
 	egressResult, err := m.networkAPI.NetworkInspect(ctx, egressEndpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {

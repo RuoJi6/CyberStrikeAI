@@ -66,7 +66,7 @@ function createHarness(nowMs) {
         clearInterval() {},
     };
     vm.runInNewContext(
-        `${timingSource(chat)}; this.setAssistantTurnTiming = setAssistantTurnTiming; this.setAssistantTurnTokenUsage = setAssistantTurnTokenUsage; this.extractAssistantTurnTokenUsage = extractAssistantTurnTokenUsage;`,
+        `${timingSource(chat)}; this.setAssistantTurnTiming = setAssistantTurnTiming; this.setAssistantTurnTokenUsage = setAssistantTurnTokenUsage; this.extractAssistantTurnTokenUsage = extractAssistantTurnTokenUsage; this.assistantContainerInitializationTiming = assistantContainerInitializationTiming;`,
         context
     );
     return context;
@@ -118,7 +118,7 @@ test('已完成任务仍优先使用持久化耗时', () => {
     assert.match(message.label.innerHTML, /耗时 1 分钟 5 秒/);
 });
 
-test('容器启动只占用顶部计时摘要且就绪后恢复普通对话耗时', () => {
+test('容器启动使用独立计时且就绪后从零开始计算普通对话耗时', () => {
     const startedAt = '2026-08-12T02:00:00.000Z';
     const context = createHarness(Date.parse(startedAt) + 31_000);
     const message = createMessage();
@@ -132,9 +132,26 @@ test('容器启动只占用顶部计时摘要且就绪后恢复普通对话耗�
     assert.match(message.label.innerHTML, /容器正在启动中 · 31 秒/);
 
     delete message.dataset.turnPhase;
-    context.syncAssistantTurnSummary(message);
-    assert.match(message.label.innerHTML, /已处理 31 秒/);
+    context.setAssistantTurnTiming(message, {
+        startedAt: new Date(Date.parse(startedAt) + 31_000).toISOString(),
+        elapsedMs: 0,
+        containerInitializationMs: 31_000,
+        status: 'running',
+    });
+    assert.equal(message.dataset.containerInitializationDurationMs, '31000');
+    assert.match(message.label.innerHTML, /已处理 0 秒/);
     assert.doesNotMatch(message.label.innerHTML, /容器正在启动中/);
+});
+
+test('历史详情可恢复容器启动结束点作为对话计时起点', () => {
+    const context = createHarness(Date.parse('2026-08-12T02:05:00.000Z'));
+    const timing = context.assistantContainerInitializationTiming([
+        { eventType: 'container_initialization', createdAt: '2026-08-12T02:00:00.000Z', data: { state: 'initializing' } },
+        { eventType: 'container_initialization', createdAt: '2026-08-12T02:00:04.500Z', data: { state: 'ready' } },
+    ]);
+
+    assert.equal(timing.initializationDurationMs, 4500);
+    assert.equal(timing.executionStartedAt, '2026-08-12T02:00:04.500Z');
 });
 
 test('助手轮次摘要会显示持久化 token 用量', () => {

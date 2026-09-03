@@ -833,7 +833,13 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 	view.IdlePolicy, _ = h.db.GetConversationIdlePolicy(c.Request.Context(), id)
 	view.IdleExpiresAt = database.ConversationIdleExpiresAt(conversation.UpdatedAt, view.IdlePolicy)
 	observe := c.Query("observe") == "1" || strings.EqualFold(c.Query("observe"), "true")
-	if observe && record.Status == containerruntime.InitializationCreated {
+	// A start/stop/rebuild operation intentionally moves the Agent and gateway
+	// through different engine states. Observing the immutable topology in that
+	// window can report a transient runtime drift even though the durable
+	// lifecycle operation is still progressing normally. Keep the lifecycle
+	// state authoritative until the operation reaches idle/failed, then perform
+	// the full live verification on the next poll.
+	if observe && record.Status == containerruntime.InitializationCreated && record.LifecycleState != containerruntime.LifecycleInProgress {
 		if h.containerObserver == nil {
 			view.ObservationError = "observer_unavailable"
 		} else {

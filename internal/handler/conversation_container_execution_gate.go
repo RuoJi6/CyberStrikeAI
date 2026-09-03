@@ -38,6 +38,19 @@ func (f ConversationContainerInitializationSchedulerFunc) EnsureConversationAsyn
 	return f(ctx, conversationID)
 }
 
+// ConversationContainerExecutionPreparer starts an already-created runtime and
+// joins an in-progress start before the Agent begins reasoning. This keeps the
+// container startup phase explicit and removes the first-tool cold-start delay.
+type ConversationContainerExecutionPreparer interface {
+	EnsureConversationRunning(context.Context, string) (containerruntime.InitializationRecord, error)
+}
+
+type ConversationContainerExecutionPreparerFunc func(context.Context, string) (containerruntime.InitializationRecord, error)
+
+func (f ConversationContainerExecutionPreparerFunc) EnsureConversationRunning(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+	return f(ctx, conversationID)
+}
+
 type conversationContainerExecutionGate struct {
 	State     string
 	Record    containerruntime.InitializationRecord
@@ -82,11 +95,15 @@ func (h *AgentHandler) conversationContainerExecutionGateFromRecord(record conta
 		gate.State = containerGateFailed
 	case record.Status == containerruntime.InitializationCreated &&
 		(record.ReadinessStatus == containerruntime.ReadinessReady || record.ReadinessStatus == containerruntime.ReadinessNotRequired):
-		if h.containerExecutionReady {
+		if !h.containerExecutionReady || h.containerExecutionPreparer == nil {
+			gate.State = containerGateBackendPending
+			gate.Retryable = false
+			break
+		}
+		if record.RuntimeStatus == containerruntime.StatusRunning && record.LifecycleState == containerruntime.LifecycleIdle {
 			return nil
 		}
-		gate.State = containerGateBackendPending
-		gate.Retryable = false
+		gate.State = containerGateInitializing
 	default:
 		gate.State = containerGateInitializing
 	}
@@ -109,6 +126,14 @@ func conversationContainerExecutionPayload(prep *multiAgentPrepared, gate *conve
 		payload["requestedAt"] = gate.Record.RequestedAt
 		payload["startedAt"] = gate.Record.StartedAt
 		payload["updatedAt"] = gate.Record.UpdatedAt
+		payload["completedAt"] = gate.Record.CompletedAt
+		payload["readinessStartedAt"] = gate.Record.ReadinessStartedAt
+		payload["readinessCompletedAt"] = gate.Record.ReadinessCompletedAt
+		payload["runtimeStatus"] = gate.Record.RuntimeStatus
+		payload["lifecycleOperation"] = gate.Record.LifecycleOperation
+		payload["lifecycleState"] = gate.Record.LifecycleState
+		payload["lifecycleStartedAt"] = gate.Record.LifecycleStartedAt
+		payload["lifecycleCompletedAt"] = gate.Record.LifecycleCompletedAt
 		if gate.Record.LastError != "" {
 			payload["lastError"] = gate.Record.LastError
 		}
@@ -237,14 +262,22 @@ func (h *AgentHandler) awaitConversationContainerExecution(
 
 	ticker := time.NewTicker(containerInitializationPollInterval)
 	defer ticker.Stop()
+	pollImmediately := prep.ContainerExecutionGate.Record.Status == containerruntime.InitializationCreated &&
+		(prep.ContainerExecutionGate.Record.ReadinessStatus == containerruntime.ReadinessReady ||
+			prep.ContainerExecutionGate.Record.ReadinessStatus == containerruntime.ReadinessNotRequired)
 	for {
-		select {
-		case <-taskCtx.Done():
-			if errors.Is(context.Cause(taskCtx), ErrTaskCancelled) {
-				return finishCancelled()
+		if !pollImmediately {
+			select {
+			case <-taskCtx.Done():
+				if errors.Is(context.Cause(taskCtx), ErrTaskCancelled) {
+					return finishCancelled()
+				}
+				return finishTimeout()
+			case <-ticker.C:
 			}
-			return finishTimeout()
-		case <-ticker.C:
+		}
+		pollImmediately = false
+		{
 			record, err := h.containerInitializer.EnsureConversationAsync(taskCtx, prep.ConversationID)
 			if err != nil {
 				if taskCtx.Err() != nil {
@@ -268,6 +301,23 @@ func (h *AgentHandler) awaitConversationContainerExecution(
 			}
 
 			gate := h.conversationContainerExecutionGateFromRecord(record)
+			if gate != nil && gate.State == containerGateInitializing &&
+				record.Status == containerruntime.InitializationCreated &&
+				(record.ReadinessStatus == containerruntime.ReadinessReady || record.ReadinessStatus == containerruntime.ReadinessNotRequired) {
+				record, err = h.containerExecutionPreparer.EnsureConversationRunning(taskCtx, prep.ConversationID)
+				if err != nil {
+					prep.ContainerExecutionGate = &conversationContainerExecutionGate{
+						State: containerGateFailed, Record: record, HasRecord: strings.TrimSpace(record.ConversationID) != "", Retryable: true,
+					}
+					message, payload := h.finalizeConversationContainerExecutionGate(prep)
+					payload["error"] = err.Error()
+					sendEvent("container_initialization", message, payload)
+					sendEvent("done", "", map[string]interface{}{"conversationId": prep.ConversationID})
+					h.tasks.UpdateTaskStatus(prep.ConversationID, "failed")
+					return true, "failed"
+				}
+				gate = h.conversationContainerExecutionGateFromRecord(record)
+			}
 			if gate != nil && gate.State == containerGateInitializing {
 				prep.ContainerExecutionGate = gate
 				continue

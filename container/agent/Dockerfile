@@ -173,6 +173,11 @@ RUN --mount=type=cache,id=cyberstrike-agent-pip-tools-${TARGETARCH},target=/root
     set -eux; \
     /usr/bin/python3 -m venv --system-site-packages /opt/tools-venv; \
     /opt/tools-venv/bin/python -m pip install --no-compile -r /tmp/requirements-tools.txt; \
+    /opt/tools-venv/bin/python -c 'import h2, httpx, socksio; assert httpx.__version__ == "0.28.1"'; \
+    tools_site=$(/opt/tools-venv/bin/python -c 'import site; print(site.getsitepackages()[0])'); \
+    system_site=$(/usr/bin/python3 -c 'import site; print(site.getsitepackages()[0])'); \
+    printf '%s\n' "$tools_site" >"$system_site/cyberstrike-tools-venv.pth"; \
+    /usr/bin/python3 -c 'import h2, httpx, socksio; assert httpx.__version__ == "0.28.1"'; \
     for entrypoint in ROPgadget bloodhound-python kube-hunter scout; do \
       test -x "/opt/tools-venv/bin/$entrypoint"; \
       ln -sfn "/opt/tools-venv/bin/$entrypoint" "/usr/local/bin/$entrypoint"; \

@@ -2,8 +2,8 @@
     'use strict';
 
     const views = {
-        chat: { conversationId: '', info: null, terminal: null, connectionFailed: false },
-        conversation: { conversationId: '', info: null, terminal: null, connectionFailed: false },
+        chat: { conversationId: '', info: null, terminal: null, connectionFailed: false, workspaceRequestGeneration: 0 },
+        conversation: { conversationId: '', info: null, terminal: null, connectionFailed: false, workspaceRequestGeneration: 0 },
     };
     let chatStatusGeneration = 0;
     let chatStatusTimer = null;
@@ -21,6 +21,12 @@
 
     function element(id) {
         return document.getElementById(id);
+    }
+
+    function conversationTaskStatus(conversationId) {
+        return typeof window.getConversationExecutionStatus === 'function'
+            ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
+            : '';
     }
 
     function terminalRoot(viewName) {
@@ -155,7 +161,13 @@
         }
         const available = !!(info && info.interactiveAvailable);
         if (viewName === 'chat' && info && info.runtimeStatus) {
-            renderChatContainerState(String(info.runtimeStatus));
+            const runtimeStatus = String(info.runtimeStatus).trim().toLowerCase();
+            const taskStatus = conversationTaskStatus(views.chat.conversationId || window.currentConversationId);
+            renderChatContainerState(
+                (runtimeStatus === 'stopped' || runtimeStatus === 'exited') && (taskStatus === 'running' || taskStatus === 'initializing')
+                    ? 'starting'
+                    : runtimeStatus,
+            );
         }
         renderShellButton(viewName, available);
         setStatus(viewName, available
@@ -166,7 +178,7 @@
 
     function chatContainerStatePresentation(rawState) {
         const state = String(rawState || '').trim().toLowerCase();
-        if (state === 'running' || state === 'ready') {
+        if (state === 'running') {
             return { state: 'running', key: 'chat.containerStateRunning', fallback: '运行中' };
         }
         if (state === 'failed' || state === 'error') {
@@ -193,7 +205,7 @@
         if (state === 'not_requested' || state === 'idle') {
             return { state: 'idle', key: 'chat.containerStateNotStarted', fallback: '未启动' };
         }
-        if (state === 'starting' || state === 'creating' || state === 'queued') {
+        if (state === 'starting' || state === 'initializing' || state === 'ready' || state === 'creating' || state === 'queued') {
             return { state: 'starting', key: 'chat.containerStateStarting', fallback: '启动中' };
         }
         return { state: 'unavailable', key: 'chat.containerStateUnavailable', fallback: '状态不可用 · 点击重试' };
@@ -226,26 +238,36 @@
         const observedAgentStatus = String(payload && payload.observation && payload.observation.agent && payload.observation.agent.status || '').trim().toLowerCase();
         const observationError = String(payload && payload.observationError || '').trim().toLowerCase();
         const runtimeDrift = String(payload && payload.runtimeDrift || '').trim().toLowerCase();
-        const taskStatus = typeof window.getConversationExecutionStatus === 'function'
-            ? String(window.getConversationExecutionStatus(conversationId) || '').trim().toLowerCase()
-            : '';
+        const taskStatus = conversationTaskStatus(conversationId);
+        // A lifecycle transition is authoritative while it is in progress.
+        // Agent and gateway containers start sequentially, so a live topology
+        // observation can briefly report runtime_drift between the two starts.
+        // That is not a terminal startup failure; the next idle-state poll will
+        // perform the final verified observation.
         if (lifecycleState === 'in_progress' && lifecycleOperation === 'stop') return 'stopping';
         if (lifecycleState === 'in_progress' && lifecycleOperation === 'delete') return 'deleting';
+        if (lifecycleState === 'in_progress' && ['start', 'rebuild', 'reconcile'].includes(lifecycleOperation)) return 'starting';
         if (observationError === 'provider_missing' || observationError === 'runtime_drift') return 'failed';
         if (observationError) return 'unavailable';
-        if (observedAgentStatus === 'running') return 'running';
-        if (observedAgentStatus === 'stopped' || observedAgentStatus === 'exited') return 'stopped';
         if (observedAgentStatus === 'failed') return 'failed';
         if (initStatus === 'failed' || readiness === 'failed' || runtimeStatus === 'failed' || runtimeDrift) return 'failed';
+        // A freshly-created runtime is durably recorded as stopped before the
+        // execution backend claims the start operation. During that hand-off,
+        // Docker observation can also truthfully report "stopped". Active
+        // lifecycle/readiness/task signals must win over those transitional
+        // stopped values so the UI keeps polling instead of becoming terminal.
+        if (initStatus === 'queued' || initStatus === 'creating' || readiness === 'pending' || readiness === 'validating') return 'starting';
+        if (observedAgentStatus === 'running') return 'running';
         if (runtimeStatus === 'running') return 'running';
-        if (runtimeStatus === 'stopped' || runtimeStatus === 'exited') return 'stopped';
-        if (initStatus === 'not_requested') return 'idle';
-        if (lifecycleState === 'in_progress' && ['start', 'rebuild', 'reconcile'].includes(lifecycleOperation)) return 'starting';
+        if (taskStatus === 'initializing') return 'starting';
         // A ready runtime is necessarily usable by an already-running turn. This
         // closes the short persistence/event ordering window where chat output is
         // visible while the lightweight runtimeStatus field is still stale.
         if (taskStatus === 'running' && initStatus === 'created' && !runtimeStatus && (readiness === 'ready' || readiness === 'not_required')) return 'running';
-        if (initStatus === 'queued' || initStatus === 'creating' || readiness === 'pending' || readiness === 'validating' || taskStatus === 'initializing') return 'starting';
+        if (taskStatus === 'running') return 'starting';
+        if (observedAgentStatus === 'stopped' || observedAgentStatus === 'exited') return 'stopped';
+        if (runtimeStatus === 'stopped' || runtimeStatus === 'exited') return 'stopped';
+        if (initStatus === 'not_requested') return 'idle';
         return 'unavailable';
     }
 
@@ -258,9 +280,7 @@
         const id = String(conversationId || '').trim();
         if (!id || generation !== chatStatusGeneration) return;
         try {
-            const taskStatus = typeof window.getConversationExecutionStatus === 'function'
-                ? String(window.getConversationExecutionStatus(id) || '').trim().toLowerCase()
-                : '';
+            const taskStatus = conversationTaskStatus(id);
             // Always make the first refresh authoritative. Turns can finish before
             // the final lifecycle write reaches the browser, so trusting only the
             // durable field after a completed turn can leave a running container
@@ -274,6 +294,7 @@
             if (generation !== chatStatusGeneration || id !== String(window.currentConversationId || '').trim()) return;
             const nextState = initializationState(payload, id);
             renderChatContainerState(nextState);
+            refreshOpenWorkspaceInfoIfNeeded('chat', id, nextState);
             chatStatusRequestFailures = 0;
             if (['starting', 'stopping', 'deleting', 'checking'].includes(nextState)) {
                 if (chatStatusPollAttempts < 120) {
@@ -321,6 +342,7 @@
         const view = views[viewName];
         const expected = String(conversationId || '').trim();
         if (!view || !expected) return null;
+        const requestGeneration = ++view.workspaceRequestGeneration;
         view.conversationId = expected;
         view.info = null;
         disposeTerminal(viewName);
@@ -332,18 +354,43 @@
         setStatus(viewName, translate('chat.containerWorkspaceLoading', '正在读取容器工作目录…'));
         try {
             const info = await fetchWorkspaceInfo(expected);
-            if (view.conversationId !== expected) return null;
+            if (view.conversationId !== expected || view.workspaceRequestGeneration !== requestGeneration) return null;
             view.info = info;
             renderWorkspaceInfo(viewName, info);
             return info;
         } catch (error) {
-            if (view.conversationId !== expected) return null;
+            if (view.conversationId !== expected || view.workspaceRequestGeneration !== requestGeneration) return null;
             renderWorkspaceInfo(viewName, null);
             setStatus(viewName, error && error.message
                 ? error.message
                 : translate('chat.containerWorkspaceLoadFailed', '读取容器工作目录失败。'), 'danger');
             return null;
         }
+    }
+
+    function refreshOpenWorkspaceInfoIfNeeded(viewName, conversationId, runtimeState) {
+        const view = views[viewName];
+        const drawer = terminalDrawer(viewName);
+        const expected = String(conversationId || '').trim();
+        if (!view || !drawer || drawer.hidden || !expected || view.conversationId !== expected) return;
+        const normalizedState = String(runtimeState || '').trim().toLowerCase();
+        const expectedInteractive = normalizedState === 'running';
+        const currentInteractive = !!(view.info && view.info.interactiveAvailable);
+        if (view.info && currentInteractive === expectedInteractive &&
+            (!view.info.runtimeStatus || String(view.info.runtimeStatus).trim().toLowerCase() === normalizedState)) {
+            return;
+        }
+        const requestGeneration = ++view.workspaceRequestGeneration;
+        fetchWorkspaceInfo(expected).then((info) => {
+            if (view.conversationId !== expected || view.workspaceRequestGeneration !== requestGeneration || drawer.hidden) return;
+            view.info = info;
+            renderWorkspaceInfo(viewName, info);
+        }).catch((error) => {
+            if (view.conversationId !== expected || view.workspaceRequestGeneration !== requestGeneration || drawer.hidden) return;
+            setStatus(viewName, error && error.message
+                ? error.message
+                : translate('chat.containerWorkspaceLoadFailed', '读取容器工作目录失败。'), 'danger');
+        });
     }
 
     function terminalURL(conversationId) {
@@ -526,6 +573,7 @@
         if (panel) panel.hidden = true;
         if (button) button.setAttribute('aria-expanded', 'false');
         syncDrawerBodyState();
+        views.chat.workspaceRequestGeneration += 1;
         disposeTerminal('chat');
     }
 
@@ -602,6 +650,7 @@
         const drawer = element('conversation-container-terminal-drawer');
         if (drawer) drawer.hidden = true;
         syncDrawerBodyState();
+        views.conversation.workspaceRequestGeneration += 1;
         disposeTerminal('conversation');
         views.conversation.conversationId = '';
         views.conversation.info = null;
@@ -633,11 +682,15 @@
         const id = String(detail.conversationId || '').trim();
         if (!id || id !== String(window.currentConversationId || '').trim()) return;
         const runtimeStatus = String(detail.runtimeStatus || '').trim().toLowerCase();
+        const eventState = String(detail.state || '').trim().toLowerCase();
         const state = runtimeStatus === 'running'
             ? 'running'
-            : String(detail.state || runtimeStatus || '').trim().toLowerCase();
-        renderChatContainerState(state === 'ready' ? 'running' : state);
-        if (state === 'ready' || state === 'running' || state === 'failed' || state === 'unavailable' || state === 'stopped' || state === 'idle' || state === 'not_requested') {
+            : (['initializing', 'ready', 'starting', 'creating', 'queued'].includes(eventState)
+                ? 'starting'
+                : String(eventState || runtimeStatus).trim().toLowerCase());
+        renderChatContainerState(state);
+        refreshOpenWorkspaceInfoIfNeeded('chat', id, state);
+        if (state === 'running' || state === 'failed' || state === 'unavailable' || state === 'stopped' || state === 'idle' || state === 'not_requested') {
             clearChatContainerStatusPoll();
             chatStatusGeneration += 1;
         } else {

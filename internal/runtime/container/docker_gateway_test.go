@@ -105,7 +105,7 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	egressName := EgressNetworkName(spec.ID)
 	internalOptions := api.networkCreateOptsByName[internalName]
 	egressOptions := api.networkCreateOptsByName[egressName]
-	if !internalOptions.Internal || egressOptions.Internal || internalOptions.Driver != "bridge" || egressOptions.Driver != "bridge" || len(internalOptions.Options) != 1 || internalOptions.Options[conversationNetworkInhibitIPv4] != "true" {
+	if internalOptions.Internal || egressOptions.Internal || internalOptions.Driver != "bridge" || egressOptions.Driver != "bridge" || !validConversationNetworkOptions(internalOptions.Options) {
 		t.Fatalf("network options = internal %#v, egress %#v", internalOptions, egressOptions)
 	}
 	agentOptions := api.createOptsByName[runtimeContainerName(spec.ID)]
@@ -121,6 +121,9 @@ func TestDockerManagerCreatesHardenedPerConversationGatewayTopology(t *testing.T
 	}
 	if len(gatewayOptions.NetworkingConfig.EndpointsConfig) != 2 || gatewayOptions.NetworkingConfig.EndpointsConfig[internalName] == nil || gatewayOptions.NetworkingConfig.EndpointsConfig[egressName] == nil {
 		t.Fatalf("gateway network endpoints = %#v", gatewayOptions.NetworkingConfig)
+	}
+	if gatewayOptions.NetworkingConfig.EndpointsConfig[internalName].GwPriority != 0 || gatewayOptions.NetworkingConfig.EndpointsConfig[egressName].GwPriority != 1 {
+		t.Fatalf("gateway route priorities = %#v", gatewayOptions.NetworkingConfig.EndpointsConfig)
 	}
 	if gatewayOptions.HostConfig.NetworkMode != mobycontainer.NetworkMode(internalName) || gatewayOptions.HostConfig.Privileged || !gatewayOptions.HostConfig.ReadonlyRootfs || len(gatewayOptions.HostConfig.CapDrop) != 1 || gatewayOptions.HostConfig.CapDrop[0] != "ALL" || !equalCapabilitySets(gatewayOptions.HostConfig.CapAdd, gatewayCapabilities) || !containsString(gatewayOptions.HostConfig.SecurityOpt, "no-new-privileges") || gatewayOptions.HostConfig.Sysctls["net.ipv4.ip_forward"] != "1" {
 		t.Fatalf("gateway security baseline = %#v", gatewayOptions.HostConfig)
@@ -330,10 +333,20 @@ func TestDockerManagerBindsExactSnapshotOnlyIntoGatewayAndStartsAfterHealthRepor
 	if len(api.startedIDs) != 2 || api.startedIDs[0] != "provider-gateway-1" || api.startedIDs[1] != "provider-agent-1" {
 		t.Fatalf("snapshot-aware start order = %#v", api.startedIDs)
 	}
-	if api.execContainerID != "provider-agent-1" || api.execCreateOpts.User != runtimeRootExecUser || api.execCreateOpts.Privileged ||
-		!equalStrings(api.execCreateOpts.Cmd, []string{"/sbin/ip", "route", "replace", "default", "via", "172.30.0.2"}) ||
-		!equalStrings(api.execCreateOpts.Env, runtimeExecEnvironment(nil)) {
-		t.Fatalf("runtime default route helper = container %q options %#v", api.execContainerID, api.execCreateOpts)
+	if len(api.execCreateOptsHistory) != 2 {
+		t.Fatalf("runtime start helper count = %d, want route plus readiness", len(api.execCreateOptsHistory))
+	}
+	routeProbe := api.execCreateOptsHistory[0]
+	readinessProbe := api.execCreateOptsHistory[1]
+	if api.execContainerID != "provider-agent-1" || routeProbe.User != runtimeRootExecUser || routeProbe.Privileged ||
+		!equalStrings(routeProbe.Cmd, []string{"/sbin/ip", "route", "replace", "default", "via", "172.30.0.2"}) ||
+		!equalStrings(routeProbe.Env, runtimeExecEnvironment(nil)) {
+		t.Fatalf("runtime default route helper = container %q options %#v", api.execContainerID, routeProbe)
+	}
+	if readinessProbe.User != runtimeRootExecUser || readinessProbe.Privileged ||
+		!equalStrings(readinessProbe.Cmd, []string{"/bin/sh", "-c", runtimeWorkspaceReadyWaitScript}) ||
+		!equalStrings(readinessProbe.Env, runtimeWorkspaceEnvironment()) {
+		t.Fatalf("runtime workspace readiness helper = %#v", readinessProbe)
 	}
 }
 
@@ -991,10 +1004,10 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 		HostConfig: egressGatewayHostConfig(spec),
 		NetworkSettings: &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
 			ConversationNetworkName(spec.ID): {
-				NetworkID: "provider-network-1", IPAddress: policyDNSAddress,
+				NetworkID: "provider-network-1", IPAddress: policyDNSAddress, GwPriority: 0,
 				IPAMConfig: &mobynetwork.EndpointIPAMConfig{IPv4Address: policyDNSAddress},
 			},
-			EgressNetworkName(spec.ID): {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2")},
+			EgressNetworkName(spec.ID): {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2"), GwPriority: 1},
 		}},
 	}}
 	agentImage := mobyclient.ImageInspectResult{InspectResponse: mobyimage.InspectResponse{

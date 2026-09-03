@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -144,6 +145,20 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 			return Runtime{}, err
 		}
 	}
+	if err := m.waitForRuntimeWorkspaceReady(operationCtx, spec.ID, spec.Workspace.MountPath, runtime.ProviderID); err != nil {
+		seconds := int(defaultRuntimeStopTimeout / time.Second)
+		_, agentStopErr := m.api.ContainerStop(operationCtx, runtime.ProviderID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+		if agentStopErr != nil && !containerderrdefs.IsNotFound(agentStopErr) {
+			err = errors.Join(err, fmt.Errorf("rollback unready runtime start: %w", agentStopErr))
+		}
+		if spec.EgressGateway != nil {
+			_, gatewayStopErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+			if gatewayStopErr != nil && !containerderrdefs.IsNotFound(gatewayStopErr) {
+				err = errors.Join(err, fmt.Errorf("rollback gateway after runtime readiness failure: %w", gatewayStopErr))
+			}
+		}
+		return Runtime{}, err
+	}
 	started, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
 		return Runtime{}, err
@@ -152,6 +167,44 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 		return Runtime{}, fmt.Errorf("%w: runtime %s did not enter running state", ErrRuntimeStateConflict, id)
 	}
 	return started, nil
+}
+
+func (m *DockerManager) waitForRuntimeWorkspaceReady(ctx context.Context, id RuntimeID, workspacePath, providerID string) error {
+	created, err := m.execAPI.ExecCreate(ctx, providerID, mobyclient.ExecCreateOptions{
+		Privileged:   false,
+		User:         runtimeRootExecUser,
+		AttachStdin:  false,
+		AttachStdout: true,
+		AttachStderr: true,
+		Env:          runtimeWorkspaceEnvironment(),
+		WorkingDir:   workspacePath,
+		Cmd:          []string{"/bin/sh", "-c", runtimeWorkspaceReadyWaitScript},
+	})
+	if err != nil {
+		return fmt.Errorf("%w: create runtime %s workspace readiness probe: %v", ErrRuntimeNotReady, id, err)
+	}
+	if strings.TrimSpace(created.ID) == "" {
+		return fmt.Errorf("%w: runtime %s workspace readiness probe has no exec id", ErrRuntimeNotReady, id)
+	}
+	attached, err := m.execAPI.ExecAttach(ctx, created.ID, mobyclient.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("%w: attach runtime %s workspace readiness probe: %v", ErrRuntimeNotReady, id, err)
+	}
+	defer attached.Close()
+	if _, err := io.Copy(io.Discard, attached.Reader); err != nil {
+		return fmt.Errorf("%w: read runtime %s workspace readiness probe: %v", ErrRuntimeNotReady, id, err)
+	}
+	inspection, err := m.execAPI.ExecInspect(ctx, created.ID, mobyclient.ExecInspectOptions{})
+	if err != nil {
+		return fmt.Errorf("%w: inspect runtime %s workspace readiness probe: %v", ErrRuntimeNotReady, id, err)
+	}
+	if inspection.ID != created.ID || inspection.ContainerID != providerID || inspection.Running {
+		return fmt.Errorf("%w: runtime %s workspace readiness probe identity mismatch", ErrRuntimeNotReady, id)
+	}
+	if inspection.ExitCode != 0 {
+		return fmt.Errorf("%w: runtime %s workspace initialization probe exited with status %d", ErrRuntimeNotReady, id, inspection.ExitCode)
+	}
+	return nil
 }
 
 func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec RuntimeSpec, providerID string) error {
@@ -612,7 +665,7 @@ func (m *DockerManager) deleteOwnedConversationNetworkByRuntimeID(ctx context.Co
 	if observeErr != nil || !sameManagedResource(expected, observed) {
 		return false, fmt.Errorf("%w: conversation network ownership mismatch", ErrRuntimeStateConflict)
 	}
-	if result.Network.Driver != "bridge" || result.Network.Scope != "local" || !result.Network.Internal || !result.Network.EnableIPv4 || result.Network.EnableIPv6 || result.Network.Attachable || result.Network.Ingress || result.Network.ConfigOnly || len(result.Network.Containers) != 0 || len(result.Network.Services) != 0 {
+	if result.Network.Driver != "bridge" || result.Network.Scope != "local" || result.Network.Internal || !result.Network.EnableIPv4 || result.Network.EnableIPv6 || result.Network.Attachable || result.Network.Ingress || result.Network.ConfigOnly || !validConversationNetworkOptions(result.Network.Options) || len(result.Network.Containers) != 0 || len(result.Network.Services) != 0 {
 		return false, fmt.Errorf("%w: conversation network is unsafe to delete", ErrRuntimeStateConflict)
 	}
 	if _, err := m.networkAPI.NetworkRemove(ctx, result.Network.ID, mobyclient.NetworkRemoveOptions{}); err != nil {
@@ -861,9 +914,6 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 	if endpoint == nil || strings.TrimSpace(endpoint.NetworkID) == "" {
 		return fmt.Errorf("%w: runtime conversation network endpoint is incomplete", ErrRuntimeStateConflict)
 	}
-	if endpoint.Gateway.IsValid() || endpoint.IPv6Gateway.IsValid() {
-		return fmt.Errorf("%w: runtime conversation network exposes a host gateway", ErrRuntimeStateConflict)
-	}
 	result, err := m.networkAPI.NetworkInspect(ctx, endpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {
 		if containerderrdefs.IsNotFound(err) {
@@ -873,6 +923,9 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 	}
 	if _, err := m.verifyConversationNetwork(spec, actual.Config.Labels[LabelSpecDigest], result.Network, endpoint.NetworkID, false); err != nil {
 		return err
+	}
+	if !validConversationEndpointGateway(endpoint, result.Network) {
+		return fmt.Errorf("%w: runtime conversation network gateway metadata mismatch", ErrRuntimeStateConflict)
 	}
 	expectedAttachments := 1
 	if spec.EgressGateway != nil {

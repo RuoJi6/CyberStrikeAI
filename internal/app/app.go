@@ -710,6 +710,14 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle, hostTrafficProxy)
 	executor.SetExecutionBackendResolver(executionBackendResolver)
 	agent.SetExecutionBackendResolver(executionBackendResolver)
+	agentHandler.SetConversationContainerExecutionPreparer(handler.ConversationContainerExecutionPreparerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+		_, resolveErr := executionBackendResolver.ResolveExecutionBackend(mcp.WithMCPConversationID(ctx, conversationID))
+		record, recordErr := db.GetContainerInitialization(ctx, conversationID)
+		if resolveErr != nil {
+			return record, resolveErr
+		}
+		return record, recordErr
+	}))
 	trafficHandler.SetTrafficReplayExecutor(func(ctx context.Context, conversationID string, request security.ExecutionRequest) (security.ExecutionResult, error) {
 		boundCtx := mcp.WithMCPConversationID(ctx, conversationID)
 		backend, err := executionBackendResolver.ResolveExecutionBackend(boundCtx)

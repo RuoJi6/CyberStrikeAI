@@ -4869,10 +4869,11 @@ function prefetchProcessDetailsSummaryHint(messageId, messageElement) {
             const s = j.summary;
             if (typeof window.setAssistantTurnTiming === 'function') {
                 window.setAssistantTurnTiming(messageElement, {
-                    startedAt: s.startedAt,
+                    startedAt: s.executionStartedAt || s.startedAt,
                     completedAt: s.completedAt,
-                    durationMs: s.durationMs,
-                    elapsedMs: s.elapsedMs,
+                    durationMs: s.executionDurationMs === undefined ? s.durationMs : s.executionDurationMs,
+                    elapsedMs: s.executionElapsedMs === undefined ? s.elapsedMs : s.executionElapsedMs,
+                    containerInitializationMs: s.containerInitializationMs,
                     status: s.status || 'completed'
                 });
             }
@@ -5369,6 +5370,28 @@ function assistantTurnTerminalState(processDetails) {
 
 let assistantTurnElapsedTimer = null;
 
+function assistantContainerInitializationTiming(processDetails) {
+    const details = Array.isArray(processDetails) ? processDetails : [];
+    let initializationStartedAtMs = NaN;
+    for (const detail of details) {
+        if (!detail || detail.eventType !== 'container_initialization') continue;
+        const state = String(detail.data && detail.data.state || '').trim().toLowerCase();
+        const createdAtMs = assistantTurnTimestamp(detail.createdAt);
+        if (!Number.isFinite(createdAtMs)) continue;
+        if (state === 'initializing' && !Number.isFinite(initializationStartedAtMs)) {
+            initializationStartedAtMs = createdAtMs;
+            continue;
+        }
+        if (state === 'ready' && Number.isFinite(initializationStartedAtMs) && createdAtMs >= initializationStartedAtMs) {
+            return {
+                initializationDurationMs: createdAtMs - initializationStartedAtMs,
+                executionStartedAt: new Date(createdAtMs).toISOString(),
+            };
+        }
+    }
+    return null;
+}
+
 function syncRunningAssistantTurnSummaries() {
     const runningTurns = document.querySelectorAll('#chat-messages .message.assistant[data-turn-status="running"]');
     runningTurns.forEach((messageElement) => syncAssistantTurnSummary(messageElement));
@@ -5394,6 +5417,10 @@ function setAssistantTurnTiming(messageElementOrId, timing) {
         : messageElementOrId;
     if (!messageElement || !messageElement.dataset) return;
     const value = timing || {};
+    const initializationDurationMs = Number(value.containerInitializationMs);
+    if (Number.isFinite(initializationDurationMs) && initializationDurationMs >= 0) {
+        messageElement.dataset.containerInitializationDurationMs = String(Math.round(initializationDurationMs));
+    }
     if (value.startedAt) messageElement.dataset.turnStartedAt = String(value.startedAt);
     if (value.completedAt) messageElement.dataset.turnCompletedAt = String(value.completedAt);
     if (value.status) messageElement.dataset.turnStatus = String(value.status);
@@ -5503,6 +5530,7 @@ window.setAssistantTurnTokenUsage = setAssistantTurnTokenUsage;
 window.syncAssistantTurnSummary = syncAssistantTurnSummary;
 window.formatAssistantTurnDuration = formatAssistantTurnDuration;
 window.extractAssistantTurnTokenUsage = extractAssistantTurnTokenUsage;
+window.assistantContainerInitializationTiming = assistantContainerInitializationTiming;
 
 /** 渗透测试区：工具栏（展开详情 | N次工具执行）+ 独立工具列表 + 迭代时间线 */
 function ensureMcpCallSectionChrome(messageElement, messageId) {
@@ -6863,7 +6891,10 @@ async function loadConversation(conversationId) {
                 }
                 if (msg.role === 'assistant') {
                     if (messageEl && typeof window.setAssistantTurnTiming === 'function') {
-                        const startedAt = msg && msg.createdAt ? msg.createdAt : null;
+                        const containerTiming = assistantContainerInitializationTiming(msg && msg.processDetails);
+                        const startedAt = containerTiming && containerTiming.executionStartedAt
+                            ? containerTiming.executionStartedAt
+                            : (msg && msg.createdAt ? msg.createdAt : null);
                         const completedAt = terminalState && terminalState.completedAt
                             ? terminalState.completedAt
                             : (msg && msg.updatedAt ? msg.updatedAt : startedAt);
@@ -6883,6 +6914,7 @@ async function loadConversation(conversationId) {
                             durationMs: (!isRunning && Number.isFinite(startedMs) && Number.isFinite(completedMs))
                                 ? Math.max(0, completedMs - startedMs)
                                 : undefined,
+                            containerInitializationMs: containerTiming && containerTiming.initializationDurationMs,
                             status: status
                         });
                     }

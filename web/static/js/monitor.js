@@ -1508,7 +1508,11 @@ const progressElapsedTimerById = new Map();
 
 function progressElapsedText(progressId) {
     const el = document.getElementById(progressId);
-    const startedAt = el && el.dataset ? Number(el.dataset.turnStartedAtMs) : NaN;
+    const phaseStartedAt = el && el.dataset && el.dataset.containerInitializationState === 'initializing'
+        ? Number(el.dataset.containerInitializationStartedAtMs)
+        : NaN;
+    const turnStartedAt = el && el.dataset ? Number(el.dataset.turnStartedAtMs) : NaN;
+    const startedAt = Number.isFinite(phaseStartedAt) ? phaseStartedAt : turnStartedAt;
     const duration = typeof window.formatAssistantTurnDuration === 'function'
         ? window.formatAssistantTurnDuration(Number.isFinite(startedAt) ? Date.now() - startedAt : 0)
         : Math.max(0, Math.floor((Date.now() - (Number.isFinite(startedAt) ? startedAt : Date.now())) / 1000)) + ' 秒';
@@ -1716,6 +1720,12 @@ function applyAssistantTurnTimingFromProgress(progressId, assistantElement, term
     const completedAt = new Date();
     stopProgressElapsedClock(progressId);
     if (!assistantElement || typeof window.setAssistantTurnTiming !== 'function') return;
+    const containerInitializationDurationMs = progressElement && progressElement.dataset
+        ? Number(progressElement.dataset.containerInitializationDurationMs)
+        : NaN;
+    if (Number.isFinite(containerInitializationDurationMs) && containerInitializationDurationMs >= 0) {
+        assistantElement.dataset.containerInitializationDurationMs = String(Math.round(containerInitializationDurationMs));
+    }
     window.setAssistantTurnTiming(assistantElement, {
         startedAt: progressStartedAt,
         completedAt: completedAt.toISOString(),
@@ -4148,6 +4158,9 @@ function handleStreamEvent(event, progressElement, progressId,
             if (progressNode && progressNode.dataset) {
                 if (initializationState === 'initializing') {
                     progressNode.dataset.containerInitializationState = initializationState;
+                    if (!Number.isFinite(Number(progressNode.dataset.containerInitializationStartedAtMs))) {
+                        progressNode.dataset.containerInitializationStartedAtMs = String(Date.now());
+                    }
                     const requestedAtMs = Date.parse(String(initializationData.requestedAt || initializationData.startedAt || ''));
                     if (Number.isFinite(requestedAtMs)) {
                         // 保留服务端时间供诊断，但实时计时继续使用 addProgressMessage
@@ -4160,8 +4173,19 @@ function handleStreamEvent(event, progressElement, progressId,
                         }
                     }
                     startProgressElapsedClock(progressId);
+                } else if (initializationState === 'ready') {
+                    const initializationStartedAtMs = Number(progressNode.dataset.containerInitializationStartedAtMs);
+                    if (Number.isFinite(initializationStartedAtMs)) {
+                        progressNode.dataset.containerInitializationDurationMs = String(Math.max(0, Date.now() - initializationStartedAtMs));
+                    }
+                    delete progressNode.dataset.containerInitializationState;
+                    delete progressNode.dataset.containerInitializationStartedAtMs;
+                    progressNode.dataset.turnStartedAtMs = String(Date.now());
+                    progressNode.dataset.turnStartedAt = new Date().toISOString();
+                    syncProgressElapsedSummary(progressId);
                 } else {
                     delete progressNode.dataset.containerInitializationState;
+                    delete progressNode.dataset.containerInitializationStartedAtMs;
                     syncProgressElapsedSummary(progressId);
                 }
             }
@@ -4176,9 +4200,12 @@ function handleStreamEvent(event, progressElement, progressId,
             if (runningAssistant && runningAssistant.dataset) {
                 if (initializationState === 'initializing') {
                     runningAssistant.dataset.turnPhase = 'container_initializing';
+                    if (!Number.isFinite(Number(runningAssistant.dataset.containerInitializationStartedAtMs))) {
+                        runningAssistant.dataset.containerInitializationStartedAtMs = String(Date.now());
+                    }
                     if (typeof window.setAssistantTurnTiming === 'function') {
                         const localStartedAtMs = progressNode && progressNode.dataset
-                            ? Number(progressNode.dataset.turnStartedAtMs)
+                            ? Number(progressNode.dataset.containerInitializationStartedAtMs)
                             : NaN;
                         const localElapsedMs = Number.isFinite(localStartedAtMs)
                             ? Math.max(0, Date.now() - localStartedAtMs)
@@ -4191,11 +4218,25 @@ function handleStreamEvent(event, progressElement, progressId,
                             status: 'running'
                         });
                     }
-                } else if (runningAssistant.dataset.turnPhase === 'container_initializing') {
+                } else if (initializationState === 'ready' && runningAssistant.dataset.turnPhase === 'container_initializing') {
+                    const initializationStartedAtMs = Number(runningAssistant.dataset.containerInitializationStartedAtMs);
+                    if (Number.isFinite(initializationStartedAtMs)) {
+                        runningAssistant.dataset.containerInitializationDurationMs = String(Math.max(0, Date.now() - initializationStartedAtMs));
+                    }
                     delete runningAssistant.dataset.turnPhase;
-                    if (typeof window.syncAssistantTurnSummary === 'function') {
+                    delete runningAssistant.dataset.containerInitializationStartedAtMs;
+                    if (typeof window.setAssistantTurnTiming === 'function') {
+                        window.setAssistantTurnTiming(runningAssistant, {
+                            startedAt: new Date().toISOString(),
+                            elapsedMs: 0,
+                            status: 'running'
+                        });
+                    } else if (typeof window.syncAssistantTurnSummary === 'function') {
                         window.syncAssistantTurnSummary(runningAssistant);
                     }
+                } else if (runningAssistant.dataset.turnPhase === 'container_initializing') {
+                    delete runningAssistant.dataset.turnPhase;
+                    delete runningAssistant.dataset.containerInitializationStartedAtMs;
                 }
             }
 
@@ -7209,18 +7250,37 @@ function renderActiveTasks(tasks) {
         if (visibleTask && visibleAssistantIsRunningTurn) {
             if (visibleTask.status === 'initializing') {
                 visibleAssistant.dataset.turnPhase = 'container_initializing';
+                if (!Number.isFinite(Number(visibleAssistant.dataset.containerInitializationStartedAtMs))) {
+                    visibleAssistant.dataset.containerInitializationStartedAtMs = String(Date.now());
+                }
             } else if (visibleAssistant.dataset.turnPhase === 'container_initializing') {
+                const initializationStartedAtMs = Number(visibleAssistant.dataset.containerInitializationStartedAtMs);
+                const taskElapsedMs = Number(visibleTask.elapsedMs);
+                if (Number.isFinite(initializationStartedAtMs) && !Number.isFinite(Number(visibleAssistant.dataset.containerInitializationDurationMs))) {
+                    visibleAssistant.dataset.containerInitializationDurationMs = String(
+                        Number.isFinite(taskElapsedMs) && taskElapsedMs >= 0
+                            ? taskElapsedMs
+                            : Math.max(0, Date.now() - initializationStartedAtMs)
+                    );
+                }
                 delete visibleAssistant.dataset.turnPhase;
+                delete visibleAssistant.dataset.containerInitializationStartedAtMs;
             }
             if (typeof window.setAssistantTurnTiming === 'function') {
+                const startupDurationMs = Number(visibleAssistant.dataset.containerInitializationDurationMs);
+                const taskElapsedMs = Number(visibleTask.elapsedMs);
+                const visibleElapsedMs = visibleTask.status === 'initializing' || !Number.isFinite(startupDurationMs)
+                    ? taskElapsedMs
+                    : Math.max(0, taskElapsedMs - startupDurationMs);
                 window.setAssistantTurnTiming(visibleAssistant, {
                     startedAt: visibleTask.startedAt || visibleAssistant.dataset.turnStartedAt,
-                    elapsedMs: visibleTask.elapsedMs,
+                    elapsedMs: visibleElapsedMs,
                     status: 'running'
                 });
             }
         } else if (visibleAssistant.dataset.turnPhase === 'container_initializing') {
             delete visibleAssistant.dataset.turnPhase;
+            delete visibleAssistant.dataset.containerInitializationStartedAtMs;
             if (typeof window.syncAssistantTurnSummary === 'function') {
                 window.syncAssistantTurnSummary(visibleAssistant);
             }

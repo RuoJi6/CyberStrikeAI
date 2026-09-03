@@ -20,6 +20,22 @@ import (
 	"go.uber.org/zap"
 )
 
+func setTestContainerExecutionPreparer(h *AgentHandler) {
+	h.SetConversationContainerExecutionPreparer(ConversationContainerExecutionPreparerFunc(func(_ context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+		now := time.Now()
+		return containerruntime.InitializationRecord{
+			ConversationID:     conversationID,
+			RuntimeID:          containerruntime.RuntimeID("conversation-" + conversationID),
+			Status:             containerruntime.InitializationCreated,
+			ReadinessStatus:    containerruntime.ReadinessReady,
+			RuntimeStatus:      containerruntime.StatusRunning,
+			LifecycleOperation: containerruntime.LifecycleOperationStart,
+			LifecycleState:     containerruntime.LifecycleIdle,
+			UpdatedAt:          now,
+		}, nil
+	}))
+}
+
 func containerGateRequest(t *testing.T, user *database.RBACUser, body map[string]interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	return containerGateRequestWithContext(t, context.Background(), user, body, handler)
 }
@@ -51,6 +67,7 @@ func TestContainerConversationInitializationSurvivesDisconnectAndContinuesOrigin
 	tasks.SetTaskEventBus(taskBus)
 	h := &AgentHandler{db: db, logger: zap.NewNop(), tasks: tasks, taskEventBus: taskBus}
 	h.SetConversationContainerExecutionReady(true)
+	setTestContainerExecutionPreparer(h)
 	scheduled := make(chan string, 1)
 	allowReady := make(chan struct{})
 	callCount := 0
@@ -188,6 +205,7 @@ func TestContainerConversationStopCancelsInitializationAndOriginalRequest(t *tes
 	tasks.SetTaskEventBus(taskBus)
 	h := &AgentHandler{db: db, logger: zap.NewNop(), tasks: tasks, taskEventBus: taskBus}
 	h.SetConversationContainerExecutionReady(true)
+	setTestContainerExecutionPreparer(h)
 	scheduled := make(chan string, 1)
 	h.SetConversationContainerInitializationScheduler(ConversationContainerInitializationSchedulerFunc(func(_ context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
 		select {
@@ -364,20 +382,31 @@ func TestRobotCannotBypassContainerInitializationGate(t *testing.T) {
 
 func TestReadyContainerPassesGateOnlyAfterExecutionBackendWired(t *testing.T) {
 	h := &AgentHandler{logger: zap.NewNop()}
+	running := false
 	h.SetConversationContainerInitializationScheduler(ConversationContainerInitializationSchedulerFunc(func(_ context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
-		return containerruntime.InitializationRecord{
+		record := containerruntime.InitializationRecord{
 			ConversationID:  conversationID,
 			RuntimeID:       containerruntime.RuntimeID("conversation-" + conversationID),
 			Status:          containerruntime.InitializationCreated,
 			ReadinessStatus: containerruntime.ReadinessReady,
-		}, nil
+		}
+		if running {
+			record.RuntimeStatus = containerruntime.StatusRunning
+			record.LifecycleState = containerruntime.LifecycleIdle
+		}
+		return record, nil
 	}))
 	conversation := &database.Conversation{ID: "conversation-ready", RuntimeMode: database.ConversationRuntimeModeContainer}
 	if gate := h.prepareConversationContainerExecutionGate(context.Background(), conversation); gate == nil || gate.State != containerGateBackendPending {
 		t.Fatalf("unwired ready gate = %#v", gate)
 	}
 	h.SetConversationContainerExecutionReady(true)
+	setTestContainerExecutionPreparer(h)
+	if gate := h.prepareConversationContainerExecutionGate(context.Background(), conversation); gate == nil || gate.State != containerGateInitializing {
+		t.Fatalf("wired stopped container should enter explicit startup phase: %#v", gate)
+	}
+	running = true
 	if gate := h.prepareConversationContainerExecutionGate(context.Background(), conversation); gate != nil {
-		t.Fatalf("wired ready container remained gated: %#v", gate)
+		t.Fatalf("already-running ready container remained gated: %#v", gate)
 	}
 }

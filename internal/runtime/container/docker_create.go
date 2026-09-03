@@ -74,19 +74,24 @@ const (
 	LabelEgressTrafficCapture  = "com.cyberstrike.egress.traffic-capture"
 	ResourceKindAgent          = "agent-runtime"
 
-	defaultDockerOperationTimeout  = 30 * time.Second
-	rollbackTimeout                = 10 * time.Second
-	defaultGlobalConcurrentExec    = 32
-	defaultGlobalQueuedExec        = 128
-	conversationNetworkInhibitIPv4 = "com.docker.network.bridge.inhibit_ipv4"
-	egressGatewayProxyPort         = 3128
-	egressGatewaySOCKS5Port        = 1080
-	runtimeWorkspaceInitScript     = "umask 077; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; "
-	runtimeKeepaliveScript         = runtimeWorkspaceInitScript + "trap 'exit 0' TERM INT; while :; do sleep 3600; done"
-	runtimeTLSKeepaliveScript      = "umask 077; cat /etc/ssl/certs/ca-certificates.crt " + egress.TLSAuthorityCertificateContainerPath + " > " + egress.TLSAgentCABundlePath + " || exit 70; " + runtimeKeepaliveScript
-	runtimeAgentUser               = "pentester"
-	runtimeRootExecUser            = "0:0"
-	runtimeCapabilityProfile       = "root-security-tools-v1"
+	defaultDockerOperationTimeout       = 30 * time.Second
+	rollbackTimeout                     = 10 * time.Second
+	defaultGlobalConcurrentExec         = 32
+	defaultGlobalQueuedExec             = 128
+	conversationNetworkInhibitIPv4      = "com.docker.network.bridge.inhibit_ipv4"
+	conversationNetworkIPMasquerade     = "com.docker.network.bridge.enable_ip_masquerade"
+	conversationNetworkGatewayModeIPv4  = "com.docker.network.bridge.gateway_mode_ipv4"
+	conversationNetworkGatewayModeValue = "nat-unprotected"
+	egressGatewayProxyPort              = 3128
+	egressGatewaySOCKS5Port             = 1080
+	runtimeReadyFile                    = "/tmp/.cyberstrike-runtime-ready"
+	runtimeWorkspaceInitScript          = "umask 077; rm -f " + runtimeReadyFile + "; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; runtime_start=$(awk '{print $22}' /proc/1/stat) || exit 73; printf '%s\n' \"$runtime_start\" >" + runtimeReadyFile + " || exit 74; "
+	runtimeKeepaliveScript              = runtimeWorkspaceInitScript + "trap 'rm -f " + runtimeReadyFile + "; exit 0' TERM INT; while :; do sleep 3600; done"
+	runtimeWorkspaceReadyWaitScript     = "attempt=0; while [ \"$attempt\" -lt 300 ]; do runtime_start=$(awk '{print $22}' /proc/1/stat 2>/dev/null) || exit 75; runtime_ready=$(cat " + runtimeReadyFile + " 2>/dev/null || true); if [ -n \"$runtime_start\" ] && [ \"$runtime_ready\" = \"$runtime_start\" ] && [ -x /workspace/.venv/bin/python3 ]; then exit 0; fi; attempt=$((attempt + 1)); sleep 0.1; done; exit 76"
+	runtimeTLSKeepaliveScript           = "umask 077; cat /etc/ssl/certs/ca-certificates.crt " + egress.TLSAuthorityCertificateContainerPath + " > " + egress.TLSAgentCABundlePath + " || exit 70; " + runtimeKeepaliveScript
+	runtimeAgentUser                    = "pentester"
+	runtimeRootExecUser                 = "0:0"
+	runtimeCapabilityProfile            = "root-security-tools-v1"
 )
 
 // runtimeAgentCapabilities is the reviewed, closed capability set available
@@ -415,7 +420,7 @@ func (m *DockerManager) ensureOwnedConversationNetwork(ctx context.Context, spec
 	enableIPv4, enableIPv6 := true, false
 	options := mobyclient.NetworkCreateOptions{
 		Driver: "bridge", Scope: "local", EnableIPv4: &enableIPv4, EnableIPv6: &enableIPv6,
-		Internal: true, Attachable: false, Ingress: false, Options: conversationNetworkOptions(),
+		Internal: false, Attachable: false, Ingress: false, Options: conversationNetworkOptions(),
 		Labels: conversationNetworkLabels(m.ownerID, spec),
 	}
 	var created mobyclient.NetworkCreateResult
@@ -463,7 +468,7 @@ func (m *DockerManager) verifyConversationNetwork(spec RuntimeSpec, expectedSpec
 			return ManagedResource{}, fmt.Errorf("%w: conversation network label %s mismatch", ErrRuntimeStateConflict, key)
 		}
 	}
-	if actual.Driver != "bridge" || actual.Scope != "local" || !actual.Internal || !actual.EnableIPv4 || actual.EnableIPv6 || actual.Attachable || actual.Ingress || actual.ConfigOnly || len(actual.Options) != 1 || actual.Options[conversationNetworkInhibitIPv4] != "true" {
+	if actual.Driver != "bridge" || actual.Scope != "local" || actual.Internal || !actual.EnableIPv4 || actual.EnableIPv6 || actual.Attachable || actual.Ingress || actual.ConfigOnly || !validConversationNetworkOptions(actual.Options) {
 		return ManagedResource{}, fmt.Errorf("%w: conversation network isolation settings mismatch", ErrRuntimeStateConflict)
 	}
 	if requireEmpty && (len(actual.Containers) != 0 || len(actual.Services) != 0) {
@@ -473,7 +478,37 @@ func (m *DockerManager) verifyConversationNetwork(spec RuntimeSpec, expectedSpec
 }
 
 func conversationNetworkOptions() map[string]string {
-	return map[string]string{conversationNetworkInhibitIPv4: "true"}
+	return map[string]string{
+		conversationNetworkInhibitIPv4:     "true",
+		conversationNetworkIPMasquerade:    "false",
+		conversationNetworkGatewayModeIPv4: conversationNetworkGatewayModeValue,
+	}
+}
+
+func validConversationNetworkOptions(options map[string]string) bool {
+	return len(options) == 3 &&
+		options[conversationNetworkInhibitIPv4] == "true" &&
+		options[conversationNetworkIPMasquerade] == "false" &&
+		options[conversationNetworkGatewayModeIPv4] == conversationNetworkGatewayModeValue
+}
+
+// Docker reports the IPAM gateway in endpoint metadata even when inhibit_ipv4
+// prevents that address from being assigned to the host bridge. Once the
+// immutable network options above have been verified, accept only that exact
+// metadata value; a different or IPv6 gateway is still security drift.
+func validConversationEndpointGateway(endpoint *mobynetwork.EndpointSettings, network mobynetwork.Inspect) bool {
+	if endpoint == nil || endpoint.IPv6Gateway.IsValid() {
+		return false
+	}
+	if !endpoint.Gateway.IsValid() {
+		return true
+	}
+	for _, config := range network.IPAM.Config {
+		if config.Gateway.IsValid() && endpoint.Gateway == config.Gateway {
+			return true
+		}
+	}
+	return false
 }
 
 func conversationNetworkLabels(ownerID string, spec RuntimeSpec) map[string]string {

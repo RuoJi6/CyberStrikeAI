@@ -4,7 +4,10 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
@@ -18,6 +21,25 @@ import (
 type appFakeRuntimeExecutor struct {
 	called  int
 	request containerruntime.ExecRequest
+}
+
+type appBlockingStartManager struct {
+	*containertest.FakeManager
+	entered   chan struct{}
+	release   chan struct{}
+	enterOnce sync.Once
+	startCall atomic.Int32
+}
+
+func (m *appBlockingStartManager) Start(ctx context.Context, id containerruntime.RuntimeID) (containerruntime.Runtime, error) {
+	m.startCall.Add(1)
+	m.enterOnce.Do(func() { close(m.entered) })
+	select {
+	case <-ctx.Done():
+		return containerruntime.Runtime{}, ctx.Err()
+	case <-m.release:
+	}
+	return m.FakeManager.Start(ctx, id)
 }
 
 func (f *appFakeRuntimeExecutor) Exec(_ context.Context, _ containerruntime.RuntimeSpec, request containerruntime.ExecRequest, sink containerruntime.ExecOutputSink) (containerruntime.ExecResult, error) {
@@ -108,6 +130,101 @@ func TestConversationExecutionBackendResolverStartsAndRoutesContainer(t *testing
 	}
 }
 
+func TestConversationExecutionBackendResolverJoinsConcurrentContainerStart(t *testing.T) {
+	db, conversationID, manager := appStoppedContainerRuntime(t)
+	defer db.Close()
+	lifecycle, err := containerruntime.NewLifecycleController(manager, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := newConversationExecutionBackendResolver(db, &appFakeRuntimeExecutor{}, lifecycle)
+	ctx, cancel := context.WithTimeout(mcp.WithMCPConversationID(context.Background(), conversationID), 2*time.Second)
+	defer cancel()
+
+	type result struct {
+		backend security.ExecutionBackend
+		err     error
+	}
+	first := make(chan result, 1)
+	second := make(chan result, 1)
+	go func() {
+		backend, resolveErr := resolver.ResolveExecutionBackend(ctx)
+		first <- result{backend: backend, err: resolveErr}
+	}()
+	select {
+	case <-manager.entered:
+	case <-ctx.Done():
+		t.Fatalf("first start did not reach the engine: %v", ctx.Err())
+	}
+	go func() {
+		backend, resolveErr := resolver.ResolveExecutionBackend(ctx)
+		second <- result{backend: backend, err: resolveErr}
+	}()
+	select {
+	case early := <-second:
+		t.Fatalf("concurrent resolver did not join the active start: backend=%T err=%v", early.backend, early.err)
+	case <-time.After(4 * containerStartJoinPollInterval):
+	}
+	close(manager.release)
+
+	for index, channel := range []<-chan result{first, second} {
+		select {
+		case resolved := <-channel:
+			if resolved.err != nil || resolved.backend == nil {
+				t.Fatalf("resolver %d result: backend=%T err=%v", index+1, resolved.backend, resolved.err)
+			}
+		case <-ctx.Done():
+			t.Fatalf("resolver %d timed out: %v", index+1, ctx.Err())
+		}
+	}
+	if calls := manager.startCall.Load(); calls != 1 {
+		t.Fatalf("engine start calls = %d, want 1", calls)
+	}
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	if err != nil || record.RuntimeStatus != containerruntime.StatusRunning || record.LifecycleState != containerruntime.LifecycleIdle {
+		t.Fatalf("completed runtime = %#v, err=%v", record, err)
+	}
+}
+
+func TestConversationExecutionBackendResolverWaiterPropagatesPersistedStartFailure(t *testing.T) {
+	db, conversationID, manager := appStoppedContainerRuntime(t)
+	defer db.Close()
+	if _, err := db.BeginLifecycle(context.Background(), conversationID, containerruntime.LifecycleOperationStart); err != nil {
+		t.Fatal(err)
+	}
+	resolver := &conversationExecutionBackendResolver{db: db}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	result := make(chan error, 1)
+	go func() {
+		_, waitErr := resolver.waitForContainerStart(ctx, conversationID)
+		result <- waitErr
+	}()
+	time.Sleep(2 * containerStartJoinPollInterval)
+	if _, err := db.FailLifecycle(context.Background(), conversationID, containerruntime.LifecycleOperationStart, containerruntime.LifecycleFailure{
+		Message:       "engine start exploded",
+		RuntimeStatus: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case waitErr := <-result:
+		if waitErr == nil || !strings.Contains(waitErr.Error(), "engine start exploded") {
+			t.Fatalf("waiter failure = %v", waitErr)
+		}
+	case <-ctx.Done():
+		t.Fatalf("waiter timed out: %v", ctx.Err())
+	}
+	if calls := manager.startCall.Load(); calls != 0 {
+		t.Fatalf("waiter called the engine %d times", calls)
+	}
+	record, err := db.GetContainerInitialization(context.Background(), conversationID)
+	if err != nil || record.LifecycleOperation != containerruntime.LifecycleOperationStart || record.LifecycleState != containerruntime.LifecycleFailed || !strings.Contains(record.LifecycleError, "engine start exploded") {
+		t.Fatalf("failed runtime = %#v, err=%v", record, err)
+	}
+}
+
 func TestConversationExecutionBackendResolverFailsClosedWithoutBoundarySnapshot(t *testing.T) {
 	db, err := database.NewDB(filepath.Join(t.TempDir(), "execution-backend-no-boundary.db"), zap.NewNop())
 	if err != nil {
@@ -190,5 +307,46 @@ func appExecutionSpec(conversationID string) containerruntime.RuntimeSpec {
 			NetworkMode: containerruntime.NetworkNone, SeccompProfile: "default", TmpfsBytes: 64 << 20,
 		},
 		Workspace: containerruntime.WorkspaceSpec{MountPath: "/workspace"},
+	}
+}
+
+func appStoppedContainerRuntime(t *testing.T) (*database.DB, string, *appBlockingStartManager) {
+	t.Helper()
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "execution-backend-concurrent.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := db.CreateConversation("container", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	spec := appExecutionSpec(conversation.ID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+		db.Close()
+		t.Fatalf("claim: claimed=%v err=%v", claimed, err)
+	}
+	fake := containertest.NewFakeManager(containerruntime.EngineInfo{Available: true})
+	runtime, err := fake.Create(context.Background(), spec)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Complete(context.Background(), conversation.ID, runtime); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	return db, conversation.ID, &appBlockingStartManager{
+		FakeManager: fake,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
 	}
 }

@@ -55,6 +55,7 @@ type fakeDockerCreationAPI struct {
 	killOpts                mobyclient.ContainerKillOptions
 	killErr                 error
 	execCreateOpts          mobyclient.ExecCreateOptions
+	execCreateOptsHistory   []mobyclient.ExecCreateOptions
 	execContainerID         string
 	execID                  string
 	execStdout              string
@@ -98,13 +99,41 @@ func (f *fakeDockerCreationAPI) ContainerCreate(_ context.Context, options mobyc
 		result, err := f.createResults[options.Name], f.createErrs[options.Name]
 		if err == nil {
 			f.applyCreatedHealthcheck(result.ID, options.Config)
+			f.applyCreatedNetworking(result.ID, options.NetworkingConfig)
 		}
 		return result, err
 	}
 	if f.createErr == nil {
 		f.applyCreatedHealthcheck(f.createResult.ID, options.Config)
+		f.applyCreatedNetworking(f.createResult.ID, options.NetworkingConfig)
 	}
 	return f.createResult, f.createErr
+}
+
+func (f *fakeDockerCreationAPI) applyCreatedNetworking(id string, config *mobynetwork.NetworkingConfig) {
+	if id == "" || config == nil {
+		return
+	}
+	apply := func(result *mobyclient.ContainerInspectResult) {
+		if result.Container.NetworkSettings == nil {
+			return
+		}
+		for name, endpoint := range result.Container.NetworkSettings.Networks {
+			desired := config.EndpointsConfig[name]
+			if endpoint != nil && desired != nil {
+				endpoint.GwPriority = desired.GwPriority
+			}
+		}
+	}
+	if f.containerResult.Container.ID == id {
+		apply(&f.containerResult)
+	}
+	for key, result := range f.containerResults {
+		if result.Container.ID == id {
+			apply(&result)
+			f.containerResults[key] = result
+		}
+	}
 }
 
 func (f *fakeDockerCreationAPI) applyCreatedHealthcheck(id string, config *mobycontainer.Config) {
@@ -183,7 +212,7 @@ func (f *fakeDockerCreationAPI) NetworkCreate(_ context.Context, name string, op
 	enableIPv4 := options.EnableIPv4 == nil || *options.EnableIPv4
 	enableIPv6 := options.EnableIPv6 != nil && *options.EnableIPv6
 	subnet := netip.MustParsePrefix("172.31.0.0/16")
-	if options.Internal {
+	if options.Labels[LabelResourceKind] == ResourceKindConversationNetwork {
 		subnet = netip.MustParsePrefix("172.30.0.0/16")
 	}
 	f.networks[name] = mobynetwork.Inspect{Network: mobynetwork.Network{
@@ -380,6 +409,7 @@ func (f *fakeDockerCreationAPI) ContainerStatPath(_ context.Context, _ string, o
 func (f *fakeDockerCreationAPI) ExecCreate(_ context.Context, containerID string, options mobyclient.ExecCreateOptions) (mobyclient.ExecCreateResult, error) {
 	f.execContainerID = containerID
 	f.execCreateOpts = options
+	f.execCreateOptsHistory = append(f.execCreateOptsHistory, options)
 	if f.execID == "" {
 		f.execID = "exec-1"
 	}
@@ -503,7 +533,7 @@ func TestDockerManagerCreateUsesOwnedInternalConversationNetwork(t *testing.T) {
 		t.Fatalf("runtime/network create = %#v / %d / %q", runtime, api.networkCreateCalls, api.networkCreateName)
 	}
 	options := api.networkCreateOpts
-	if options.Driver != "bridge" || options.Scope != "local" || !options.Internal || options.Attachable || options.Ingress || options.EnableIPv4 == nil || !*options.EnableIPv4 || options.EnableIPv6 == nil || *options.EnableIPv6 || len(options.Options) != 1 || options.Options[conversationNetworkInhibitIPv4] != "true" {
+	if options.Driver != "bridge" || options.Scope != "local" || options.Internal || options.Attachable || options.Ingress || options.EnableIPv4 == nil || !*options.EnableIPv4 || options.EnableIPv6 == nil || *options.EnableIPv6 || !validConversationNetworkOptions(options.Options) {
 		t.Fatalf("network isolation options = %#v", options)
 	}
 	if options.Labels[LabelOwner] != ownerID || options.Labels[LabelResourceKind] != ResourceKindConversationNetwork || options.Labels[LabelRuntimeID] != string(spec.ID) || options.Labels[LabelConversationID] != spec.ConversationID || options.Labels[LabelNetworkMode] != string(NetworkInternal) || options.Labels[LabelSpecDigest] != RuntimeSpecDigest(spec) {
@@ -551,8 +581,10 @@ func TestDockerManagerCreateRejectsConversationNetworkGatewayOptionDrift(t *test
 		options map[string]string
 	}{
 		{name: "missing"},
-		{name: "disabled", options: map[string]string{conversationNetworkInhibitIPv4: "false"}},
-		{name: "unexpected extra", options: map[string]string{conversationNetworkInhibitIPv4: "true", "unexpected": "true"}},
+		{name: "inhibit disabled", options: map[string]string{conversationNetworkInhibitIPv4: "false", conversationNetworkIPMasquerade: "false", conversationNetworkGatewayModeIPv4: conversationNetworkGatewayModeValue}},
+		{name: "masquerade enabled", options: map[string]string{conversationNetworkInhibitIPv4: "true", conversationNetworkIPMasquerade: "true", conversationNetworkGatewayModeIPv4: conversationNetworkGatewayModeValue}},
+		{name: "protected gateway mode", options: map[string]string{conversationNetworkInhibitIPv4: "true", conversationNetworkIPMasquerade: "false", conversationNetworkGatewayModeIPv4: "nat"}},
+		{name: "unexpected extra", options: map[string]string{conversationNetworkInhibitIPv4: "true", conversationNetworkIPMasquerade: "false", conversationNetworkGatewayModeIPv4: conversationNetworkGatewayModeValue, "unexpected": "true"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			spec := creationSpec()
@@ -562,7 +594,7 @@ func TestDockerManagerCreateRejectsConversationNetworkGatewayOptionDrift(t *test
 			name := ConversationNetworkName(spec.ID)
 			api.networks = map[string]mobynetwork.Inspect{name: {Network: mobynetwork.Network{
 				ID: "provider-network-1", Name: name, Created: time.Now().UTC(), Scope: "local", Driver: "bridge",
-				EnableIPv4: true, Internal: true, Options: test.options, Labels: conversationNetworkLabels(ownerID, spec),
+				EnableIPv4: true, Internal: false, Options: test.options, Labels: conversationNetworkLabels(ownerID, spec),
 			}}}
 			manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
 			if err != nil {
@@ -583,7 +615,7 @@ func TestDockerManagerCreateReusesEmptyOwnedConversationNetwork(t *testing.T) {
 	name := ConversationNetworkName(spec.ID)
 	api.networks = map[string]mobynetwork.Inspect{name: {Network: mobynetwork.Network{
 		ID: "provider-network-1", Name: name, Created: time.Now().UTC(), Scope: "local", Driver: "bridge",
-		EnableIPv4: true, Internal: true, Options: conversationNetworkOptions(), Labels: conversationNetworkLabels(ownerID, spec),
+		EnableIPv4: true, Internal: false, Options: conversationNetworkOptions(), Labels: conversationNetworkLabels(ownerID, spec),
 	}}}
 	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: ownerID})
 	if err != nil {

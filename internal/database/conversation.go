@@ -1781,17 +1781,21 @@ func (db *DB) GetProcessDetailByID(id string) (*ProcessDetail, error) {
 
 // ProcessDetailsSummary 过程详情摘要（用于折叠态展示，避免全量加载）。
 type ProcessDetailsSummary struct {
-	Total           int                           `json:"total"`
-	IterationCount  int                           `json:"iterationCount"`
-	MaxIteration    int                           `json:"maxIteration"`
-	ToolCount       int                           `json:"toolCount"`
-	ToolExecutions  []ProcessDetailsToolExecution `json:"toolExecutions,omitempty"`
-	MCPExecutionIDs []string                      `json:"mcpExecutionIds,omitempty"`
-	StartedAt       *time.Time                    `json:"startedAt,omitempty"`
-	CompletedAt     *time.Time                    `json:"completedAt,omitempty"`
-	DurationMs      int64                         `json:"durationMs"`
-	ElapsedMs       *int64                        `json:"elapsedMs,omitempty"`
-	Status          string                        `json:"status,omitempty"`
+	Total                     int                           `json:"total"`
+	IterationCount            int                           `json:"iterationCount"`
+	MaxIteration              int                           `json:"maxIteration"`
+	ToolCount                 int                           `json:"toolCount"`
+	ToolExecutions            []ProcessDetailsToolExecution `json:"toolExecutions,omitempty"`
+	MCPExecutionIDs           []string                      `json:"mcpExecutionIds,omitempty"`
+	StartedAt                 *time.Time                    `json:"startedAt,omitempty"`
+	CompletedAt               *time.Time                    `json:"completedAt,omitempty"`
+	DurationMs                int64                         `json:"durationMs"`
+	ElapsedMs                 *int64                        `json:"elapsedMs,omitempty"`
+	ContainerInitializationMs *int64                        `json:"containerInitializationMs,omitempty"`
+	ExecutionStartedAt        *time.Time                    `json:"executionStartedAt,omitempty"`
+	ExecutionDurationMs       *int64                        `json:"executionDurationMs,omitempty"`
+	ExecutionElapsedMs        *int64                        `json:"executionElapsedMs,omitempty"`
+	Status                    string                        `json:"status,omitempty"`
 }
 
 type ProcessDetailsToolExecution struct {
@@ -1871,6 +1875,69 @@ LIMIT 1`, messageID).Scan(&terminalEvent, &terminalCreatedAt)
 	}
 	if total == 0 {
 		return summary, nil
+	}
+
+	// Container preparation is a separate user-visible phase. Keep the original
+	// turn timing for compatibility, but expose an execution-only clock anchored
+	// at the first durable ready event so refreshes do not fold startup time back
+	// into the normal conversation duration.
+	timingRows, timingErr := db.Query(`
+SELECT data, created_at
+FROM process_details
+WHERE message_id = ? AND event_type = 'container_initialization'
+ORDER BY created_at ASC, rowid ASC`, messageID)
+	if timingErr != nil {
+		return nil, fmt.Errorf("查询容器初始化耗时失败: %w", timingErr)
+	}
+	var initializationStartedAt *time.Time
+	for timingRows.Next() {
+		var rawData, rawCreatedAt string
+		if scanErr := timingRows.Scan(&rawData, &rawCreatedAt); scanErr != nil {
+			_ = timingRows.Close()
+			return nil, fmt.Errorf("读取容器初始化耗时失败: %w", scanErr)
+		}
+		var payload struct {
+			State string `json:"state"`
+		}
+		if json.Unmarshal([]byte(rawData), &payload) != nil {
+			continue
+		}
+		createdAt := parseDBTime(rawCreatedAt)
+		if createdAt.IsZero() {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(payload.State)) {
+		case "initializing":
+			if initializationStartedAt == nil {
+				copy := createdAt
+				initializationStartedAt = &copy
+			}
+		case "ready":
+			if initializationStartedAt != nil && summary.ExecutionStartedAt == nil && !createdAt.Before(*initializationStartedAt) {
+				copy := createdAt
+				summary.ExecutionStartedAt = &copy
+				duration := createdAt.Sub(*initializationStartedAt).Milliseconds()
+				summary.ContainerInitializationMs = &duration
+			}
+		}
+	}
+	if closeErr := timingRows.Close(); closeErr != nil {
+		return nil, fmt.Errorf("关闭容器初始化耗时结果失败: %w", closeErr)
+	}
+	if rowsErr := timingRows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("遍历容器初始化耗时失败: %w", rowsErr)
+	}
+	if summary.ExecutionStartedAt != nil {
+		if summary.CompletedAt != nil && !summary.CompletedAt.Before(*summary.ExecutionStartedAt) {
+			duration := summary.CompletedAt.Sub(*summary.ExecutionStartedAt).Milliseconds()
+			summary.ExecutionDurationMs = &duration
+		} else if summary.Status == "running" {
+			elapsed := time.Since(*summary.ExecutionStartedAt).Milliseconds()
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			summary.ExecutionElapsedMs = &elapsed
+		}
 	}
 
 	if err := db.QueryRow(

@@ -4,11 +4,17 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
+)
+
+const (
+	containerStartJoinPollInterval = 25 * time.Millisecond
+	containerStartJoinMaxWait      = 30 * time.Second
 )
 
 // conversationExecutionBackendResolver binds command execution to durable
@@ -97,13 +103,29 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	if snapshot.RuntimeGeneration != record.RuntimeGeneration {
 		return nil, fmt.Errorf("boundary snapshot/runtime generation mismatch for conversation %s", conversationID)
 	}
-	if record.RuntimeStatus == containerruntime.StatusStopped {
+	if containerStartInProgress(record) {
+		record, err = r.waitForContainerStart(ctx, conversationID)
+		if err != nil {
+			return nil, err
+		}
+	} else if record.RuntimeStatus == containerruntime.StatusStopped {
 		started, startErr := r.lifecycle.Start(ctx, conversationID)
 		if startErr != nil {
-			// A concurrent tool may have won the durable lifecycle CAS. Reload once
-			// and accept only an observed running runtime; otherwise fail closed.
 			observed, getErr := r.db.GetContainerInitialization(ctx, conversationID)
-			if getErr != nil || observed.RuntimeStatus != containerruntime.StatusRunning || observed.LifecycleState != containerruntime.LifecycleIdle {
+			if getErr != nil {
+				return nil, fmt.Errorf("start container runtime for conversation %s: %w (reload lifecycle state: %v)", conversationID, startErr, getErr)
+			}
+			switch {
+			case containerStartInProgress(observed):
+				observed, err = r.waitForContainerStart(ctx, conversationID)
+				if err != nil {
+					return nil, err
+				}
+			case observed.RuntimeStatus == containerruntime.StatusRunning && observed.LifecycleState == containerruntime.LifecycleIdle:
+				// A concurrent caller completed the same durable start before the reload.
+			case observed.LifecycleOperation == containerruntime.LifecycleOperationStart && observed.LifecycleState == containerruntime.LifecycleFailed:
+				return nil, containerStartFailedError(observed)
+			default:
 				return nil, fmt.Errorf("start container runtime for conversation %s: %w", conversationID, startErr)
 			}
 			record = observed
@@ -119,4 +141,48 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 		return nil, fmt.Errorf("bind container execution backend for conversation %s: %w", conversationID, err)
 	}
 	return backend, nil
+}
+
+func containerStartInProgress(record containerruntime.InitializationRecord) bool {
+	return record.LifecycleOperation == containerruntime.LifecycleOperationStart &&
+		record.LifecycleState == containerruntime.LifecycleInProgress
+}
+
+func containerStartFailedError(record containerruntime.InitializationRecord) error {
+	message := strings.TrimSpace(record.LifecycleError)
+	if message == "" {
+		message = strings.TrimSpace(record.LastError)
+	}
+	if message == "" {
+		message = "unknown container engine error"
+	}
+	return fmt.Errorf("container runtime start for conversation %s failed: %s", record.ConversationID, message)
+}
+
+func (r *conversationExecutionBackendResolver) waitForContainerStart(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, containerStartJoinMaxWait)
+	defer cancel()
+	ticker := time.NewTicker(containerStartJoinPollInterval)
+	defer ticker.Stop()
+
+	for {
+		record, err := r.db.GetContainerInitialization(waitCtx, conversationID)
+		if err != nil {
+			return record, fmt.Errorf("wait for container runtime start for conversation %s: %w", conversationID, err)
+		}
+		switch {
+		case record.RuntimeStatus == containerruntime.StatusRunning && record.LifecycleState == containerruntime.LifecycleIdle:
+			return record, nil
+		case record.LifecycleOperation == containerruntime.LifecycleOperationStart && record.LifecycleState == containerruntime.LifecycleFailed:
+			return record, containerStartFailedError(record)
+		case !containerStartInProgress(record):
+			return record, fmt.Errorf("container runtime start for conversation %s changed to %s/%s before completion", conversationID, record.LifecycleOperation, record.LifecycleState)
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return record, fmt.Errorf("wait for container runtime start for conversation %s: %w", conversationID, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
 }

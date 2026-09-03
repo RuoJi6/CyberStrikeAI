@@ -15,14 +15,29 @@ const styles = read('web', 'static', 'css', 'style.css');
 const zh = JSON.parse(read('web', 'static', 'i18n', 'zh-CN.json'));
 const en = JSON.parse(read('web', 'static', 'i18n', 'en-US.json'));
 
-function containerStatusHarness(apiFetch, conversationId = 'conversation-a') {
+function containerStatusHarness(apiFetch, conversationId = 'conversation-a', executionStatus = '') {
     const listeners = new Map();
     const timers = [];
+    const statefulElement = (extra = {}) => Object.assign({
+        hidden: false,
+        disabled: false,
+        dataset: {},
+        className: '',
+        textContent: '',
+        title: '',
+        setAttribute() {},
+        replaceChildren() {},
+        appendChild() {},
+        querySelector() { return null; },
+    }, extra);
     const elements = {
         'runtime-mode-select': { value: 'container' },
-        'chat-container-workspace-btn': { hidden: false, disabled: false, setAttribute() {} },
-        'chat-container-runtime-state': { dataset: {}, className: '', title: '' },
-        'chat-container-runtime-state-label': { textContent: '' },
+        'chat-container-workspace-btn': statefulElement(),
+        'chat-container-workspace-panel': statefulElement({ hidden: true }),
+        'chat-container-terminal-open': statefulElement(),
+        'chat-container-terminal-status': statefulElement(),
+        'chat-container-runtime-state': statefulElement(),
+        'chat-container-runtime-state-label': statefulElement(),
     };
     const classList = { add() {}, remove() {}, toggle() {} };
     const document = {
@@ -35,6 +50,7 @@ function containerStatusHarness(apiFetch, conversationId = 'conversation-a') {
     const window = {
         currentConversationId: conversationId,
         apiFetch,
+        getConversationExecutionStatus() { return executionStatus; },
         addEventListener(type, fn) { listeners.set(type, fn); },
         setTimeout(fn, delay) { timers.push({ fn, delay }); return timers.length; },
         clearTimeout() {},
@@ -124,6 +140,97 @@ test('未知状态不会显示为启动中，首次状态失败可自动恢复',
     assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'running');
 });
 
+test('活动任务初始化时短暂的 stopped 状态不会终止轮询且无需刷新即可转为运行中', async () => {
+    let calls = 0;
+    const harness = containerStatusHarness(async () => {
+        calls += 1;
+        if (calls === 1) {
+            return {
+                ok: true,
+                async json() {
+                    return {
+                        status: 'created',
+                        readinessStatus: 'ready',
+                        runtimeStatus: 'stopped',
+                        lifecycleOperation: 'start',
+                        lifecycleState: 'in_progress',
+                        observationError: 'runtime_drift',
+                        observation: { agent: { status: 'stopped' } },
+                    };
+                },
+            };
+        }
+        return {
+            ok: true,
+            async json() {
+                return {
+                    status: 'created',
+                    readinessStatus: 'ready',
+                    runtimeStatus: 'running',
+                    lifecycleOperation: 'start',
+                    lifecycleState: 'idle',
+                    observation: { agent: { status: 'running' } },
+                };
+            },
+        };
+    }, 'conversation-a', 'initializing');
+
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'starting');
+    assert.equal(harness.timers.length, 1);
+
+    await harness.timers.shift().fn();
+    await flushStatusPromises();
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'running');
+    assert.equal(calls, 2);
+});
+
+test('容器就绪事件在运行状态落库前保持启动中并继续自动同步', async () => {
+    let calls = 0;
+    const harness = containerStatusHarness(() => {
+        calls += 1;
+        return new Promise(() => {});
+    }, 'conversation-a', 'running');
+    harness.listeners.get('conversation-container-state-changed')({
+        detail: { conversationId: 'conversation-a', state: 'ready', runtimeStatus: 'stopped' },
+    });
+    assert.equal(harness.elements['chat-container-runtime-state'].dataset.state, 'starting');
+    assert.equal(calls, 2);
+});
+
+test('工作区抽屉打开时会随运行状态刷新 Shell 可用性', async () => {
+    let workspaceCalls = 0;
+    const harness = containerStatusHarness(async (url) => {
+        if (url.includes('/container/workspace')) {
+            workspaceCalls += 1;
+            const running = workspaceCalls > 1;
+            return {
+                ok: true,
+                async json() {
+                    return {
+                        runtimeStatus: running ? 'running' : 'stopped',
+                        interactiveAvailable: running,
+                    };
+                },
+            };
+        }
+        return { ok: true, async json() { return { status: 'created', runtimeStatus: 'stopped' }; } };
+    }, 'conversation-a', 'running');
+
+    await flushStatusPromises();
+    await harness.window.toggleChatContainerWorkspacePanel();
+    assert.equal(workspaceCalls, 1);
+    assert.equal(harness.elements['chat-container-terminal-open'].disabled, true);
+
+    harness.listeners.get('conversation-container-state-changed')({
+        detail: { conversationId: 'conversation-a', state: 'ready', runtimeStatus: 'running' },
+    });
+    await flushStatusPromises();
+    assert.equal(workspaceCalls, 2);
+    assert.equal(harness.elements['chat-container-terminal-open'].disabled, false);
+    assert.equal(harness.elements['chat-container-terminal-status'].dataset.tone, 'success');
+});
+
 test('快速切换对话时旧状态响应不能覆盖当前对话', async () => {
     const pending = new Map();
     const harness = containerStatusHarness((url) => new Promise((resolve) => {
@@ -149,7 +256,7 @@ test('系统设置终端与容器终端复用同一 xterm 会话和多标签代�
     assert.match(terminal, /event\.key !== 'Tab'/);
     assert.match(terminal, /sendToWS\(event\.shiftKey \? '\\x1b\[Z' : '\\t'\)/);
     assert.match(template, /terminal\.js\?v=20260828-3/);
-    assert.match(template, /container-terminal\.js\?v=20260901-1/);
+    assert.match(template, /container-terminal\.js\?v=20260903-1/);
 });
 
 test('容器终端只连接会话容器端点且不会回退宿主机终端', () => {
@@ -221,7 +328,7 @@ test('容器终端中英文文案和缓存版本完整', () => {
         for (const key of managementKeys) assert.equal(typeof locale.containerManagement[key], 'string', key);
     }
     assert.match(template, /style\.css\?v=20260901-3/);
-	assert.match(template, /chat\.js\?v=20260901-2/);
-	assert.match(template, /container-terminal\.js\?v=20260901-1/);
+	assert.match(template, /chat\.js\?v=20260902-1/);
+	assert.match(template, /container-terminal\.js\?v=20260903-1/);
 	assert.match(template, /container-management\.js\?v=20260901-2/);
 });

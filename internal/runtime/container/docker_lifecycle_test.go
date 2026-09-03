@@ -3,6 +3,7 @@ package container
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,31 @@ func TestDockerManagerLifecycleStartStopAndDelete(t *testing.T) {
 	}
 	if api.removedID != "provider-container-1" || api.removeOpts.Force || api.removeOpts.RemoveVolumes {
 		t.Fatalf("delete target/options = %q / %#v", api.removedID, api.removeOpts)
+	}
+}
+
+func TestDockerManagerStartWaitsForWorkspaceInitialization(t *testing.T) {
+	spec := creationSpec()
+	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")
+	api.containerResult.Container.NetworkSettings = &mobycontainer.NetworkSettings{
+		Networks: map[string]*mobynetwork.EndpointSettings{"none": {}},
+	}
+	api.execExitCode = 76
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := manager.Start(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeNotReady) {
+		t.Fatalf("start readiness error = %v", err)
+	}
+	if api.stoppedID != "provider-container-1" {
+		t.Fatalf("unready runtime rollback target = %q", api.stoppedID)
+	}
+	if !strings.Contains(runtimeWorkspaceInitScript, runtimeReadyFile) ||
+		!strings.Contains(runtimeWorkspaceReadyWaitScript, "/proc/1/stat") ||
+		!strings.Contains(runtimeWorkspaceReadyWaitScript, runtimeReadyFile) {
+		t.Fatal("runtime workspace readiness scripts do not bind the marker to the current PID 1 start")
 	}
 }
 

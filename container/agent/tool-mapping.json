@@ -236,11 +236,11 @@
     },
     {
       "yaml_name": "http-framework-test",
-      "probe_bin": "python3",
-      "install_method": "runtime_builtin",
-      "package": "python3",
+      "probe_bin": "httpx",
+      "install_method": "pip",
+      "package": "httpx",
       "category": "runtime",
-      "probe_kind": "bin"
+      "probe_kind": "python_import"
     },
     {
       "yaml_name": "hydra",

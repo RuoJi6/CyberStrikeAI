@@ -55,7 +55,7 @@ CyberStrikeAI 控制面
 
 强制要求：
 
-1. Agent 容器只连接对话级 `--internal` 网络，不连接 Docker 默认 `bridge`。
+1. Agent 容器只连接对话级受管 bridge，不连接 Docker 默认 `bridge`。该网络固定使用 `inhibit_ipv4=true`、`enable_ip_masquerade=false` 与 `gateway_mode_ipv4=nat-unprotected`：取消宿主桥地址和直连出口，同时允许原始 TCP/UDP/ICMP 按 Agent 默认路由送到同网段出站网关。
 2. 只有出站网关同时连接对话内部网络和出口网络。
 3. 不依赖 `HTTP_PROXY`/`HTTPS_PROXY` 环境变量实现安全边界；环境变量只是客户端兼容性配置，Docker 网络路由才是强制边界。
 4. 不挂载 `/var/run/docker.sock`，不使用 `--privileged`、`--network host` 或任意宿主机 bind mount。
