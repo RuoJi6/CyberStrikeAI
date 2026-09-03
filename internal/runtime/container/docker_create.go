@@ -579,6 +579,48 @@ func (m *DockerManager) verifyWorkspaceVolume(spec RuntimeSpec, actual mobyvolum
 	return nil
 }
 
+// workspaceVolumeDigestForRebuild returns the immutable digest already attached
+// to an owned dedicated workspace. A runtime rebuild may legitimately change
+// fields that are unrelated to the workspace (for example the boundary
+// snapshot or attribution generation), while Docker volume labels cannot be
+// updated. Re-authorizing the exact observed digest here keeps consecutive
+// rebuilds recoverable without weakening the ordinary Create path: every other
+// ownership and identity label must still match the target specification.
+func (m *DockerManager) workspaceVolumeDigestForRebuild(ctx context.Context, spec RuntimeSpec) (string, error) {
+	if !spec.Workspace.Persistent || spec.Workspace.Shared {
+		return "", nil
+	}
+	if m.volumeAPI == nil {
+		return "", fmt.Errorf("%w: engine client does not support named volumes", ErrEngineUnavailable)
+	}
+	expected := workspaceManagedResource(spec)
+	result, err := m.volumeAPI.VolumeInspect(ctx, expected.Name, mobyclient.VolumeInspectOptions{})
+	if containerderrdefs.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace volume %s for rebuild: %w", expected.Name, err)
+	}
+	actual := result.Volume
+	observed, err := m.resourceFromLabels(ResourceKindWorkspaceVolume, actual.Name, actual.Name, actual.Labels, parseVolumeCreatedAt(actual))
+	if err != nil || !sameManagedResource(expected, observed) {
+		return "", fmt.Errorf("%w: workspace volume ownership mismatch", ErrRuntimeStateConflict)
+	}
+	for key, value := range workspaceVolumeLabels(m.ownerID, spec) {
+		if key == LabelSpecDigest {
+			continue
+		}
+		if actual.Labels[key] != value {
+			return "", fmt.Errorf("%w: workspace volume label %s mismatch", ErrRuntimeStateConflict, key)
+		}
+	}
+	digest := strings.TrimSpace(actual.Labels[LabelSpecDigest])
+	if !sha256DigestPattern.MatchString(digest) {
+		return "", fmt.Errorf("%w: workspace volume label %s mismatch", ErrRuntimeStateConflict, LabelSpecDigest)
+	}
+	return digest, nil
+}
+
 func workspaceVolumeSpecDigestMatches(spec RuntimeSpec, actual, authorized string) bool {
 	if actual == RuntimeSpecDigest(spec) {
 		return true

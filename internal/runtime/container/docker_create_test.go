@@ -751,6 +751,50 @@ func TestWorkspaceVolumeDigestAcceptsOnlyOtherwiseIdenticalPreSnapshotGatewaySpe
 	}
 }
 
+func TestWorkspaceVolumeDigestForRebuildReauthorizesExactOwnedDigest(t *testing.T) {
+	target := gatewayCreationSpec()
+	target.Workspace.Persistent = true
+	target.Workspace.VolumeName = WorkspaceVolumeName(target.ID)
+	previous := target
+	previousGateway := *previous.EgressGateway
+	previousGateway.AttributionRuntimeGeneration = 1
+	previous.EgressGateway = &previousGateway
+	targetGateway := *target.EgressGateway
+	targetGateway.AttributionRuntimeGeneration = 3
+	target.EgressGateway = &targetGateway
+
+	api := newSuccessfulCreationAPI(target, "instance-01", "provider-container-1", "")
+	api.volumes = map[string]mobyvolume.Volume{
+		target.Workspace.VolumeName: {
+			Name: target.Workspace.VolumeName, Driver: "local",
+			Labels: workspaceVolumeLabels("instance-01", previous),
+		},
+	}
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := manager.workspaceVolumeDigestForRebuild(context.Background(), target)
+	if err != nil {
+		t.Fatalf("authorize owned workspace digest: %v", err)
+	}
+	if digest != RuntimeSpecDigest(previous) {
+		t.Fatalf("authorized digest = %q, want %q", digest, RuntimeSpecDigest(previous))
+	}
+
+	api.volumes[target.Workspace.VolumeName].Labels[LabelOwner] = "other-owner"
+	if _, err := manager.workspaceVolumeDigestForRebuild(context.Background(), target); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("owner mismatch error = %v", err)
+	}
+	invalid := api.volumes[target.Workspace.VolumeName]
+	invalid.Labels = workspaceVolumeLabels("instance-01", previous)
+	invalid.Labels[LabelSpecDigest] = "not-a-digest"
+	api.volumes[target.Workspace.VolumeName] = invalid
+	if _, err := manager.workspaceVolumeDigestForRebuild(context.Background(), target); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("invalid digest error = %v", err)
+	}
+}
+
 func TestDockerManagerCreateReusesOnlyExplicitlyAuthorizedPreviousWorkspaceDigest(t *testing.T) {
 	spec := creationSpec()
 	spec.Workspace.Persistent = true

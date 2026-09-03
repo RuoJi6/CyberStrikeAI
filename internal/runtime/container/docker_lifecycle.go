@@ -340,6 +340,21 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 	if options.Spec.ID != id {
 		return Runtime{}, invalidSpec("rebuild runtime identity cannot change")
 	}
+	authorizedWorkspaceSpecDigest := options.AuthorizedWorkspaceSpecDigest
+	if options.Spec.Workspace.Persistent && !options.Spec.Workspace.Shared && !options.RemoveWorkspace {
+		operationCtx, cancel, contextErr := m.operationContext(ctx)
+		if contextErr != nil {
+			return Runtime{}, contextErr
+		}
+		observedDigest, authorizationErr := m.workspaceVolumeDigestForRebuild(operationCtx, options.Spec)
+		cancel()
+		if authorizationErr != nil {
+			return Runtime{}, authorizationErr
+		}
+		if observedDigest != "" {
+			authorizedWorkspaceSpecDigest = observedDigest
+		}
+	}
 	current, err := m.Inspect(ctx, id)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Runtime{}, err
@@ -429,7 +444,7 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 			return Runtime{}, fmt.Errorf("remove workspace volume for rebuild %s: %w", id, removeErr)
 		}
 	}
-	rebuilt, createErr := m.create(ctx, options.Spec, options.AuthorizedWorkspaceSpecDigest)
+	rebuilt, createErr := m.create(ctx, options.Spec, authorizedWorkspaceSpecDigest)
 	if createErr != nil {
 		return Runtime{}, fmt.Errorf("rebuild runtime %s after removing the stopped provider: %w", id, createErr)
 	}
