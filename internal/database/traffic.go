@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 
 	"github.com/google/uuid"
@@ -19,11 +20,19 @@ import (
 const createTrafficTransactionsTable = `
 CREATE TABLE IF NOT EXISTS traffic_transactions (
 	id TEXT PRIMARY KEY,
+	event_id TEXT NOT NULL DEFAULT '',
 	conversation_id TEXT,
 	project_id TEXT,
 	agent_id TEXT NOT NULL DEFAULT '',
+	tool_name TEXT NOT NULL DEFAULT '',
 	execution_id TEXT NOT NULL DEFAULT '',
 	tool_call_id TEXT NOT NULL DEFAULT '',
+	activity_scope_id TEXT NOT NULL DEFAULT '',
+	runtime_generation INTEGER NOT NULL DEFAULT 0,
+	runtime_instance_id TEXT NOT NULL DEFAULT '',
+	attribution_status TEXT NOT NULL DEFAULT 'legacy_unattributed',
+	declared_activity_kind TEXT NOT NULL DEFAULT 'unknown',
+	observed_activity_kind TEXT NOT NULL DEFAULT 'single',
 	runtime_mode TEXT NOT NULL DEFAULT 'unknown' CHECK (runtime_mode IN ('host', 'container', 'unknown')),
 	capture_coverage TEXT NOT NULL DEFAULT 'unknown' CHECK (capture_coverage IN ('enforced', 'best_effort', 'unknown')),
 	scheme TEXT NOT NULL CHECK (scheme IN ('http', 'https')),
@@ -94,10 +103,32 @@ func (db *DB) initTrafficTables() error {
 		createTrafficTransactionsTable,
 		createTrafficMessagesTable,
 		createVulnerabilityTrafficEvidenceTable,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			return fmt.Errorf("initialize traffic evidence schema: %w", err)
+		}
+	}
+	for _, column := range []struct{ name, statement string }{
+		{"event_id", `ALTER TABLE traffic_transactions ADD COLUMN event_id TEXT NOT NULL DEFAULT ''`},
+		{"tool_name", `ALTER TABLE traffic_transactions ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''`},
+		{"activity_scope_id", `ALTER TABLE traffic_transactions ADD COLUMN activity_scope_id TEXT NOT NULL DEFAULT ''`},
+		{"runtime_generation", `ALTER TABLE traffic_transactions ADD COLUMN runtime_generation INTEGER NOT NULL DEFAULT 0`},
+		{"runtime_instance_id", `ALTER TABLE traffic_transactions ADD COLUMN runtime_instance_id TEXT NOT NULL DEFAULT ''`},
+		{"attribution_status", `ALTER TABLE traffic_transactions ADD COLUMN attribution_status TEXT NOT NULL DEFAULT 'legacy_unattributed'`},
+		{"declared_activity_kind", `ALTER TABLE traffic_transactions ADD COLUMN declared_activity_kind TEXT NOT NULL DEFAULT 'unknown'`},
+		{"observed_activity_kind", `ALTER TABLE traffic_transactions ADD COLUMN observed_activity_kind TEXT NOT NULL DEFAULT 'single'`},
+	} {
+		if err := db.addColumnIfMissing("traffic_transactions", column.name, column.statement); err != nil {
+			return fmt.Errorf("initialize traffic provenance column %s: %w", column.name, err)
+		}
+	}
+	for _, statement := range []string{
 		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_conversation_time ON traffic_transactions(conversation_id, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_project_time ON traffic_transactions(project_id, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_target_time ON traffic_transactions(host, port, started_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_execution ON traffic_transactions(execution_id, tool_call_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_event ON traffic_transactions(event_id) WHERE event_id <> ''`,
+		`CREATE INDEX IF NOT EXISTS idx_traffic_transactions_provenance ON traffic_transactions(runtime_mode, attribution_status, agent_id, tool_name, execution_id, activity_scope_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_traffic_messages_transaction_stage ON traffic_messages(transaction_id, stage)`,
 		`CREATE INDEX IF NOT EXISTS idx_vulnerability_traffic_evidence_transaction ON vulnerability_traffic_evidence(traffic_transaction_id)`,
 	} {
@@ -109,19 +140,22 @@ func (db *DB) initTrafficTables() error {
 }
 
 type TrafficTransactionFilter struct {
-	ID             string
-	ConversationID string
-	ProjectID      string
-	ExecutionID    string
-	RuntimeMode    string
-	Scheme         string
-	Host           string
-	Method         string
-	Search         string
-	UserID         string
-	Scope          string
-	Limit          int
-	Offset         int
+	ID                string
+	ConversationID    string
+	ProjectID         string
+	ExecutionID       string
+	AgentID           string
+	ToolName          string
+	AttributionStatus string
+	RuntimeMode       string
+	Scheme            string
+	Host              string
+	Method            string
+	Search            string
+	UserID            string
+	Scope             string
+	Limit             int
+	Offset            int
 }
 
 type trafficTransactionScanner interface {
@@ -133,7 +167,8 @@ func scanTrafficTransaction(scanner trafficTransactionScanner) (traffic.Transact
 	var conversationID, projectID sql.NullString
 	var completedAt, aggregateFirstAt, aggregateLastAt sql.NullTime
 	err := scanner.Scan(
-		&item.ID, &conversationID, &projectID, &item.AgentID, &item.ExecutionID, &item.ToolCallID,
+		&item.ID, &item.EventID, &conversationID, &projectID, &item.AgentID, &item.ToolName, &item.ExecutionID, &item.ToolCallID, &item.ActivityScopeID,
+		&item.RuntimeGeneration, &item.RuntimeInstanceID, &item.AttributionStatus, &item.DeclaredActivityKind, &item.ObservedActivityKind,
 		&item.RuntimeMode, &item.CaptureCoverage, &item.Scheme, &item.Host, &item.Port, &item.Method, &item.Path,
 		&item.HTTPStatus, &item.StartedAt, &completedAt, &item.LatencyMS, &item.BytesUp, &item.BytesDown,
 		&item.BoundarySnapshotID, &item.RuleID, &item.UpstreamRouteID,
@@ -162,7 +197,8 @@ func scanTrafficTransaction(scanner trafficTransactionScanner) (traffic.Transact
 }
 
 const trafficTransactionSelect = `
-	SELECT id, conversation_id, project_id, agent_id, execution_id, tool_call_id,
+	SELECT id, event_id, conversation_id, project_id, agent_id, tool_name, execution_id, tool_call_id, activity_scope_id,
+		runtime_generation, runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
 		runtime_mode, capture_coverage, scheme, host, port, method, path, http_status,
 		started_at, completed_at, latency_ms, bytes_up, bytes_down,
 		boundary_snapshot_id, rule_id, upstream_route_id,
@@ -217,9 +253,24 @@ func (db *DB) CreateTrafficTransaction(ctx context.Context, item *traffic.Transa
 		}
 	}
 	copyItem := *item
+	copyItem.EventID = strings.TrimSpace(copyItem.EventID)
 	copyItem.ConversationID = strings.TrimSpace(copyItem.ConversationID)
 	copyItem.ProjectID = strings.TrimSpace(copyItem.ProjectID)
 	copyItem.RuntimeMode = traffic.NormalizeRuntimeMode(copyItem.RuntimeMode)
+	provenance := networkprovenance.NetworkProvenanceV1{
+		RuntimeMode: copyItem.RuntimeMode, RuntimeGeneration: copyItem.RuntimeGeneration,
+		RuntimeInstanceID: copyItem.RuntimeInstanceID, AgentID: copyItem.AgentID, ToolName: copyItem.ToolName,
+		ExecutionID: copyItem.ExecutionID, ToolCallID: copyItem.ToolCallID, ActivityScopeID: copyItem.ActivityScopeID,
+		AttributionStatus: copyItem.AttributionStatus, DeclaredActivityKind: copyItem.DeclaredActivityKind,
+		ObservedActivityKind: copyItem.ObservedActivityKind,
+	}.Normalized()
+	if copyItem.AttributionStatus == "" {
+		provenance.AttributionStatus = networkprovenance.AttributionLegacyUnattributed
+	}
+	copyItem.AgentID, copyItem.ToolName = provenance.AgentID, provenance.ToolName
+	copyItem.ExecutionID, copyItem.ToolCallID, copyItem.ActivityScopeID = provenance.ExecutionID, provenance.ToolCallID, provenance.ActivityScopeID
+	copyItem.RuntimeGeneration, copyItem.RuntimeInstanceID = provenance.RuntimeGeneration, provenance.RuntimeInstanceID
+	copyItem.AttributionStatus, copyItem.DeclaredActivityKind, copyItem.ObservedActivityKind = provenance.AttributionStatus, provenance.DeclaredActivityKind, provenance.ObservedActivityKind
 	copyItem.CaptureCoverage = traffic.NormalizeCaptureCoverage(copyItem.CaptureCoverage)
 	copyItem.Scheme = strings.ToLower(strings.TrimSpace(copyItem.Scheme))
 	copyItem.Host = strings.ToLower(strings.TrimSpace(copyItem.Host))
@@ -254,15 +305,17 @@ func (db *DB) CreateTrafficTransaction(ctx context.Context, item *traffic.Transa
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO traffic_transactions (
-			id, conversation_id, project_id, agent_id, execution_id, tool_call_id,
+			id, event_id, conversation_id, project_id, agent_id, tool_name, execution_id, tool_call_id, activity_scope_id,
+			runtime_generation, runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
 			runtime_mode, capture_coverage, scheme, host, port, method, path, http_status,
 			started_at, completed_at, latency_ms, bytes_up, bytes_down,
 			boundary_snapshot_id, rule_id, upstream_route_id,
 			transform_binding_id, transform_revision_id, transform_result,
 			aggregate_kind, aggregate_count, aggregate_first_at, aggregate_last_at, aggregate_summary_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, copyItem.ID, nullIfEmpty(copyItem.ConversationID), nullIfEmpty(copyItem.ProjectID), copyItem.AgentID, copyItem.ExecutionID, copyItem.ToolCallID,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, copyItem.ID, copyItem.EventID, nullIfEmpty(copyItem.ConversationID), nullIfEmpty(copyItem.ProjectID), copyItem.AgentID, copyItem.ToolName, copyItem.ExecutionID, copyItem.ToolCallID, copyItem.ActivityScopeID,
+		copyItem.RuntimeGeneration, copyItem.RuntimeInstanceID, copyItem.AttributionStatus, copyItem.DeclaredActivityKind, copyItem.ObservedActivityKind,
 		copyItem.RuntimeMode, copyItem.CaptureCoverage, copyItem.Scheme, copyItem.Host, copyItem.Port, copyItem.Method, copyItem.Path, copyItem.HTTPStatus,
 		copyItem.StartedAt, copyItem.CompletedAt, copyItem.LatencyMS, copyItem.BytesUp, copyItem.BytesDown,
 		copyItem.BoundarySnapshotID, copyItem.RuleID, copyItem.UpstreamRouteID,
@@ -443,7 +496,8 @@ func appendTrafficTransactionFilter(query string, args []interface{}, filter Tra
 		value  string
 	}{
 		{"id", filter.ID}, {"conversation_id", filter.ConversationID}, {"project_id", filter.ProjectID},
-		{"execution_id", filter.ExecutionID}, {"runtime_mode", filter.RuntimeMode}, {"scheme", filter.Scheme},
+		{"execution_id", filter.ExecutionID}, {"agent_id", filter.AgentID}, {"tool_name", filter.ToolName},
+		{"attribution_status", filter.AttributionStatus}, {"runtime_mode", filter.RuntimeMode}, {"scheme", filter.Scheme},
 		{"host", filter.Host}, {"method", strings.ToUpper(strings.TrimSpace(filter.Method))},
 	} {
 		if strings.TrimSpace(value.value) != "" {
@@ -453,8 +507,8 @@ func appendTrafficTransactionFilter(query string, args []interface{}, filter Tra
 	}
 	if search := strings.TrimSpace(filter.Search); search != "" {
 		pattern := escapeVulnerabilityLikePattern(search)
-		query += ` AND (LOWER(host) LIKE LOWER(?) ESCAPE '\' OR LOWER(path) LIKE LOWER(?) ESCAPE '\' OR LOWER(method) LIKE LOWER(?) ESCAPE '\' OR LOWER(execution_id) LIKE LOWER(?) ESCAPE '\')`
-		args = append(args, pattern, pattern, pattern, pattern)
+		query += ` AND (LOWER(host) LIKE LOWER(?) ESCAPE '\' OR LOWER(path) LIKE LOWER(?) ESCAPE '\' OR LOWER(method) LIKE LOWER(?) ESCAPE '\' OR LOWER(execution_id) LIKE LOWER(?) ESCAPE '\' OR LOWER(tool_name) LIKE LOWER(?) ESCAPE '\' OR LOWER(agent_id) LIKE LOWER(?) ESCAPE '\')`
+		args = append(args, pattern, pattern, pattern, pattern, pattern, pattern)
 	}
 	return appendTrafficAccessFilter(query, args, filter)
 }

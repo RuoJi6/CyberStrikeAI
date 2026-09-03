@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 
 	"github.com/google/uuid"
@@ -56,33 +57,37 @@ type ProxyOptions struct {
 	UpstreamRouteID         string
 	RuntimeMode             string
 	CaptureCoverage         string
+	AttributionVerifier     *networkprovenance.Verifier
+	AttributionAudience     networkprovenance.ExpectedAudience
 }
 
 // Proxy is the policy-enforcing HTTP forward proxy and HTTPS CONNECT tunnel.
 // It never accepts policy input from a request: the immutable compiled policy
 // is loaded once from the gateway's read-only snapshot.
 type Proxy struct {
-	policy             *boundary.Policy
-	dialContext        DialContextFunc
-	lookupNetIP        LookupNetIPFunc
-	transport          http.RoundTripper
-	authProfiles       map[string]GatewayAuthProfile
-	now                func() time.Time
-	clientHelloTimeout time.Duration
-	maxClientHello     int
-	activitySink       ActivitySink
-	guard              *requestGuard
-	tlsInspection      *TLSInspectionPolicy
-	tlsAuthority       *TLSAuthority
-	httpPacer          *trafficPacer
-	tcpPacer           *trafficPacer
-	udpPacer           *trafficPacer
-	trafficSink        TrafficSink
-	conversationID     string
-	boundarySnapshotID string
-	upstreamRouteID    string
-	runtimeMode        string
-	captureCoverage    string
+	policy              *boundary.Policy
+	dialContext         DialContextFunc
+	lookupNetIP         LookupNetIPFunc
+	transport           http.RoundTripper
+	authProfiles        map[string]GatewayAuthProfile
+	now                 func() time.Time
+	clientHelloTimeout  time.Duration
+	maxClientHello      int
+	activitySink        ActivitySink
+	guard               *requestGuard
+	tlsInspection       *TLSInspectionPolicy
+	tlsAuthority        *TLSAuthority
+	httpPacer           *trafficPacer
+	tcpPacer            *trafficPacer
+	udpPacer            *trafficPacer
+	trafficSink         TrafficSink
+	conversationID      string
+	boundarySnapshotID  string
+	upstreamRouteID     string
+	runtimeMode         string
+	captureCoverage     string
+	attributionVerifier *networkprovenance.Verifier
+	attributionAudience networkprovenance.ExpectedAudience
 }
 
 type boundedPacketCapture struct {
@@ -236,15 +241,17 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
 		tlsInspection: options.TLSInspection, tlsAuthority: options.TLSAuthority,
-		httpPacer:          newTrafficPacer(options.HTTPRequestsPerSecond),
-		tcpPacer:           newTrafficPacer(options.TCPConnectionsPerSecond),
-		udpPacer:           newTrafficPacer(options.UDPDatagramsPerSecond),
-		trafficSink:        options.TrafficSink,
-		conversationID:     strings.TrimSpace(options.ConversationID),
-		boundarySnapshotID: strings.TrimSpace(options.BoundarySnapshotID),
-		upstreamRouteID:    strings.TrimSpace(options.UpstreamRouteID),
-		runtimeMode:        traffic.NormalizeRuntimeMode(options.RuntimeMode),
-		captureCoverage:    traffic.NormalizeCaptureCoverage(options.CaptureCoverage),
+		httpPacer:           newTrafficPacer(options.HTTPRequestsPerSecond),
+		tcpPacer:            newTrafficPacer(options.TCPConnectionsPerSecond),
+		udpPacer:            newTrafficPacer(options.UDPDatagramsPerSecond),
+		trafficSink:         options.TrafficSink,
+		conversationID:      strings.TrimSpace(options.ConversationID),
+		boundarySnapshotID:  strings.TrimSpace(options.BoundarySnapshotID),
+		upstreamRouteID:     strings.TrimSpace(options.UpstreamRouteID),
+		runtimeMode:         traffic.NormalizeRuntimeMode(options.RuntimeMode),
+		captureCoverage:     traffic.NormalizeCaptureCoverage(options.CaptureCoverage),
+		attributionVerifier: options.AttributionVerifier,
+		attributionAudience: options.AttributionAudience,
 	}
 	if proxy.transport == nil {
 		proxy.transport = &http.Transport{
@@ -293,6 +300,29 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		http.Error(writer, "egress proxy unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	var provenance networkprovenance.NetworkProvenanceV1
+	var attributionErr error
+	request, provenance, attributionErr = p.authorizeAttribution(request)
+	if attributionErr != nil {
+		requestType, domain, port := attributionTarget(request)
+		now := p.now().UTC()
+		event := ActivityEvent{
+			Timestamp: now, RequestType: requestType, Domain: domain, Port: port,
+			Decision: ActivityDecisionBlocked, Outcome: "attribution_rejected", Provenance: provenance,
+		}
+		if requestType == ActivityRequestHTTP || requestType == ActivityRequestHTTPS {
+			event.Method = strings.ToUpper(strings.TrimSpace(request.Method))
+			event.Path = "/"
+			if request.URL != nil {
+				event.Path = activityHTTPPath(request.URL.Path)
+			}
+			event.HTTPStatus = http.StatusProxyAuthRequired
+		}
+		emitActivity(p.activitySink, event)
+		writer.Header().Set("Proxy-Authenticate", `Basic realm="CyberStrike network provenance"`)
+		http.Error(writer, "proxy authentication required", http.StatusProxyAuthRequired)
+		return
+	}
 	if err := p.httpPacer.Wait(request.Context()); err != nil {
 		http.Error(writer, "egress request canceled while waiting for the configured rate", http.StatusServiceUnavailable)
 		return
@@ -314,7 +344,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	startedAt := p.now().UTC()
-	attribution := consumeTrafficAttribution(request.Header)
+	attribution := consumeTrafficAttribution(request.Context(), request.Header)
 	decision, err := p.policy.Evaluate(request.URL.String(), request.Method, nil, startedAt)
 	if err != nil || (decision.Target.Scheme != "http" && (!inspectedTLS || decision.Target.Scheme != "https")) {
 		http.Error(writer, "invalid HTTP proxy target", http.StatusBadRequest)
@@ -325,10 +355,11 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		requestType = ActivityRequestHTTPS
 	}
 	event := ActivityEvent{
+		EventID:   uuid.NewString(),
 		Timestamp: startedAt, RequestType: requestType,
 		Domain: decision.Target.Host, Port: decision.Target.Port,
 		Decision: ActivityDecisionBlocked, RuleID: decision.RuleID, Reason: decision.Reason,
-		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected",
+		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected", Provenance: attribution.provenance,
 	}
 	packet := newHTTPPacket(request, event.Path)
 	event.HTTPPacket = &packet
@@ -489,27 +520,35 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		),
 	}
 	transaction := traffic.Transaction{
-		ID:                 transactionID,
-		ConversationID:     p.conversationID,
-		AgentID:            attribution.agentID,
-		ExecutionID:        attribution.executionID,
-		ToolCallID:         attribution.toolCallID,
-		RuntimeMode:        p.runtimeMode,
-		CaptureCoverage:    p.captureCoverage,
-		Scheme:             decision.Target.Scheme,
-		Host:               decision.Target.Host,
-		Port:               decision.Target.Port,
-		Method:             outbound.Method,
-		Path:               packetRequestTarget(outbound, event.Path),
-		HTTPStatus:         response.StatusCode,
-		StartedAt:          startedAt,
-		CompletedAt:        &completedAt,
-		LatencyMS:          activityLatencyMS(startedAt, completedAt),
-		BytesUp:            fullRequestCapture.total,
-		BytesDown:          fullResponseCapture.total,
-		BoundarySnapshotID: p.boundarySnapshotID,
-		RuleID:             decision.RuleID,
-		UpstreamRouteID:    p.upstreamRouteID,
+		ID:                   transactionID,
+		EventID:              event.EventID,
+		ConversationID:       p.conversationID,
+		AgentID:              attribution.provenance.AgentID,
+		ToolName:             attribution.provenance.ToolName,
+		ExecutionID:          attribution.provenance.ExecutionID,
+		ToolCallID:           attribution.provenance.ToolCallID,
+		ActivityScopeID:      attribution.provenance.ActivityScopeID,
+		RuntimeMode:          p.runtimeMode,
+		RuntimeGeneration:    attribution.provenance.RuntimeGeneration,
+		RuntimeInstanceID:    attribution.provenance.RuntimeInstanceID,
+		AttributionStatus:    attribution.provenance.AttributionStatus,
+		DeclaredActivityKind: attribution.provenance.DeclaredActivityKind,
+		ObservedActivityKind: attribution.provenance.ObservedActivityKind,
+		CaptureCoverage:      p.captureCoverage,
+		Scheme:               decision.Target.Scheme,
+		Host:                 decision.Target.Host,
+		Port:                 decision.Target.Port,
+		Method:               outbound.Method,
+		Path:                 packetRequestTarget(outbound, event.Path),
+		HTTPStatus:           response.StatusCode,
+		StartedAt:            startedAt,
+		CompletedAt:          &completedAt,
+		LatencyMS:            activityLatencyMS(startedAt, completedAt),
+		BytesUp:              fullRequestCapture.total,
+		BytesDown:            fullResponseCapture.total,
+		BoundarySnapshotID:   p.boundarySnapshotID,
+		RuleID:               decision.RuleID,
+		UpstreamRouteID:      p.upstreamRouteID,
 	}
 	emitTraffic(p.trafficSink, context.WithoutCancel(request.Context()), transaction, messages)
 }
@@ -521,7 +560,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		http.Error(writer, "invalid CONNECT target", http.StatusBadRequest)
 		return
 	}
-	attribution := consumeTrafficAttribution(request.Header)
+	attribution := consumeTrafficAttribution(request.Context(), request.Header)
 	interceptTLS := p.shouldInterceptTLS(targetHost)
 	decision := boundary.Decision{}
 	if interceptTLS {
@@ -545,9 +584,10 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		}
 	}
 	event := ActivityEvent{
+		EventID:   uuid.NewString(),
 		Timestamp: startedAt, RequestType: ActivityRequestCONNECT,
 		Domain: targetHost, Port: targetPort, Decision: ActivityDecisionBlocked,
-		RuleID: decision.RuleID, Reason: decision.Reason, Outcome: "policy_denied",
+		RuleID: decision.RuleID, Reason: decision.Reason, Outcome: "policy_denied", Provenance: attribution.provenance,
 	}
 	dialObservation := &activityDialObservation{}
 	defer func() {
@@ -617,7 +657,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	sniURL := (&url.URL{Scheme: "https", Host: targetAuthority, Path: "/"}).String()
 	if interceptTLS {
 		event.Outcome = "tls_inspection_failed"
-		if err := p.serveInterceptedTLS(client, buffered.Reader, clientHello, targetAuthority, targetHost); err != nil {
+		if err := p.serveInterceptedTLS(client, buffered.Reader, clientHello, targetAuthority, targetHost, attribution.provenance); err != nil {
 			return
 		}
 		event.Outcome = "tls_inspection_closed"
@@ -693,27 +733,35 @@ func (p *Proxy) connectTrafficEvidence(
 		),
 	}
 	return traffic.Transaction{
-		ID:                 transactionID,
-		ConversationID:     p.conversationID,
-		AgentID:            attribution.agentID,
-		ExecutionID:        attribution.executionID,
-		ToolCallID:         attribution.toolCallID,
-		RuntimeMode:        p.runtimeMode,
-		CaptureCoverage:    p.captureCoverage,
-		Scheme:             "https",
-		Host:               host,
-		Port:               port,
-		Method:             http.MethodConnect,
-		Path:               "/",
-		HTTPStatus:         http.StatusOK,
-		StartedAt:          startedAt,
-		CompletedAt:        &completedAt,
-		LatencyMS:          event.LatencyMS,
-		BytesUp:            event.BytesUp,
-		BytesDown:          event.BytesDown,
-		BoundarySnapshotID: p.boundarySnapshotID,
-		RuleID:             event.RuleID,
-		UpstreamRouteID:    p.upstreamRouteID,
+		ID:                   transactionID,
+		EventID:              event.EventID,
+		ConversationID:       p.conversationID,
+		AgentID:              attribution.provenance.AgentID,
+		ToolName:             attribution.provenance.ToolName,
+		ExecutionID:          attribution.provenance.ExecutionID,
+		ToolCallID:           attribution.provenance.ToolCallID,
+		ActivityScopeID:      attribution.provenance.ActivityScopeID,
+		RuntimeMode:          p.runtimeMode,
+		RuntimeGeneration:    attribution.provenance.RuntimeGeneration,
+		RuntimeInstanceID:    attribution.provenance.RuntimeInstanceID,
+		AttributionStatus:    attribution.provenance.AttributionStatus,
+		DeclaredActivityKind: attribution.provenance.DeclaredActivityKind,
+		ObservedActivityKind: attribution.provenance.ObservedActivityKind,
+		CaptureCoverage:      p.captureCoverage,
+		Scheme:               "https",
+		Host:                 host,
+		Port:                 port,
+		Method:               http.MethodConnect,
+		Path:                 "/",
+		HTTPStatus:           http.StatusOK,
+		StartedAt:            startedAt,
+		CompletedAt:          &completedAt,
+		LatencyMS:            event.LatencyMS,
+		BytesUp:              event.BytesUp,
+		BytesDown:            event.BytesDown,
+		BoundarySnapshotID:   p.boundarySnapshotID,
+		RuleID:               event.RuleID,
+		UpstreamRouteID:      p.upstreamRouteID,
 	}, messages
 }
 
@@ -765,7 +813,7 @@ func (writer *interceptedResponseWriter) Write(content []byte) (int, error) {
 	return writer.writer.Write(content)
 }
 
-func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, clientHello []byte, authority, host string) error {
+func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, clientHello []byte, authority, host string, provenance networkprovenance.NetworkProvenanceV1) error {
 	leafDER, leafKey, err := p.tlsAuthority.leafCertificate(host, p.now().UTC())
 	if err != nil {
 		return err
@@ -787,6 +835,7 @@ func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, cli
 	defer request.Body.Close()
 	request.URL.Scheme = "https"
 	request.URL.Host = authority
+	request = request.WithContext(networkprovenance.WithContext(request.Context(), provenance))
 	response := &interceptedResponseWriter{writer: bufio.NewWriter(tlsClient), header: make(http.Header)}
 	p.serveForwardRequest(response, request, true)
 	if !response.wroteHeader {

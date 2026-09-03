@@ -11,6 +11,7 @@ import (
 
 	"cyberstrike-ai/internal/einomcp"
 	"cyberstrike-ai/internal/mcp"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/security"
 
 	"github.com/cloudwego/eino/adk/filesystem"
@@ -112,6 +113,20 @@ func (w *einoStreamingShellWrap) ExecuteStreaming(ctx context.Context, input *fi
 	if monitorExecID != "" {
 		execCtx = mcp.WithMCPExecutionID(execCtx, monitorExecID)
 	}
+	provenance := networkprovenance.FromContext(execCtx)
+	provenance.ConversationID = strings.TrimSpace(convID)
+	provenance.AgentID = agentTag
+	provenance.ToolName = "execute"
+	provenance.ExecutionID = strings.TrimSpace(monitorExecID)
+	provenance.ToolCallID = tid
+	provenance.ActivityScopeID = tid
+	if provenance.ActivityScopeID == "" {
+		provenance.ActivityScopeID = provenance.ExecutionID
+	}
+	if provenance.DeclaredActivityKind == networkprovenance.ActivityKindUnknown {
+		provenance.DeclaredActivityKind = networkprovenance.ActivityKindNormal
+	}
+	execCtx = networkprovenance.WithContext(execCtx, provenance)
 	if monitorExecID != "" && w.registerCancelMonitor != nil {
 		w.registerCancelMonitor(monitorExecID, execCancel)
 	}

@@ -60,11 +60,19 @@ type Header struct {
 
 type Transaction struct {
 	ID                   string     `json:"id"`
+	EventID              string     `json:"event_id,omitempty"`
 	ConversationID       string     `json:"conversation_id,omitempty"`
 	ProjectID            string     `json:"project_id,omitempty"`
 	AgentID              string     `json:"agent_id,omitempty"`
+	ToolName             string     `json:"tool_name,omitempty"`
 	ExecutionID          string     `json:"execution_id,omitempty"`
 	ToolCallID           string     `json:"tool_call_id,omitempty"`
+	ActivityScopeID      string     `json:"activity_scope_id,omitempty"`
+	RuntimeGeneration    int        `json:"runtime_generation,omitempty"`
+	RuntimeInstanceID    string     `json:"runtime_instance_id,omitempty"`
+	AttributionStatus    string     `json:"attribution_status,omitempty"`
+	DeclaredActivityKind string     `json:"declared_activity_kind,omitempty"`
+	ObservedActivityKind string     `json:"observed_activity_kind,omitempty"`
 	RuntimeMode          string     `json:"runtime_mode"`
 	CaptureCoverage      string     `json:"capture_coverage"`
 	Scheme               string     `json:"scheme"`
@@ -263,6 +271,9 @@ func ValidateMessage(message Message) error {
 func ValidateTransaction(transaction Transaction) error {
 	if strings.TrimSpace(transaction.ConversationID) == "" {
 		return errors.New("traffic transaction conversation is required")
+	}
+	if len(transaction.EventID) > 128 || strings.TrimSpace(transaction.EventID) != transaction.EventID || strings.ContainsAny(transaction.EventID, "\r\n\x00") {
+		return errors.New("traffic transaction event id is invalid")
 	}
 	if transaction.Scheme != "http" && transaction.Scheme != "https" {
 		return errors.New("traffic transaction scheme must be http or https")

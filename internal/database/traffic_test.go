@@ -35,7 +35,7 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 	started := time.Now().UTC().Add(-25 * time.Millisecond)
 	completed := time.Now().UTC()
 	item := &traffic.Transaction{
-		ConversationID: conversation.ID, AgentID: "agent-1", ExecutionID: "execution-1", ToolCallID: "tool-1",
+		EventID: "event-traffic-1", ConversationID: conversation.ID, AgentID: "agent-1", ExecutionID: "execution-1", ToolCallID: "tool-1",
 		RuntimeMode: traffic.RuntimeModeContainer, CaptureCoverage: traffic.CaptureCoverageEnforced,
 		Scheme: "https", Host: "API.Example.Test", Port: 443, Method: "post", Path: "/v1/encrypted",
 		HTTPStatus: 200, StartedAt: started, CompletedAt: &completed, LatencyMS: 25, BytesUp: 4, BytesDown: 5,
@@ -47,7 +47,7 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateTrafficTransaction: %v", err)
 	}
-	if detail.Transaction.Host != "api.example.test" || detail.Transaction.Method != "POST" || len(detail.Messages) != 2 {
+	if detail.Transaction.EventID != "event-traffic-1" || detail.Transaction.Host != "api.example.test" || detail.Transaction.Method != "POST" || len(detail.Messages) != 2 {
 		t.Fatalf("created detail = %#v", detail)
 	}
 

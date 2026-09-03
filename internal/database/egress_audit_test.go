@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 
 	"go.uber.org/zap"
@@ -151,6 +152,55 @@ func TestEgressAuditPersistsNetworkAndLifecycleEventsWithScopedSearch(t *testing
 	}
 	if _, err := db.GetEgressAuditEvent(ctx, items[0].ID, "owner-b", RBACScopeOwn); err == nil {
 		t.Fatal("other owner resolved a protected audit event")
+	}
+}
+
+func TestSignedAuditTargetAllowsOnlyRuntimeBoundUnattributedNonHTTP(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, _ := createRunningEgressAuditRuntime(t, db, "signed non-http audit")
+	targets, err := db.ListRunningEgressAuditRuntimeTargets(context.Background())
+	if err != nil || len(targets) != 1 {
+		t.Fatalf("audit target = %#v, %v", targets, err)
+	}
+	target := targets[0]
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target.Record.Spec.EgressGateway.AttributionPublicKey = signer.PublicKeyEncoded()
+	target.Record.Spec.EgressGateway.AttributionRuntimeGeneration = target.Record.RuntimeGeneration
+	target.Record.Spec.EgressGateway.AttributionInstanceID = "87654321-4321-4321-8321-cba987654321"
+	audience := networkprovenance.ExpectedAudience{
+		ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeContainer,
+		RuntimeGeneration: target.Record.RuntimeGeneration, RuntimeInstanceID: target.Record.Spec.EgressGateway.AttributionInstanceID,
+	}
+	base := egress.ActivityEvent{
+		EventID: "event-runtime-bound", Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), Domain: "allowed.example",
+		Decision: egress.ActivityDecisionAllowed, Outcome: "resolved",
+		SnapshotID: target.Record.Spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: target.Record.Spec.EgressGateway.BoundarySnapshot.SHA256,
+	}
+	dns := base
+	dns.RequestType = egress.ActivityRequestDNS
+	dns.Provenance = networkprovenance.ForAudience(audience, networkprovenance.AttributionUnattributed)
+	if err := validateEgressNetworkAuditEvent(target, dns); err != nil {
+		t.Fatalf("runtime-bound unattributed DNS rejected: %v", err)
+	}
+	health := base
+	health.EventID, health.RequestType, health.Decision, health.Reason, health.Outcome, health.RetryAfterMS = "event-runtime-health", egress.ActivityRequestHealth, egress.ActivityDecisionBlocked, "upstream_rate_limited", "cooldown_started", 1000
+	health.Provenance = dns.Provenance
+	if err := validateEgressNetworkAuditEvent(target, health); err != nil {
+		t.Fatalf("runtime-bound unattributed health rejected: %v", err)
+	}
+	httpEvent := base
+	httpEvent.EventID, httpEvent.RequestType, httpEvent.Method, httpEvent.Path, httpEvent.Port, httpEvent.Outcome = "event-invalid-http", egress.ActivityRequestHTTP, "GET", "/", 80, "attribution_rejected"
+	httpEvent.Decision = egress.ActivityDecisionBlocked
+	httpEvent.Provenance = networkprovenance.ForAudience(audience, networkprovenance.AttributionInvalid)
+	if err := validateEgressNetworkAuditEvent(target, httpEvent); err != nil {
+		t.Fatalf("runtime-bound invalid HTTP rejected: %v", err)
+	}
+	httpEvent.Provenance = dns.Provenance
+	if err := validateEgressNetworkAuditEvent(target, httpEvent); err == nil {
+		t.Fatal("signed HTTP audit accepted unattributed provenance")
 	}
 }
 
@@ -298,8 +348,8 @@ func TestConversationEgressAuditSettingControlsCollectorTargets(t *testing.T) {
 	if enabled, err := db.GetConversationEgressAuditEnabled(ctx, conversation.ID); err != nil || enabled {
 		t.Fatalf("disabled audit setting = %v, %v", enabled, err)
 	}
-	if targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx); err != nil || len(targets) != 0 {
-		t.Fatalf("disabled collector targets = %#v, %v", targets, err)
+	if targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx); err != nil || len(targets) != 1 {
+		t.Fatalf("disabled audit runtime must remain available to realtime ingestion: %#v, %v", targets, err)
 	}
 	if inserted, err := db.AppendEgressNetworkAuditEvent(ctx, targets[0], disabledEvent); err != nil || inserted {
 		t.Fatalf("disabled event persistence = %v, %v", inserted, err)
@@ -374,6 +424,17 @@ func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 			},
 		},
 		{
+			name: "modified provenance",
+			tamper: func(t *testing.T, db *DB, conversationID string) {
+				if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`UPDATE egress_audit_events SET execution_id = 'tampered-execution' WHERE conversation_id = ? AND category = 'network'`, conversationID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
 			name: "reordered sequence",
 			tamper: func(t *testing.T, db *DB, conversationID string) {
 				if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
@@ -422,6 +483,58 @@ func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 				t.Fatalf("tamper verification = %#v, %v", integrity, err)
 			}
 		})
+	}
+}
+
+func TestEgressAuditHashVersionFallbacksRemainCompatible(t *testing.T) {
+	base := []interface{}{"previous", "1", "event"}
+	v1 := egressAuditHashValues(base...)
+	if got := egressAuditHashValuesWithPacket(append(append([]interface{}{}, base...), "")...); got != v1 {
+		t.Fatalf("empty packet did not preserve v1 hash: %q != %q", got, v1)
+	}
+	packetValues := append(append([]interface{}{}, base...), `{"requestLine":"GET / HTTP/1.1"}`)
+	v2 := egressAuditHashValuesWithPacket(packetValues...)
+	if v2 == v1 {
+		t.Fatal("v2 packet hash reused v1 domain")
+	}
+	if got := egressAuditHashValuesWithDNS(append(append([]interface{}{}, packetValues...), "", "[]")...); got != v2 {
+		t.Fatalf("empty DNS projection did not preserve v2 hash: %q != %q", got, v2)
+	}
+	dnsValues := append(append([]interface{}{}, packetValues...), "A", `["93.184.216.34"]`)
+	v3 := egressAuditHashValuesWithDNS(dnsValues...)
+	if v3 == v2 {
+		t.Fatal("v3 DNS hash reused v2 domain")
+	}
+	emptyProvenance := []interface{}{"", "", "", "", "", "", "", "", "", ""}
+	if got := egressAuditHashValuesWithProvenance(append(append([]interface{}{}, dnsValues...), emptyProvenance...)...); got != v3 {
+		t.Fatalf("empty provenance did not preserve v3 hash: %q != %q", got, v3)
+	}
+	provenance := []interface{}{"event-id", "container", "gateway", "curl", "execution", "call", "call", "verified", "normal", "single"}
+	v4 := egressAuditHashValuesWithProvenance(append(append([]interface{}{}, dnsValues...), provenance...)...)
+	if v4 == v3 {
+		t.Fatal("v4 provenance hash reused v3 domain")
+	}
+}
+
+func TestEgressAuditLegacyRowsProjectAndFilterAsContainerUnattributed(t *testing.T) {
+	db := newContainerRuntimeTestDB(t)
+	conversation, _ := createRunningEgressAuditRuntime(t, db, "legacy provenance projection")
+	if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE egress_audit_events SET source_event_id = '', runtime_mode = '', runtime_instance_id = '', tool_name = '', execution_id = '', tool_call_id = '', activity_scope_id = '', attribution_status = '', declared_activity_kind = '', observed_activity_kind = '' WHERE conversation_id = ?`, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, err := db.ListEgressAuditEvents(context.Background(), EgressAuditFilter{
+		ConversationID: conversation.ID, RuntimeMode: "container", AttributionStatus: "legacy_unattributed",
+		Scope: RBACScopeAll, Limit: 20,
+	})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("legacy provenance filter = %#v, %v", items, err)
+	}
+	if items[0].RuntimeMode != "container" || items[0].AttributionStatus != "legacy_unattributed" || items[0].HashVersion != 1 ||
+		items[0].DeclaredActivityKind != "unknown" || items[0].ObservedActivityKind != "single" {
+		t.Fatalf("legacy provenance projection = %#v", items[0])
 	}
 }
 

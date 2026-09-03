@@ -22,19 +22,22 @@ test('SSE parser preserves split frames, event names, comments, and multi-line d
     assert.deepEqual(second.events, [{ event: 'activity', data: '{"domain":"allowed.example",\n"decision":"allowed"}' }]);
 });
 
-test('client activity validation and filters use closed request/decision vocabularies', () => {
-    const allowed = { timestamp: '2026-08-22T12:00:00Z', requestType: 'dns', decision: 'allowed', domain: 'allowed.example', resolvedIps: ['93.184.216.34'], agent: 'container-agent', tool: '', upstreamRouteId: 'route-a' };
-    const blocked = { timestamp: '2026-08-22T12:00:01Z', requestType: 'connect', decision: 'blocked', domain: 'blocked.example', connectedIp: '', agent: 'container-agent', tool: '', upstreamRouteId: '' };
+test('client activity validation and filters use closed request/decision/provenance vocabularies', () => {
+    const provenance = { version: 1, runtimeMode: 'container', runtimeGeneration: 2, runtimeInstanceId: 'gateway-a', agentId: 'container-agent', toolName: '', executionId: '', toolCallId: '', activityScopeId: '', attributionStatus: 'legacy_unattributed', declaredActivityKind: 'unknown', observedActivityKind: 'single' };
+    const allowed = { eventId: 'event-allowed', timestamp: '2026-08-22T12:00:00Z', requestType: 'dns', decision: 'allowed', domain: 'allowed.example', resolvedIps: ['93.184.216.34'], agent: 'container-agent', tool: '', upstreamRouteId: 'route-a', provenance };
+    const blocked = { eventId: 'event-blocked', timestamp: '2026-08-22T12:00:01Z', requestType: 'connect', decision: 'blocked', domain: 'blocked.example', connectedIp: '', agent: 'container-agent', tool: '', upstreamRouteId: '', provenance };
     assert.equal(activity.isSafeActivityEvent(allowed), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, requestType: 'raw-socket' }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, decision: '<script>' }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, upstreamRouteId: '<script>' }), false);
+    assert.equal(activity.isSafeActivityEvent({ ...allowed, provenance: { ...provenance, toolName: '<script>\n' } }), false);
+    assert.equal(activity.isSafeActivityEvent({ ...allowed, provenance: { ...provenance, attributionStatus: 'trusted-because-it-looks-right' } }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, requestType: 'icmp', connectedIp: '93.184.216.34' }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, dnsQueryType: 'mx', dnsAnswers: ['allowed.example MX 10 mail.allowed.example'] }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, dnsAnswers: new Array(129).fill('A') }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration', aggregateFirstAt: '2026-08-22T12:00:00Z', aggregateLastAt: '2026-08-22T12:00:01Z', aggregateDistinctVariants: 30 }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration' }), false);
-    const filtered = activity.filteredEventsForTest([allowed, blocked], { domain: '93.184', requestType: 'dns', decision: 'allowed', agent: 'container-agent', tool: 'unknown', route: 'route-a' });
+	const filtered = activity.filteredEventsForTest([allowed, blocked], { domain: '93.184', requestType: 'dns', decision: 'allowed', agent: 'container-agent', tool: 'unknown', runtime: 'container', attribution: 'legacy_unattributed', route: 'route-a' });
     assert.deepEqual(filtered, [allowed]);
 });
 
@@ -68,11 +71,11 @@ test('background gateway retries preserve a stable waiting or error badge', () =
 test('network activity page is a real incremental authenticated stream UI', () => {
     for (const id of [
         'network-activity-conversation', 'network-activity-connection', 'network-activity-domain',
-        'network-activity-type', 'network-activity-decision', 'network-activity-agent',
-        'network-activity-tool', 'network-activity-route', 'network-activity-pause',
+		'network-activity-type', 'network-activity-decision', 'network-activity-agent',
+		'network-activity-tool', 'network-activity-runtime', 'network-activity-attribution', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-    assert.match(template, /network-activity\.js\?v=20260903-1/);
+    assert.match(template, /network-activity\.js\?v=20260903-2/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);
@@ -90,6 +93,9 @@ test('network activity page is a real incremental authenticated stream UI', () =
     assert.match(source, /await yieldToMainThread\(\)/);
     assert.doesNotMatch(source, /EventSource\s*\(/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
+    assert.match(source, /appendProvenanceDetails\(contextCell/);
+    assert.match(source, /navigator\.clipboard\.writeText/);
+    assert.match(source, /CONNECT（未解密）/);
     assert.match(router, /stopNetworkActivityPage\(\)/);
 });
 
@@ -97,7 +103,9 @@ test('network activity translations and responsive card/table rules are complete
     const keys = [
         'activityStatusLive', 'activityConversation', 'activityPause', 'activityResume', 'activityFollow',
         'activityDomainPlaceholder', 'activityRequestType', 'activityDecision', 'activityAgent',
-        'activityToolFilter', 'activityRouteFilter', 'activityAllowed',
+		'activityToolFilter', 'activityRuntimeFilter', 'activityAttributionFilter', 'activityRouteFilter', 'activityAllowed', 'activityRuntimeContainer', 'activityRuntimeHostMITM', 'activityRuntimeUnknown',
+        'activityAttributionVerified', 'activityAttributionLegacy', 'activityAttributionUnattributed', 'activityAttributionInvalid',
+        'activityProvenanceDetails', 'activityCopyId', 'activityConnectUninspected',
         'activityBlocked', 'activityStreamTitle', 'activityEmpty', 'activitySummary', 'activityResult',
     ];
     for (const locale of [zh, en]) {

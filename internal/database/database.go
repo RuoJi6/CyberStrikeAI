@@ -38,7 +38,10 @@ func ensureCyberStrikeSQLiteDriver() {
 			if err := connection.RegisterFunc("cyberstrike_egress_audit_hash_packet", egressAuditHashValuesWithPacket, true); err != nil {
 				return err
 			}
-			return connection.RegisterFunc("cyberstrike_egress_audit_hash_dns", egressAuditHashValuesWithDNS, true)
+			if err := connection.RegisterFunc("cyberstrike_egress_audit_hash_dns", egressAuditHashValuesWithDNS, true); err != nil {
+				return err
+			}
+			return connection.RegisterFunc("cyberstrike_egress_audit_hash_provenance", egressAuditHashValuesWithProvenance, true)
 		}})
 	})
 }

@@ -132,15 +132,17 @@
             row.appendChild(runtimeCell);
 
 			const replayTransform = String(item.execution_id || '').startsWith('replay-transform:');
-            const source = replayTransform ? '重发包 · 脚本' : ([item.agent_id, item.execution_id, item.tool_call_id].filter(Boolean).join(' · ') || '未标注');
-            const sourceCell = create('td', '', source);
-            sourceCell.title = source;
+			const attributionLabels = { verified: '已验证', legacy_unattributed: '旧版运行时', unattributed: '未归因', invalid: '归因无效' };
+			const source = replayTransform ? '重发包 · 脚本' : ([item.agent_id || 'Agent 未归因', item.tool_name || '工具未知', attributionLabels[item.attribution_status] || '未归因'].join(' · '));
+			const sourceCell = create('td', '', source);
+			sourceCell.title = [source, `event: ${item.event_id || '—'}`, `execution: ${item.execution_id || '—'}`, `tool-call: ${item.tool_call_id || '—'}`, `scope: ${item.activity_scope_id || '—'}`, `generation: ${item.runtime_generation || 0}`, `declared: ${item.declared_activity_kind || 'unknown'}`, `observed: ${item.observed_activity_kind || 'single'}`].join('\n');
             row.appendChild(sourceCell);
 
             const storageCell = create('td');
             const aggregateCount = Number(item.aggregate_count || 0);
             if (aggregateCount > 1) {
-                const aggregateKind = item.aggregate_kind === 'web-fuzz' ? 'Web fuzz' : '高频请求';
+				const aggregateLabels = { 'web-fuzz': 'Fuzz（已声明）', 'path-sweep': '疑似路径扫描', 'unattributed-path-sweep': '未归因路径扫描', 'request-burst': '高频请求' };
+				const aggregateKind = aggregateLabels[item.aggregate_kind] || '高频请求';
                 const aggregate = create('span', 'traffic-evidence-aggregate', `${aggregateKind} × ${aggregateCount}`);
                 aggregate.title = '仅首个事务保存完整代表包；其余请求只计数并保留关键摘要';
                 storageCell.appendChild(aggregate);
@@ -221,7 +223,7 @@
         stages.replaceChildren();
         const aggregateCount = Number(transaction.aggregate_count || 0);
         const aggregateMeta = aggregateCount > 1 ? ` · ${transaction.aggregate_kind || 'aggregate'} × ${aggregateCount}（当前为完整代表包）` : '';
-        setText(byId('traffic-evidence-detail-meta'), `${transaction.id || '-'} · ${transaction.scheme || ''}://${transaction.host || ''}${transaction.path || ''}${aggregateMeta}`);
+		setText(byId('traffic-evidence-detail-meta'), `${transaction.id || '-'} · event ${transaction.event_id || '—'} · ${transaction.scheme || ''}://${transaction.host || ''}${transaction.path || ''}${aggregateMeta}`);
 		const transformed = Boolean(transaction.transform_result || transaction.transform_binding_id || transaction.transform_revision_id);
 		if (transformed) {
 			const transformCard = create('section', 'traffic-evidence-transform-summary');

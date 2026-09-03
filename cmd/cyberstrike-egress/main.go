@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 	"cyberstrike-ai/internal/trafficspool"
 )
@@ -72,6 +73,13 @@ func runConfigured(args []string) error {
 	if err != nil {
 		return err
 	}
+	attributionVerifier, attributionAudience, err := attributionFromEnvironment()
+	if err != nil {
+		return err
+	}
+	if conversationID == "" {
+		conversationID = attributionAudience.ConversationID
+	}
 	runErr := egress.RunWithSnapshot(ctx, path, reference, os.Stdout, egress.GatewayOptions{
 		UpstreamRoutePath: routePath, UpstreamRoute: routeReference,
 		AuthProfilesPath: authPath, AuthProfiles: authReference,
@@ -81,12 +89,35 @@ func runConfigured(args []string) error {
 		Proxy: egress.ProxyOptions{
 			TrafficSink: trafficSink, ConversationID: conversationID,
 			RuntimeMode: traffic.RuntimeModeContainer, CaptureCoverage: traffic.CaptureCoverageEnforced,
+			AttributionVerifier: attributionVerifier, AttributionAudience: attributionAudience,
 		},
 	})
 	if closeTrafficSink != nil {
 		return errors.Join(runErr, closeTrafficSink())
 	}
 	return runErr
+}
+
+func attributionFromEnvironment() (*networkprovenance.Verifier, networkprovenance.ExpectedAudience, error) {
+	publicKey := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ATTRIBUTION_PUBLIC_KEY"))
+	conversationID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ATTRIBUTION_CONVERSATION_ID"))
+	rawGeneration := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION"))
+	instanceID := strings.TrimSpace(os.Getenv("CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID"))
+	if publicKey == "" && conversationID == "" && rawGeneration == "" && instanceID == "" {
+		return nil, networkprovenance.ExpectedAudience{}, nil
+	}
+	generation, generationErr := strconv.Atoi(rawGeneration)
+	if publicKey == "" || conversationID == "" || generationErr != nil || generation < 1 || instanceID == "" {
+		return nil, networkprovenance.ExpectedAudience{}, errors.New("incomplete network provenance gateway environment")
+	}
+	verifier, err := networkprovenance.NewVerifier(publicKey)
+	if err != nil {
+		return nil, networkprovenance.ExpectedAudience{}, err
+	}
+	return verifier, networkprovenance.ExpectedAudience{
+		ConversationID: conversationID, RuntimeMode: networkprovenance.RuntimeModeContainer,
+		RuntimeGeneration: generation, RuntimeInstanceID: instanceID,
+	}, nil
 }
 
 func checkConfigured(args []string) error {

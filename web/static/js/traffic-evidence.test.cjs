@@ -15,7 +15,7 @@ const en = JSON.parse(fs.readFileSync('web/static/i18n/en-US.json', 'utf8'));
 test('流量证据列表不再展示常驻的不可信内容提示', () => {
     assert.doesNotMatch(html, /traffic-evidence-notice/);
     assert.doesNotMatch(html, /目标内容不可信/);
-    assert.match(html, /style\.css\?v=20260903-1/);
+    assert.match(html, /style\.css\?v=20260903-2/);
     assert.match(html, /router\.js\?v=20260827-2/);
     assert.match(html, /traffic-evidence\.js\?v=5/);
 });

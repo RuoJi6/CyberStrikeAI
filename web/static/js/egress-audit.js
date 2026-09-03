@@ -19,6 +19,8 @@
     const AUDIT_EVENT_FIELDS = new Set([
         'id', 'chainSequence', 'previousHash', 'eventHash', 'recordedAt', 'occurredAt', 'category', 'eventType', 'conversationId', 'conversationTitle',
         'containerId', 'agentId', 'runtimeGeneration', 'snapshotId', 'snapshotSha256', 'domain', 'dnsQueryType', 'dnsAnswers', 'resolvedIps',
+        'eventId', 'runtimeMode', 'runtimeInstanceId', 'toolName', 'executionId', 'toolCallId', 'activityScopeId',
+        'attributionStatus', 'declaredActivityKind', 'observedActivityKind', 'hashVersion',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
         'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket',
         'aggregateCount', 'aggregateKind', 'aggregateFirstAt', 'aggregateLastAt', 'aggregateDistinctTargets', 'aggregateDistinctPorts', 'aggregateDistinctVariants',
@@ -162,6 +164,9 @@
         if (Number.isNaN(Date.parse(event.occurredAt))) return false;
         const safeFields = [
             [event.conversationTitle, 512], [event.containerId, 128], [event.agentId, 128],
+            [event.eventId, 128], [event.runtimeMode, 32], [event.runtimeInstanceId, 128], [event.toolName, 256],
+            [event.executionId, 128], [event.toolCallId, 128], [event.activityScopeId, 128], [event.attributionStatus, 32],
+            [event.declaredActivityKind, 32], [event.observedActivityKind, 32],
             [event.snapshotId, 128], [event.snapshotSha256, 128], [event.domain, 253], [event.dnsQueryType, 128],
             [event.connectedIp, 64], [event.ruleId, 256], [event.reason, 128],
             [event.upstreamRouteId, 128], [event.method, 32], [event.path, 1024],
@@ -178,6 +183,9 @@
             const numeric = Number(value || 0);
             if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) return false;
         }
+        if (![0, 1, 2, 3, 4].includes(Number(event.hashVersion || 0))) return false;
+        if (event.runtimeMode && !['container', 'host_mitm'].includes(event.runtimeMode)) return false;
+        if (event.attributionStatus && !['verified', 'legacy_unattributed', 'unattributed', 'invalid'].includes(event.attributionStatus)) return false;
         if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
         if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
         if (event.httpPacket !== undefined && !isSafeHTTPPacket(event.httpPacket)) return false;
@@ -382,8 +390,17 @@
 		} else if (!event.ruleId && event.reason === 'default-deny') {
 			rule = t('activityBoundaryDefaultDeny', '边界默认拒绝');
 		}
-        const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
-        const traceSecondary = [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
+        const runtimeLabel = event.runtimeMode === 'host_mitm' ? t('activityRuntimeHostMITM', 'Host MITM') : t('activityRuntimeContainer', '容器');
+        const attributionLabels = {
+            verified: t('activityAttributionVerified', '已验证'), legacy_unattributed: t('activityAttributionLegacy', '旧版运行时'),
+            unattributed: t('activityAttributionUnattributed', '未归因'), invalid: t('activityAttributionInvalid', '归因无效'),
+        };
+        const tracePrimary = event.category === 'network'
+            ? `${runtimeLabel} · ${event.agentId || 'Agent 未归因'} · ${event.toolName || '工具未知'}`
+            : (event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration }));
+        const traceSecondary = event.category === 'network'
+            ? [attributionLabels[event.attributionStatus] || t('activityAttributionUnattributed', '未归因'), event.executionId, event.toolCallId, event.activityScopeId].filter(Boolean).join(' · ')
+            : [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
         const outcome = outcomeLabel(event);
         const packet = packetSummary(event);
         const resultDetail = event.category === 'network'
@@ -400,6 +417,9 @@
             cell(t('auditTrace', '追溯'), tracePrimary, traceSecondary, 'is-trace'),
             cell(t('activityResult', '结果'), outcome, resultDetail, 'is-result'),
         );
+        if (event.category === 'network') {
+            row.title = [`event: ${event.eventId || '—'}`, `execution: ${event.executionId || '—'}`, `tool-call: ${event.toolCallId || '—'}`, `scope: ${event.activityScopeId || '—'}`, `generation: ${event.runtimeGeneration || 0}`, `declared: ${event.declaredActivityKind || 'unknown'}`, `observed: ${event.observedActivityKind || 'single'}`, `hash v${event.hashVersion || 1}`].join('\n');
+        }
         return row;
     }
 

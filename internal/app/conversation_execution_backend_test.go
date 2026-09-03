@@ -23,6 +23,33 @@ type appFakeRuntimeExecutor struct {
 	request containerruntime.ExecRequest
 }
 
+type credentialEchoBackend struct{ value string }
+
+func (backend credentialEchoBackend) Execute(_ context.Context, request security.ExecutionRequest) (security.ExecutionResult, error) {
+	pivot := len(backend.value) / 2
+	if request.Output != nil {
+		request.Output("before " + backend.value[:pivot])
+		request.Output(backend.value[pivot:] + " after")
+	}
+	return security.ExecutionResult{Output: "before " + backend.value + " after", ExitCode: 0}, nil
+}
+
+func TestExecutionCredentialRedactionCoversSplitStreamAndResult(t *testing.T) {
+	credential := "v1.header.payload.signature"
+	var streamed strings.Builder
+	result, err := executeWithCredentialRedaction(context.Background(), credentialEchoBackend{value: credential}, security.ExecutionRequest{
+		Output: func(chunk string) { _, _ = streamed.WriteString(chunk) },
+	}, []string{credential})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, output := range map[string]string{"stream": streamed.String(), "result": result.Output} {
+		if strings.Contains(output, credential) || output != "before "+redactedNetworkCredential+" after" {
+			t.Fatalf("%s credential redaction = %q", label, output)
+		}
+	}
+}
+
 type appBlockingStartManager struct {
 	*containertest.FakeManager
 	entered   chan struct{}

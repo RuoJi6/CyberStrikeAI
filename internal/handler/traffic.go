@@ -79,7 +79,9 @@ func (h *TrafficHandler) List(c *gin.Context) {
 	filter := database.TrafficTransactionFilter{
 		ID: strings.TrimSpace(c.Query("id")), ConversationID: strings.TrimSpace(c.Query("conversation_id")),
 		ProjectID: strings.TrimSpace(c.Query("project_id")), ExecutionID: strings.TrimSpace(c.Query("execution_id")),
-		RuntimeMode: strings.TrimSpace(c.Query("runtime_mode")), Scheme: strings.TrimSpace(c.Query("scheme")),
+		AgentID: strings.TrimSpace(c.Query("agent")), ToolName: strings.TrimSpace(c.Query("tool")),
+		AttributionStatus: strings.TrimSpace(c.Query("attribution_status")),
+		RuntimeMode:       strings.TrimSpace(c.Query("runtime_mode")), Scheme: strings.TrimSpace(c.Query("scheme")),
 		Host: strings.ToLower(strings.TrimSpace(c.Query("host"))), Method: strings.TrimSpace(c.Query("method")), Search: search,
 		UserID: session.UserID, Scope: session.ScopeFor("traffic:read"), Limit: pageSize, Offset: (page - 1) * pageSize,
 	}

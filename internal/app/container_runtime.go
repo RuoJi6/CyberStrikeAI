@@ -18,6 +18,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -25,7 +26,7 @@ import (
 
 const tlsAuthorityRotationPeriod = 6 * 24 * time.Hour
 
-func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, credentialCipher *egress.CredentialCipher, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, *egress.SnapshotStore, *egress.UpstreamRouteStore, *egress.AuthProfilesStore, *egress.TLSAuthorityStore, error) {
+func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, credentialCipher *egress.CredentialCipher, provenanceSigner *networkprovenance.Signer, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, *egress.SnapshotStore, *egress.UpstreamRouteStore, *egress.AuthProfilesStore, *egress.TLSAuthorityStore, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil
 	}
@@ -57,7 +58,7 @@ func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, cred
 	if err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, err
 	}
-	gatewaySpec := conversationEgressGatewaySpec(cfg)
+	gatewaySpec := conversationEgressGatewaySpec(cfg, provenanceSigner.PublicKeyEncoded())
 	initializerStore := &boundarySnapshotInitializationStore{
 		DB: db, SnapshotStore: snapshotStore, UpstreamStore: upstreamStore, AuthProfilesStore: authProfilesStore,
 		TLSAuthorityStore: tlsAuthorityStore,
@@ -219,6 +220,10 @@ func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, convers
 		if s.EgressGateway != nil {
 			gateway := *s.EgressGateway
 			gateway.BoundarySnapshot = &snapshotSpec
+			if gateway.AttributionPublicKey != "" {
+				gateway.AttributionRuntimeGeneration = snapshotSpec.RuntimeGeneration
+				gateway.AttributionInstanceID = uuid.NewString()
+			}
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
 			gateway.TLSAuthority = tlsAuthority
@@ -226,6 +231,10 @@ func (s *boundarySnapshotInitializationStore) Claim(ctx context.Context, convers
 		} else if target.EgressGateway != nil {
 			gateway := *target.EgressGateway
 			gateway.BoundarySnapshot = &snapshotSpec
+			if gateway.AttributionPublicKey != "" && gateway.AttributionInstanceID == "" {
+				gateway.AttributionRuntimeGeneration = snapshotSpec.RuntimeGeneration
+				gateway.AttributionInstanceID = uuid.NewString()
+			}
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
 			gateway.TLSAuthority = tlsAuthority
@@ -337,7 +346,7 @@ func materializeBoundarySnapshot(store *egress.SnapshotStore, snapshot database.
 	if _, err := store.Put(reference, snapshot.CanonicalJSON); err != nil {
 		return containerruntime.EgressBoundarySnapshotSpec{}, err
 	}
-	return containerruntime.EgressBoundarySnapshotSpec{ID: reference.ID, SHA256: reference.SHA256}, nil
+	return containerruntime.EgressBoundarySnapshotSpec{ID: reference.ID, SHA256: reference.SHA256, RuntimeGeneration: snapshot.RuntimeGeneration}, nil
 }
 
 func materializeConversationAuthProfiles(ctx context.Context, db *database.DB, cipher *egress.CredentialCipher, store *egress.AuthProfilesStore, snapshot database.ConversationBoundarySnapshot) (*containerruntime.EgressAuthProfilesSpec, error) {
@@ -533,7 +542,7 @@ func logContainerIdleStop(logger *zap.Logger, report containerruntime.IdleStopRe
 
 // conversationContainerSpec converts trusted configuration into the immutable
 // specification used when phase 2 requests a container for first execution.
-func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec) (containerruntime.RuntimeSpec, error) {
+func conversationContainerSpec(cfg *config.Config, conversationID string, workspacePersistent bool, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec, publicKeys ...string) (containerruntime.RuntimeSpec, error) {
 	binding := database.ConversationWorkspaceBinding{ConversationID: conversationID, Mode: database.ConversationWorkspaceModeEphemeral}
 	if workspacePersistent {
 		workspaceID := "conversation-" + strings.TrimSpace(conversationID)
@@ -543,14 +552,18 @@ func conversationContainerSpec(cfg *config.Config, conversationID string, worksp
 			VolumeName: containerruntime.WorkspaceVolumeNameForID(workspaceID),
 		}
 	}
-	return conversationContainerSpecWithWorkspace(cfg, conversationID, binding, snapshot, upstreamRoute, authProfiles, tlsAuthority)
+	return conversationContainerSpecWithWorkspace(cfg, conversationID, binding, snapshot, upstreamRoute, authProfiles, tlsAuthority, publicKeys...)
 }
 
-func conversationContainerSpecWithWorkspace(cfg *config.Config, conversationID string, binding database.ConversationWorkspaceBinding, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec) (containerruntime.RuntimeSpec, error) {
+func conversationContainerSpecWithWorkspace(cfg *config.Config, conversationID string, binding database.ConversationWorkspaceBinding, snapshot containerruntime.EgressBoundarySnapshotSpec, upstreamRoute *containerruntime.EgressUpstreamRouteSpec, authProfiles *containerruntime.EgressAuthProfilesSpec, tlsAuthority *containerruntime.EgressTLSAuthoritySpec, publicKeys ...string) (containerruntime.RuntimeSpec, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return containerruntime.RuntimeSpec{}, fmt.Errorf("%w: conversation container runtime is disabled", containerruntime.ErrEngineUnavailable)
 	}
 	conversationID = strings.TrimSpace(conversationID)
+	publicKey := ""
+	if len(publicKeys) > 0 {
+		publicKey = strings.TrimSpace(publicKeys[0])
+	}
 	spec := containerruntime.RuntimeSpec{
 		ID:             containerruntime.RuntimeID("conversation-" + conversationID),
 		ConversationID: conversationID,
@@ -588,7 +601,11 @@ func conversationContainerSpecWithWorkspace(cfg *config.Config, conversationID s
 			Inventory:       cfg.Container.ToolInventory,
 		},
 		EgressGateway: func() *containerruntime.EgressGatewaySpec {
-			gateway := conversationEgressGatewaySpec(cfg)
+			gateway := conversationEgressGatewaySpec(cfg, publicKey)
+			if gateway.AttributionPublicKey != "" {
+				gateway.AttributionRuntimeGeneration = snapshot.RuntimeGeneration
+				gateway.AttributionInstanceID = uuid.NewString()
+			}
 			gateway.BoundarySnapshot = &snapshot
 			gateway.UpstreamRoute = upstreamRoute
 			gateway.AuthProfiles = authProfiles
@@ -627,9 +644,14 @@ func applyConversationRuntimeControls(spec *containerruntime.RuntimeSpec, contro
 	}
 }
 
-func conversationEgressGatewaySpec(cfg *config.Config) containerruntime.EgressGatewaySpec {
+func conversationEgressGatewaySpec(cfg *config.Config, publicKeys ...string) containerruntime.EgressGatewaySpec {
+	publicKey := ""
+	if len(publicKeys) > 0 {
+		publicKey = strings.TrimSpace(publicKeys[0])
+	}
 	return containerruntime.EgressGatewaySpec{
-		TrafficCapture: true,
+		TrafficCapture:       true,
+		AttributionPublicKey: publicKey,
 		Image: containerruntime.ImageReference{
 			Repository: strings.TrimSpace(cfg.Container.EgressImageRepository),
 			Digest:     strings.TrimSpace(cfg.Container.EgressImageDigest),

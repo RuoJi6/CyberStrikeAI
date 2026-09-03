@@ -12,14 +12,17 @@ import (
 	"sync"
 	"time"
 
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 )
 
 const (
-	AggregateKindWebFuzz      = "web-fuzz"
-	AggregateKindRequestBurst = "request-burst"
-	maximumSummaryPaths       = 32
-	maximumDistinctPaths      = 4096
+	AggregateKindWebFuzz               = "web-fuzz"
+	AggregateKindPathSweep             = "path-sweep"
+	AggregateKindUnattributedPathSweep = "unattributed-path-sweep"
+	AggregateKindRequestBurst          = "request-burst"
+	maximumSummaryPaths                = 32
+	maximumDistinctPaths               = 4096
 )
 
 // CompactConfig bounds how long complete HTTP transactions may be held in
@@ -280,8 +283,17 @@ func (s *CompactingSink) flushLocked(key string) []compactRecord {
 
 	firstAt, lastAt := current.firstAt.UTC(), current.lastAt.UTC()
 	representative.transaction.AggregateKind = AggregateKindRequestBurst
+	representative.transaction.ObservedActivityKind = networkprovenance.ObservedBurst
 	if len(paths) >= s.config.DistinctThreshold {
-		representative.transaction.AggregateKind = AggregateKindWebFuzz
+		representative.transaction.ObservedActivityKind = networkprovenance.ObservedPathSweep
+		switch {
+		case representative.transaction.DeclaredActivityKind == networkprovenance.ActivityKindFuzz:
+			representative.transaction.AggregateKind = AggregateKindWebFuzz
+		case representative.transaction.AttributionStatus == networkprovenance.AttributionUnattributed || representative.transaction.AttributionStatus == networkprovenance.AttributionLegacyUnattributed:
+			representative.transaction.AggregateKind = AggregateKindUnattributedPathSweep
+		default:
+			representative.transaction.AggregateKind = AggregateKindPathSweep
+		}
 	}
 	representative.transaction.AggregateCount = current.count
 	representative.transaction.AggregateFirstAt = &firstAt
@@ -308,8 +320,17 @@ func compactGroupKey(item traffic.Transaction) string {
 		strings.ToLower(strings.TrimSpace(item.Host)),
 		strconv.Itoa(item.Port),
 		strings.TrimSpace(item.RuleID),
+		strings.TrimSpace(item.RuntimeMode),
+		strconv.Itoa(item.RuntimeGeneration),
+		strings.TrimSpace(item.RuntimeInstanceID),
 		strings.TrimSpace(item.AgentID),
+		strings.TrimSpace(item.ToolName),
 		strings.TrimSpace(item.ExecutionID),
+		strings.TrimSpace(item.ToolCallID),
+		strings.TrimSpace(item.ActivityScopeID),
+		strings.TrimSpace(item.AttributionStatus),
+		strings.TrimSpace(item.DeclaredActivityKind),
+		strings.TrimSpace(item.UpstreamRouteID),
 	}, "|")
 }
 

@@ -15,6 +15,7 @@ import (
 
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/mcp"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/tooloutput"
 
 	"github.com/creack/pty"
@@ -181,6 +182,11 @@ func (e *Executor) ExecuteTool(ctx context.Context, toolName string, args map[st
 			zap.Int("enabledTools", len(e.toolIndex)),
 		)
 		return nil, fmt.Errorf("工具 %s 未找到或未启用", toolName)
+	}
+	if strings.EqualFold(strings.TrimSpace(toolConfig.NetworkActivityKind), networkprovenance.ActivityKindFuzz) {
+		provenance := networkprovenance.FromContext(ctx)
+		provenance.DeclaredActivityKind = networkprovenance.ActivityKindFuzz
+		ctx = networkprovenance.WithContext(ctx, provenance)
 	}
 
 	e.logger.Debug("找到工具配置",

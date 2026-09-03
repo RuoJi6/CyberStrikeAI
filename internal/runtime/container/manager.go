@@ -148,8 +148,9 @@ type EgressGatewayResources struct {
 // that must be mounted read-only and verified before the gateway is ready. The
 // canonical JSON stays in the trusted snapshot store, never in Agent input.
 type EgressBoundarySnapshotSpec struct {
-	ID     string
-	SHA256 string
+	ID                string
+	SHA256            string
+	RuntimeGeneration int `json:",omitempty"`
 }
 
 // EgressUpstreamRouteSpec identifies the immutable gateway-only route file.
@@ -188,14 +189,17 @@ type EgressTrafficLimits struct {
 // EgressGatewaySpec pins the only image that may bridge a conversation's
 // internal network to its dedicated egress network.
 type EgressGatewaySpec struct {
-	Image            ImageReference
-	Resources        EgressGatewayResources
-	TrafficCapture   bool                        `json:",omitempty"`
-	BoundarySnapshot *EgressBoundarySnapshotSpec `json:",omitempty"`
-	UpstreamRoute    *EgressUpstreamRouteSpec    `json:",omitempty"`
-	AuthProfiles     *EgressAuthProfilesSpec     `json:",omitempty"`
-	TLSAuthority     *EgressTLSAuthoritySpec     `json:",omitempty"`
-	TrafficLimits    *EgressTrafficLimits        `json:",omitempty"`
+	Image                        ImageReference
+	Resources                    EgressGatewayResources
+	TrafficCapture               bool                        `json:",omitempty"`
+	AttributionPublicKey         string                      `json:",omitempty"`
+	AttributionRuntimeGeneration int                         `json:",omitempty"`
+	AttributionInstanceID        string                      `json:",omitempty"`
+	BoundarySnapshot             *EgressBoundarySnapshotSpec `json:",omitempty"`
+	UpstreamRoute                *EgressUpstreamRouteSpec    `json:",omitempty"`
+	AuthProfiles                 *EgressAuthProfilesSpec     `json:",omitempty"`
+	TLSAuthority                 *EgressTLSAuthoritySpec     `json:",omitempty"`
+	TrafficLimits                *EgressTrafficLimits        `json:",omitempty"`
 }
 
 // RuntimeSpec is the desired immutable specification for one conversation.

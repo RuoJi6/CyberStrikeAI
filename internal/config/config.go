@@ -1726,15 +1726,16 @@ func (c ExternalMCPServerConfig) GetTransportType() string {
 }
 
 type ToolConfig struct {
-	Name             string            `yaml:"name"`
-	Command          string            `yaml:"command"`
-	Args             []string          `yaml:"args,omitempty"`              // 固定参数（可选）
-	ShortDescription string            `yaml:"short_description,omitempty"` // 简短描述（用于工具列表，减少token消耗）
-	Description      string            `yaml:"description"`                 // 详细描述（用于工具文档）
-	Enabled          bool              `yaml:"enabled"`
-	Parameters       []ParameterConfig `yaml:"parameters,omitempty"`         // 参数定义（可选）
-	ArgMapping       string            `yaml:"arg_mapping,omitempty"`        // 参数映射方式: "auto", "manual", "template"（可选）
-	AllowedExitCodes []int             `yaml:"allowed_exit_codes,omitempty"` // 允许的退出码列表（某些工具在成功时也返回非零退出码）
+	Name                string            `yaml:"name"`
+	Command             string            `yaml:"command"`
+	Args                []string          `yaml:"args,omitempty"`              // 固定参数（可选）
+	ShortDescription    string            `yaml:"short_description,omitempty"` // 简短描述（用于工具列表，减少token消耗）
+	Description         string            `yaml:"description"`                 // 详细描述（用于工具文档）
+	Enabled             bool              `yaml:"enabled"`
+	Parameters          []ParameterConfig `yaml:"parameters,omitempty"`            // 参数定义（可选）
+	ArgMapping          string            `yaml:"arg_mapping,omitempty"`           // 参数映射方式: "auto", "manual", "template"（可选）
+	AllowedExitCodes    []int             `yaml:"allowed_exit_codes,omitempty"`    // 允许的退出码列表（某些工具在成功时也返回非零退出码）
+	NetworkActivityKind string            `yaml:"network_activity_kind,omitempty"` // normal/fuzz；由受信任工具配置声明网络活动语义
 }
 
 // ParameterConfig 参数配置
@@ -2158,6 +2159,10 @@ func LoadToolFromFile(path string) (*ToolConfig, error) {
 	}
 	if tool.Command == "" {
 		return nil, fmt.Errorf("工具命令不能为空")
+	}
+	tool.NetworkActivityKind = strings.ToLower(strings.TrimSpace(tool.NetworkActivityKind))
+	if tool.NetworkActivityKind != "" && tool.NetworkActivityKind != "normal" && tool.NetworkActivityKind != "fuzz" {
+		return nil, fmt.Errorf("工具 network_activity_kind 必须为 normal 或 fuzz")
 	}
 
 	return &tool, nil

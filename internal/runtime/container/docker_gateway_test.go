@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/trafficspool"
 	mobycontainer "github.com/moby/moby/api/types/container"
 	mobyimage "github.com/moby/moby/api/types/image"
@@ -412,6 +413,34 @@ func TestEgressGatewayTrafficEnvironmentIgnoresImageDefaultsAndRejectsManagedDri
 				t.Fatalf("managed traffic-limit drift was accepted: %#v", mutated)
 			}
 		})
+	}
+}
+
+func TestEgressGatewayEnvironmentBindsAttributionGenerationAndInstance(t *testing.T) {
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{
+		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:" + strings.Repeat("e", 64), RuntimeGeneration: 7,
+	}
+	spec.EgressGateway.AttributionPublicKey = signer.PublicKeyEncoded()
+	spec.EgressGateway.AttributionRuntimeGeneration = 7
+	spec.EgressGateway.AttributionInstanceID = "87654321-4321-4321-8321-cba987654321"
+	if err := ValidateSpec(spec); err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, entry := range egressGatewayEnvironment(spec) {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = value
+	}
+	if values["CYBERSTRIKE_ATTRIBUTION_PUBLIC_KEY"] != signer.PublicKeyEncoded() ||
+		values["CYBERSTRIKE_ATTRIBUTION_CONVERSATION_ID"] != spec.ConversationID ||
+		values["CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION"] != "7" ||
+		values["CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID"] != spec.EgressGateway.AttributionInstanceID {
+		t.Fatalf("attribution environment = %#v", values)
 	}
 }
 

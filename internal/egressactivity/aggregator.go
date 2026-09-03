@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 )
 
 const (
@@ -297,7 +298,11 @@ func (a *Aggregator) flush(key string) []egress.ActivityEvent {
 	}
 	first := current.first
 	first.AggregateCount = current.count
-	first.AggregateKind = aggregateKind(first.RequestType, len(current.targets), len(current.ports), len(current.variants), a.config.DistinctThreshold)
+	first.AggregateKind = aggregateKind(first, len(current.targets), len(current.ports), len(current.variants), a.config.DistinctThreshold)
+	first.Provenance.ObservedActivityKind = networkprovenance.ObservedBurst
+	if (first.RequestType == egress.ActivityRequestHTTP || first.RequestType == egress.ActivityRequestHTTPS) && len(current.variants) >= a.config.DistinctThreshold {
+		first.Provenance.ObservedActivityKind = networkprovenance.ObservedPathSweep
+	}
 	firstAt, lastAt := current.firstAt, current.lastAt
 	first.AggregateFirstAt = &firstAt
 	first.AggregateLastAt = &lastAt
@@ -310,7 +315,9 @@ func (a *Aggregator) flush(key string) []egress.ActivityEvent {
 }
 
 func activityGroupKey(event egress.ActivityEvent) string {
-	base := fmt.Sprintf("%s|%s|%s|%s|%s", event.RequestType, event.Decision, event.RuleID, event.Reason, event.SnapshotID)
+	p := event.Provenance.Normalized()
+	base := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s|%s|%s", event.RequestType, event.Decision, event.RuleID, event.Reason, event.SnapshotID,
+		p.RuntimeMode, p.RuntimeGeneration, p.RuntimeInstanceID, p.AgentID, p.ToolName, p.ExecutionID, p.ToolCallID, p.ActivityScopeID, p.AttributionStatus, p.DeclaredActivityKind)
 	switch event.RequestType {
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS, egress.ActivityRequestCONNECT:
 		return base + "|" + strings.ToLower(strings.TrimSpace(event.Domain))
@@ -334,12 +341,20 @@ func activityVariant(event egress.ActivityEvent) string {
 	}
 }
 
-func aggregateKind(requestType string, targets, ports, variants, threshold int) string {
+func aggregateKind(event egress.ActivityEvent, targets, ports, variants, threshold int) string {
+	requestType := event.RequestType
 	switch {
 	case requestType == egress.ActivityRequestDNS && variants >= threshold:
 		return "dns-enumeration"
 	case (requestType == egress.ActivityRequestHTTP || requestType == egress.ActivityRequestHTTPS) && variants >= threshold:
-		return "web-fuzz"
+		provenance := event.Provenance.Normalized()
+		if provenance.DeclaredActivityKind == networkprovenance.ActivityKindFuzz {
+			return "web-fuzz"
+		}
+		if provenance.AttributionStatus == networkprovenance.AttributionUnattributed || provenance.AttributionStatus == networkprovenance.AttributionLegacyUnattributed {
+			return "unattributed-path-sweep"
+		}
+		return "path-sweep"
 	case ports >= threshold:
 		return "port-scan"
 	case targets >= threshold:

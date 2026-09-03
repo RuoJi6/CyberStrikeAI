@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/networkprovenance"
 )
 
 const (
@@ -418,6 +419,9 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 			event.SnapshotID = report.SnapshotID
 			event.SnapshotSHA256 = report.SHA256
 			event.UpstreamRouteID = report.UpstreamRouteID
+			if options.Proxy.AttributionVerifier != nil {
+				event.Provenance = networkprovenance.BindAudience(event.Provenance, options.Proxy.AttributionAudience)
+			}
 			outputMu.Lock()
 			_ = json.NewEncoder(output).Encode(event)
 			outputMu.Unlock()

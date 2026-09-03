@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	"github.com/moby/moby/api/pkg/stdcopy"
 	mobyclient "github.com/moby/moby/client"
 )
@@ -260,6 +263,28 @@ func parseGatewayActivityLine(line []byte, spec RuntimeSpec) (egress.ActivityEve
 	if err := decoder.Decode(&event); err != nil {
 		return egress.ActivityEvent{}, true, fmt.Errorf("%w: invalid egress activity event", ErrRuntimeStateConflict)
 	}
+	if event.EventID == "" {
+		digest := sha256.Sum256(line)
+		event.EventID = "legacy-" + hex.EncodeToString(digest[:16])
+	}
+	provenance := event.Provenance.Normalized()
+	if provenance.RuntimeMode == "" {
+		provenance.RuntimeMode = networkprovenance.RuntimeModeContainer
+	}
+	expectedRuntimeInstance := ""
+	if spec.EgressGateway != nil {
+		expectedRuntimeInstance = strings.TrimSpace(spec.EgressGateway.AttributionInstanceID)
+		if expectedRuntimeInstance == "" && spec.EgressGateway.BoundarySnapshot != nil {
+			expectedRuntimeInstance = spec.EgressGateway.BoundarySnapshot.ID
+		}
+	}
+	if provenance.RuntimeInstanceID == "" {
+		provenance.RuntimeInstanceID = expectedRuntimeInstance
+	}
+	if provenance.AttributionStatus == networkprovenance.AttributionUnattributed && spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) == "" {
+		provenance.AttributionStatus = networkprovenance.AttributionLegacyUnattributed
+	}
+	event.Provenance = provenance.Normalized()
 	if err := validateGatewayActivityEvent(event, spec); err != nil {
 		return egress.ActivityEvent{}, true, err
 	}
@@ -274,6 +299,29 @@ func validateGatewayActivityEvent(event egress.ActivityEvent, spec RuntimeSpec) 
 		len(event.Domain) > 253 || strings.TrimSpace(event.Domain) != event.Domain ||
 		event.LatencyMS < 0 || event.BytesUp < 0 || event.BytesDown < 0 || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 || len(event.DNSAnswers) > 128 ||
 		!validActivityCode(event.Outcome, false) || !validActivityCode(event.Reason, true) || !validActivityText(event.RuleID, 256, true) {
+		return invalid()
+	}
+	provenance := event.Provenance.Normalized()
+	expectedRuntimeInstance := strings.TrimSpace(spec.EgressGateway.AttributionInstanceID)
+	if expectedRuntimeInstance == "" {
+		expectedRuntimeInstance = spec.EgressGateway.BoundarySnapshot.ID
+	}
+	if provenance.RuntimeMode != networkprovenance.RuntimeModeContainer || provenance.RuntimeInstanceID != expectedRuntimeInstance {
+		return invalid()
+	}
+	if strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" {
+		if provenance.RuntimeGeneration != spec.EgressGateway.AttributionRuntimeGeneration {
+			return invalid()
+		}
+		requiresAttribution := event.RequestType == egress.ActivityRequestHTTP || event.RequestType == egress.ActivityRequestHTTPS || event.RequestType == egress.ActivityRequestCONNECT
+		if requiresAttribution && provenance.AttributionStatus != networkprovenance.AttributionVerified && provenance.AttributionStatus != networkprovenance.AttributionInvalid {
+			return invalid()
+		}
+		if !requiresAttribution && provenance.AttributionStatus != networkprovenance.AttributionUnattributed {
+			return invalid()
+		}
+	}
+	if provenance.AttributionStatus == networkprovenance.AttributionVerified && (provenance.ConversationID != spec.ConversationID || !provenance.ValidVerified()) {
 		return invalid()
 	}
 	switch event.RequestType {

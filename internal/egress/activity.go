@@ -7,6 +7,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"cyberstrike-ai/internal/networkprovenance"
+	"github.com/google/uuid"
 )
 
 const (
@@ -133,37 +136,39 @@ func ValidateHTTPPacket(packet *HTTPPacket) error {
 // HTTP/HTTPS events may include a bounded packet projection for on-demand
 // audit inspection. Raw provider errors and environment values remain excluded.
 type ActivityEvent struct {
-	Event                     string      `json:"event"`
-	Timestamp                 time.Time   `json:"timestamp"`
-	RequestType               string      `json:"requestType"`
-	Domain                    string      `json:"domain"`
-	DNSQueryType              string      `json:"dnsQueryType,omitempty"`
-	DNSAnswers                []string    `json:"dnsAnswers,omitempty"`
-	ResolvedIPs               []string    `json:"resolvedIps,omitempty"`
-	ConnectedIP               string      `json:"connectedIp,omitempty"`
-	Port                      int         `json:"port,omitempty"`
-	Decision                  string      `json:"decision"`
-	RuleID                    string      `json:"ruleId,omitempty"`
-	Reason                    string      `json:"reason,omitempty"`
-	UpstreamRouteID           string      `json:"upstreamRouteId,omitempty"`
-	Method                    string      `json:"method,omitempty"`
-	Path                      string      `json:"path,omitempty"`
-	HTTPStatus                int         `json:"httpStatus,omitempty"`
-	Outcome                   string      `json:"outcome"`
-	LatencyMS                 int64       `json:"latencyMs"`
-	BytesUp                   int64       `json:"bytesUp,omitempty"`
-	BytesDown                 int64       `json:"bytesDown,omitempty"`
-	HTTPPacket                *HTTPPacket `json:"httpPacket,omitempty"`
-	RetryAfterMS              int64       `json:"retryAfterMs,omitempty"`
-	SnapshotID                string      `json:"snapshotId"`
-	SnapshotSHA256            string      `json:"snapshotSha256"`
-	AggregateCount            int64       `json:"aggregateCount,omitempty"`
-	AggregateKind             string      `json:"aggregateKind,omitempty"`
-	AggregateFirstAt          *time.Time  `json:"aggregateFirstAt,omitempty"`
-	AggregateLastAt           *time.Time  `json:"aggregateLastAt,omitempty"`
-	AggregateDistinctTargets  int         `json:"aggregateDistinctTargets,omitempty"`
-	AggregateDistinctPorts    int         `json:"aggregateDistinctPorts,omitempty"`
-	AggregateDistinctVariants int         `json:"aggregateDistinctVariants,omitempty"`
+	EventID                   string                                `json:"eventId"`
+	Event                     string                                `json:"event"`
+	Timestamp                 time.Time                             `json:"timestamp"`
+	RequestType               string                                `json:"requestType"`
+	Domain                    string                                `json:"domain"`
+	DNSQueryType              string                                `json:"dnsQueryType,omitempty"`
+	DNSAnswers                []string                              `json:"dnsAnswers,omitempty"`
+	ResolvedIPs               []string                              `json:"resolvedIps,omitempty"`
+	ConnectedIP               string                                `json:"connectedIp,omitempty"`
+	Port                      int                                   `json:"port,omitempty"`
+	Decision                  string                                `json:"decision"`
+	RuleID                    string                                `json:"ruleId,omitempty"`
+	Reason                    string                                `json:"reason,omitempty"`
+	UpstreamRouteID           string                                `json:"upstreamRouteId,omitempty"`
+	Method                    string                                `json:"method,omitempty"`
+	Path                      string                                `json:"path,omitempty"`
+	HTTPStatus                int                                   `json:"httpStatus,omitempty"`
+	Outcome                   string                                `json:"outcome"`
+	LatencyMS                 int64                                 `json:"latencyMs"`
+	BytesUp                   int64                                 `json:"bytesUp,omitempty"`
+	BytesDown                 int64                                 `json:"bytesDown,omitempty"`
+	HTTPPacket                *HTTPPacket                           `json:"httpPacket,omitempty"`
+	RetryAfterMS              int64                                 `json:"retryAfterMs,omitempty"`
+	SnapshotID                string                                `json:"snapshotId"`
+	SnapshotSHA256            string                                `json:"snapshotSha256"`
+	AggregateCount            int64                                 `json:"aggregateCount,omitempty"`
+	AggregateKind             string                                `json:"aggregateKind,omitempty"`
+	AggregateFirstAt          *time.Time                            `json:"aggregateFirstAt,omitempty"`
+	AggregateLastAt           *time.Time                            `json:"aggregateLastAt,omitempty"`
+	AggregateDistinctTargets  int                                   `json:"aggregateDistinctTargets,omitempty"`
+	AggregateDistinctPorts    int                                   `json:"aggregateDistinctPorts,omitempty"`
+	AggregateDistinctVariants int                                   `json:"aggregateDistinctVariants,omitempty"`
+	Provenance                networkprovenance.NetworkProvenanceV1 `json:"provenance"`
 }
 
 // ActivitySink is best-effort observability. Enforcement must never depend on
@@ -176,7 +181,11 @@ func emitActivity(sink ActivitySink, event ActivityEvent) {
 	}
 	defer func() { _ = recover() }()
 	event.Event = ActivityEventName
+	if event.EventID == "" {
+		event.EventID = uuid.NewString()
+	}
 	event.Timestamp = event.Timestamp.UTC()
+	event.Provenance = event.Provenance.Normalized()
 	if event.LatencyMS < 0 {
 		event.LatencyMS = 0
 	}

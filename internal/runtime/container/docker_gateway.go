@@ -450,16 +450,28 @@ func egressGatewayEnvironment(spec RuntimeSpec) []string {
 			"CYBERSTRIKE_CONVERSATION_ID="+spec.ConversationID,
 		)
 	}
+	if publicKey := strings.TrimSpace(spec.EgressGateway.AttributionPublicKey); publicKey != "" {
+		result = append(result,
+			"CYBERSTRIKE_ATTRIBUTION_PUBLIC_KEY="+publicKey,
+			"CYBERSTRIKE_ATTRIBUTION_CONVERSATION_ID="+spec.ConversationID,
+			"CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION="+strconv.Itoa(spec.EgressGateway.AttributionRuntimeGeneration),
+			"CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID="+strings.TrimSpace(spec.EgressGateway.AttributionInstanceID),
+		)
+	}
 	return result
 }
 
 func matchesEgressGatewayTrafficEnvironment(actual, expected []string) bool {
 	managedKeys := map[string]struct{}{
-		"CYBERSTRIKE_HTTP_RPS":           {},
-		"CYBERSTRIKE_TCP_CPS":            {},
-		"CYBERSTRIKE_UDP_DPS":            {},
-		"CYBERSTRIKE_TRAFFIC_SPOOL_PATH": {},
-		"CYBERSTRIKE_CONVERSATION_ID":    {},
+		"CYBERSTRIKE_HTTP_RPS":                       {},
+		"CYBERSTRIKE_TCP_CPS":                        {},
+		"CYBERSTRIKE_UDP_DPS":                        {},
+		"CYBERSTRIKE_TRAFFIC_SPOOL_PATH":             {},
+		"CYBERSTRIKE_CONVERSATION_ID":                {},
+		"CYBERSTRIKE_ATTRIBUTION_PUBLIC_KEY":         {},
+		"CYBERSTRIKE_ATTRIBUTION_CONVERSATION_ID":    {},
+		"CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION": {},
+		"CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID":        {},
 	}
 	expectedValues := make(map[string]string, len(expected))
 	for _, entry := range expected {
@@ -937,6 +949,11 @@ func expectedEgressGatewayLabels(ownerID string, spec RuntimeSpec, specDigest st
 	if gateway.TrafficCapture {
 		labels[LabelEgressTrafficCapture] = "true"
 	}
+	if gateway.AttributionPublicKey != "" {
+		labels[LabelEgressAttributionKey] = gateway.AttributionPublicKey
+		labels[LabelEgressAttributionGen] = strconv.Itoa(gateway.AttributionRuntimeGeneration)
+		labels[LabelEgressAttributionID] = gateway.AttributionInstanceID
+	}
 	return labels
 }
 
@@ -953,6 +970,9 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 		LabelEgressTLSAuthorityID, LabelEgressTLSCertSHA256, LabelEgressTLSKeySHA256,
 		LabelEgressHTTPRPS, LabelEgressTCPCPS, LabelEgressUDPDPS,
 		LabelEgressTrafficCapture,
+		LabelEgressAttributionKey,
+		LabelEgressAttributionGen,
+		LabelEgressAttributionID,
 	}
 	if enabled == "" {
 		for _, key := range keys {
@@ -1008,6 +1028,18 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 			NoFileSoft: nofileSoft, NoFileHard: nofileHard, TmpfsBytes: tmpfsBytes,
 			LogMaxBytes: logMaxBytes, LogMaxFiles: int(logMaxFiles),
 		},
+	}
+	gateway.AttributionPublicKey = strings.TrimSpace(labels[LabelEgressAttributionKey])
+	if gateway.AttributionPublicKey != "" {
+		generation, err := strconv.Atoi(strings.TrimSpace(labels[LabelEgressAttributionGen]))
+		if err != nil || generation < 1 {
+			return nil, errors.New("invalid egress gateway attribution generation label")
+		}
+		gateway.AttributionRuntimeGeneration = generation
+		gateway.AttributionInstanceID = strings.TrimSpace(labels[LabelEgressAttributionID])
+		if gateway.AttributionInstanceID == "" {
+			return nil, errors.New("invalid egress gateway attribution instance label")
+		}
 	}
 	if raw := strings.TrimSpace(labels[LabelEgressTrafficCapture]); raw != "" {
 		if raw != "true" {

@@ -14,6 +14,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"go.uber.org/zap"
 )
@@ -101,6 +102,20 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	}
 	if !spec.Readiness.Enabled || spec.Readiness.InventoryDigest != cfg.Container.ToolInventoryDigest || len(spec.Readiness.Inventory.Tools) != 1 {
 		t.Fatalf("spec readiness = %#v", spec.Readiness)
+	}
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.RuntimeGeneration = 4
+	attributed, err := conversationContainerSpec(cfg, "conversation-attributed", false, snapshot, nil, nil, nil, signer.PublicKeyEncoded())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attributed.EgressGateway == nil || attributed.EgressGateway.AttributionPublicKey != signer.PublicKeyEncoded() ||
+		attributed.EgressGateway.AttributionRuntimeGeneration != 4 || attributed.EgressGateway.AttributionInstanceID == "" ||
+		attributed.EgressGateway.AttributionInstanceID == snapshot.ID {
+		t.Fatalf("attributed gateway binding = %#v", attributed.EgressGateway)
 	}
 }
 

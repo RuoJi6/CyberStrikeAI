@@ -38,7 +38,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
         titles.add(title[1]);
     }
     assert.equal(titles.size, 7);
-    assert.match(template, /network-activity\.js\?v=20260903-1/);
+    assert.match(template, /network-activity\.js\?v=20260903-2/);
     assert.match(template, /boundary-rules\.js\?v=20260827-1/);
     assert.match(template, /egress-management\.js\?v=20260826-1/);
     assert.match(template, /container-management\.js\?v=20260903-1/);
@@ -131,7 +131,7 @@ test('中英文导航与页面文案完整且窄屏布局有明确规则', () =>
     assert.match(router, /window\.matchMedia\('\(max-width: 760px\)'\)\.matches/);
     assert.match(router, /sidebar\.classList\.add\('collapsed'\)/);
     assert.match(router, /syncContainerManagementSidebar\(pageId\)/);
-    assert.match(template, /style\.css\?v=20260903-1/);
+    assert.match(template, /style\.css\?v=20260903-2/);
     assert.match(template, /router\.js\?v=20260827-2/);
     assert.match(router, /popup\.style\.maxHeight = 'calc\(100vh - 16px\)'/);
     assert.match(router, /window\.innerHeight - popupRect\.height - viewportMargin/);

@@ -11,6 +11,7 @@ import (
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
 	"cyberstrike-ai/internal/egressactivity"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 
 	"go.uber.org/zap"
@@ -39,20 +40,25 @@ type Collector struct {
 	store    Store
 	streamer ActivityStreamer
 	logger   *zap.Logger
+	ingestor *egressactivity.Ingestor
 
 	mu      sync.Mutex
 	streams map[string]streamHandle
 	wg      sync.WaitGroup
 }
 
-func NewCollector(store Store, streamer ActivityStreamer, logger *zap.Logger) (*Collector, error) {
+func NewCollector(store Store, streamer ActivityStreamer, logger *zap.Logger, ingestors ...*egressactivity.Ingestor) (*Collector, error) {
 	if store == nil || streamer == nil {
 		return nil, errors.New("egress audit collector requires a store and activity streamer")
 	}
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	return &Collector{store: store, streamer: streamer, logger: logger, streams: make(map[string]streamHandle)}, nil
+	collector := &Collector{store: store, streamer: streamer, logger: logger, streams: make(map[string]streamHandle)}
+	if len(ingestors) > 0 {
+		collector.ingestor = ingestors[0]
+	}
+	return collector, nil
 }
 
 func auditStreamKey(target database.EgressAuditRuntimeTarget) string {
@@ -128,6 +134,11 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 	defer ticker.Stop()
 	appendEvents := func(appendCtx context.Context, outgoing []egress.ActivityEvent) error {
 		for _, event := range outgoing {
+			if c.ingestor != nil {
+				c.ingestor.Publish(egressactivity.IngestedActivity{
+					ConversationID: record.ConversationID, ConversationTitle: target.ConversationTitle, Event: event,
+				})
+			}
 			if _, appendErr := c.store.AppendEgressNetworkAuditEvent(appendCtx, target, event); appendErr != nil {
 				return appendErr
 			}
@@ -135,6 +146,16 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 		return nil
 	}
 	appendEvent := func(appendCtx context.Context, event egress.ActivityEvent) error {
+		provenance := event.Provenance.Normalized()
+		provenance.RuntimeMode = networkprovenance.RuntimeModeContainer
+		provenance.RuntimeGeneration = record.RuntimeGeneration
+		if record.Spec.EgressGateway != nil && record.Spec.EgressGateway.BoundarySnapshot != nil {
+			provenance.RuntimeInstanceID = record.Spec.EgressGateway.AttributionInstanceID
+			if provenance.RuntimeInstanceID == "" {
+				provenance.RuntimeInstanceID = record.Spec.EgressGateway.BoundarySnapshot.ID
+			}
+		}
+		event.Provenance = provenance.Normalized()
 		if event.RequestType == egress.ActivityRequestHealth {
 			_, appendErr := c.store.ApplyEgressHealthEvent(appendCtx, target, event)
 			return appendErr

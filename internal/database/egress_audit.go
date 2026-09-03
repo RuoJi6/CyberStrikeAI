@@ -18,6 +18,7 @@ import (
 
 	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 )
 
@@ -54,6 +55,16 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	container_id TEXT NOT NULL DEFAULT '',
 	agent_id TEXT NOT NULL DEFAULT '',
 	runtime_generation INTEGER NOT NULL DEFAULT 0,
+	source_event_id TEXT NOT NULL DEFAULT '',
+	runtime_mode TEXT NOT NULL DEFAULT '',
+	runtime_instance_id TEXT NOT NULL DEFAULT '',
+	tool_name TEXT NOT NULL DEFAULT '',
+	execution_id TEXT NOT NULL DEFAULT '',
+	tool_call_id TEXT NOT NULL DEFAULT '',
+	activity_scope_id TEXT NOT NULL DEFAULT '',
+	attribution_status TEXT NOT NULL DEFAULT '',
+	declared_activity_kind TEXT NOT NULL DEFAULT '',
+	observed_activity_kind TEXT NOT NULL DEFAULT '',
 	snapshot_id TEXT NOT NULL DEFAULT '',
 	snapshot_sha256 TEXT NOT NULL DEFAULT '',
 	domain TEXT NOT NULL DEFAULT '',
@@ -147,7 +158,7 @@ BEGIN
 	UPDATE egress_audit_events
 	SET chain_sequence = COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1,
 		previous_hash = COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
-		event_hash = cyberstrike_egress_audit_hash_dns(
+		event_hash = cyberstrike_egress_audit_hash_provenance(
 			COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 			CAST(COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1 AS TEXT),
 			CAST(NEW.id AS TEXT), CAST(NEW.event_key AS TEXT), CAST(NEW.recorded_at AS TEXT), CAST(NEW.occurred_at AS TEXT),
@@ -158,7 +169,11 @@ BEGIN
 			CAST(NEW.reason AS TEXT), CAST(NEW.upstream_route_id AS TEXT), CAST(NEW.method AS TEXT), CAST(NEW.path AS TEXT),
 			CAST(NEW.http_status AS TEXT), CAST(NEW.outcome AS TEXT), CAST(NEW.latency_ms AS TEXT), CAST(NEW.bytes_up AS TEXT),
 			CAST(NEW.bytes_down AS TEXT), CAST(NEW.lifecycle_operation AS TEXT), CAST(NEW.lifecycle_state AS TEXT), CAST(NEW.message AS TEXT),
-			CAST(NEW.http_packet_json AS TEXT), CAST(NEW.dns_query_type AS TEXT), CAST(NEW.dns_answers_json AS TEXT)
+			CAST(NEW.http_packet_json AS TEXT), CAST(NEW.dns_query_type AS TEXT), CAST(NEW.dns_answers_json AS TEXT),
+			CAST(NEW.source_event_id AS TEXT), CAST(NEW.runtime_mode AS TEXT), CAST(NEW.runtime_instance_id AS TEXT),
+			CAST(NEW.tool_name AS TEXT), CAST(NEW.execution_id AS TEXT), CAST(NEW.tool_call_id AS TEXT),
+			CAST(NEW.activity_scope_id AS TEXT), CAST(NEW.attribution_status AS TEXT),
+			CAST(NEW.declared_activity_kind AS TEXT), CAST(NEW.observed_activity_kind AS TEXT)
 		)
 	WHERE id = NEW.id;
 	INSERT INTO egress_audit_chain_heads (conversation_id, last_sequence, last_hash, event_count, updated_at)
@@ -305,6 +320,17 @@ type EgressAuditEvent struct {
 	ContainerID               string             `json:"containerId,omitempty"`
 	AgentID                   string             `json:"agentId,omitempty"`
 	RuntimeGeneration         int                `json:"runtimeGeneration"`
+	SourceEventID             string             `json:"eventId,omitempty"`
+	RuntimeMode               string             `json:"runtimeMode,omitempty"`
+	RuntimeInstanceID         string             `json:"runtimeInstanceId,omitempty"`
+	ToolName                  string             `json:"toolName,omitempty"`
+	ExecutionID               string             `json:"executionId,omitempty"`
+	ToolCallID                string             `json:"toolCallId,omitempty"`
+	ActivityScopeID           string             `json:"activityScopeId,omitempty"`
+	AttributionStatus         string             `json:"attributionStatus,omitempty"`
+	DeclaredActivityKind      string             `json:"declaredActivityKind,omitempty"`
+	ObservedActivityKind      string             `json:"observedActivityKind,omitempty"`
+	HashVersion               int                `json:"hashVersion"`
 	SnapshotID                string             `json:"snapshotId,omitempty"`
 	SnapshotSHA256            string             `json:"snapshotSha256,omitempty"`
 	Domain                    string             `json:"domain,omitempty"`
@@ -339,17 +365,22 @@ type EgressAuditEvent struct {
 }
 
 type EgressAuditFilter struct {
-	ConversationID string
-	Category       string
-	EventType      string
-	Decision       string
-	Query          string
-	Since          *time.Time
-	Until          *time.Time
-	Limit          int
-	Offset         int
-	UserID         string
-	Scope          string
+	ConversationID    string
+	Category          string
+	EventType         string
+	Decision          string
+	RuntimeMode       string
+	AgentID           string
+	ToolName          string
+	ExecutionID       string
+	AttributionStatus string
+	Query             string
+	Since             *time.Time
+	Until             *time.Time
+	Limit             int
+	Offset            int
+	UserID            string
+	Scope             string
 }
 
 type EgressAuditSummary struct {
@@ -376,6 +407,7 @@ type EgressAuditRuntimeTarget struct {
 	Record            containerruntime.InitializationRecord
 	ConversationTitle string
 	AuditMode         string
+	RuntimeMode       string
 }
 
 type ConversationEgressAuditSetting struct {
@@ -422,6 +454,24 @@ func egressAuditHashValuesWithDNS(values ...interface{}) string {
 		return egressAuditHashValuesWithPacket(values[:len(values)-2]...)
 	}
 	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v3-dns\x00", values...)
+}
+
+func egressAuditHashValuesWithProvenance(values ...interface{}) string {
+	const provenanceFields = 10
+	if len(values) < provenanceFields {
+		return egressAuditHashValuesWithDNS(values...)
+	}
+	allEmpty := true
+	for _, value := range values[len(values)-provenanceFields:] {
+		if fmt.Sprint(value) != "" {
+			allEmpty = false
+			break
+		}
+	}
+	if allEmpty {
+		return egressAuditHashValuesWithDNS(values[:len(values)-provenanceFields]...)
+	}
+	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v4-provenance\x00", values...)
 }
 
 func egressAuditHashWithDomain(domain string, values ...interface{}) string {
@@ -479,6 +529,16 @@ func (db *DB) initEgressAuditTables() error {
 		{"http_packet_json", "ALTER TABLE egress_audit_events ADD COLUMN http_packet_json TEXT NOT NULL DEFAULT ''"},
 		{"dns_query_type", "ALTER TABLE egress_audit_events ADD COLUMN dns_query_type TEXT NOT NULL DEFAULT ''"},
 		{"dns_answers_json", "ALTER TABLE egress_audit_events ADD COLUMN dns_answers_json TEXT NOT NULL DEFAULT '[]'"},
+		{"source_event_id", "ALTER TABLE egress_audit_events ADD COLUMN source_event_id TEXT NOT NULL DEFAULT ''"},
+		{"runtime_mode", "ALTER TABLE egress_audit_events ADD COLUMN runtime_mode TEXT NOT NULL DEFAULT ''"},
+		{"runtime_instance_id", "ALTER TABLE egress_audit_events ADD COLUMN runtime_instance_id TEXT NOT NULL DEFAULT ''"},
+		{"tool_name", "ALTER TABLE egress_audit_events ADD COLUMN tool_name TEXT NOT NULL DEFAULT ''"},
+		{"execution_id", "ALTER TABLE egress_audit_events ADD COLUMN execution_id TEXT NOT NULL DEFAULT ''"},
+		{"tool_call_id", "ALTER TABLE egress_audit_events ADD COLUMN tool_call_id TEXT NOT NULL DEFAULT ''"},
+		{"activity_scope_id", "ALTER TABLE egress_audit_events ADD COLUMN activity_scope_id TEXT NOT NULL DEFAULT ''"},
+		{"attribution_status", "ALTER TABLE egress_audit_events ADD COLUMN attribution_status TEXT NOT NULL DEFAULT ''"},
+		{"declared_activity_kind", "ALTER TABLE egress_audit_events ADD COLUMN declared_activity_kind TEXT NOT NULL DEFAULT ''"},
+		{"observed_activity_kind", "ALTER TABLE egress_audit_events ADD COLUMN observed_activity_kind TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("egress_audit_events", column.name, column.statement); err != nil {
 			return fmt.Errorf("initialize egress audit chain column %s: %w", column.name, err)
@@ -494,6 +554,7 @@ func (db *DB) initEgressAuditTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_category_type_time ON egress_audit_events(category, event_type, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_decision_time ON egress_audit_events(decision, result, occurred_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_egress_audit_domain_time ON egress_audit_events(domain, occurred_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_egress_audit_provenance ON egress_audit_events(runtime_mode, attribution_status, agent_id, tool_name, execution_id, activity_scope_id)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
@@ -580,6 +641,40 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	if ctx == nil {
 		return false, errors.New("egress audit context is required")
 	}
+	if event.EventID == "" {
+		legacyKey, err := json.Marshal(struct {
+			ConversationID string
+			ContainerID    string
+			Event          egress.ActivityEvent
+		}{target.Record.ConversationID, target.Record.ProviderID, event})
+		if err != nil {
+			return false, fmt.Errorf("encode legacy egress event id: %w", err)
+		}
+		digest := sha256.Sum256(legacyKey)
+		event.EventID = "legacy-" + hex.EncodeToString(digest[:16])
+	}
+	provenance := event.Provenance.Normalized()
+	if provenance.RuntimeMode == "" {
+		provenance.RuntimeMode = networkprovenance.RuntimeModeContainer
+	}
+	provenance.RuntimeGeneration = target.Record.RuntimeGeneration
+	expectedRuntimeInstance := ""
+	if target.Record.Spec.EgressGateway != nil {
+		expectedRuntimeInstance = strings.TrimSpace(target.Record.Spec.EgressGateway.AttributionInstanceID)
+		if expectedRuntimeInstance == "" && target.Record.Spec.EgressGateway.BoundarySnapshot != nil {
+			expectedRuntimeInstance = target.Record.Spec.EgressGateway.BoundarySnapshot.ID
+		}
+	}
+	if provenance.RuntimeInstanceID == "" {
+		provenance.RuntimeInstanceID = expectedRuntimeInstance
+	}
+	if provenance.AttributionStatus == networkprovenance.AttributionUnattributed && target.Record.Spec.EgressGateway != nil && strings.TrimSpace(target.Record.Spec.EgressGateway.AttributionPublicKey) == "" {
+		provenance.AttributionStatus = networkprovenance.AttributionLegacyUnattributed
+	}
+	if provenance.RuntimeMode == networkprovenance.RuntimeModeContainer && provenance.AttributionStatus == networkprovenance.AttributionLegacyUnattributed && provenance.AgentID == "" {
+		provenance.AgentID = "container-agent"
+	}
+	event.Provenance = provenance.Normalized()
 	if err := validateEgressNetworkAuditEvent(target, event); err != nil {
 		return false, err
 	}
@@ -597,6 +692,7 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	// projection with a newly calculated count. Historical audit chains remain
 	// immutable; new traffic is compacted before its first sample is stored.
 	if event.AggregateCount > 1 {
+		provenance := event.Provenance.Normalized()
 		var exists int
 		err := db.QueryRowContext(ctx, `
 			SELECT EXISTS(
@@ -605,10 +701,12 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 					AND occurred_at = ? AND category = 'network' AND event_type = ?
 					AND domain = ? AND connected_ip = ? AND port = ? AND decision = ?
 					AND rule_id = ? AND reason = ? AND method = ? AND path = ?
+					AND execution_id = ? AND tool_call_id = ? AND activity_scope_id = ?
 			)
 		`, record.ConversationID, record.ProviderID, record.RuntimeGeneration,
 			formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType, event.Domain, event.ConnectedIP,
-			event.Port, event.Decision, event.RuleID, event.Reason, event.Method, event.Path).Scan(&exists)
+			event.Port, event.Decision, event.RuleID, event.Reason, event.Method, event.Path,
+			provenance.ExecutionID, provenance.ToolCallID, provenance.ActivityScopeID).Scan(&exists)
 		if err != nil {
 			return false, fmt.Errorf("check replayed egress aggregate: %w", err)
 		}
@@ -650,16 +748,21 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 	eventKey := "network:" + hex.EncodeToString(digest[:])
 	id := "ea-" + hex.EncodeToString(digest[:16])
 	now := time.Now().UTC()
+	provenance = event.Provenance.Normalized()
 	result, err := db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO egress_audit_events (
 			id, event_key, recorded_at, occurred_at, category, event_type,
 			conversation_id, conversation_title, container_id, agent_id, runtime_generation,
+			source_event_id, runtime_mode, runtime_instance_id, tool_name, execution_id, tool_call_id,
+			activity_scope_id, attribution_status, declared_activity_kind, observed_activity_kind,
 			snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 			decision, rule_id, reason, upstream_route_id, method, path, http_status,
 			outcome, latency_ms, bytes_up, bytes_down, http_packet_json, message
-		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, 'container-agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, eventKey, formatSQLiteUTC(now), formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType,
-		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
+		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, provenance.AgentID, record.RuntimeGeneration,
+		event.EventID, provenance.RuntimeMode, provenance.RuntimeInstanceID, provenance.ToolName, provenance.ExecutionID, provenance.ToolCallID,
+		provenance.ActivityScopeID, provenance.AttributionStatus, provenance.DeclaredActivityKind, provenance.ObservedActivityKind,
 		event.SnapshotID, event.SnapshotSHA256, event.Domain, event.DNSQueryType, string(dnsAnswersJSON), string(resolvedJSON), event.ConnectedIP, event.Port,
 		event.Decision, event.RuleID, event.Reason, event.UpstreamRouteID, event.Method, event.Path, event.HTTPStatus,
 		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, packetJSON, message)
@@ -710,6 +813,32 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		!validEgressAuditCode(event.Outcome, false) || !validEgressAuditCode(event.Reason, true) ||
 		!validEgressAuditText(event.RuleID, 256, true) || !validEgressAuditText(event.UpstreamRouteID, 128, true) {
 		return invalid()
+	}
+	provenance := event.Provenance.Normalized()
+	expectedRuntimeMode := networkprovenance.RuntimeModeContainer
+	if strings.TrimSpace(target.RuntimeMode) != "" {
+		expectedRuntimeMode = strings.TrimSpace(target.RuntimeMode)
+	}
+	expectedRuntimeInstance := strings.TrimSpace(record.Spec.EgressGateway.AttributionInstanceID)
+	if expectedRuntimeInstance == "" {
+		expectedRuntimeInstance = record.Spec.EgressGateway.BoundarySnapshot.ID
+	}
+	if !validEgressAuditText(event.EventID, 128, false) || provenance.RuntimeMode != expectedRuntimeMode ||
+		provenance.RuntimeGeneration != record.RuntimeGeneration || provenance.RuntimeInstanceID != expectedRuntimeInstance {
+		return invalid()
+	}
+	if provenance.AttributionStatus == networkprovenance.AttributionVerified {
+		if provenance.ConversationID != record.ConversationID || !provenance.ValidVerified() {
+			return invalid()
+		}
+	} else if strings.TrimSpace(record.Spec.EgressGateway.AttributionPublicKey) != "" {
+		requiresAttribution := event.RequestType == egress.ActivityRequestHTTP || event.RequestType == egress.ActivityRequestHTTPS || event.RequestType == egress.ActivityRequestCONNECT
+		if requiresAttribution && provenance.AttributionStatus != networkprovenance.AttributionInvalid {
+			return invalid()
+		}
+		if !requiresAttribution && provenance.AttributionStatus != networkprovenance.AttributionUnattributed {
+			return invalid()
+		}
 	}
 	if !validEgressAuditDomain(event.RequestType, event.DNSQueryType, event.Domain) {
 		return invalid()
@@ -768,10 +897,30 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.HTTPPacket != nil {
 			return invalid()
 		}
+	case egress.ActivityRequestHealth:
+		if event.DNSQueryType != "" || len(event.DNSAnswers) != 0 || event.Port != 0 || event.Method != "" || event.Path != "" || event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 || event.LatencyMS != 0 || event.HTTPPacket != nil || !validEgressAuditHealthEvent(event) {
+			return invalid()
+		}
 	default:
 		return invalid()
 	}
 	return nil
+}
+
+func validEgressAuditHealthEvent(event egress.ActivityEvent) bool {
+	switch event.Outcome {
+	case "cooldown_started":
+		return event.Decision == egress.ActivityDecisionBlocked && event.Reason == "upstream_rate_limited" && event.RetryAfterMS > 0
+	case "cooldown_expired":
+		return event.Decision == egress.ActivityDecisionAllowed && event.Reason == "upstream_rate_limited" && event.RetryAfterMS == 0
+	case "health_paused":
+		if event.Decision != egress.ActivityDecisionBlocked || event.RetryAfterMS != 0 {
+			return false
+		}
+		return event.Reason == "consecutive_login_failures" || event.Reason == "waf_challenge" || event.Reason == "captcha_challenge"
+	default:
+		return false
+	}
 }
 
 func validEgressAuditDomain(requestType, dnsQueryType, domain string) bool {
@@ -875,49 +1024,61 @@ func sanitizeEgressAuditDisplayText(value string, maximum int) string {
 }
 
 type egressAuditChainRow struct {
-	ID                 string
-	EventKey           string
-	RecordedAt         string
-	OccurredAt         string
-	Category           string
-	EventType          string
-	ConversationID     string
-	ConversationTitle  string
-	ContainerID        string
-	AgentID            string
-	RuntimeGeneration  int64
-	SnapshotID         string
-	SnapshotSHA256     string
-	Domain             string
-	DNSQueryType       string
-	DNSAnswersJSON     string
-	ResolvedIPsJSON    string
-	ConnectedIP        string
-	Port               int64
-	Decision           string
-	Result             string
-	RuleID             string
-	Reason             string
-	UpstreamRouteID    string
-	Method             string
-	Path               string
-	HTTPStatus         int64
-	Outcome            string
-	LatencyMS          int64
-	BytesUp            int64
-	BytesDown          int64
-	LifecycleOperation string
-	LifecycleState     string
-	Message            string
-	HTTPPacketJSON     string
-	ChainSequence      int64
-	PreviousHash       string
-	EventHash          string
+	ID                   string
+	EventKey             string
+	RecordedAt           string
+	OccurredAt           string
+	Category             string
+	EventType            string
+	ConversationID       string
+	ConversationTitle    string
+	ContainerID          string
+	AgentID              string
+	RuntimeGeneration    int64
+	SourceEventID        string
+	RuntimeMode          string
+	RuntimeInstanceID    string
+	ToolName             string
+	ExecutionID          string
+	ToolCallID           string
+	ActivityScopeID      string
+	AttributionStatus    string
+	DeclaredActivityKind string
+	ObservedActivityKind string
+	SnapshotID           string
+	SnapshotSHA256       string
+	Domain               string
+	DNSQueryType         string
+	DNSAnswersJSON       string
+	ResolvedIPsJSON      string
+	ConnectedIP          string
+	Port                 int64
+	Decision             string
+	Result               string
+	RuleID               string
+	Reason               string
+	UpstreamRouteID      string
+	Method               string
+	Path                 string
+	HTTPStatus           int64
+	Outcome              string
+	LatencyMS            int64
+	BytesUp              int64
+	BytesDown            int64
+	LifecycleOperation   string
+	LifecycleState       string
+	Message              string
+	HTTPPacketJSON       string
+	ChainSequence        int64
+	PreviousHash         string
+	EventHash            string
 }
 
 const egressAuditChainSelect = `
 	SELECT id, event_key, CAST(recorded_at AS TEXT), CAST(occurred_at AS TEXT), category, event_type,
 		conversation_id, conversation_title, container_id, agent_id, runtime_generation,
+		source_event_id, runtime_mode, runtime_instance_id, tool_name, execution_id, tool_call_id,
+		activity_scope_id, attribution_status, declared_activity_kind, observed_activity_kind,
 		snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 		decision, result, rule_id, reason, upstream_route_id, method, path, http_status,
 		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json,
@@ -929,6 +1090,8 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 	err := scanner.Scan(
 		&row.ID, &row.EventKey, &row.RecordedAt, &row.OccurredAt, &row.Category, &row.EventType,
 		&row.ConversationID, &row.ConversationTitle, &row.ContainerID, &row.AgentID, &row.RuntimeGeneration,
+		&row.SourceEventID, &row.RuntimeMode, &row.RuntimeInstanceID, &row.ToolName, &row.ExecutionID, &row.ToolCallID,
+		&row.ActivityScopeID, &row.AttributionStatus, &row.DeclaredActivityKind, &row.ObservedActivityKind,
 		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.DNSQueryType, &row.DNSAnswersJSON, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
 		&row.Decision, &row.Result, &row.RuleID, &row.Reason, &row.UpstreamRouteID, &row.Method, &row.Path, &row.HTTPStatus,
 		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON,
@@ -938,7 +1101,7 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 }
 
 func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int64) string {
-	return egressAuditHashValuesWithDNS(
+	return egressAuditHashValuesWithProvenance(
 		previousHash, strconv.FormatInt(sequence, 10), row.ID, row.EventKey, row.RecordedAt, row.OccurredAt,
 		row.Category, row.EventType, row.ConversationID, row.ConversationTitle, row.ContainerID, row.AgentID,
 		strconv.FormatInt(row.RuntimeGeneration, 10), row.SnapshotID, row.SnapshotSHA256, row.Domain,
@@ -946,6 +1109,8 @@ func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int6
 		row.RuleID, row.Reason, row.UpstreamRouteID, row.Method, row.Path, strconv.FormatInt(row.HTTPStatus, 10),
 		row.Outcome, strconv.FormatInt(row.LatencyMS, 10), strconv.FormatInt(row.BytesUp, 10), strconv.FormatInt(row.BytesDown, 10),
 		row.LifecycleOperation, row.LifecycleState, row.Message, row.HTTPPacketJSON, row.DNSQueryType, row.DNSAnswersJSON,
+		row.SourceEventID, row.RuntimeMode, row.RuntimeInstanceID, row.ToolName, row.ExecutionID, row.ToolCallID,
+		row.ActivityScopeID, row.AttributionStatus, row.DeclaredActivityKind, row.ObservedActivityKind,
 	)
 }
 
@@ -1144,7 +1309,6 @@ func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]Egres
 		JOIN conversations c ON c.id = r.conversation_id
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = r.conversation_id
 		WHERE r.initialization_status = ? AND r.runtime_status = ?
-			AND COALESCE(s.enabled, 1) = 1
 			AND json_type(r.spec_json, '$.EgressGateway') IS NOT NULL
 			AND json_type(r.spec_json, '$.EgressGateway') <> 'null'
 		ORDER BY r.conversation_id
@@ -1290,6 +1454,19 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 		where += " AND (e.decision = ? OR e.result = ?)"
 		args = append(args, decision, decision)
 	}
+	for _, exact := range []struct{ column, value string }{
+		{"COALESCE(NULLIF(e.runtime_mode, ''), 'container')", filter.RuntimeMode}, {"e.agent_id", filter.AgentID}, {"e.tool_name", filter.ToolName},
+		{"e.execution_id", filter.ExecutionID}, {"e.attribution_status", filter.AttributionStatus},
+	} {
+		if value := strings.TrimSpace(exact.value); value != "" && value != "all" {
+			column := exact.column
+			if column == "e.attribution_status" {
+				column = "COALESCE(NULLIF(e.attribution_status, ''), 'legacy_unattributed')"
+			}
+			where += " AND " + column + " = ?"
+			args = append(args, value)
+		}
+	}
 	if filter.Since != nil {
 		where += " AND " + sqliteEpochGE("e.occurred_at", ">=")
 		args = append(args, formatSQLiteUTC(filter.Since.UTC()))
@@ -1305,8 +1482,10 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 			OR e.resolved_ips_json LIKE ? ESCAPE '\' OR e.dns_query_type LIKE ? ESCAPE '\'
 			OR e.dns_answers_json LIKE ? ESCAPE '\' OR e.rule_id LIKE ? ESCAPE '\'
 			OR e.reason LIKE ? ESCAPE '\' OR e.upstream_route_id LIKE ? ESCAPE '\'
-			OR e.lifecycle_operation LIKE ? ESCAPE '\' OR e.message LIKE ? ESCAPE '\')`
-		for i := 0; i < 12; i++ {
+			OR e.lifecycle_operation LIKE ? ESCAPE '\' OR e.message LIKE ? ESCAPE '\'
+			OR e.agent_id LIKE ? ESCAPE '\' OR e.tool_name LIKE ? ESCAPE '\'
+			OR e.execution_id LIKE ? ESCAPE '\' OR e.tool_call_id LIKE ? ESCAPE '\')`
+		for i := 0; i < 16; i++ {
 			args = append(args, pattern)
 		}
 	}
@@ -1317,6 +1496,8 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 const egressAuditSelect = `
 	SELECT e.id, e.chain_sequence, e.previous_hash, e.event_hash, e.recorded_at, e.occurred_at, e.category, e.event_type,
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
+		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
+		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
@@ -1327,6 +1508,8 @@ const egressAuditSelect = `
 const egressAuditDetailSelect = `
 	SELECT e.id, e.chain_sequence, e.previous_hash, e.event_hash, e.recorded_at, e.occurred_at, e.category, e.event_type,
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
+		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
+		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
@@ -1438,6 +1621,8 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 	destinations := []interface{}{
 		&event.ID, &event.ChainSequence, &event.PreviousHash, &event.EventHash, &recordedAt, &occurredAt, &event.Category, &event.EventType,
 		&event.ConversationID, &event.ConversationTitle, &event.ContainerID, &event.AgentID, &event.RuntimeGeneration,
+		&event.SourceEventID, &event.RuntimeMode, &event.RuntimeInstanceID, &event.ToolName, &event.ExecutionID, &event.ToolCallID,
+		&event.ActivityScopeID, &event.AttributionStatus, &event.DeclaredActivityKind, &event.ObservedActivityKind,
 		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &event.DNSQueryType, &dnsAnswersJSON, &resolvedJSON, &event.ConnectedIP, &event.Port,
 		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &event.UpstreamRouteID, &event.Method, &event.Path,
 		&event.HTTPStatus, &event.Outcome, &event.LatencyMS, &event.BytesUp, &event.BytesDown,
@@ -1476,6 +1661,27 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 		event.HTTPPacket = &packet
 	}
 	applyEgressAuditAggregateMessage(&event)
+	if event.SourceEventID != "" || event.RuntimeMode != "" || event.AttributionStatus != "" {
+		event.HashVersion = 4
+	} else if event.DNSQueryType != "" || (dnsAnswersJSON != "" && dnsAnswersJSON != "[]") {
+		event.HashVersion = 3
+	} else if packetJSON != "" {
+		event.HashVersion = 2
+	} else {
+		event.HashVersion = 1
+	}
+	if event.RuntimeMode == "" {
+		event.RuntimeMode = networkprovenance.RuntimeModeContainer
+	}
+	if event.AttributionStatus == "" {
+		event.AttributionStatus = networkprovenance.AttributionLegacyUnattributed
+	}
+	if event.DeclaredActivityKind == "" {
+		event.DeclaredActivityKind = networkprovenance.ActivityKindUnknown
+	}
+	if event.ObservedActivityKind == "" {
+		event.ObservedActivityKind = networkprovenance.ObservedSingle
+	}
 	return event, nil
 }
 

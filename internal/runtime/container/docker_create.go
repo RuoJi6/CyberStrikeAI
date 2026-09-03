@@ -72,6 +72,9 @@ const (
 	LabelEgressTCPCPS          = "com.cyberstrike.egress.traffic.tcp-cps"
 	LabelEgressUDPDPS          = "com.cyberstrike.egress.traffic.udp-dps"
 	LabelEgressTrafficCapture  = "com.cyberstrike.egress.traffic-capture"
+	LabelEgressAttributionKey  = "com.cyberstrike.egress.attribution-public-key"
+	LabelEgressAttributionGen  = "com.cyberstrike.egress.attribution-runtime-generation"
+	LabelEgressAttributionID   = "com.cyberstrike.egress.attribution-instance-id"
 	ResourceKindAgent          = "agent-runtime"
 
 	defaultDockerOperationTimeout       = 30 * time.Second
@@ -1239,6 +1242,11 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	labels[LabelEgressLogMaxFiles] = strconv.Itoa(resources.LogMaxFiles)
 	if gateway.TrafficCapture {
 		labels[LabelEgressTrafficCapture] = "true"
+	}
+	if gateway.AttributionPublicKey != "" {
+		labels[LabelEgressAttributionKey] = gateway.AttributionPublicKey
+		labels[LabelEgressAttributionGen] = strconv.Itoa(gateway.AttributionRuntimeGeneration)
+		labels[LabelEgressAttributionID] = gateway.AttributionInstanceID
 	}
 	if gateway.BoundarySnapshot != nil {
 		labels[LabelEgressSnapshotID] = gateway.BoundarySnapshot.ID

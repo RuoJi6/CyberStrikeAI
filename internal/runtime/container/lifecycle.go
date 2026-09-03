@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type LifecycleOperation string
@@ -323,6 +325,17 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus: record.RuntimeStatus, Drift: "boundary_snapshot_unavailable", ReadinessFailed: record.Spec.Readiness.Enabled,
 		})
+	}
+	if target.Spec.EgressGateway != nil && strings.TrimSpace(target.Spec.EgressGateway.AttributionPublicKey) != "" {
+		gateway := *target.Spec.EgressGateway
+		gateway.AttributionRuntimeGeneration = record.RuntimeGeneration + 1
+		gateway.AttributionInstanceID = uuid.NewString()
+		if gateway.BoundarySnapshot != nil {
+			snapshot := *gateway.BoundarySnapshot
+			snapshot.RuntimeGeneration = gateway.AttributionRuntimeGeneration
+			gateway.BoundarySnapshot = &snapshot
+		}
+		target.Spec.EgressGateway = &gateway
 	}
 	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{
 		Spec:                          target.Spec,

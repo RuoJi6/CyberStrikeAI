@@ -1,6 +1,7 @@
 name: "arjun"
 command: "arjun"
 enabled: true
+network_activity_kind: "fuzz"
 short_description: "HTTP参数发现工具"
 description: |
   Arjun是一个HTTP参数发现工具，用于发现Web应用中的隐藏参数。

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 )
 
@@ -21,9 +22,7 @@ const (
 type TrafficSink func(context.Context, traffic.Transaction, []traffic.Message) error
 
 type trafficAttribution struct {
-	agentID     string
-	executionID string
-	toolCallID  string
+	provenance networkprovenance.NetworkProvenanceV1
 }
 
 type fullBodyCapture struct {
@@ -72,19 +71,9 @@ func (capture *fullBodyCapture) message(
 	}
 }
 
-func consumeTrafficAttribution(headers http.Header) trafficAttribution {
-	if headers == nil {
-		return trafficAttribution{}
-	}
-	result := trafficAttribution{
-		agentID:     boundedAttributionValue(headers.Get(trafficAgentIDHeader)),
-		executionID: boundedAttributionValue(headers.Get(trafficExecutionIDHeader)),
-		toolCallID:  boundedAttributionValue(headers.Get(trafficToolCallIDHeader)),
-	}
-	for _, name := range []string{trafficAgentIDHeader, trafficExecutionIDHeader, trafficToolCallIDHeader} {
-		headers.Del(name)
-	}
-	return result
+func consumeTrafficAttribution(ctx context.Context, headers http.Header) trafficAttribution {
+	stripLegacyAttributionHeaders(headers)
+	return trafficAttribution{provenance: networkprovenance.FromContext(ctx)}
 }
 
 func boundedAttributionValue(value string) string {

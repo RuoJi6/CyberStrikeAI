@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 )
 
 func TestAggregatorReleasesOrdinaryTrafficUnchanged(t *testing.T) {
@@ -33,6 +34,7 @@ func TestAggregatorCompactsWebFuzzToFirstSampleAndCount(t *testing.T) {
 	for index := 0; index < 12; index++ {
 		event := activityFixture(start.Add(time.Duration(index)*50*time.Millisecond), egress.ActivityRequestHTTP, "target.example", 80, fmt.Sprintf("/FUZZ-%d", index))
 		event.BytesUp, event.BytesDown = 10, 20
+		event.Provenance.DeclaredActivityKind = networkprovenance.ActivityKindFuzz
 		if got := aggregator.Observe(event); len(got) != 0 {
 			t.Fatalf("early output = %#v", got)
 		}
@@ -145,6 +147,7 @@ func TestAggregatorUsesReceiptTimeForDelayedOutOfOrderGatewayEvents(t *testing.T
 			80,
 			fmt.Sprintf("/delayed-fuzz-%d", index),
 		)
+		event.Provenance.DeclaredActivityKind = networkprovenance.ActivityKindFuzz
 		if got := aggregator.ObserveAt(event, receivedAt.Add(time.Duration(index)*10*time.Millisecond)); len(got) != 0 {
 			t.Fatalf("event %d flushed before the observed burst was idle: %#v", index, got)
 		}
@@ -163,6 +166,42 @@ func TestAggregatorUsesReceiptTimeForDelayedOutOfOrderGatewayEvents(t *testing.T
 	lastOccurrence := occurredAt.Add(7 * time.Millisecond)
 	if got[0].AggregateLastAt == nil || !got[0].AggregateLastAt.Equal(lastOccurrence) {
 		t.Fatalf("aggregate last occurrence = %v, want %v", got[0].AggregateLastAt, lastOccurrence)
+	}
+}
+
+func TestAggregatorSeparatesConcurrentNormalAndDeclaredFuzzScopes(t *testing.T) {
+	start := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	aggregator := New(Config{IdleWindow: time.Second, SlowIdleWindow: time.Second, MaximumBatchAge: time.Minute, CountThreshold: 4, DistinctThreshold: 4})
+	for index := 0; index < 8; index++ {
+		for _, scope := range []struct {
+			execution, call, kind string
+		}{
+			{execution: "execution-normal", call: "call-normal", kind: networkprovenance.ActivityKindNormal},
+			{execution: "execution-fuzz", call: "call-fuzz", kind: networkprovenance.ActivityKindFuzz},
+		} {
+			event := activityFixture(start.Add(time.Duration(index)*time.Millisecond), egress.ActivityRequestHTTPS, "same.example", 443, fmt.Sprintf("/path-%d", index))
+			event.Provenance = networkprovenance.NetworkProvenanceV1{
+				ConversationID: "conversation", RuntimeMode: networkprovenance.RuntimeModeContainer,
+				RuntimeGeneration: 2, RuntimeInstanceID: "gateway", AgentID: "agent", ToolName: "curl",
+				ExecutionID: scope.execution, ToolCallID: scope.call, ActivityScopeID: scope.call,
+				AttributionStatus: networkprovenance.AttributionVerified, DeclaredActivityKind: scope.kind,
+			}.Normalized()
+			aggregator.Observe(event)
+		}
+	}
+	got := aggregator.FlushAll()
+	if len(got) != 2 {
+		t.Fatalf("got %d provenance groups, want 2: %#v", len(got), got)
+	}
+	byExecution := map[string]egress.ActivityEvent{}
+	for _, event := range got {
+		byExecution[event.Provenance.ExecutionID] = event
+	}
+	if normal := byExecution["execution-normal"]; normal.AggregateKind != "path-sweep" || normal.Provenance.DeclaredActivityKind != networkprovenance.ActivityKindNormal || normal.AggregateCount != 8 {
+		t.Fatalf("normal execution was misclassified or merged: %#v", normal)
+	}
+	if fuzz := byExecution["execution-fuzz"]; fuzz.AggregateKind != "web-fuzz" || fuzz.Provenance.DeclaredActivityKind != networkprovenance.ActivityKindFuzz || fuzz.AggregateCount != 8 {
+		t.Fatalf("declared fuzz execution = %#v", fuzz)
 	}
 }
 

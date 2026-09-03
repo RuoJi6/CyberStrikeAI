@@ -5336,6 +5336,13 @@ html[data-theme="dark"] .traffic-transform-script-item.is-active { background: #
 .network-activity-table td.is-decision.is-allowed strong { color: #15803d; }
 .network-activity-table td.is-decision.is-blocked strong { color: #dc2626; }
 
+.network-activity-provenance { margin-top: 6px; font-size: 11px; }
+.network-activity-provenance summary { cursor: pointer; color: var(--primary-color); }
+.network-activity-provenance-body { display: grid; gap: 3px; margin-top: 5px; }
+.network-activity-provenance-line { display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0; }
+.network-activity-provenance-line span { overflow-wrap: anywhere; }
+.network-activity-copy-id { border: 0; padding: 1px 4px; border-radius: 4px; background: color-mix(in srgb, var(--primary-color) 12%, transparent); color: var(--primary-color); cursor: pointer; font-size: 10px; }
+
 .network-activity-empty {
     display: grid;
     min-height: 238px;

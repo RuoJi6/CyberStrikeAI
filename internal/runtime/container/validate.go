@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 
+	"cyberstrike-ai/internal/networkprovenance"
+
 	"github.com/distribution/reference"
 )
 
@@ -120,6 +122,28 @@ func ValidateEgressGatewaySpec(spec EgressGatewaySpec) error {
 	}
 	if resources.TmpfsBytes <= 0 || resources.LogMaxBytes <= 0 || resources.LogMaxFiles <= 0 {
 		return invalidSpec("egress gateway tmpfs and log rotation limits must be positive")
+	}
+	if publicKey := strings.TrimSpace(spec.AttributionPublicKey); publicKey != "" {
+		if publicKey != spec.AttributionPublicKey {
+			return invalidSpec("egress attribution public key must be canonical")
+		}
+		if _, err := networkprovenance.NewVerifier(publicKey); err != nil {
+			return invalidSpec("egress attribution public key is invalid")
+		}
+		if spec.BoundarySnapshot == nil {
+			if spec.AttributionRuntimeGeneration != 0 || strings.TrimSpace(spec.AttributionInstanceID) != "" {
+				return invalidSpec("egress attribution template must not bind a runtime instance")
+			}
+		} else {
+			if spec.AttributionRuntimeGeneration < 1 {
+				return invalidSpec("egress attribution runtime generation must be positive")
+			}
+			if !snapshotIDPattern.MatchString(strings.TrimSpace(spec.AttributionInstanceID)) || spec.AttributionInstanceID != strings.TrimSpace(spec.AttributionInstanceID) {
+				return invalidSpec("egress attribution instance id must be a canonical UUID")
+			}
+		}
+	} else if spec.AttributionRuntimeGeneration != 0 || strings.TrimSpace(spec.AttributionInstanceID) != "" {
+		return invalidSpec("egress attribution metadata requires a public key")
 	}
 	if spec.TrafficLimits != nil {
 		limits := spec.TrafficLimits

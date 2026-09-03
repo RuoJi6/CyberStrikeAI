@@ -11,6 +11,7 @@ import (
 
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/mcp"
+	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/tooloutput"
 
@@ -325,16 +326,35 @@ func TestExecutionBackendResolverErrorNeverFallsBackToHost(t *testing.T) {
 }
 
 type recordingExecutionBackend struct {
-	requests []ExecutionRequest
+	requests   []ExecutionRequest
+	provenance []networkprovenance.NetworkProvenanceV1
 }
 
-func (b *recordingExecutionBackend) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
+func (b *recordingExecutionBackend) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	request.Command = append([]string(nil), request.Command...)
 	b.requests = append(b.requests, request)
+	b.provenance = append(b.provenance, networkprovenance.FromContext(ctx))
 	if request.Output != nil {
 		request.Output("container-route-ok")
 	}
 	return ExecutionResult{Output: "container-route-ok", ExitCode: 0, Location: "container", RuntimeID: "runtime-01"}, nil
+}
+
+func TestStructuredFuzzToolDeclaresFuzzActivity(t *testing.T) {
+	backend := &recordingExecutionBackend{}
+	cfg := config.SecurityConfig{Tools: []config.ToolConfig{{
+		Name: "structured-fuzzer", Command: "/usr/bin/structured-fuzzer", Args: []string{"--target", "https://example.test/FUZZ"},
+		Enabled: true, NetworkActivityKind: networkprovenance.ActivityKindFuzz,
+	}}}
+	executor := NewExecutor(&cfg, nil, testLogger())
+	executor.SetExecutionBackendResolver(NewFixedExecutionBackendResolver(backend))
+	result, err := executor.ExecuteTool(context.Background(), "structured-fuzzer", map[string]interface{}{})
+	if err != nil || result == nil || result.IsError || len(backend.provenance) != 1 {
+		t.Fatalf("structured fuzz execution = %#v provenance=%#v err=%v", result, backend.provenance, err)
+	}
+	if backend.provenance[0].DeclaredActivityKind != networkprovenance.ActivityKindFuzz {
+		t.Fatalf("structured fuzz provenance = %#v", backend.provenance[0])
+	}
 }
 
 func TestAgentCommandEntryPointsUseConfiguredExecutionBackend(t *testing.T) {

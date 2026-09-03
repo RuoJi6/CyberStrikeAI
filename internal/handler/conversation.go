@@ -14,6 +14,7 @@ import (
 
 	"cyberstrike-ai/internal/audit"
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/egressactivity"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"github.com/gin-gonic/gin"
@@ -108,6 +109,7 @@ type ConversationHandler struct {
 	containerWorkspace        ConversationContainerWorkspaceInspector
 	containerInteractive      ConversationContainerInteractiveExecutor
 	egressActivityStreamer    ConversationEgressActivityStreamer
+	egressActivityIngestor    *egressactivity.Ingestor
 	egressHealthController    ConversationEgressHealthController
 	egressRebuildPreparer     ConversationEgressRebuildPreparer
 	containerLifecycle        ConversationContainerLifecycleController
@@ -159,6 +161,10 @@ func (h *ConversationHandler) SetContainerInteractiveExecutor(executor Conversat
 
 func (h *ConversationHandler) SetEgressActivityStreamer(streamer ConversationEgressActivityStreamer) {
 	h.egressActivityStreamer = streamer
+}
+
+func (h *ConversationHandler) SetEgressActivityIngestor(ingestor *egressactivity.Ingestor) {
+	h.egressActivityIngestor = ingestor
 }
 
 func (h *ConversationHandler) SetEgressHealthController(controller ConversationEgressHealthController) {

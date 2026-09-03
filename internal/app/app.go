@@ -23,6 +23,7 @@ import (
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/egressactivity"
 	"cyberstrike-ai/internal/egressaudit"
 	"cyberstrike-ai/internal/einoobserve"
 	"cyberstrike-ai/internal/handler"
@@ -33,6 +34,7 @@ import (
 	"cyberstrike-ai/internal/mcp/builtin"
 	"cyberstrike-ai/internal/monitor"
 	"cyberstrike-ai/internal/multiagent"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/robot"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
@@ -141,6 +143,11 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("初始化出站代理凭据加密失败: %w", err)
+	}
+	provenanceSigner, err := networkprovenance.LoadOrCreateSigner(filepath.Join(filepath.Dir(credentialKeyFile), "egress-attribution-signing.key"))
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("初始化出站归因签名失败: %w", err)
 	}
 
 	// 认证管理器（数据库初始化后挂载 RBAC）
@@ -495,6 +502,8 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 
 	// 创建OpenAPI处理器
 	conversationHandler := handler.NewConversationHandler(db, log.Logger)
+	activityIngestor := egressactivity.NewIngestor()
+	conversationHandler.SetEgressActivityIngestor(activityIngestor)
 	conversationHandler.SetContainerRolloutAuthorizer(func(userID, projectID string) (bool, bool) {
 		return cfg.Container.Enabled, cfg.Container.AllowsRollout(userID, projectID)
 	})
@@ -537,7 +546,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
-	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerTLSAuthorityStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, log.Logger)
+	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerTLSAuthorityStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, provenanceSigner, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
 	} else if containerInitializer != nil {
@@ -574,7 +583,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if policyErr != nil {
 				return containerruntime.InitializationRecord{}, policyErr
 			}
-			spec, specErr := conversationContainerSpecWithWorkspace(cfg, conversationID, workspaceBinding, snapshotSpec, upstreamRoute, authProfiles, tlsAuthority)
+			spec, specErr := conversationContainerSpecWithWorkspace(cfg, conversationID, workspaceBinding, snapshotSpec, upstreamRoute, authProfiles, tlsAuthority, provenanceSigner.PublicKeyEncoded())
 			if specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
@@ -629,7 +638,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		})
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		conversationHandler.SetSharedWorkspaceController(containerManager)
-		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger)
+		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger, activityIngestor)
 		if auditErr != nil {
 			log.Logger.Error("对话出站持久审计采集器启动失败", zap.Error(auditErr))
 		} else {
@@ -705,9 +714,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	if containerManager != nil {
 		containerExecutor = containerManager
 	}
-	hostTrafficProxy := newHostTrafficProxyManager(db, transformRunner, log.Logger)
+	hostTrafficProxy := newHostTrafficProxyManager(db, transformRunner, log.Logger, provenanceSigner, activityIngestor)
 	app.hostTrafficProxy = hostTrafficProxy
-	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle, hostTrafficProxy)
+	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle, hostTrafficProxy, provenanceSigner)
 	executor.SetExecutionBackendResolver(executionBackendResolver)
 	agent.SetExecutionBackendResolver(executionBackendResolver)
 	agentHandler.SetConversationContainerExecutionPreparer(handler.ConversationContainerExecutionPreparerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {

@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260903-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260903-2">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -5671,8 +5671,8 @@ def decode_request(ctx, wire: Message) -> Message:
                                 <div class="network-activity-toolbar">
                                     <div class="network-activity-conversation-field">
                                         <label for="network-activity-conversation" data-i18n="containerManagement.activityConversation">对话</label>
-                                        <select id="network-activity-conversation" data-unified-select="single" data-unified-search="true" aria-describedby="network-activity-conversation-help"><option value="" data-i18n="containerManagement.activitySelectConversation">选择一个已创建的对话容器</option></select>
-                                        <small id="network-activity-conversation-help" data-i18n="containerManagement.activityConversationHelp">仅显示已创建且具有独立出站网关的容器。</small>
+										<select id="network-activity-conversation" data-unified-select="single" data-unified-search="true" aria-describedby="network-activity-conversation-help"><option value="" data-i18n="containerManagement.activitySelectConversation">选择一个对话</option></select>
+										<small id="network-activity-conversation-help" data-i18n="containerManagement.activityConversationHelp">显示容器网关及 Host MITM 的 HTTP/HTTPS 出站活动。</small>
                                     </div>
                                     <div class="network-activity-actions">
                                         <button id="network-activity-refresh" class="btn-secondary" type="button" data-i18n="containerManagement.activityRefreshConversations">刷新对话</button>
@@ -5685,9 +5685,11 @@ def decode_request(ctx, wire: Message) -> Message:
                                     <label class="container-runtime-search"><span class="sr-only" data-i18n="containerManagement.activityDomain">域名</span><input id="network-activity-domain" type="search" maxlength="253" autocomplete="off" data-i18n="containerManagement.activityDomainPlaceholder" data-i18n-attr="placeholder" placeholder="筛选域名或解析 IP…"></label>
                                     <div class="container-runtime-filter-field"><label for="network-activity-type" data-i18n="containerManagement.activityRequestType">请求类型</label><select id="network-activity-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option></select></div>
                                     <div class="container-runtime-filter-field"><label for="network-activity-decision" data-i18n="containerManagement.activityDecision">策略判定</label><select id="network-activity-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option></select></div>
-                                    <div class="container-runtime-filter-field"><label for="network-activity-agent" data-i18n="containerManagement.activityAgent">Agent</label><select id="network-activity-agent" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="container-agent" data-i18n="containerManagement.activityContainerAgent">容器 Agent</option></select></div>
-                                    <div class="container-runtime-filter-field"><label for="network-activity-tool" data-i18n="containerManagement.activityToolFilter">工具</label><select id="network-activity-tool" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="unknown" data-i18n="containerManagement.activityToolUnknown">工具未知</option></select></div>
-                                    <div class="container-runtime-filter-field"><label for="network-activity-route" data-i18n="containerManagement.activityRouteFilter">代理出口</label><select id="network-activity-route" data-unified-select="single" data-unified-search="true"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="direct" data-i18n="containerManagement.activityDirectRoute">直接出口</option></select></div>
+	                                    <div class="container-runtime-filter-field"><label for="network-activity-agent" data-i18n="containerManagement.activityAgent">Agent</label><select id="network-activity-agent" data-unified-select="single" data-unified-search="true"><option value="all" data-i18n="containerManagement.filterAll">全部</option></select></div>
+									<div class="container-runtime-filter-field"><label for="network-activity-tool" data-i18n="containerManagement.activityToolFilter">工具</label><select id="network-activity-tool" data-unified-select="single" data-unified-search="true"><option value="all" data-i18n="containerManagement.filterAll">全部</option></select></div>
+									<div class="container-runtime-filter-field"><label for="network-activity-runtime" data-i18n="containerManagement.activityRuntimeFilter">运行来源</label><select id="network-activity-runtime" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option></select></div>
+									<div class="container-runtime-filter-field"><label for="network-activity-attribution" data-i18n="containerManagement.activityAttributionFilter">归因状态</label><select id="network-activity-attribution" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option></select></div>
+	                                    <div class="container-runtime-filter-field"><label for="network-activity-route" data-i18n="containerManagement.activityRouteFilter">代理出口</label><select id="network-activity-route" data-unified-select="single" data-unified-search="true"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="direct" data-i18n="containerManagement.activityDirectRoute">直接出口</option></select></div>
                                 </div>
                             </section>
                             <section class="network-activity-stream" aria-labelledby="network-activity-stream-title">
@@ -5697,7 +5699,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                         <thead><tr><th data-i18n="containerManagement.activityTime">时间</th><th data-i18n="containerManagement.activityRequest">请求</th><th data-i18n="containerManagement.activityTarget">目标</th><th data-i18n="containerManagement.activityResolution">解析 / 连接</th><th data-i18n="containerManagement.activityDecision">策略判定</th><th data-i18n="containerManagement.activityContext">上下文</th><th data-i18n="containerManagement.activityResult">结果</th></tr></thead>
                                         <tbody id="network-activity-rows"></tbody>
                                     </table>
-                                    <div id="network-activity-empty" class="network-activity-empty"><span aria-hidden="true">⌁</span><strong data-i18n="containerManagement.activityEmpty">选择一个运行中的对话容器以查看实时网络活动</strong><p data-i18n="containerManagement.activityEmptyHint">历史尾部与新事件将通过增量流到达，无需刷新页面。</p></div>
+									<div id="network-activity-empty" class="network-activity-empty"><span aria-hidden="true">⌁</span><strong data-i18n="containerManagement.activityEmpty">选择对话以查看实时网络活动</strong><p data-i18n="containerManagement.activityEmptyHint">容器网关与 Host MITM 事件通过统一增量流到达。</p></div>
                                 </div>
                             </section>
                         </div>
@@ -7540,7 +7542,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/network-activity.js?v=20260903-1"></script>
+    <script src="/static/js/network-activity.js?v=20260903-2"></script>
     <script src="/static/js/egress-audit.js?v=20260903-1"></script>
     <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>

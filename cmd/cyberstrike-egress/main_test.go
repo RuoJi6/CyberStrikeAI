@@ -3,7 +3,28 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"cyberstrike-ai/internal/networkprovenance"
 )
+
+func TestAttributionEnvironmentRequiresCompleteGenerationBoundAudience(t *testing.T) {
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CYBERSTRIKE_ATTRIBUTION_PUBLIC_KEY", signer.PublicKeyEncoded())
+	t.Setenv("CYBERSTRIKE_ATTRIBUTION_CONVERSATION_ID", "conversation-one")
+	t.Setenv("CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION", "7")
+	t.Setenv("CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID", "gateway-one")
+	verifier, audience, err := attributionFromEnvironment()
+	if err != nil || verifier == nil || audience.ConversationID != "conversation-one" || audience.RuntimeGeneration != 7 || audience.RuntimeInstanceID != "gateway-one" {
+		t.Fatalf("attribution environment = %#v verifier=%v err=%v", audience, verifier != nil, err)
+	}
+	t.Setenv("CYBERSTRIKE_ATTRIBUTION_RUNTIME_GENERATION", "")
+	if _, _, err := attributionFromEnvironment(); err == nil {
+		t.Fatal("partial attribution environment was accepted")
+	}
+}
 
 func TestParseSnapshotFlagsRequiresExactConfiguredInputs(t *testing.T) {
 	path, reference, err := parseSnapshotFlags("check", []string{

@@ -6,11 +6,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"cyberstrike-ai/internal/egress"
+	"cyberstrike-ai/internal/networkprovenance"
 	mobyclient "github.com/moby/moby/client"
 )
 
@@ -97,6 +99,70 @@ func TestDockerManagerStreamsOnlyValidatedExactSnapshotActivity(t *testing.T) {
 	}
 	if err := manager.StreamEgressActivity(context.Background(), spec, ActivityStreamOptions{All: true, Tail: 1}, func(egress.ActivityEvent) error { return nil }); err == nil {
 		t.Fatal("combined all/tail stream options were accepted")
+	}
+}
+
+func TestGatewayActivityParserAllowsRuntimeBoundUnattributedNonHTTP(t *testing.T) {
+	spec, _, _ := snapshotGatewayFixture(t)
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec.EgressGateway.AttributionPublicKey = signer.PublicKeyEncoded()
+	spec.EgressGateway.AttributionRuntimeGeneration = 3
+	spec.EgressGateway.AttributionInstanceID = "87654321-4321-4321-8321-cba987654321"
+	audience := networkprovenance.ExpectedAudience{
+		ConversationID: spec.ConversationID, RuntimeMode: networkprovenance.RuntimeModeContainer,
+		RuntimeGeneration: 3, RuntimeInstanceID: spec.EgressGateway.AttributionInstanceID,
+	}
+	base := egress.ActivityEvent{
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), Domain: "allowed.example",
+		Decision: egress.ActivityDecisionAllowed, Outcome: "allowed",
+		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
+		Provenance: networkprovenance.ForAudience(audience, networkprovenance.AttributionUnattributed),
+	}
+	for _, event := range []egress.ActivityEvent{
+		func() egress.ActivityEvent {
+			candidate := base
+			candidate.RequestType = egress.ActivityRequestDNS
+			candidate.Outcome = "resolved"
+			return candidate
+		}(),
+		func() egress.ActivityEvent {
+			candidate := base
+			candidate.RequestType = egress.ActivityRequestTCP
+			candidate.Port = 443
+			return candidate
+		}(),
+		func() egress.ActivityEvent {
+			candidate := base
+			candidate.RequestType = egress.ActivityRequestUDP
+			candidate.Port = 443
+			return candidate
+		}(),
+		func() egress.ActivityEvent {
+			candidate := base
+			candidate.RequestType = egress.ActivityRequestHealth
+			candidate.Decision, candidate.Reason, candidate.Outcome, candidate.RetryAfterMS = egress.ActivityDecisionBlocked, "upstream_rate_limited", "cooldown_started", 1000
+			return candidate
+		}(),
+	} {
+		line, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		parsed, activity, parseErr := parseGatewayActivityLine(line, spec)
+		if parseErr != nil || !activity || parsed.Provenance.AttributionStatus != networkprovenance.AttributionUnattributed {
+			t.Fatalf("runtime-bound %s event rejected: activity=%v event=%#v err=%v", event.RequestType, activity, parsed, parseErr)
+		}
+	}
+	invalidHTTP := base
+	invalidHTTP.RequestType, invalidHTTP.Method, invalidHTTP.Path, invalidHTTP.Port = egress.ActivityRequestHTTP, http.MethodGet, "/", 80
+	invalidHTTP.Decision, invalidHTTP.Outcome = egress.ActivityDecisionBlocked, "attribution_rejected"
+	invalidHTTP.Provenance = networkprovenance.ForAudience(audience, networkprovenance.AttributionInvalid)
+	line, _ := json.Marshal(invalidHTTP)
+	if parsed, activity, parseErr := parseGatewayActivityLine(line, spec); parseErr != nil || !activity || parsed.Provenance.RuntimeGeneration != 3 {
+		t.Fatalf("runtime-bound invalid HTTP rejected: activity=%v event=%#v err=%v", activity, parsed, parseErr)
 	}
 }
 

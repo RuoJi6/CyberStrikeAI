@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 )
 
@@ -60,7 +61,7 @@ func TestProxyCapturesCompleteTrafficAndConsumesAttributionHeaders(t *testing.T)
 	if recorder.Code != http.StatusCreated || !bytes.Equal(recorder.Body.Bytes(), []byte{4, 5, 0, 255}) {
 		t.Fatalf("response = %d / %v", recorder.Code, recorder.Body.Bytes())
 	}
-	if captured.ID == "" || captured.ConversationID != "conversation-1" || captured.AgentID != "agent-1" || captured.ExecutionID != "execution-1" || captured.ToolCallID != "tool-1" || captured.Path != "/api?item=1" || captured.HTTPStatus != http.StatusCreated || captured.BoundarySnapshotID != "snapshot-1" || captured.RuleID != "capture" {
+	if captured.ID == "" || captured.ConversationID != "conversation-1" || captured.AgentID != "" || captured.ExecutionID != "" || captured.ToolCallID != "" || captured.AttributionStatus != networkprovenance.AttributionLegacyUnattributed || captured.Path != "/api?item=1" || captured.HTTPStatus != http.StatusCreated || captured.BoundarySnapshotID != "snapshot-1" || captured.RuleID != "capture" {
 		t.Fatalf("captured transaction = %#v", captured)
 	}
 	if len(messages) != 2 || messages[0].Stage != traffic.StageUpstreamRequest || messages[1].Stage != traffic.StageUpstreamResponse {
@@ -119,7 +120,7 @@ func TestConnectTrafficEvidenceStoresTunnelMetadataWithoutClaimingDecodedHTTP(t 
 	startedAt := time.Now().UTC().Add(-time.Second)
 	completedAt := time.Now().UTC()
 	item, messages := proxy.connectTrafficEvidence(
-		request, trafficAttribution{agentID: "agent-1"}, "example.org:443", "example.org", 443,
+		request, trafficAttribution{provenance: networkprovenance.NetworkProvenanceV1{AgentID: "agent-1"}.Normalized()}, "example.org:443", "example.org", 443,
 		ActivityEvent{LatencyMS: 1000, BytesUp: 2048, BytesDown: 4096, RuleID: "allow"},
 		startedAt, completedAt,
 	)

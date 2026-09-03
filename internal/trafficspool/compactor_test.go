@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 )
 
@@ -69,6 +70,7 @@ func TestCompactingSinkStoresOneCompleteRepresentativeForWebFuzz(t *testing.T) {
 	startedAt := time.Now().UTC()
 	for index := 0; index < 12; index++ {
 		item, messages := compactTestTransaction(index, startedAt.Add(time.Duration(index)*time.Millisecond))
+		item.DeclaredActivityKind = networkprovenance.ActivityKindFuzz
 		if err := sink.Write(context.Background(), item, messages); err != nil {
 			t.Fatal(err)
 		}
@@ -111,6 +113,7 @@ func TestDefaultCompactorGroupsSlowSequentialWebFuzz(t *testing.T) {
 	startedAt := time.Now().UTC()
 	for index := 0; index < 12; index++ {
 		item, messages := compactTestTransaction(index, startedAt.Add(time.Duration(index)*1500*time.Millisecond))
+		item.DeclaredActivityKind = networkprovenance.ActivityKindFuzz
 		if err := sink.Write(context.Background(), item, messages); err != nil {
 			t.Fatal(err)
 		}
@@ -146,5 +149,53 @@ func TestCompactingSinkCompactsRepeatedRequestBurst(t *testing.T) {
 	}
 	if len(captured) != 1 || captured[0].AggregateKind != AggregateKindRequestBurst || captured[0].AggregateCount != 5 {
 		t.Fatalf("aggregate = %#v", captured)
+	}
+}
+
+func TestCompactingSinkSeparatesConcurrentNormalAndDeclaredFuzzExecutions(t *testing.T) {
+	var captured []traffic.Transaction
+	sink, err := NewCompactingSink(func(_ context.Context, item traffic.Transaction, _ []traffic.Message) error {
+		captured = append(captured, item)
+		return nil
+	}, CompactConfig{IdleWindow: time.Hour, CountThreshold: 4, DistinctThreshold: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now().UTC()
+	for index := 0; index < 8; index++ {
+		for _, execution := range []struct {
+			id, call, kind string
+		}{
+			{id: "execution-normal", call: "call-normal", kind: networkprovenance.ActivityKindNormal},
+			{id: "execution-fuzz", call: "call-fuzz", kind: networkprovenance.ActivityKindFuzz},
+		} {
+			item, messages := compactTestTransaction(index, startedAt.Add(time.Duration(index)*time.Millisecond))
+			item.ID = execution.id + fmt.Sprintf("-%02d", index)
+			item.ExecutionID = execution.id
+			item.ToolCallID = execution.call
+			item.ActivityScopeID = execution.call
+			item.AttributionStatus = networkprovenance.AttributionVerified
+			item.DeclaredActivityKind = execution.kind
+			messages[0].TransactionID = item.ID
+			if err := sink.Write(context.Background(), item, messages); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 2 {
+		t.Fatalf("captured %d provenance groups, want 2: %#v", len(captured), captured)
+	}
+	kinds := map[string]traffic.Transaction{}
+	for _, item := range captured {
+		kinds[item.ExecutionID] = item
+	}
+	if normal := kinds["execution-normal"]; normal.AggregateKind != AggregateKindPathSweep || normal.DeclaredActivityKind != networkprovenance.ActivityKindNormal || normal.AggregateCount != 8 {
+		t.Fatalf("normal execution was misclassified or merged: %#v", normal)
+	}
+	if fuzz := kinds["execution-fuzz"]; fuzz.AggregateKind != AggregateKindWebFuzz || fuzz.DeclaredActivityKind != networkprovenance.ActivityKindFuzz || fuzz.AggregateCount != 8 {
+		t.Fatalf("declared fuzz execution = %#v", fuzz)
 	}
 }

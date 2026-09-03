@@ -51,6 +51,25 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "对话不存在"})
 		return
 	}
+	runtimeMode := strings.ToLower(strings.TrimSpace(c.DefaultQuery("runtime_mode", "all")))
+	if runtimeMode != "all" && runtimeMode != "container" && runtimeMode != "host_mitm" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "runtime_mode 必须为 all、container 或 host_mitm"})
+		return
+	}
+	tail, err := strconv.Atoi(c.DefaultQuery("tail", "100"))
+	if err != nil || tail < 1 || tail > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "tail 必须为 1 到 500 的整数"})
+		return
+	}
+	auditSetting, settingErr := h.db.GetConversationEgressAuditSetting(c.Request.Context(), id)
+	activityMode := egressactivity.ModeCompact
+	if settingErr == nil && auditSetting.Mode == egressactivity.ModeFull {
+		activityMode = egressactivity.ModeFull
+	}
+	if h.egressActivityIngestor != nil {
+		h.streamIngestedEgressActivity(c, id, conversation.Title, runtimeMode, activityMode, tail)
+		return
+	}
 	if h.containerInitializations == nil || h.egressActivityStreamer == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "出站网络活动服务未配置"})
 		return
@@ -66,16 +85,6 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 	}
 	if record.Status != containerruntime.InitializationCreated || record.Spec.EgressGateway == nil || record.Spec.EgressGateway.BoundarySnapshot == nil {
 		c.JSON(http.StatusConflict, gin.H{"error": "对话容器网关尚未就绪", "code": "not_ready"})
-		return
-	}
-	auditSetting, settingErr := h.db.GetConversationEgressAuditSetting(c.Request.Context(), id)
-	activityMode := egressactivity.ModeCompact
-	if settingErr == nil && auditSetting.Mode == egressactivity.ModeFull {
-		activityMode = egressactivity.ModeFull
-	}
-	tail, err := strconv.Atoi(c.DefaultQuery("tail", "100"))
-	if err != nil || tail < 1 || tail > 500 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "tail 必须为 1 到 500 的整数"})
 		return
 	}
 	flusher, ok := c.Writer.(http.Flusher)
@@ -128,7 +137,7 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 		for _, event := range events {
 			view := conversationEgressActivityView{
 				ActivityEvent: event, ConversationID: id, ConversationTitle: conversation.Title,
-				Agent: "container-agent", Tool: "",
+				Agent: event.Provenance.AgentID, Tool: event.Provenance.ToolName,
 			}
 			if err := writeConversationActivitySSE(c.Writer, flusher, "activity", view); err != nil {
 				return err
@@ -175,6 +184,72 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 				outgoing = aggregator.ObserveAt(event, time.Now().UTC())
 			}
 			if err := writeActivities(outgoing); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (h *ConversationHandler) streamIngestedEgressActivity(c *gin.Context, conversationID, title, runtimeMode, activityMode string, tail int) {
+	flusher, ok := c.Writer.(http.Flusher)
+	if !ok {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "当前响应不支持实时流"})
+		return
+	}
+	c.Header("Content-Type", "text/event-stream; charset=utf-8")
+	c.Header("Cache-Control", "no-cache, no-transform")
+	c.Header("Connection", "keep-alive")
+	c.Header("X-Accel-Buffering", "no")
+	if err := writeConversationActivitySSE(c.Writer, flusher, "ready", gin.H{
+		"conversationId": conversationID, "conversationTitle": title, "runtimeMode": runtimeMode,
+	}); err != nil {
+		return
+	}
+	ctx := c.Request.Context()
+	stream := h.egressActivityIngestor.Subscribe(ctx, conversationID, runtimeMode, tail)
+	keepalive := time.NewTicker(egressActivityKeepaliveInterval)
+	defer keepalive.Stop()
+	flushTicker := time.NewTicker(100 * time.Millisecond)
+	defer flushTicker.Stop()
+	aggregator := egressactivity.New(egressactivity.DefaultConfig())
+	writeEvents := func(events []egress.ActivityEvent) bool {
+		for _, event := range events {
+			view := conversationEgressActivityView{
+				ActivityEvent: event, ConversationID: conversationID, ConversationTitle: title,
+				Agent: event.Provenance.AgentID, Tool: event.Provenance.ToolName,
+			}
+			if writeConversationActivitySSE(c.Writer, flusher, "activity", view) != nil {
+				return false
+			}
+		}
+		return true
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-keepalive.C:
+			if _, err := c.Writer.Write([]byte(": keepalive\n\n")); err != nil {
+				return
+			}
+			flusher.Flush()
+		case now := <-flushTicker.C:
+			if activityMode == egressactivity.ModeCompact && !writeEvents(aggregator.FlushExpired(now.UTC())) {
+				return
+			}
+		case item, open := <-stream:
+			if !open {
+				if activityMode == egressactivity.ModeCompact {
+					_ = writeEvents(aggregator.FlushAll())
+				}
+				return
+			}
+			event := item.Event
+			outgoing := []egress.ActivityEvent{event}
+			if activityMode == egressactivity.ModeCompact && event.AggregateCount <= 1 && event.RequestType != egress.ActivityRequestHealth {
+				outgoing = aggregator.ObserveAt(event, time.Now().UTC())
+			}
+			if !writeEvents(outgoing) {
 				return
 			}
 		}

@@ -275,6 +275,17 @@ func egressAuditFilterFromRequest(c *gin.Context) (database.EgressAuditFilter, i
 		return filter, 0, 0, false
 	}
 	filter.Category, filter.EventType, filter.Decision = category, eventType, decision
+	filter.RuntimeMode = strings.TrimSpace(c.Query("runtime_mode"))
+	filter.AgentID = strings.TrimSpace(c.Query("agent"))
+	filter.ToolName = strings.TrimSpace(c.Query("tool"))
+	filter.ExecutionID = strings.TrimSpace(c.Query("execution_id"))
+	filter.AttributionStatus = strings.TrimSpace(c.Query("attribution_status"))
+	for _, value := range []string{filter.RuntimeMode, filter.AgentID, filter.ToolName, filter.ExecutionID, filter.AttributionStatus} {
+		if len(value) > 256 || !utf8.ValidString(value) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "归因过滤条件无效"})
+			return filter, 0, 0, false
+		}
+	}
 	if raw := strings.TrimSpace(c.Query("since")); raw != "" {
 		value, err := database.ParseRFC3339Time(raw)
 		if err != nil {
@@ -314,8 +325,10 @@ func writeEgressAuditCSV(c *gin.Context, items []database.EgressAuditEvent) {
 	writer := csv.NewWriter(c.Writer)
 	_ = writer.Write([]string{
 		"id", "chain_sequence", "previous_hash", "event_hash", "occurred_at", "recorded_at", "category", "event_type", "conversation_id", "conversation_title",
-		"container_id", "agent_id", "runtime_generation", "snapshot_id", "snapshot_sha256", "domain", "resolved_ips",
-		"connected_ip", "port", "decision", "result", "rule_id", "reason", "upstream_route_id", "method", "path",
+		"container_id", "agent_id", "runtime_generation", "snapshot_id", "snapshot_sha256", "domain",
+		"source_event_id", "runtime_mode", "runtime_instance_id", "tool_name", "execution_id", "tool_call_id", "activity_scope_id",
+		"attribution_status", "declared_activity_kind", "observed_activity_kind", "hash_version",
+		"resolved_ips", "connected_ip", "port", "decision", "result", "rule_id", "reason", "upstream_route_id", "method", "path",
 		"http_status", "outcome", "latency_ms", "bytes_up", "bytes_down", "lifecycle_operation", "lifecycle_state", "message",
 	})
 	for _, item := range items {
@@ -324,6 +337,8 @@ func writeEgressAuditCSV(c *gin.Context, items []database.EgressAuditEvent) {
 			item.OccurredAt.UTC().Format(time.RFC3339Nano), item.RecordedAt.UTC().Format(time.RFC3339Nano),
 			item.Category, item.EventType, item.ConversationID, item.ConversationTitle, item.ContainerID,
 			item.AgentID, strconv.Itoa(item.RuntimeGeneration), item.SnapshotID, item.SnapshotSHA256, item.Domain,
+			item.SourceEventID, item.RuntimeMode, item.RuntimeInstanceID, item.ToolName, item.ExecutionID, item.ToolCallID, item.ActivityScopeID,
+			item.AttributionStatus, item.DeclaredActivityKind, item.ObservedActivityKind, strconv.Itoa(item.HashVersion),
 			strings.Join(item.ResolvedIPs, " "), item.ConnectedIP, strconv.Itoa(item.Port), item.Decision, item.Result,
 			item.RuleID, item.Reason, item.UpstreamRouteID, item.Method, item.Path, strconv.Itoa(item.HTTPStatus), item.Outcome,
 			strconv.FormatInt(item.LatencyMS, 10), strconv.FormatInt(item.BytesUp, 10), strconv.FormatInt(item.BytesDown, 10),

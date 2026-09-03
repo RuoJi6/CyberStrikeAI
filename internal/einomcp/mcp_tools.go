@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"cyberstrike-ai/internal/agent"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/security"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -45,14 +46,14 @@ func ToolsFromDefinitions(
 			return nil, fmt.Errorf("tool %q: %w", d.Function.Name, err)
 		}
 		out = append(out, &mcpBridgeTool{
-			info:           info,
-			name:           d.Function.Name,
-			agent:          ag,
-			holder:         holder,
-			record:         rec,
-			chunk:          toolOutputChunk,
-			invokeNotify:   invokeNotify,
-			einoAgentName:  strings.TrimSpace(einoAgentName),
+			info:          info,
+			name:          d.Function.Name,
+			agent:         ag,
+			holder:        holder,
+			record:        rec,
+			chunk:         toolOutputChunk,
+			invokeNotify:  invokeNotify,
+			einoAgentName: strings.TrimSpace(einoAgentName),
 		})
 	}
 	return out, nil
@@ -102,6 +103,15 @@ func (m *mcpBridgeTool) Info(ctx context.Context) (*schema.ToolInfo, error) {
 func (m *mcpBridgeTool) InvokableRun(ctx context.Context, argumentsInJSON string, opts ...tool.Option) (out string, err error) {
 	_ = opts
 	toolCallID := compose.GetToolCallID(ctx)
+	provenance := networkprovenance.FromContext(ctx)
+	provenance.AgentID = strings.TrimSpace(m.einoAgentName)
+	provenance.ToolName = strings.TrimSpace(m.name)
+	provenance.ToolCallID = strings.TrimSpace(toolCallID)
+	provenance.ActivityScopeID = provenance.ToolCallID
+	if provenance.DeclaredActivityKind == networkprovenance.ActivityKindUnknown {
+		provenance.DeclaredActivityKind = networkprovenance.ActivityKindNormal
+	}
+	ctx = networkprovenance.WithContext(ctx, provenance)
 	defer func() {
 		if m.invokeNotify == nil {
 			return

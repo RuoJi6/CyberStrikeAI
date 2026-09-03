@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/authctx"
+	"cyberstrike-ai/internal/networkprovenance"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -184,6 +185,13 @@ func (s *ExecutionService) runWorker(ctx context.Context, entry *executionEntry,
 	if conv := strings.TrimSpace(entry.exec.ConversationID); conv != "" {
 		ctx = WithMCPConversationID(ctx, conv)
 	}
+	provenance := networkprovenance.FromContext(ctx)
+	provenance.ConversationID = strings.TrimSpace(entry.exec.ConversationID)
+	provenance.ExecutionID = id
+	if provenance.ToolName == "" {
+		provenance.ToolName = strings.TrimSpace(entry.exec.ToolName)
+	}
+	ctx = networkprovenance.WithContext(ctx, provenance)
 	var release func()
 	defer func() {
 		if release != nil {

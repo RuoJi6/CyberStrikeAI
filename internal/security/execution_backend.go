@@ -29,6 +29,34 @@ type ExecutionRequest struct {
 	RetryWithPTY       bool
 }
 
+// ConsumeNetworkScope recognizes the trusted execution wrapper without
+// launching a helper binary. Only an exact command prefix is consumed, so
+// ordinary shell text cannot accidentally relabel an execution as fuzz.
+func ConsumeNetworkScope(request ExecutionRequest) (ExecutionRequest, string, error) {
+	if len(request.Command) == 0 {
+		return request, "", nil
+	}
+	if request.Command[0] == "network-scope" {
+		if len(request.Command) < 4 || request.Command[1] != "fuzz" || request.Command[2] != "--" {
+			return request, "", fmt.Errorf("network-scope requires: network-scope fuzz -- <command>")
+		}
+		request.Command = append([]string(nil), request.Command[3:]...)
+		return request, "fuzz", nil
+	}
+	if len(request.Command) >= 3 && (request.Command[0] == "/bin/sh" || request.Command[0] == "sh" || request.Command[0] == "/bin/bash" || request.Command[0] == "bash") && request.Command[1] == "-c" {
+		const prefix = "network-scope fuzz -- "
+		if strings.HasPrefix(request.Command[2], prefix) {
+			request.Command = append([]string(nil), request.Command...)
+			request.Command[2] = strings.TrimPrefix(request.Command[2], prefix)
+			if strings.TrimSpace(request.Command[2]) == "" {
+				return request, "", fmt.Errorf("network-scope wrapped command is empty")
+			}
+			return request, "fuzz", nil
+		}
+	}
+	return request, "", nil
+}
+
 type ExecutionResult struct {
 	Output         string
 	ExitCode       int

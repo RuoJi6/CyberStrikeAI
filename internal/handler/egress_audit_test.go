@@ -89,7 +89,7 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 		t.Fatalf("csv export = %d %#v %s", csvRecorder.Code, csvRecorder.Header(), csvRecorder.Body.String())
 	}
 	records, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
-	if err != nil || len(records) != 2 || len(records[0]) != 34 || records[0][1] != "chain_sequence" || records[0][2] != "previous_hash" || records[0][3] != "event_hash" {
+	if err != nil || len(records) != 2 || len(records[0]) != 45 || records[0][1] != "chain_sequence" || records[0][2] != "previous_hash" || records[0][3] != "event_hash" {
 		t.Fatalf("csv chain columns = %#v, %v", records, err)
 	}
 

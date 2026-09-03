@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -19,12 +20,127 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/boundary"
+	"cyberstrike-ai/internal/networkprovenance"
+	"cyberstrike-ai/internal/traffic"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
+}
+
+func attributionBasic(token string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(attributionProxyUsername+":"+token))
+}
+
+func TestProxyRequiresSignedExecutionAttributionAndStripsUntrustedHeaders(t *testing.T) {
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := signer.Verifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	audience := networkprovenance.ExpectedAudience{
+		ConversationID: "conversation-signed", RuntimeMode: networkprovenance.RuntimeModeContainer,
+		RuntimeGeneration: 3, RuntimeInstanceID: "gateway-signed",
+	}
+	provenance := networkprovenance.NetworkProvenanceV1{
+		ConversationID: audience.ConversationID, RuntimeMode: audience.RuntimeMode,
+		RuntimeGeneration: audience.RuntimeGeneration, RuntimeInstanceID: audience.RuntimeInstanceID,
+		AgentID: "agent-a", ToolName: "curl", ExecutionID: "execution-a", ToolCallID: "call-a",
+		DeclaredActivityKind: networkprovenance.ActivityKindNormal,
+	}
+	token, err := signer.Issue(provenance, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	var events []ActivityEvent
+	var capturedTraffic traffic.Transaction
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http"}}}), ProxyOptions{
+		ConversationID: audience.ConversationID, RuntimeMode: traffic.RuntimeModeContainer,
+		AttributionVerifier: verifier, AttributionAudience: audience,
+		ActivitySink: func(event ActivityEvent) { events = append(events, event) },
+		TrafficSink: func(_ context.Context, transaction traffic.Transaction, _ []traffic.Message) error {
+			capturedTraffic = transaction
+			return nil
+		},
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			got := networkprovenance.FromContext(request.Context())
+			if got.AttributionStatus != networkprovenance.AttributionVerified || got.ExecutionID != "execution-a" || got.ToolCallID != "call-a" || got.ActivityScopeID != "call-a" {
+				t.Fatalf("forwarded provenance = %#v", got)
+			}
+			if request.Header.Get("Proxy-Authorization") != "" || request.Header.Get(trafficAgentIDHeader) != "" || request.Header.Get(trafficExecutionIDHeader) != "" || request.Header.Get(trafficToolCallIDHeader) != "" {
+				t.Fatalf("attribution credentials escaped to upstream: %#v", request.Header)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok")), Request: request}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	valid := httptest.NewRequest(http.MethodGet, "http://allowed.example/safe", nil)
+	valid.Header.Set("Proxy-Authorization", attributionBasic(token))
+	valid.Header.Set(trafficAgentIDHeader, "forged-agent")
+	valid.Header.Set(trafficExecutionIDHeader, "forged-execution")
+	valid.Header.Set(trafficToolCallIDHeader, "forged-call")
+	validRecorder := httptest.NewRecorder()
+	proxy.ServeHTTP(validRecorder, valid)
+	if validRecorder.Code != http.StatusOK || calls.Load() != 1 {
+		t.Fatalf("valid signed request status/calls = %d/%d", validRecorder.Code, calls.Load())
+	}
+	if len(events) != 1 || events[0].Provenance.AttributionStatus != networkprovenance.AttributionVerified || events[0].HTTPPacket == nil || len(events[0].HTTPPacket.RequestHeaders["Proxy-Authorization"]) != 0 {
+		t.Fatalf("signed activity = %#v", events)
+	}
+	if events[0].EventID == "" || capturedTraffic.EventID != events[0].EventID {
+		t.Fatalf("activity/traffic event identity = %q/%q", events[0].EventID, capturedTraffic.EventID)
+	}
+
+	tamperedParts := strings.Split(token, ".")
+	if len(tamperedParts) != 3 || tamperedParts[2] == "" {
+		t.Fatalf("unexpected token format: %q", token)
+	}
+	replacement := byte('A')
+	if tamperedParts[2][0] == replacement {
+		replacement = 'B'
+	}
+	tamperedParts[2] = string(replacement) + tamperedParts[2][1:]
+	tampered := strings.Join(tamperedParts, ".")
+	wrongToken, err := signer.Issue(networkprovenance.NetworkProvenanceV1{
+		ConversationID: "other-conversation", RuntimeMode: audience.RuntimeMode, RuntimeGeneration: audience.RuntimeGeneration,
+		RuntimeInstanceID: audience.RuntimeInstanceID, AgentID: "agent-other", ToolName: "curl",
+		ExecutionID: "execution-other", DeclaredActivityKind: networkprovenance.ActivityKindNormal,
+	}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, auth := range map[string]string{
+		"missing":        "",
+		"tampered":       attributionBasic(tampered),
+		"wrong-audience": attributionBasic(wrongToken),
+	} {
+		t.Run(name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://allowed.example/rejected", nil)
+			request.Header.Set(trafficAgentIDHeader, "forged-agent")
+			if auth != "" {
+				request.Header.Set("Proxy-Authorization", auth)
+			}
+			recorder := httptest.NewRecorder()
+			proxy.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusProxyAuthRequired || calls.Load() != 1 || recorder.Header().Get("Proxy-Authenticate") == "" {
+				t.Fatalf("rejection status/calls/headers = %d/%d/%#v", recorder.Code, calls.Load(), recorder.Header())
+			}
+			last := events[len(events)-1].Provenance
+			if last.AttributionStatus != networkprovenance.AttributionInvalid || last.ConversationID != audience.ConversationID || last.RuntimeMode != audience.RuntimeMode || last.RuntimeGeneration != audience.RuntimeGeneration || last.RuntimeInstanceID != audience.RuntimeInstanceID || last.AgentID != "" || last.ExecutionID != "" {
+				t.Fatalf("rejected request runtime provenance = %#v", last)
+			}
+		})
+	}
 }
 
 func TestProxyForwardsOnlyAuthorizedAbsoluteHTTPAndStripsProxyHeaders(t *testing.T) {
@@ -203,11 +319,33 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 		t.Fatal(err)
 	}
 	var events []ActivityEvent
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := signer.Verifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	audience := networkprovenance.ExpectedAudience{ConversationID: "conversation-one", RuntimeMode: networkprovenance.RuntimeModeContainer, RuntimeGeneration: 2, RuntimeInstanceID: "gateway-one"}
+	token, err := signer.Issue(networkprovenance.NetworkProvenanceV1{
+		ConversationID: audience.ConversationID, RuntimeMode: audience.RuntimeMode, RuntimeGeneration: audience.RuntimeGeneration,
+		RuntimeInstanceID: audience.RuntimeInstanceID, AgentID: "agent-one", ToolName: "curl", ExecutionID: "execution-one", ToolCallID: "call-one",
+		DeclaredActivityKind: networkprovenance.ActivityKindNormal,
+	}, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
 	proxy, err := NewProxy(policy, ProxyOptions{
-		TLSInspection: &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{}},
-		TLSAuthority:  authority,
-		ActivitySink:  func(event ActivityEvent) { events = append(events, event) },
+		TLSInspection:  &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{}},
+		TLSAuthority:   authority,
+		ActivitySink:   func(event ActivityEvent) { events = append(events, event) },
+		ConversationID: "conversation-one", RuntimeMode: traffic.RuntimeModeContainer,
+		AttributionVerifier: verifier, AttributionAudience: audience,
 		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if got := networkprovenance.FromContext(request.Context()); got.AttributionStatus != networkprovenance.AttributionVerified || got.ExecutionID != "execution-one" || got.ToolCallID != "call-one" {
+				t.Fatalf("decrypted HTTPS lost CONNECT provenance: %#v", got)
+			}
 			if request.URL.Scheme != "https" || request.URL.Host != "inspect.example:443" {
 				t.Fatalf("inspected outbound target = %s %s", request.Method, request.URL)
 			}
@@ -232,21 +370,21 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 		t.Fatal("append conversation CA")
 	}
 	secret := "stage8-secret-must-not-leak"
-	response := performInspectedTLSRequest(t, proxy, roots, "GET /safe/report?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nAuthorization: Bearer "+secret+"\r\nConnection: close\r\n\r\n")
+	response := performInspectedTLSRequest(t, proxy, roots, token, "GET /safe/report?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nAuthorization: Bearer "+secret+"\r\nConnection: close\r\n\r\n")
 	allowedBody, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
 	if response.StatusCode != http.StatusOK || string(allowedBody) != "inspected-ok" {
 		t.Fatalf("allowed HTTPS response = %d %q", response.StatusCode, allowedBody)
 	}
 	uploadBody := "password=" + secret + "&file=%00%ff"
-	upload := performInspectedTLSRequest(t, proxy, roots, "POST /upload HTTP/1.1\r\nHost: inspect.example\r\nCookie: session="+secret+"\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "+strconv.Itoa(len(uploadBody))+"\r\nConnection: close\r\n\r\n"+uploadBody)
+	upload := performInspectedTLSRequest(t, proxy, roots, token, "POST /upload HTTP/1.1\r\nHost: inspect.example\r\nCookie: session="+secret+"\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: "+strconv.Itoa(len(uploadBody))+"\r\nConnection: close\r\n\r\n"+uploadBody)
 	binaryBody, _ := io.ReadAll(upload.Body)
 	_ = upload.Body.Close()
 	if upload.StatusCode != http.StatusOK || !bytes.Equal(binaryBody, []byte{0, 255, 1, 2}) {
 		t.Fatalf("inspected upload response = %d %v", upload.StatusCode, binaryBody)
 	}
 
-	denied := performInspectedTLSRequest(t, proxy, roots, "GET /admin?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")
+	denied := performInspectedTLSRequest(t, proxy, roots, token, "GET /admin?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")
 	deniedBody, _ := io.ReadAll(denied.Body)
 	_ = denied.Body.Close()
 	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(string(deniedBody), "block-admin") {
@@ -256,6 +394,9 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 	foundCompleteGet := false
 	foundCompleteUpload := false
 	for _, event := range events {
+		if event.RequestType == ActivityRequestHTTPS && (event.Provenance.AttributionStatus != networkprovenance.AttributionVerified || event.Provenance.ExecutionID != "execution-one" || event.Provenance.ToolCallID != "call-one") {
+			t.Fatalf("HTTPS event lost provenance: %#v", event)
+		}
 		if event.Domain == "inspect.example" && event.Path == "/admin" && event.Decision == ActivityDecisionBlocked && event.RuleID == "block-admin" {
 			foundPathDecision = true
 		}
@@ -308,13 +449,14 @@ func (writer *hijackResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error
 	return writer.conn, bufio.NewReadWriter(writer.reader, writer.writer), nil
 }
 
-func performInspectedTLSRequest(t *testing.T, proxy *Proxy, roots *x509.CertPool, rawRequest string) *http.Response {
+func performInspectedTLSRequest(t *testing.T, proxy *Proxy, roots *x509.CertPool, token, rawRequest string) *http.Response {
 	t.Helper()
 	clientSide, proxySide := net.Pipe()
 	writer := &hijackResponseWriter{header: make(http.Header), conn: proxySide, reader: bufio.NewReader(proxySide), writer: bufio.NewWriter(proxySide)}
 	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
 	connect.Host = "inspect.example:443"
 	connect.RequestURI = connect.Host
+	connect.Header.Set("Proxy-Authorization", attributionBasic(token))
 	done := make(chan struct{})
 	go func() {
 		defer close(done)

@@ -805,11 +805,12 @@ func validateLifecycleSpecReplacement(
 		return 0, "", fmt.Errorf("%w: replacement specification does not match the observed runtime", containerruntime.ErrRuntimeStateConflict)
 	}
 	var currentJSON string
+	var currentGeneration int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT spec_json FROM conversation_container_runtimes
+		SELECT spec_json, runtime_generation FROM conversation_container_runtimes
 		WHERE conversation_id = ? AND runtime_id = ? AND initialization_status = ?
 			AND lifecycle_operation = ? AND lifecycle_state = ?
-	`, conversationID, runtime.ID, containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress).Scan(&currentJSON); err != nil {
+	`, conversationID, runtime.ID, containerruntime.InitializationCreated, operation, containerruntime.LifecycleInProgress).Scan(&currentJSON, &currentGeneration); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, "", containerruntime.ErrRuntimeStateConflict
 		}
@@ -842,6 +843,31 @@ func validateLifecycleSpecReplacement(
 		gateway := *current.EgressGateway
 		gateway.Image = replacement.EgressGateway.Image
 		gateway.Resources = replacement.EgressGateway.Resources
+		expected.EgressGateway = &gateway
+		changed = true
+	}
+	if current.EgressGateway != nil && current.EgressGateway.BoundarySnapshot != nil && replacement.EgressGateway != nil &&
+		(current.EgressGateway.AttributionPublicKey != replacement.EgressGateway.AttributionPublicKey ||
+			current.EgressGateway.AttributionRuntimeGeneration != replacement.EgressGateway.AttributionRuntimeGeneration ||
+			current.EgressGateway.AttributionInstanceID != replacement.EgressGateway.AttributionInstanceID) {
+		if strings.TrimSpace(replacement.EgressGateway.AttributionPublicKey) == "" ||
+			replacement.EgressGateway.AttributionRuntimeGeneration != currentGeneration+1 ||
+			strings.TrimSpace(replacement.EgressGateway.AttributionInstanceID) == "" ||
+			replacement.EgressGateway.AttributionInstanceID == current.EgressGateway.AttributionInstanceID {
+			return 0, "", fmt.Errorf("%w: egress attribution replacement is not bound to the next runtime generation", containerruntime.ErrRuntimeStateConflict)
+		}
+		if expected.EgressGateway == nil {
+			return 0, "", fmt.Errorf("%w: egress attribution requires a gateway", containerruntime.ErrRuntimeStateConflict)
+		}
+		gateway := *expected.EgressGateway
+		gateway.AttributionPublicKey = replacement.EgressGateway.AttributionPublicKey
+		gateway.AttributionRuntimeGeneration = replacement.EgressGateway.AttributionRuntimeGeneration
+		gateway.AttributionInstanceID = replacement.EgressGateway.AttributionInstanceID
+		if gateway.BoundarySnapshot != nil {
+			snapshot := *gateway.BoundarySnapshot
+			snapshot.RuntimeGeneration = replacement.EgressGateway.AttributionRuntimeGeneration
+			gateway.BoundarySnapshot = &snapshot
+		}
 		expected.EgressGateway = &gateway
 		changed = true
 	}

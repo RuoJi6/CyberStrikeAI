@@ -16,6 +16,7 @@ import (
 
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/mcp"
+	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/traffic"
 
@@ -48,7 +49,11 @@ func TestHostTrafficProxyCapturesHTTPAndHTTPSAsBestEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := newHostTrafficProxyManager(db, nil, zap.NewNop())
+	signer, err := networkprovenance.LoadOrCreateSigner(filepath.Join(t.TempDir(), "provenance.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newHostTrafficProxyManager(db, nil, zap.NewNop(), signer)
 	manager.transport = hostTrafficRoundTripper{}
 	resolver := newConversationExecutionBackendResolver(db, nil, nil, manager)
 	ctx := mcp.WithMCPConversationID(context.Background(), conversation.ID)
@@ -70,17 +75,72 @@ func TestHostTrafficProxyCapturesHTTPAndHTTPSAsBestEffort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(environment.Output, proxied.proxyURL+"|"+proxied.caPath+"|") || !strings.Contains(environment.Output, "127.0.0.1") {
+	environmentParts := strings.SplitN(environment.Output, "|", 3)
+	if len(environmentParts) != 3 || !strings.Contains(environmentParts[0], redactedNetworkCredential) || strings.Contains(environmentParts[0], "v1.") || environmentParts[1] != proxied.caPath || !strings.Contains(environmentParts[2], "127.0.0.1") {
 		t.Fatalf("host capture environment = %q", environment.Output)
 	}
-
-	proxyURL, err := url.Parse(proxied.proxyURL)
+	provenance := networkprovenance.NetworkProvenanceV1{
+		ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
+		RuntimeGeneration: 1, RuntimeInstanceID: proxied.runtimeInstanceID,
+		AgentID: "agent-test", ToolName: "exec", ExecutionID: "execution-test",
+		ToolCallID: "call-test", DeclaredActivityKind: networkprovenance.ActivityKindNormal,
+	}.Normalized()
+	prepared, sensitiveValues, err := prepareAttributedProxyRequest(security.ExecutionRequest{Command: []string{
+		"/bin/sh", "-c", `printf normal; network-scope fuzz -- printf fuzz`,
+	}}, signer, provenance, time.Time{}, proxied.proxyURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	unauthenticatedURL := *proxyURL
-	unauthenticatedURL.User = nil
-	unauthenticatedTransport := &http.Transport{Proxy: http.ProxyURL(&unauthenticatedURL)}
+	if len(sensitiveValues) != 4 {
+		t.Fatalf("sensitive proxy values = %d", len(sensitiveValues))
+	}
+	var mixedURLs []string
+	for _, entry := range prepared.Env {
+		name, value, found := strings.Cut(entry, "=")
+		if found && (name == "HTTP_PROXY" || name == "CYBERSTRIKE_NETWORK_SCOPE_FUZZ_PROXY") {
+			mixedURLs = append(mixedURLs, value)
+		}
+	}
+	if len(mixedURLs) != 2 || mixedURLs[0] == mixedURLs[1] {
+		t.Fatalf("normal/fuzz proxy scopes = %#v", mixedURLs)
+	}
+	verifiedScopes := make([]networkprovenance.NetworkProvenanceV1, 0, 2)
+	verifier, err := signer.Verifier()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range mixedURLs {
+		parsed, parseErr := url.Parse(raw)
+		if parseErr != nil || parsed.User == nil {
+			t.Fatalf("parse scoped proxy %q: %v", raw, parseErr)
+		}
+		token, ok := parsed.User.Password()
+		if !ok {
+			t.Fatalf("scoped proxy has no token: %q", raw)
+		}
+		verified, verifyErr := verifier.Verify(token, networkprovenance.ExpectedAudience{
+			ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
+			RuntimeGeneration: 1, RuntimeInstanceID: proxied.runtimeInstanceID,
+		})
+		if verifyErr != nil {
+			t.Fatalf("verify scoped proxy: %v", verifyErr)
+		}
+		verifiedScopes = append(verifiedScopes, verified)
+	}
+	if verifiedScopes[0].ExecutionID != verifiedScopes[1].ExecutionID || verifiedScopes[0].ActivityScopeID == verifiedScopes[1].ActivityScopeID ||
+		verifiedScopes[0].DeclaredActivityKind != networkprovenance.ActivityKindNormal || verifiedScopes[1].DeclaredActivityKind != networkprovenance.ActivityKindFuzz {
+		t.Fatalf("normal/fuzz child scopes = %#v", verifiedScopes)
+	}
+
+	proxyURL, err := url.Parse(mixedURLs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthenticatedURL, err := url.Parse(proxied.proxyURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthenticatedTransport := &http.Transport{Proxy: http.ProxyURL(unauthenticatedURL)}
 	unauthenticated := &http.Client{Transport: unauthenticatedTransport, Timeout: 3 * time.Second}
 	response, err := unauthenticated.Get("http://example.com/rejected")
 	if err != nil {
@@ -140,11 +200,28 @@ func TestHostTrafficProxyCapturesHTTPAndHTTPSAsBestEffort(t *testing.T) {
 		t.Fatalf("captured transactions total=%d items=%#v", total, items)
 	}
 	seenSchemes := map[string]bool{}
+	auditItems, auditErr := db.ListEgressAuditEvents(context.Background(), database.EgressAuditFilter{
+		ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
+		Scope: database.RBACScopeAll, Limit: 20,
+	})
+	if auditErr != nil {
+		t.Fatal(auditErr)
+	}
+	auditEventIDs := make(map[string]struct{}, len(auditItems))
+	for _, audit := range auditItems {
+		auditEventIDs[audit.SourceEventID] = struct{}{}
+	}
 	for _, item := range items {
 		if item.RuntimeMode != traffic.RuntimeModeHost || item.CaptureCoverage != traffic.CaptureCoverageBestEffort || item.HTTPStatus != http.StatusOK {
 			t.Fatalf("captured transaction = %#v", item)
 		}
 		seenSchemes[item.Scheme] = true
+		if item.EventID == "" {
+			t.Fatalf("captured transaction has no shared event id: %#v", item)
+		}
+		if _, exists := auditEventIDs[item.EventID]; !exists {
+			t.Fatalf("traffic event %q has no matching audit event: %#v", item.EventID, auditItems)
+		}
 		detail, getErr := db.GetTrafficTransaction(context.Background(), item.ID)
 		if getErr != nil || len(detail.Messages) != 2 {
 			t.Fatalf("captured detail=%#v err=%v", detail, getErr)
