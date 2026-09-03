@@ -555,6 +555,9 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		app.containerLifecycle = containerLifecycle
 		app.containerOrphan = containerOrphan
 		scheduleConversationContainer := func(ctx context.Context, conversationID string, retryFailed bool) (containerruntime.InitializationRecord, error) {
+			if existing, reused, existingErr := scheduleExistingConversationContainer(ctx, containerInitializer, conversationID, retryFailed); reused || existingErr != nil {
+				return existing, existingErr
+			}
 			binding, egressErr := db.EnsureConversationEgressBinding(ctx, conversationID)
 			if egressErr != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("bind conversation upstream egress: %w", egressErr)
@@ -595,10 +598,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 			if specErr = containerruntime.ValidateSpec(spec); specErr != nil {
 				return containerruntime.InitializationRecord{}, specErr
 			}
-			if retryFailed {
-				return containerInitializer.RetryAsync(ctx, spec)
-			}
-			return containerInitializer.EnsureAsync(ctx, spec)
+			return scheduleConversationContainerSpec(ctx, containerInitializer, spec, retryFailed, true)
 		}
 		agentHandler.SetConversationContainerInitializationScheduler(handler.ConversationContainerInitializationSchedulerFunc(func(ctx context.Context, conversationID string) (containerruntime.InitializationRecord, error) {
 			return scheduleConversationContainer(ctx, conversationID, false)

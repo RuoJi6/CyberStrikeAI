@@ -26,6 +26,56 @@ import (
 
 const tlsAuthorityRotationPeriod = 6 * 24 * time.Hour
 
+type conversationContainerScheduler interface {
+	Get(context.Context, string) (containerruntime.InitializationRecord, error)
+	EnsureAsync(context.Context, containerruntime.RuntimeSpec) (containerruntime.InitializationRecord, error)
+	RetryAsync(context.Context, containerruntime.RuntimeSpec) (containerruntime.InitializationRecord, error)
+}
+
+// scheduleExistingConversationContainer preserves the exact immutable runtime
+// specification after first queueing. In particular, attribution instance IDs
+// are generated only for a new runtime and rotate only through an explicit
+// rebuild; normal execution and failed-readiness retries must never synthesize
+// a replacement specification.
+func scheduleExistingConversationContainer(ctx context.Context, scheduler conversationContainerScheduler, conversationID string, retryFailed bool) (containerruntime.InitializationRecord, bool, error) {
+	record, err := scheduler.Get(ctx, conversationID)
+	if err != nil {
+		if errors.Is(err, containerruntime.ErrNotFound) {
+			return containerruntime.InitializationRecord{}, false, nil
+		}
+		return containerruntime.InitializationRecord{}, false, fmt.Errorf("load immutable conversation runtime: %w", err)
+	}
+	record, err = scheduleConversationContainerSpec(ctx, scheduler, record.Spec, retryFailed, false)
+	if errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		latest, latestErr := scheduler.Get(ctx, conversationID)
+		if latestErr != nil {
+			return record, true, errors.Join(err, latestErr)
+		}
+		record, err = scheduleConversationContainerSpec(ctx, scheduler, latest.Spec, retryFailed, false)
+	}
+	return record, true, err
+}
+
+func scheduleConversationContainerSpec(ctx context.Context, scheduler conversationContainerScheduler, spec containerruntime.RuntimeSpec, retryFailed, recoverConflict bool) (containerruntime.InitializationRecord, error) {
+	var (
+		record containerruntime.InitializationRecord
+		err    error
+	)
+	if retryFailed {
+		record, err = scheduler.RetryAsync(ctx, spec)
+	} else {
+		record, err = scheduler.EnsureAsync(ctx, spec)
+	}
+	if !recoverConflict || !errors.Is(err, containerruntime.ErrRuntimeStateConflict) {
+		return record, err
+	}
+	latest, reused, latestErr := scheduleExistingConversationContainer(ctx, scheduler, spec.ConversationID, retryFailed)
+	if reused || latestErr != nil {
+		return latest, latestErr
+	}
+	return record, err
+}
+
 func setupConversationContainerRuntime(cfg *config.Config, db *database.DB, credentialCipher *egress.CredentialCipher, provenanceSigner *networkprovenance.Signer, logger *zap.Logger) (*containerruntime.Initializer, *containerruntime.DockerManager, *containerruntime.LifecycleController, *containerruntime.OrphanScanner, *egress.SnapshotStore, *egress.UpstreamRouteStore, *egress.AuthProfilesStore, *egress.TLSAuthorityStore, error) {
 	if cfg == nil || !cfg.Container.Enabled {
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil

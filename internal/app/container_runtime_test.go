@@ -61,6 +61,89 @@ func TestMaterializeConversationTLSAuthorityIsConversationScopedStableAndRotates
 	}
 }
 
+type recordingConversationContainerScheduler struct {
+	record      containerruntime.InitializationRecord
+	getErr      error
+	ensureSpec  containerruntime.RuntimeSpec
+	retrySpec   containerruntime.RuntimeSpec
+	ensureCalls int
+	retryCalls  int
+	ensureErrs  []error
+}
+
+func (s *recordingConversationContainerScheduler) Get(context.Context, string) (containerruntime.InitializationRecord, error) {
+	return s.record, s.getErr
+}
+
+func (s *recordingConversationContainerScheduler) EnsureAsync(_ context.Context, spec containerruntime.RuntimeSpec) (containerruntime.InitializationRecord, error) {
+	s.ensureCalls++
+	s.ensureSpec = spec
+	if len(s.ensureErrs) > 0 {
+		err := s.ensureErrs[0]
+		s.ensureErrs = s.ensureErrs[1:]
+		return s.record, err
+	}
+	return s.record, nil
+}
+
+func (s *recordingConversationContainerScheduler) RetryAsync(_ context.Context, spec containerruntime.RuntimeSpec) (containerruntime.InitializationRecord, error) {
+	s.retryCalls++
+	s.retrySpec = spec
+	return s.record, nil
+}
+
+func TestScheduleExistingConversationContainerReusesImmutableAttributionInstance(t *testing.T) {
+	stored := containerruntime.RuntimeSpec{
+		ID: "conversation-runtime-one", ConversationID: "runtime-one",
+		EgressGateway: &containerruntime.EgressGatewaySpec{
+			AttributionPublicKey: "stored-public-key", AttributionRuntimeGeneration: 7,
+			AttributionInstanceID: "12345678-1234-4234-8234-123456789abc",
+		},
+	}
+	scheduler := &recordingConversationContainerScheduler{record: containerruntime.InitializationRecord{ConversationID: stored.ConversationID, Spec: stored}}
+	record, reused, err := scheduleExistingConversationContainer(context.Background(), scheduler, stored.ConversationID, false)
+	if err != nil || !reused || record.ConversationID != stored.ConversationID {
+		t.Fatalf("schedule existing runtime = %#v, reused %v, err %v", record, reused, err)
+	}
+	if scheduler.ensureCalls != 1 || scheduler.retryCalls != 0 || scheduler.ensureSpec.EgressGateway == nil ||
+		scheduler.ensureSpec.EgressGateway.AttributionInstanceID != stored.EgressGateway.AttributionInstanceID {
+		t.Fatalf("ensure used mutable specification = %#v", scheduler)
+	}
+
+	_, reused, err = scheduleExistingConversationContainer(context.Background(), scheduler, stored.ConversationID, true)
+	if err != nil || !reused || scheduler.retryCalls != 1 || scheduler.retrySpec.EgressGateway == nil ||
+		scheduler.retrySpec.EgressGateway.AttributionRuntimeGeneration != 7 ||
+		scheduler.retrySpec.EgressGateway.AttributionInstanceID != stored.EgressGateway.AttributionInstanceID {
+		t.Fatalf("retry used mutable specification = %#v, reused %v, err %v", scheduler, reused, err)
+	}
+}
+
+func TestScheduleExistingConversationContainerBuildsOnlyWhenMissing(t *testing.T) {
+	scheduler := &recordingConversationContainerScheduler{getErr: containerruntime.ErrNotFound}
+	record, reused, err := scheduleExistingConversationContainer(context.Background(), scheduler, "new-runtime", false)
+	if err != nil || reused || record.ConversationID != "" || scheduler.ensureCalls != 0 || scheduler.retryCalls != 0 {
+		t.Fatalf("missing runtime schedule = %#v, reused %v, scheduler %#v, err %v", record, reused, scheduler, err)
+	}
+}
+
+func TestScheduleConversationContainerSpecRecoversConcurrentFirstQueue(t *testing.T) {
+	stored := containerruntime.RuntimeSpec{
+		ID: "conversation-runtime-race", ConversationID: "runtime-race",
+		EgressGateway: &containerruntime.EgressGatewaySpec{AttributionInstanceID: "stored-instance"},
+	}
+	scheduler := &recordingConversationContainerScheduler{
+		record:     containerruntime.InitializationRecord{ConversationID: stored.ConversationID, Spec: stored},
+		ensureErrs: []error{containerruntime.ErrRuntimeStateConflict},
+	}
+	candidate := stored
+	candidate.EgressGateway = &containerruntime.EgressGatewaySpec{AttributionInstanceID: "racing-instance"}
+	record, err := scheduleConversationContainerSpec(context.Background(), scheduler, candidate, false, true)
+	if err != nil || record.ConversationID != stored.ConversationID || scheduler.ensureCalls != 2 ||
+		scheduler.ensureSpec.EgressGateway == nil || scheduler.ensureSpec.EgressGateway.AttributionInstanceID != "stored-instance" {
+		t.Fatalf("concurrent queue recovery = %#v, scheduler %#v, err %v", record, scheduler, err)
+	}
+}
+
 func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	cfg := config.Default()
 	cfg.Container.Enabled = true
