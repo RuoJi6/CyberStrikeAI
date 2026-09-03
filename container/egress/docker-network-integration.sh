@@ -5,7 +5,7 @@ set -euo pipefail
 : "${CYBERSTRIKE_AGENT_IMAGE:?CYBERSTRIKE_AGENT_IMAGE is required}"
 
 snapshot_id=12345678-1234-1234-1234-123456789ab6
-snapshot_json='{"schemaVersion":5,"policyId":"stage4-item6-policy","rules":[{"id":"block-example-tcp-81","effect":"blocked","host":"example.com","schemes":["tcp"],"ports":[81],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-example-web","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[53,80,443,784,853,8853,2375,2376],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-example-tcp","effect":"allow-visit","host":"example.com","schemes":["tcp"],"ports":[80],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-example-icmp","effect":"allow-visit","host":"example.com","schemes":["icmp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-ntp-124","effect":"blocked","host":"time.cloudflare.com","schemes":["udp"],"ports":[124],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":6},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":7},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":8},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":9}],"networkAccess":{"allowRestrictedTargets":false}}'
+snapshot_json='{"schemaVersion":5,"policyId":"stage4-item6-policy","rules":[{"id":"block-example-tcp-81","effect":"blocked","host":"example.com","schemes":["tcp"],"ports":[81],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-example-web","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[53,80,443,784,853,2375,2376,8853],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-example-tcp","effect":"allow-visit","host":"example.com","schemes":["tcp"],"ports":[80],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-example-icmp","effect":"allow-visit","host":"example.com","schemes":["icmp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-ntp-124","effect":"blocked","host":"time.cloudflare.com","schemes":["udp"],"ports":[124],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":6},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":7},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":8},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":9}],"networkAccess":{"allowRestrictedTargets":false}}'
 snapshot_sha="sha256:$(printf '%s\n' "$snapshot_json" | sha256sum | awk '{print $1}')"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/cyberstrike-egress-integration.XXXXXX")
 test_suffix=${CYBERSTRIKE_EGRESS_TEST_SUFFIX:-"$$"}
@@ -23,6 +23,9 @@ auth_profiles_path="$test_root/auth-profiles.json"
 mismatch_profiles_path="$test_root/auth-profiles-mismatch.json"
 open_snapshot_path="$test_root/open-boundary.json"
 open_restricted_snapshot_path="$test_root/open-restricted-boundary.json"
+tls_certificate_path="$test_root/ca.crt"
+tls_private_key_path="$test_root/ca.key"
+tls_authority_id=42345678-1234-4234-8234-123456789ab8
 
 gateway_security_args=(
   --read-only
@@ -64,7 +67,15 @@ agent_workspace_env=(
   --env VIRTUAL_ENV=/workspace/.venv
   --env PATH=/workspace/.venv/bin:/workspace/.local/bin:/opt/tools-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 )
-agent_keepalive_script="umask 077; ready_file=/tmp/.cyberstrike-runtime-ready; rm -f \$ready_file; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; runtime_start=\$(awk '{print \$22}' /proc/1/stat) || exit 73; printf '%s\\n' \"\$runtime_start\" >\$ready_file || exit 74; trap 'rm -f \$ready_file; exit 0' TERM INT; while :; do sleep 3600; done"
+agent_tls_env=(
+  --env SSL_CERT_FILE=/tmp/cyberstrike-ca-bundle.pem
+  --env CURL_CA_BUNDLE=/tmp/cyberstrike-ca-bundle.pem
+  --env REQUESTS_CA_BUNDLE=/tmp/cyberstrike-ca-bundle.pem
+  --env PIP_CERT=/tmp/cyberstrike-ca-bundle.pem
+  --env GIT_SSL_CAINFO=/tmp/cyberstrike-ca-bundle.pem
+  --env NODE_EXTRA_CA_CERTS=/etc/cyberstrike/tls/ca.crt
+)
+agent_keepalive_script="umask 077; ready_file=/tmp/.cyberstrike-runtime-ready; rm -f \$ready_file; if [ -r /etc/cyberstrike/tls/ca.crt ]; then cat /etc/ssl/certs/ca-certificates.crt /etc/cyberstrike/tls/ca.crt >/tmp/cyberstrike-ca-bundle.pem || exit 70; fi; mkdir -p /workspace/.cache/pip /workspace/.config /workspace/.local/bin /workspace/.local/share; if [ ! -x /workspace/.venv/bin/python3 ]; then rm -rf /workspace/.venv; /usr/bin/python3 -m venv --system-site-packages /workspace/.venv || exit 71; /workspace/.venv/bin/python3 -m ensurepip --upgrade >/dev/null 2>&1 || exit 72; fi; runtime_start=\$(awk '{print \$22}' /proc/1/stat) || exit 73; printf '%s\\n' \"\$runtime_start\" >\$ready_file || exit 74; trap 'rm -f \$ready_file; exit 0' TERM INT; while :; do sleep 3600; done"
 
 configure_agent_route() {
   local container=$1 gateway=$2
@@ -311,27 +322,48 @@ open_snapshot_json='{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":
 printf '%s\n' "$open_snapshot_json" >"$open_snapshot_path"
 chmod 0444 "$open_snapshot_path"
 open_snapshot_sha="sha256:$(sha256sum "$open_snapshot_path" | awk '{print $1}')"
+openssl genpkey -algorithm ED25519 -out "$tls_private_key_path" >/dev/null 2>&1
+openssl req -x509 -new -key "$tls_private_key_path" -out "$tls_certificate_path" -days 1 \
+  -subj '/CN=CyberStrikeAI Docker integration CA' \
+  -addext 'basicConstraints=critical,CA:TRUE' \
+  -addext 'keyUsage=critical,keyCertSign' >/dev/null 2>&1
+chmod 0444 "$tls_certificate_path" "$tls_private_key_path"
+tls_certificate_sha="sha256:$(sha256sum "$tls_certificate_path" | awk '{print $1}')"
+tls_private_key_sha="sha256:$(sha256sum "$tls_private_key_path" | awk '{print $1}')"
 docker run -d --name "$restricted_container" --network "$egress_network" --network-alias restricted-target \
   --entrypoint python3 "$CYBERSTRIKE_AGENT_IMAGE" -m http.server 18081 >/dev/null
 docker run -d --name "$gateway_container" --network "$internal_network" \
   "${gateway_security_args[@]}" \
   --mount type=bind,source="$open_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
+  --mount type=bind,source="$tls_certificate_path",target=/etc/cyberstrike/tls/ca.crt,readonly \
+  --mount type=bind,source="$tls_private_key_path",target=/etc/cyberstrike/tls/ca.key,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" run \
   --snapshot-path /etc/cyberstrike/boundary.json \
   --snapshot-id "$open_snapshot_id" \
-  --snapshot-sha256 "$open_snapshot_sha" >/dev/null
+  --snapshot-sha256 "$open_snapshot_sha" \
+  --tls-ca-cert-path /etc/cyberstrike/tls/ca.crt \
+  --tls-ca-key-path /etc/cyberstrike/tls/ca.key \
+  --tls-ca-id "$tls_authority_id" \
+  --tls-ca-cert-sha256 "$tls_certificate_sha" \
+  --tls-ca-key-sha256 "$tls_private_key_sha" >/dev/null
 docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
   sleep 0.1
 done
-docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' || fail "open-boundary gateway did not start"
+if ! docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded'; then
+  docker inspect --format 'open_gateway_state={{json .State}}' "$gateway_container" >&2 || true
+  docker logs "$gateway_container" >&2 || true
+  fail "open-boundary gateway did not start"
+fi
 gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.IPAddress}}{{end}}" "$gateway_container")
 proxy="http://$gateway_ip:3128"
 socks_proxy="socks5h://$gateway_ip:1080"
 docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
   "${agent_security_args[@]}" \
   "${agent_workspace_env[@]}" \
+  "${agent_tls_env[@]}" \
+  --mount type=bind,source="$tls_certificate_path",target=/etc/cyberstrike/tls/ca.crt,readonly \
   --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
   --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
   --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
@@ -372,22 +404,35 @@ open_restricted_snapshot_sha="sha256:$(sha256sum "$open_restricted_snapshot_path
 docker run -d --name "$gateway_container" --network "$internal_network" \
   "${gateway_security_args[@]}" \
   --mount type=bind,source="$open_restricted_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
+  --mount type=bind,source="$tls_certificate_path",target=/etc/cyberstrike/tls/ca.crt,readonly \
+  --mount type=bind,source="$tls_private_key_path",target=/etc/cyberstrike/tls/ca.key,readonly \
   "$CYBERSTRIKE_EGRESS_IMAGE" run \
   --snapshot-path /etc/cyberstrike/boundary.json \
   --snapshot-id "$open_restricted_snapshot_id" \
-  --snapshot-sha256 "$open_restricted_snapshot_sha" >/dev/null
+  --snapshot-sha256 "$open_restricted_snapshot_sha" \
+  --tls-ca-cert-path /etc/cyberstrike/tls/ca.crt \
+  --tls-ca-key-path /etc/cyberstrike/tls/ca.key \
+  --tls-ca-id "$tls_authority_id" \
+  --tls-ca-cert-sha256 "$tls_certificate_sha" \
+  --tls-ca-key-sha256 "$tls_private_key_sha" >/dev/null
 docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
 for _ in $(seq 1 60); do
   docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
   sleep 0.1
 done
-docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' || fail "restricted-target gateway did not start"
+if ! docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded'; then
+  docker inspect --format 'restricted_gateway_state={{json .State}}' "$gateway_container" >&2 || true
+  docker logs "$gateway_container" >&2 || true
+  fail "restricted-target gateway did not start"
+fi
 gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.IPAddress}}{{end}}" "$gateway_container")
 proxy="http://$gateway_ip:3128"
 socks_proxy="socks5h://$gateway_ip:1080"
 docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
   "${agent_security_args[@]}" \
   "${agent_workspace_env[@]}" \
+  "${agent_tls_env[@]}" \
+  --mount type=bind,source="$tls_certificate_path",target=/etc/cyberstrike/tls/ca.crt,readonly \
   --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
   --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
   --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
