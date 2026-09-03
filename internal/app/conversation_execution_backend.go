@@ -166,7 +166,7 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 	}
 	return &proxiedContainerExecutionBackend{
 		base: backend, signer: r.signer, conversationID: conversationID,
-		runtimeID: record.Spec.ID, runtimeGeneration: record.Spec.EgressGateway.AttributionRuntimeGeneration, runtimeInstanceID: instanceID,
+		runtimeGeneration: record.Spec.EgressGateway.AttributionRuntimeGeneration, runtimeInstanceID: instanceID,
 	}, nil
 }
 
@@ -174,7 +174,6 @@ type proxiedContainerExecutionBackend struct {
 	base              security.ExecutionBackend
 	signer            *networkprovenance.Signer
 	conversationID    string
-	runtimeID         containerruntime.RuntimeID
 	runtimeGeneration int
 	runtimeInstanceID string
 }
@@ -357,7 +356,7 @@ func (backend *proxiedContainerExecutionBackend) Execute(ctx context.Context, re
 	}
 	deadline, _ := ctx.Deadline()
 	request, sensitiveValues, err := prepareAttributedProxyRequest(request, backend.signer, provenance, deadline,
-		(&url.URL{Scheme: "http", Host: containerruntime.EgressGatewayContainerName(backend.runtimeID) + ":3128"}).String())
+		(&url.URL{Scheme: "http", Host: containerruntime.EgressGatewayProxyAlias + ":3128"}).String())
 	if err != nil {
 		return security.ExecutionResult{Location: "container", ExitCode: -1}, fmt.Errorf("issue container traffic provenance: %w", err)
 	}

@@ -25,6 +25,10 @@ const (
 	egressNetworkModeLabel  = "egress"
 	gatewayBinaryPath       = "/cyberstrike-egress"
 	gatewayUser             = "0:0"
+	// EgressGatewayProxyAlias is safe because every runtime has a dedicated
+	// conversation network. Keep it below the DNS label length limit; runtime
+	// container names can exceed 63 bytes when they include a UUID.
+	EgressGatewayProxyAlias = "cyberstrike-egress-proxy"
 )
 
 var gatewayCapabilities = []string{"NET_ADMIN", "NET_RAW"}
@@ -823,7 +827,7 @@ func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egress
 		// Signed execution-scoped proxy URLs use this stable, non-secret name.
 		// Docker's API does not implicitly register a container-name alias when
 		// NetworkingConfig is supplied, so make the DNS binding explicit.
-		internalEndpoint.Aliases = []string{EgressGatewayContainerName(spec.ID)}
+		internalEndpoint.Aliases = []string{EgressGatewayProxyAlias}
 	}
 	if strings.TrimSpace(policyDNSAddress) != "" {
 		internalEndpoint.IPAMConfig = &mobynetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr(policyDNSAddress)}
@@ -857,7 +861,7 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 		return fmt.Errorf("%w: egress gateway internal network gateway metadata mismatch", ErrRuntimeStateConflict)
 	}
 	if spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" &&
-		!containsString(internalEndpoint.Aliases, EgressGatewayContainerName(spec.ID)) {
+		!containsString(internalEndpoint.Aliases, EgressGatewayProxyAlias) {
 		return fmt.Errorf("%w: attributed egress gateway DNS alias is missing", ErrRuntimeStateConflict)
 	}
 	egressResult, err := m.networkAPI.NetworkInspect(ctx, egressEndpoint.NetworkID, mobyclient.NetworkInspectOptions{})

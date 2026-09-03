@@ -451,7 +451,7 @@ func TestEgressGatewayNetworkingConfigBindsSignedProxyDNSAlias(t *testing.T) {
 	egressNetwork := ManagedResource{ProviderID: "egress-network-provider"}
 	config := egressGatewayNetworkingConfig(spec, conversationNetwork, egressNetwork, "172.30.0.2")
 	endpoint := config.EndpointsConfig[ConversationNetworkName(spec.ID)]
-	if endpoint == nil || !containsString(endpoint.Aliases, EgressGatewayContainerName(spec.ID)) {
+	if endpoint == nil || !containsString(endpoint.Aliases, EgressGatewayProxyAlias) || len(EgressGatewayProxyAlias) > 63 {
 		t.Fatalf("signed gateway internal endpoint aliases = %#v", endpoint)
 	}
 
@@ -1040,7 +1040,7 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 		agent.Container.Config.Env = runtimeContainerEnvironment(spec, policyDNSAddress.String())
 	}
 	if spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" {
-		internalAliases = []string{EgressGatewayContainerName(spec.ID)}
+		internalAliases = []string{EgressGatewayProxyAlias}
 	}
 	agent.Container.NetworkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
 		ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: netip.MustParseAddr("172.30.0.3")},
