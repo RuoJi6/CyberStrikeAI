@@ -1,9 +1,9 @@
 ARG GO_IMAGE="golang:1.25.0-bookworm@sha256:81dc45d05a7444ead8c92a389621fafabc8e40f8fd1a19d7e5df14e61e98bc1a"
-ARG RUNTIME_IMAGE="debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241"
+ARG RUNTIME_IMAGE="debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171"
 FROM ${GO_IMAGE} AS build
 
-ARG TARGETARCH="arm64"
-ARG TARGETOS="linux"
+ARG TARGETARCH
+ARG TARGETOS
 ARG GOPROXY="https://proxy.golang.org,direct"
 
 WORKDIR /src
