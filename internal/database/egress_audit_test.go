@@ -516,6 +516,59 @@ func TestEgressAuditHashVersionFallbacksRemainCompatible(t *testing.T) {
 	}
 }
 
+func TestEgressAuditUpgradePreservesLegacyChainWithUnhashedExecutionMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "egress-audit-unhashed-metadata.db")
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, _ := createRunningEgressAuditRuntime(t, db, "legacy execution metadata")
+	rows, err := loadEgressAuditChainRows(context.Background(), db, conversation.ID, "chain_sequence ASC")
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("load legacy chain = %#v, %v", rows, err)
+	}
+	if _, err := db.Exec(`DROP TRIGGER trg_egress_audit_append_only_update`); err != nil {
+		t.Fatal(err)
+	}
+	legacy := rows[0]
+	legacy.ChainHashVersion = 0
+	legacy.ToolName = "curl"
+	legacy.ExecutionID = "legacy-execution"
+	legacy.ToolCallID = "legacy-tool-call"
+	legacy.AttributionStatus = "legacy_unattributed"
+	legacyHash := legacy.calculatedHash(legacy.PreviousHash, legacy.ChainSequence)
+	if _, err := db.Exec(`
+		UPDATE egress_audit_events
+		SET chain_hash_version = 0, tool_name = ?, execution_id = ?, tool_call_id = ?, attribution_status = ?, event_hash = ?
+		WHERE id = ?
+	`, legacy.ToolName, legacy.ExecutionID, legacy.ToolCallID, legacy.AttributionStatus, legacyHash, legacy.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE egress_audit_chain_heads SET last_hash = ? WHERE conversation_id = ?`, legacyHash, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("reopen deployed legacy chain: %v", err)
+	}
+	defer reopened.Close()
+	integrity, err := reopened.VerifyEgressAuditIntegrity(context.Background(), EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll})
+	if err != nil || integrity.Status != "verified" || integrity.Events != 1 {
+		t.Fatalf("legacy metadata integrity = %#v, %v", integrity, err)
+	}
+	items, err := reopened.ListEgressAuditEvents(context.Background(), EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 20})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list legacy metadata = %#v, %v", items, err)
+	}
+	if items[0].HashVersion != 1 || items[0].ToolName != legacy.ToolName || items[0].ExecutionID != legacy.ExecutionID || items[0].ToolCallID != legacy.ToolCallID {
+		t.Fatalf("legacy metadata projection = %#v", items[0])
+	}
+}
+
 func TestEgressAuditLegacyRowsProjectAndFilterAsContainerUnattributed(t *testing.T) {
 	db := newContainerRuntimeTestDB(t)
 	conversation, _ := createRunningEgressAuditRuntime(t, db, "legacy provenance projection")

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	chain_sequence INTEGER NOT NULL DEFAULT 0,
 	previous_hash TEXT NOT NULL DEFAULT '',
 	event_hash TEXT NOT NULL DEFAULT '',
+	chain_hash_version INTEGER NOT NULL DEFAULT 0,
 	recorded_at DATETIME NOT NULL,
 	occurred_at DATETIME NOT NULL,
 	category TEXT NOT NULL,
@@ -158,6 +159,14 @@ BEGIN
 	UPDATE egress_audit_events
 	SET chain_sequence = COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1,
 		previous_hash = COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
+		chain_hash_version = CASE
+			WHEN NEW.source_event_id <> '' OR NEW.runtime_mode <> '' OR NEW.runtime_instance_id <> '' OR NEW.tool_name <> ''
+				OR NEW.execution_id <> '' OR NEW.tool_call_id <> '' OR NEW.activity_scope_id <> '' OR NEW.attribution_status <> ''
+				OR NEW.declared_activity_kind <> '' OR NEW.observed_activity_kind <> '' THEN 4
+			WHEN NEW.dns_query_type <> '' OR (NEW.dns_answers_json <> '' AND NEW.dns_answers_json <> '[]') THEN 3
+			WHEN NEW.http_packet_json <> '' THEN 2
+			ELSE 1
+		END,
 		event_hash = cyberstrike_egress_audit_hash_provenance(
 			COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 			CAST(COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1 AS TEXT),
@@ -526,6 +535,7 @@ func (db *DB) initEgressAuditTables() error {
 		{"chain_sequence", "ALTER TABLE egress_audit_events ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0"},
 		{"previous_hash", "ALTER TABLE egress_audit_events ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''"},
 		{"event_hash", "ALTER TABLE egress_audit_events ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''"},
+		{"chain_hash_version", "ALTER TABLE egress_audit_events ADD COLUMN chain_hash_version INTEGER NOT NULL DEFAULT 0"},
 		{"http_packet_json", "ALTER TABLE egress_audit_events ADD COLUMN http_packet_json TEXT NOT NULL DEFAULT ''"},
 		{"dns_query_type", "ALTER TABLE egress_audit_events ADD COLUMN dns_query_type TEXT NOT NULL DEFAULT ''"},
 		{"dns_answers_json", "ALTER TABLE egress_audit_events ADD COLUMN dns_answers_json TEXT NOT NULL DEFAULT '[]'"},
@@ -1072,6 +1082,7 @@ type egressAuditChainRow struct {
 	ChainSequence        int64
 	PreviousHash         string
 	EventHash            string
+	ChainHashVersion     int
 }
 
 const egressAuditChainSelect = `
@@ -1082,7 +1093,7 @@ const egressAuditChainSelect = `
 		snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 		decision, result, rule_id, reason, upstream_route_id, method, path, http_status,
 		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json,
-		chain_sequence, previous_hash, event_hash
+		chain_sequence, previous_hash, event_hash, chain_hash_version
 	FROM egress_audit_events`
 
 func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, error) {
@@ -1095,13 +1106,13 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.DNSQueryType, &row.DNSAnswersJSON, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
 		&row.Decision, &row.Result, &row.RuleID, &row.Reason, &row.UpstreamRouteID, &row.Method, &row.Path, &row.HTTPStatus,
 		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON,
-		&row.ChainSequence, &row.PreviousHash, &row.EventHash,
+		&row.ChainSequence, &row.PreviousHash, &row.EventHash, &row.ChainHashVersion,
 	)
 	return row, err
 }
 
 func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int64) string {
-	return egressAuditHashValuesWithProvenance(
+	legacyValues := []interface{}{
 		previousHash, strconv.FormatInt(sequence, 10), row.ID, row.EventKey, row.RecordedAt, row.OccurredAt,
 		row.Category, row.EventType, row.ConversationID, row.ConversationTitle, row.ContainerID, row.AgentID,
 		strconv.FormatInt(row.RuntimeGeneration, 10), row.SnapshotID, row.SnapshotSHA256, row.Domain,
@@ -1109,9 +1120,33 @@ func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int6
 		row.RuleID, row.Reason, row.UpstreamRouteID, row.Method, row.Path, strconv.FormatInt(row.HTTPStatus, 10),
 		row.Outcome, strconv.FormatInt(row.LatencyMS, 10), strconv.FormatInt(row.BytesUp, 10), strconv.FormatInt(row.BytesDown, 10),
 		row.LifecycleOperation, row.LifecycleState, row.Message, row.HTTPPacketJSON, row.DNSQueryType, row.DNSAnswersJSON,
+	}
+	// A zero chain_hash_version marks a row sealed before provenance became
+	// part of the hash domain. Some deployed databases already populated
+	// execution metadata in those rows, so field emptiness is not a reliable
+	// version discriminator. Preserve their original v1-v3 chain exactly.
+	if row.ChainHashVersion == 0 {
+		return egressAuditHashValuesWithDNS(legacyValues...)
+	}
+	return egressAuditHashValuesWithProvenance(append(legacyValues,
 		row.SourceEventID, row.RuntimeMode, row.RuntimeInstanceID, row.ToolName, row.ExecutionID, row.ToolCallID,
 		row.ActivityScopeID, row.AttributionStatus, row.DeclaredActivityKind, row.ObservedActivityKind,
-	)
+	)...)
+}
+
+func (row egressAuditChainRow) inferredHashVersion() int {
+	if row.SourceEventID != "" || row.RuntimeMode != "" || row.RuntimeInstanceID != "" || row.ToolName != "" ||
+		row.ExecutionID != "" || row.ToolCallID != "" || row.ActivityScopeID != "" || row.AttributionStatus != "" ||
+		row.DeclaredActivityKind != "" || row.ObservedActivityKind != "" {
+		return 4
+	}
+	if row.DNSQueryType != "" || (row.DNSAnswersJSON != "" && row.DNSAnswersJSON != "[]") {
+		return 3
+	}
+	if row.HTTPPacketJSON != "" {
+		return 2
+	}
+	return 1
 }
 
 type egressAuditChainQueryer interface {
@@ -1184,8 +1219,9 @@ func (db *DB) initializeEgressAuditChains(ctx context.Context) error {
 			previousHash := egressAuditGenesisHash
 			for index, row := range chainRows {
 				sequence := int64(index + 1)
+				row.ChainHashVersion = row.inferredHashVersion()
 				eventHash := row.calculatedHash(previousHash, sequence)
-				result, err := tx.ExecContext(ctx, `UPDATE egress_audit_events SET chain_sequence = ?, previous_hash = ?, event_hash = ? WHERE id = ? AND chain_sequence = 0 AND previous_hash = '' AND event_hash = ''`, sequence, previousHash, eventHash, row.ID)
+				result, err := tx.ExecContext(ctx, `UPDATE egress_audit_events SET chain_sequence = ?, previous_hash = ?, event_hash = ?, chain_hash_version = ? WHERE id = ? AND chain_sequence = 0 AND previous_hash = '' AND event_hash = ''`, sequence, previousHash, eventHash, row.ChainHashVersion, row.ID)
 				if err != nil {
 					return err
 				}
@@ -1498,6 +1534,9 @@ const egressAuditSelect = `
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
 		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
 		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
+		CASE WHEN e.chain_hash_version > 0 THEN e.chain_hash_version
+			WHEN e.dns_query_type <> '' OR (e.dns_answers_json <> '' AND e.dns_answers_json <> '[]') THEN 3
+			WHEN e.http_packet_json <> '' THEN 2 ELSE 1 END,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
@@ -1510,6 +1549,9 @@ const egressAuditDetailSelect = `
 		e.conversation_id, e.conversation_title, e.container_id, e.agent_id, e.runtime_generation,
 		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
 		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
+		CASE WHEN e.chain_hash_version > 0 THEN e.chain_hash_version
+			WHEN e.dns_query_type <> '' OR (e.dns_answers_json <> '' AND e.dns_answers_json <> '[]') THEN 3
+			WHEN e.http_packet_json <> '' THEN 2 ELSE 1 END,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
 		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
@@ -1623,6 +1665,7 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 		&event.ConversationID, &event.ConversationTitle, &event.ContainerID, &event.AgentID, &event.RuntimeGeneration,
 		&event.SourceEventID, &event.RuntimeMode, &event.RuntimeInstanceID, &event.ToolName, &event.ExecutionID, &event.ToolCallID,
 		&event.ActivityScopeID, &event.AttributionStatus, &event.DeclaredActivityKind, &event.ObservedActivityKind,
+		&event.HashVersion,
 		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &event.DNSQueryType, &dnsAnswersJSON, &resolvedJSON, &event.ConnectedIP, &event.Port,
 		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &event.UpstreamRouteID, &event.Method, &event.Path,
 		&event.HTTPStatus, &event.Outcome, &event.LatencyMS, &event.BytesUp, &event.BytesDown,
@@ -1661,15 +1704,6 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 		event.HTTPPacket = &packet
 	}
 	applyEgressAuditAggregateMessage(&event)
-	if event.SourceEventID != "" || event.RuntimeMode != "" || event.AttributionStatus != "" {
-		event.HashVersion = 4
-	} else if event.DNSQueryType != "" || (dnsAnswersJSON != "" && dnsAnswersJSON != "[]") {
-		event.HashVersion = 3
-	} else if packetJSON != "" {
-		event.HashVersion = 2
-	} else {
-		event.HashVersion = 1
-	}
 	if event.RuntimeMode == "" {
 		event.RuntimeMode = networkprovenance.RuntimeModeContainer
 	}
