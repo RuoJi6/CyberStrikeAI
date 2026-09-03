@@ -2490,6 +2490,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						{"name": "since", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
 						{"name": "until", "in": "query", "schema": map[string]interface{}{"type": "string", "format": "date-time"}},
 						{"name": "defer_integrity", "in": "query", "description": "为 true 时先返回分页摘要，客户端再通过独立端点异步校验完整性并加载对话选项。", "schema": map[string]interface{}{"type": "boolean", "default": false}},
+						{"name": "runtime_mode", "in": "query", "schema": map[string]interface{}{"type": "string", "enum": []string{"container", "host_mitm"}}},
+						{"name": "agent", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 256}},
+						{"name": "tool", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 256}},
+						{"name": "execution_id", "in": "query", "schema": map[string]interface{}{"type": "string", "maxLength": 256}},
+						{"name": "attribution_status", "in": "query", "schema": map[string]interface{}{"type": "string", "enum": []string{"verified", "legacy_unattributed", "unattributed", "invalid"}}},
 					},
 					"responses": map[string]interface{}{
 						"200": map[string]interface{}{"description": "持久审计事件分页结果", "content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{"$ref": "#/components/schemas/EgressAuditList"}}}},

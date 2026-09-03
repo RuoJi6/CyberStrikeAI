@@ -444,6 +444,24 @@ func TestEgressGatewayEnvironmentBindsAttributionGenerationAndInstance(t *testin
 	}
 }
 
+func TestEgressGatewayNetworkingConfigBindsSignedProxyDNSAlias(t *testing.T) {
+	spec := gatewayCreationSpec()
+	spec.EgressGateway.AttributionPublicKey = "signed-runtime-key"
+	conversationNetwork := ManagedResource{ProviderID: "conversation-network-provider"}
+	egressNetwork := ManagedResource{ProviderID: "egress-network-provider"}
+	config := egressGatewayNetworkingConfig(spec, conversationNetwork, egressNetwork, "172.30.0.2")
+	endpoint := config.EndpointsConfig[ConversationNetworkName(spec.ID)]
+	if endpoint == nil || !containsString(endpoint.Aliases, EgressGatewayContainerName(spec.ID)) {
+		t.Fatalf("signed gateway internal endpoint aliases = %#v", endpoint)
+	}
+
+	legacy := gatewayCreationSpec()
+	config = egressGatewayNetworkingConfig(legacy, conversationNetwork, egressNetwork, "172.30.0.2")
+	if aliases := config.EndpointsConfig[ConversationNetworkName(legacy.ID)].Aliases; len(aliases) != 0 {
+		t.Fatalf("legacy gateway unexpectedly changed aliases = %#v", aliases)
+	}
+}
+
 func TestDockerManagerInspectionAllowsImageDefinedGatewayEnvironment(t *testing.T) {
 	spec, root, snapshotPath := snapshotGatewayFixture(t)
 	api := newSuccessfulSnapshotGatewayCreationAPI(spec, "instance-01", snapshotPath)
@@ -1016,9 +1034,13 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 	agent.Container.Image = agentImageID
 	agent.Container.Config.Image = agentPinned
 	policyDNSAddress := netip.MustParseAddr("172.30.0.2")
+	internalAliases := []string(nil)
 	if requiresPolicyDNS(spec) {
 		agent.Container.HostConfig.DNS = []netip.Addr{policyDNSAddress}
 		agent.Container.Config.Env = runtimeContainerEnvironment(spec, policyDNSAddress.String())
+	}
+	if spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" {
+		internalAliases = []string{EgressGatewayContainerName(spec.ID)}
 	}
 	agent.Container.NetworkSettings = &mobycontainer.NetworkSettings{Networks: map[string]*mobynetwork.EndpointSettings{
 		ConversationNetworkName(spec.ID): {NetworkID: "provider-network-1", IPAddress: netip.MustParseAddr("172.30.0.3")},
@@ -1035,6 +1057,7 @@ func newSuccessfulGatewayCreationAPI(spec RuntimeSpec, ownerID string) *fakeDock
 			ConversationNetworkName(spec.ID): {
 				NetworkID: "provider-network-1", IPAddress: policyDNSAddress, GwPriority: 0,
 				IPAMConfig: &mobynetwork.EndpointIPAMConfig{IPv4Address: policyDNSAddress},
+				Aliases:    internalAliases,
 			},
 			EgressNetworkName(spec.ID): {NetworkID: "provider-network-2", IPAddress: netip.MustParseAddr("172.31.0.2"), GwPriority: 1},
 		}},

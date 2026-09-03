@@ -819,6 +819,12 @@ func healthySnapshotReport(health *mobycontainer.Health, reference egress.Snapsh
 
 func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egressNetwork ManagedResource, policyDNSAddress string) *mobynetwork.NetworkingConfig {
 	internalEndpoint := &mobynetwork.EndpointSettings{NetworkID: conversationNetwork.ProviderID, GwPriority: 0}
+	if spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" {
+		// Signed execution-scoped proxy URLs use this stable, non-secret name.
+		// Docker's API does not implicitly register a container-name alias when
+		// NetworkingConfig is supplied, so make the DNS binding explicit.
+		internalEndpoint.Aliases = []string{EgressGatewayContainerName(spec.ID)}
+	}
 	if strings.TrimSpace(policyDNSAddress) != "" {
 		internalEndpoint.IPAMConfig = &mobynetwork.EndpointIPAMConfig{IPv4Address: netip.MustParseAddr(policyDNSAddress)}
 	}
@@ -849,6 +855,10 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 	}
 	if !validConversationEndpointGateway(internalEndpoint, internalResult.Network) {
 		return fmt.Errorf("%w: egress gateway internal network gateway metadata mismatch", ErrRuntimeStateConflict)
+	}
+	if spec.EgressGateway != nil && strings.TrimSpace(spec.EgressGateway.AttributionPublicKey) != "" &&
+		!containsString(internalEndpoint.Aliases, EgressGatewayContainerName(spec.ID)) {
+		return fmt.Errorf("%w: attributed egress gateway DNS alias is missing", ErrRuntimeStateConflict)
 	}
 	egressResult, err := m.networkAPI.NetworkInspect(ctx, egressEndpoint.NetworkID, mobyclient.NetworkInspectOptions{})
 	if err != nil {
