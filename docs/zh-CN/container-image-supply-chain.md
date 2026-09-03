@@ -21,13 +21,13 @@ CyberStrikeAI 当前使用 Docker Hub 上的自有多架构 Agent 镜像，不�
 | 项目 | 值 |
 | --- | --- |
 | 仓库 | `ruoji6/cyberstrikeai-egress` |
-| 版本标签 | `https-default-20260827` |
-| 多架构 index digest | `sha256:68e3b5873bb62a1448c22dd689b3d38768663f0f3ad3f402a58a7ee506c20855` |
-| ARM64 manifest | `sha256:29473ae320b9e97c6106f4dc6e1ea96b5c442c6d9c8a1c47cbee4a3b94035c56` |
-| AMD64 manifest | `sha256:85624a043bcf4d5dfb7407645bf32341cb11944f82c168a58de9d969ea8de00d` |
-| OCI revision | `8c75a4fb` |
+| 版本标签 | `network-access-v5-20260903-e5530838`、`latest` |
+| 多架构 index digest | `sha256:17c106a08688000fb6d9385b237f7025296cdaa6eee22817f79851d1324a05dc` |
+| ARM64 manifest | `sha256:8457ab74f0d4051624fbf674df52c32947ad79d603f19481fa70017a23a9eece` |
+| AMD64 manifest | `sha256:0ac36ef34209adf8974cbd038c195a6708cc02a970848edc0067d61a32f5e44a` |
+| OCI revision | `e5530838f36cf4c72e0936ce5a5ce5ad265b0578` |
 
-Egress 镜像也从 Docker Hub 按 index digest 拉取。ARM64 已在虚拟机完成无边界策略 HTTPS 默认解密与完整请求/响应审计端到端验收；AMD64 二进制执行和多架构清单已验证。ARM64 运行时保持只读 rootfs、`cap-drop ALL`、仅增加 `NET_ADMIN`/`NET_RAW`、`no-new-privileges` 和不可变边界快照；该版本保留按目标元组即时拒绝 TCP/UDP 的行为，并保留默认关闭的按对话流量控制。该候选因本地 Buildx 不可用而采用平台镜像组装并发布，未生成发布脚本提供的 SBOM/来源证明，`latest` 标签未随候选移动。
+Egress 镜像从 Docker Hub 按 index digest 拉取，`latest` 指向同一个 index。AMD64 与 ARM64 分别在对应原生架构上构建；两个平台的运行层均为 gzip 压缩，AMD64 为 36.45 MiB，ARM64 为 37.58 MiB。AMD64 manifest 保留 BuildKit 来源证明，拆分发布的 ARM64 manifest 不包含证明附件。运行态验收要求只读 rootfs、`cap-drop ALL`、仅增加 `NET_ADMIN`/`NET_RAW`、`no-new-privileges` 和不可变边界快照。
 
 ## 工具与平台范围
 

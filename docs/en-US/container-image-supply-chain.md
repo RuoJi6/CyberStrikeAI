@@ -21,13 +21,13 @@ The `latest` tag currently resolves to the index digest above. The ARM64 VM pull
 | Item | Value |
 | --- | --- |
 | Repository | `ruoji6/cyberstrikeai-egress` |
-| Tag | `https-default-20260827` |
-| Multi-platform index | `sha256:68e3b5873bb62a1448c22dd689b3d38768663f0f3ad3f402a58a7ee506c20855` |
-| ARM64 manifest | `sha256:29473ae320b9e97c6106f4dc6e1ea96b5c442c6d9c8a1c47cbee4a3b94035c56` |
-| AMD64 manifest | `sha256:85624a043bcf4d5dfb7407645bf32341cb11944f82c168a58de9d969ea8de00d` |
-| OCI revision | `8c75a4fb` |
+| Tags | `network-access-v5-20260903-e5530838`, `latest` |
+| Multi-platform index | `sha256:17c106a08688000fb6d9385b237f7025296cdaa6eee22817f79851d1324a05dc` |
+| ARM64 manifest | `sha256:8457ab74f0d4051624fbf674df52c32947ad79d603f19481fa70017a23a9eece` |
+| AMD64 manifest | `sha256:0ac36ef34209adf8974cbd038c195a6708cc02a970848edc0067d61a32f5e44a` |
+| OCI revision | `e5530838f36cf4c72e0936ce5a5ce5ad265b0578` |
 
-The Egress image is also pulled from Docker Hub by index digest. ARM64 passed end-to-end VM acceptance for default HTTPS decryption and full request/response auditing without an explicit boundary policy; AMD64 binary execution and the multi-platform manifest were verified. Its ARM64 runtime keeps a read-only root filesystem, drops all capabilities before restoring only `NET_ADMIN`/`NET_RAW`, enables `no-new-privileges`, and loads an immutable boundary snapshot. This release retains immediate per-tuple TCP/UDP denial and optional, disabled-by-default traffic pacing. Because local Buildx was unavailable, this candidate was assembled and published per platform and therefore does not include the publisher script's SBOM/provenance attestations; `latest` was intentionally not moved.
+The Egress image is pulled from Docker Hub by index digest, and `latest` resolves to that same index. AMD64 and ARM64 were built natively on their respective architectures. Both platform manifests use gzip-compressed runtime layers (36.45 MiB for AMD64 and 37.58 MiB for ARM64). The AMD64 manifest retains its BuildKit attestation; the split native ARM64 publication does not include an attestation manifest. Runtime acceptance requires a read-only root filesystem, `cap-drop ALL`, only `NET_ADMIN`/`NET_RAW` restored, `no-new-privileges`, and an immutable boundary snapshot.
 
 ## Tool and platform coverage
 
