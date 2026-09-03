@@ -65,19 +65,37 @@ func validHTTPPacketHeaders(headers map[string][]string) bool {
 		return false
 	}
 	for name, values := range headers {
-		if name == "" || len(name) > 256 || len(values) > 128 || strings.TrimSpace(name) != name {
+		if !validHTTPPacketHeaderName(name) || len(values) > 128 {
 			return false
-		}
-		for _, character := range name {
-			if !((character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
-				(character >= '0' && character <= '9') || character == '-') {
-				return false
-			}
 		}
 		for _, value := range values {
 			if len(value) > 65536 || !utf8.ValidString(value) || strings.ContainsAny(value, "\r\n") {
 				return false
 			}
+		}
+	}
+	return true
+}
+
+// HTTP field names use the RFC token grammar. In particular, underscores and
+// the other tchar punctuation are legal even though the conventional spelling
+// of most fields only uses letters and hyphens. Reject separators and control
+// bytes so a captured field name cannot alter the surrounding JSON or HTTP
+// representation when it is later rendered.
+func validHTTPPacketHeaderName(name string) bool {
+	if name == "" || len(name) > 256 {
+		return false
+	}
+	for _, character := range name {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') {
+			continue
+		}
+		switch character {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
 		}
 	}
 	return true

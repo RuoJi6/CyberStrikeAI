@@ -82,3 +82,24 @@ func TestProxyHTTPActivityCapturesCompleteBoundedPacket(t *testing.T) {
 		t.Fatalf("HTTP packet = %#v", event.HTTPPacket)
 	}
 }
+
+func TestValidateHTTPPacketAcceptsRFCFieldNameTokens(t *testing.T) {
+	packet := &HTTPPacket{
+		RequestLine:    "GET / HTTP/1.1",
+		RequestHeaders: map[string][]string{"X_Backend-Trace": {"safe"}, "X!#$%&'*+-.^_`|~Token": {"safe"}},
+	}
+	if err := ValidateHTTPPacket(packet); err != nil {
+		t.Fatalf("valid RFC token header name rejected: %v", err)
+	}
+
+	for _, name := range []string{"Bad Header", "Bad:Header", "Bad\tHeader", "Bad/Header"} {
+		packet.RequestHeaders = map[string][]string{name: {"safe"}}
+		if err := ValidateHTTPPacket(packet); err == nil {
+			t.Fatalf("invalid header name %q accepted", name)
+		}
+	}
+	packet.RequestHeaders = map[string][]string{"Safe-Header": {"safe\r\ninjected: true"}}
+	if err := ValidateHTTPPacket(packet); err == nil {
+		t.Fatal("header value containing a newline was accepted")
+	}
+}
