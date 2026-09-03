@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,6 +12,53 @@ import (
 
 	"go.uber.org/zap"
 )
+
+func TestTrafficTransactionReadsLegacyTextRuntimeGeneration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traffic-legacy-generation.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacySchema := strings.Replace(createTrafficTransactionsTable,
+		"runtime_generation INTEGER NOT NULL DEFAULT 0",
+		"runtime_generation TEXT NOT NULL DEFAULT ''", 1)
+	if _, err := raw.Exec(legacySchema); err != nil {
+		_ = raw.Close()
+		t.Fatalf("create legacy traffic schema: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatalf("NewDB: %v", err)
+	}
+	defer db.Close()
+	conversation, err := db.CreateConversation("legacy traffic generation", ConversationCreateMeta{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := &traffic.Transaction{
+		ConversationID: conversation.ID, RuntimeMode: traffic.RuntimeModeContainer,
+		RuntimeGeneration: 7, CaptureCoverage: traffic.CaptureCoverageEnforced,
+		Scheme: "https", Host: "example.test", Port: 443, Method: "GET", Path: "/", StartedAt: time.Now().UTC(),
+	}
+	if _, err := db.CreateTrafficTransaction(context.Background(), item, nil); err != nil {
+		t.Fatalf("CreateTrafficTransaction: %v", err)
+	}
+	items, total, err := db.ListTrafficTransactions(context.Background(), TrafficTransactionFilter{Limit: 10})
+	if err != nil || total != 1 || len(items) != 1 || items[0].RuntimeGeneration != 7 {
+		t.Fatalf("legacy text generation list = %#v, total=%d, err=%v", items, total, err)
+	}
+	if _, err := db.Exec(`UPDATE traffic_transactions SET runtime_generation = '' WHERE id = ?`, item.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, total, err = db.ListTrafficTransactions(context.Background(), TrafficTransactionFilter{Limit: 10})
+	if err != nil || total != 1 || len(items) != 1 || items[0].RuntimeGeneration != 0 {
+		t.Fatalf("blank legacy generation list = %#v, total=%d, err=%v", items, total, err)
+	}
+}
 
 func testTrafficMessage(stage, kind, method, path string, status int, raw []byte) traffic.Message {
 	body, encoding, _ := traffic.EncodeBody(raw)

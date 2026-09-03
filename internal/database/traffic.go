@@ -198,7 +198,8 @@ func scanTrafficTransaction(scanner trafficTransactionScanner) (traffic.Transact
 
 const trafficTransactionSelect = `
 	SELECT id, event_id, conversation_id, project_id, agent_id, tool_name, execution_id, tool_call_id, activity_scope_id,
-		runtime_generation, runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
+		CAST(COALESCE(NULLIF(TRIM(runtime_generation), ''), '0') AS INTEGER) AS runtime_generation,
+		runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
 		runtime_mode, capture_coverage, scheme, host, port, method, path, http_status,
 		started_at, completed_at, latency_ms, bytes_up, bytes_down,
 		boundary_snapshot_id, rule_id, upstream_route_id,
