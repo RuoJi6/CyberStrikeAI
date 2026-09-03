@@ -213,6 +213,7 @@ type CreateConversationRequest struct {
 	EgressAuditEnabled  *bool                                 `json:"egressAuditEnabled,omitempty"`
 	EgressAuditMode     string                                `json:"egressAuditMode,omitempty"`
 	RuntimeControls     *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
+	NetworkAccess       *database.ConversationNetworkAccess   `json:"networkAccess,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -286,6 +287,20 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 			return
 		}
 		meta.RuntimeControls = normalized
+	}
+	if req.NetworkAccess != nil {
+		if runtimeMode != database.ConversationRuntimeModeContainer {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "networkAccess 只能用于 container 对话"})
+			return
+		}
+		if req.NetworkAccess.AllowRestrictedTargets {
+			session, hasSession := security.CurrentSession(c)
+			if !hasSession || !session.Permissions["boundary:read"] {
+				c.JSON(http.StatusForbidden, gin.H{"error": "启用受限目标访问需要 boundary:read 权限"})
+				return
+			}
+		}
+		meta.NetworkAccess = *req.NetworkAccess
 	}
 	if req.EgressAuditEnabled != nil && runtimeMode != database.ConversationRuntimeModeContainer {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "egressAuditEnabled 只能用于 container 对话"})
@@ -637,6 +652,7 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 			RuntimeMode: conversation.RuntimeMode, WorkspacePersistent: conversation.WorkspacePersistent,
 			Status: "not_requested", UpdatedAt: conversation.UpdatedAt,
 		}
+		item.NetworkAccess, _ = h.db.GetConversationNetworkAccess(c.Request.Context(), conversation.ID)
 		if binding, bindingErr := h.db.GetConversationWorkspaceBinding(c.Request.Context(), conversation.ID); bindingErr == nil {
 			item.WorkspaceMode = binding.Mode
 		}
@@ -656,8 +672,19 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 		if snapshot, snapshotErr := h.db.GetConversationBoundarySnapshot(c.Request.Context(), conversation.ID); snapshotErr == nil {
 			item.BoundaryPolicyID = snapshot.PolicyID
 			item.BoundarySnapshotID = snapshot.SnapshotID
+			if snapshot.Document.NetworkAccess != nil {
+				item.NetworkAccess = *snapshot.Document.NetworkAccess
+			}
 		} else if selectedPolicyID, selectionErr := h.db.GetConversationBoundaryPolicySelection(c.Request.Context(), conversation.ID); selectionErr == nil {
 			item.BoundaryPolicyID = selectedPolicyID
+		}
+		if pending, pendingErr := h.db.GetPendingConversationBoundaryRebuildSnapshot(c.Request.Context(), conversation.ID); pendingErr == nil {
+			item.PendingBoundarySnapshotID = pending.SnapshotID
+			item.PendingBoundaryPolicyID = pending.PolicyID
+			if pending.Document.NetworkAccess != nil {
+				pendingAccess := *pending.Document.NetworkAccess
+				item.PendingNetworkAccess = &pendingAccess
+			}
 		}
 		if item.BoundaryPolicyID != "" {
 			if policy, policyErr := h.db.GetBoundaryPolicy(c.Request.Context(), item.BoundaryPolicyID); policyErr == nil {
@@ -680,33 +707,37 @@ func (h *ConversationHandler) ListContainerRuntimes(c *gin.Context) {
 }
 
 type containerRuntimeListItemView struct {
-	ConversationID      string                              `json:"conversationId"`
-	ConversationTitle   string                              `json:"conversationTitle"`
-	RuntimeMode         string                              `json:"runtimeMode"`
-	WorkspaceMode       string                              `json:"workspaceMode"`
-	WorkspacePersistent bool                                `json:"workspacePersistent"`
-	Status              string                              `json:"status"`
-	RuntimeStatus       containerruntime.Status             `json:"runtimeStatus,omitempty"`
-	ImageDigest         string                              `json:"imageDigest,omitempty"`
-	ImagePlatform       string                              `json:"imagePlatform,omitempty"`
-	LastError           string                              `json:"lastError,omitempty"`
-	ReadinessStatus     containerruntime.ReadinessStatus    `json:"readinessStatus,omitempty"`
-	ReadinessError      string                              `json:"readinessError,omitempty"`
-	ToolCount           int                                 `json:"toolCount,omitempty"`
-	LifecycleOperation  containerruntime.LifecycleOperation `json:"lifecycleOperation,omitempty"`
-	LifecycleState      containerruntime.LifecycleState     `json:"lifecycleState,omitempty"`
-	LifecycleError      string                              `json:"lifecycleError,omitempty"`
-	RuntimeGeneration   int                                 `json:"runtimeGeneration,omitempty"`
-	RuntimeDrift        string                              `json:"runtimeDrift,omitempty"`
-	UpdatedAt           time.Time                           `json:"updatedAt"`
-	Desired             *conversationContainerDesiredView   `json:"desired,omitempty"`
-	ObservationError    string                              `json:"observationError,omitempty"`
-	EgressHealth        *database.EgressHealthState         `json:"egressHealth,omitempty"`
-	BoundaryPolicyID    string                              `json:"boundaryPolicyId"`
-	BoundaryPolicyName  string                              `json:"boundaryPolicyName"`
-	BoundarySnapshotID  string                              `json:"boundarySnapshotId,omitempty"`
-	IdlePolicy          database.ConversationIdlePolicy     `json:"idlePolicy"`
-	IdleExpiresAt       *time.Time                          `json:"idleExpiresAt,omitempty"`
+	ConversationID            string                              `json:"conversationId"`
+	ConversationTitle         string                              `json:"conversationTitle"`
+	RuntimeMode               string                              `json:"runtimeMode"`
+	WorkspaceMode             string                              `json:"workspaceMode"`
+	WorkspacePersistent       bool                                `json:"workspacePersistent"`
+	Status                    string                              `json:"status"`
+	RuntimeStatus             containerruntime.Status             `json:"runtimeStatus,omitempty"`
+	ImageDigest               string                              `json:"imageDigest,omitempty"`
+	ImagePlatform             string                              `json:"imagePlatform,omitempty"`
+	LastError                 string                              `json:"lastError,omitempty"`
+	ReadinessStatus           containerruntime.ReadinessStatus    `json:"readinessStatus,omitempty"`
+	ReadinessError            string                              `json:"readinessError,omitempty"`
+	ToolCount                 int                                 `json:"toolCount,omitempty"`
+	LifecycleOperation        containerruntime.LifecycleOperation `json:"lifecycleOperation,omitempty"`
+	LifecycleState            containerruntime.LifecycleState     `json:"lifecycleState,omitempty"`
+	LifecycleError            string                              `json:"lifecycleError,omitempty"`
+	RuntimeGeneration         int                                 `json:"runtimeGeneration,omitempty"`
+	RuntimeDrift              string                              `json:"runtimeDrift,omitempty"`
+	UpdatedAt                 time.Time                           `json:"updatedAt"`
+	Desired                   *conversationContainerDesiredView   `json:"desired,omitempty"`
+	ObservationError          string                              `json:"observationError,omitempty"`
+	EgressHealth              *database.EgressHealthState         `json:"egressHealth,omitempty"`
+	BoundaryPolicyID          string                              `json:"boundaryPolicyId"`
+	BoundaryPolicyName        string                              `json:"boundaryPolicyName"`
+	BoundarySnapshotID        string                              `json:"boundarySnapshotId,omitempty"`
+	NetworkAccess             database.ConversationNetworkAccess  `json:"networkAccess"`
+	PendingBoundarySnapshotID string                              `json:"pendingBoundarySnapshotId,omitempty"`
+	PendingBoundaryPolicyID   string                              `json:"pendingBoundaryPolicyId,omitempty"`
+	PendingNetworkAccess      *database.ConversationNetworkAccess `json:"pendingNetworkAccess,omitempty"`
+	IdlePolicy                database.ConversationIdlePolicy     `json:"idlePolicy"`
+	IdleExpiresAt             *time.Time                          `json:"idleExpiresAt,omitempty"`
 }
 
 func (item *containerRuntimeListItemView) apply(record containerruntime.InitializationRecord) {
@@ -805,6 +836,7 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 	record, err := h.containerInitializations.Get(c.Request.Context(), id)
 	if errors.Is(err, containerruntime.ErrNotFound) {
 		idlePolicy, _ := h.db.GetConversationIdlePolicy(c.Request.Context(), id)
+		networkAccess, _ := h.db.GetConversationNetworkAccess(c.Request.Context(), id)
 		c.JSON(http.StatusOK, gin.H{
 			"conversationId":      id,
 			"conversationTitle":   conversation.Title,
@@ -814,6 +846,7 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 			"status":              "not_requested",
 			"idlePolicy":          idlePolicy,
 			"idleExpiresAt":       database.ConversationIdleExpiresAt(conversation.UpdatedAt, idlePolicy),
+			"networkAccess":       networkAccess,
 		})
 		return
 	}
@@ -832,6 +865,21 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 	}
 	view.IdlePolicy, _ = h.db.GetConversationIdlePolicy(c.Request.Context(), id)
 	view.IdleExpiresAt = database.ConversationIdleExpiresAt(conversation.UpdatedAt, view.IdlePolicy)
+	if snapshot, snapshotErr := h.db.GetConversationBoundarySnapshot(c.Request.Context(), id); snapshotErr == nil {
+		view.BoundaryPolicyID = snapshot.PolicyID
+		view.BoundarySnapshotID = snapshot.SnapshotID
+		if snapshot.Document.NetworkAccess != nil {
+			view.NetworkAccess = *snapshot.Document.NetworkAccess
+		}
+	}
+	if pending, pendingErr := h.db.GetPendingConversationBoundaryRebuildSnapshot(c.Request.Context(), id); pendingErr == nil {
+		view.PendingBoundaryPolicyID = pending.PolicyID
+		view.PendingBoundarySnapshotID = pending.SnapshotID
+		if pending.Document.NetworkAccess != nil {
+			pendingAccess := *pending.Document.NetworkAccess
+			view.PendingNetworkAccess = &pendingAccess
+		}
+	}
 	observe := c.Query("observe") == "1" || strings.EqualFold(c.Query("observe"), "true")
 	// A start/stop/rebuild operation intentionally moves the Agent and gateway
 	// through different engine states. Observing the immutable topology in that
@@ -856,15 +904,21 @@ func (h *ConversationHandler) GetContainerInitialization(c *gin.Context) {
 
 type conversationContainerInitializationView struct {
 	containerruntime.InitializationRecord
-	ConversationTitle   string                               `json:"conversationTitle"`
-	RuntimeMode         string                               `json:"runtimeMode"`
-	WorkspaceMode       string                               `json:"workspaceMode"`
-	WorkspacePersistent bool                                 `json:"workspacePersistent"`
-	Desired             *conversationContainerDesiredView    `json:"desired,omitempty"`
-	Observation         *containerruntime.RuntimeObservation `json:"observation,omitempty"`
-	ObservationError    string                               `json:"observationError,omitempty"`
-	IdlePolicy          database.ConversationIdlePolicy      `json:"idlePolicy"`
-	IdleExpiresAt       *time.Time                           `json:"idleExpiresAt,omitempty"`
+	ConversationTitle         string                               `json:"conversationTitle"`
+	RuntimeMode               string                               `json:"runtimeMode"`
+	WorkspaceMode             string                               `json:"workspaceMode"`
+	WorkspacePersistent       bool                                 `json:"workspacePersistent"`
+	Desired                   *conversationContainerDesiredView    `json:"desired,omitempty"`
+	Observation               *containerruntime.RuntimeObservation `json:"observation,omitempty"`
+	ObservationError          string                               `json:"observationError,omitempty"`
+	IdlePolicy                database.ConversationIdlePolicy      `json:"idlePolicy"`
+	IdleExpiresAt             *time.Time                           `json:"idleExpiresAt,omitempty"`
+	BoundaryPolicyID          string                               `json:"boundaryPolicyId"`
+	BoundarySnapshotID        string                               `json:"boundarySnapshotId,omitempty"`
+	NetworkAccess             database.ConversationNetworkAccess   `json:"networkAccess"`
+	PendingBoundaryPolicyID   string                               `json:"pendingBoundaryPolicyId,omitempty"`
+	PendingBoundarySnapshotID string                               `json:"pendingBoundarySnapshotId,omitempty"`
+	PendingNetworkAccess      *database.ConversationNetworkAccess  `json:"pendingNetworkAccess,omitempty"`
 }
 
 type conversationContainerDesiredView struct {

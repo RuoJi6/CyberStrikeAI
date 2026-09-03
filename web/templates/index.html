@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260901-3">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260903-1">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -1256,7 +1256,18 @@
                                                     <select id="boundary-policy-select" data-unified-select="single" onchange="syncConversationBoundarySelection()">
                                                         <option value="" data-i18n="chat.boundaryPolicyDefaultAllow">不设置边界（允许全部外部访问）</option>
                                                     </select>
-                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时不限制外部网络目标、协议、端口或 HTTP 方法；HTTPS 默认解密并完整审计，Docker、宿主机与保留地址仍保持隔离。</span>
+                                                    <span id="boundary-policy-hint" class="container-conversation-field-hint" data-i18n="chat.boundaryPolicyDefaultAllowHint">不选择草案时公网目标、协议、端口和 HTTP 方法默认允许；HTTPS 默认解密并完整审计，受限目标由下方高风险开关控制。</span>
+                                                </div>
+                                                <div class="container-conversation-field">
+                                                    <label class="workspace-persistence-toggle" for="conversation-restricted-targets-toggle">
+                                                        <span class="workspace-persistence-toggle-copy">
+                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.restrictedTargetsLabel">允许内网与基础设施目标测试（高风险）</span>
+                                                            <span class="workspace-persistence-toggle-hint" data-i18n="chat.restrictedTargetsHint">默认关闭；开启后同一对话可按边界策略访问私网、宿主机与 Docker 网络及云元数据目标。</span>
+                                                        </span>
+                                                        <input type="checkbox" id="conversation-restricted-targets-toggle">
+                                                        <span class="workspace-persistence-switch" aria-hidden="true"></span>
+                                                    </label>
+                                                    <span class="container-conversation-field-hint is-warning" data-i18n="chat.restrictedTargetsWarning">开启只解除系统网络隔离，不会绕过已选择边界策略中的拒绝规则。Docker Socket 始终不会挂载。</span>
                                                 </div>
                                                 <div class="container-conversation-field">
                                                     <label class="container-conversation-field-label" for="conversation-egress-mode-select" data-i18n="chat.egressModeLabel">上游出口</label>
@@ -7516,7 +7527,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260901-2"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260903-1"></script>
     <script src="/static/js/vulnerability.js?v=18"></script>
     <script src="/static/js/traffic-evidence.js?v=5"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>
@@ -7529,11 +7540,11 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/roles.js"></script>
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
-    <script src="/static/js/network-activity.js?v=20260826-1"></script>
-    <script src="/static/js/egress-audit.js?v=20260826-3"></script>
+    <script src="/static/js/network-activity.js?v=20260903-1"></script>
+    <script src="/static/js/egress-audit.js?v=20260903-1"></script>
     <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
-    <script src="/static/js/container-management.js?v=20260901-2"></script>
+    <script src="/static/js/container-management.js?v=20260903-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

@@ -67,7 +67,11 @@ func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Con
 	if binding.ProxyGroup != nil {
 		proxyGroupID = binding.ProxyGroup.ID
 	}
-	c.JSON(http.StatusOK, gin.H{
+	activeNetworkAccess := database.ConversationNetworkAccess{}
+	if snapshot.Document.NetworkAccess != nil {
+		activeNetworkAccess = *snapshot.Document.NetworkAccess
+	}
+	response := gin.H{
 		"conversationId":        id,
 		"boundaryPolicyId":      snapshot.PolicyID,
 		"boundarySnapshotId":    snapshot.SnapshotID,
@@ -80,9 +84,23 @@ func (h *ConversationHandler) GetConversationContainerNetworkSettings(c *gin.Con
 		"lifecycleState":        record.LifecycleState,
 		"runtimeGeneration":     record.RuntimeGeneration,
 		"runtimeControls":       runtimeControls,
+		"networkAccess":         activeNetworkAccess,
 		"effectiveNanoCpus":     record.Spec.Resources.NanoCPUs,
 		"effectiveMemoryBytes":  record.Spec.Resources.MemoryBytes,
-	})
+	}
+	if pending, pendingErr := h.db.GetPendingConversationBoundaryRebuildSnapshot(c.Request.Context(), id); pendingErr == nil {
+		pendingNetworkAccess := database.ConversationNetworkAccess{}
+		if pending.Document.NetworkAccess != nil {
+			pendingNetworkAccess = *pending.Document.NetworkAccess
+		}
+		response["pendingBoundarySnapshotId"] = pending.SnapshotID
+		response["pendingBoundaryPolicyId"] = pending.PolicyID
+		response["pendingNetworkAccess"] = pendingNetworkAccess
+	} else if !errors.Is(pendingErr, database.ErrConversationBoundarySnapshotNotFound) {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取待生效容器网络配置失败"})
+		return
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
@@ -109,26 +127,13 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 
 	var staged *database.ConversationBoundarySnapshot
 	var previous database.ConversationBoundarySnapshot
-	if len(request.BoundaryPolicyID) != 0 {
-		if bytes.Equal(bytes.TrimSpace(request.BoundaryPolicyID), []byte("null")) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
+	boundaryChanged := len(request.BoundaryPolicyID) != 0
+	networkAccessChanged := request.NetworkAccess != nil
+	if boundaryChanged || networkAccessChanged {
+		session, hasSession := security.CurrentSession(c)
+		if !hasSession || !session.Permissions["boundary:read"] {
+			c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
 			return
-		}
-		var requestedPolicyID string
-		if err := json.Unmarshal(request.BoundaryPolicyID, &requestedPolicyID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
-			return
-		}
-		policyID := strings.TrimSpace(requestedPolicyID)
-		if policyID != "" {
-			session, hasSession := security.CurrentSession(c)
-			if !hasSession || !session.Permissions["boundary:read"] {
-				c.JSON(http.StatusForbidden, gin.H{"error": "缺少 boundary:read 权限"})
-				return
-			}
-			if !h.conversationBoundaryPolicyAllowed(c, policyID) {
-				return
-			}
 		}
 		var err error
 		previous, err = h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
@@ -136,7 +141,32 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 			h.writeBoundaryRebuildPreparationError(c, err)
 			return
 		}
-		prepared, err := h.db.PrepareConversationBoundaryRebuild(c.Request.Context(), id, policyID)
+		policyID := previous.PolicyID
+		requestedNetworkAccess := database.ConversationNetworkAccess{}
+		if previous.Document.NetworkAccess != nil {
+			requestedNetworkAccess = *previous.Document.NetworkAccess
+		}
+		if request.NetworkAccess != nil {
+			requestedNetworkAccess = *request.NetworkAccess
+		}
+		if boundaryChanged {
+			if bytes.Equal(bytes.TrimSpace(request.BoundaryPolicyID), []byte("null")) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
+				return
+			}
+			var requestedPolicyID string
+			if err := json.Unmarshal(request.BoundaryPolicyID, &requestedPolicyID); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "boundaryPolicyId 必须为字符串"})
+				return
+			}
+			policyID = strings.TrimSpace(requestedPolicyID)
+			if policyID != "" {
+				if !h.conversationBoundaryPolicyAllowed(c, policyID) {
+					return
+				}
+			}
+		}
+		prepared, err := h.db.PrepareConversationBoundaryRebuild(c.Request.Context(), id, policyID, requestedNetworkAccess)
 		if err != nil {
 			h.writeBoundaryRebuildPreparationError(c, err)
 			return
@@ -318,6 +348,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 			"runtime_status": record.RuntimeStatus, "lifecycle_state": record.LifecycleState,
 			"runtime_drift": record.RuntimeDrift, "runtime_generation": record.RuntimeGeneration,
 			"boundary_changed":         staged != nil,
+			"network_access_changed":   networkAccessChanged,
 			"egress_changed":           egressChanged,
 			"runtime_controls_changed": runtimeControlsChanged,
 		}
@@ -344,6 +375,7 @@ type RebuildConversationContainerRequest struct {
 	EgressProxyID      string                                `json:"egressProxyId,omitempty"`
 	EgressProxyGroupID string                                `json:"egressProxyGroupId,omitempty"`
 	RuntimeControls    *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
+	NetworkAccess      *database.ConversationNetworkAccess   `json:"networkAccess,omitempty"`
 }
 
 func (h *ConversationHandler) ReconcileConversationContainer(c *gin.Context) {

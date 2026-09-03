@@ -344,6 +344,7 @@ func TestConversationContainerBoundaryChangeRequiresSuccessfulExplicitRebuild(t 
 
 	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
 		"boundaryPolicyId": newPolicy.ID,
+		"networkAccess":    map[string]interface{}{"allowRestrictedTargets": true},
 	}, handler.RebuildConversationContainer)
 	if response.Code != http.StatusOK {
 		t.Fatalf("rebuild response=%d %s", response.Code, response.Body.String())
@@ -352,12 +353,16 @@ func TestConversationContainerBoundaryChangeRequiresSuccessfulExplicitRebuild(t 
 	if err != nil || active.PolicyID != newPolicy.ID || active.SnapshotID == initial.SnapshotID || active.RuntimeGeneration != 2 {
 		t.Fatalf("active snapshot = %#v, %v", active, err)
 	}
+	if access, accessErr := db.GetConversationNetworkAccess(ctx, conversation.ID); accessErr != nil || !access.AllowRestrictedTargets {
+		t.Fatalf("active network access = %#v, %v", access, accessErr)
+	}
 
 	controller.rebuild = func(context.Context, string) (containerruntime.InitializationRecord, error) {
 		return containerruntime.InitializationRecord{}, containerruntime.ErrRuntimeStateConflict
 	}
 	response = performBoundaryRebuildRequest(owner, conversation.ID, map[string]interface{}{
 		"boundaryPolicyId": oldPolicy.ID,
+		"networkAccess":    map[string]interface{}{"allowRestrictedTargets": false},
 	}, handler.RebuildConversationContainer)
 	if response.Code != http.StatusConflict {
 		t.Fatalf("failed rebuild response=%d %s", response.Code, response.Body.String())
@@ -366,9 +371,75 @@ func TestConversationContainerBoundaryChangeRequiresSuccessfulExplicitRebuild(t 
 	if err != nil || afterFailure.SnapshotID != active.SnapshotID || afterFailure.RuntimeGeneration != active.RuntimeGeneration {
 		t.Fatalf("failed rebuild changed active snapshot: %#v, %v", afterFailure, err)
 	}
+	if access, accessErr := db.GetConversationNetworkAccess(ctx, conversation.ID); accessErr != nil || !access.AllowRestrictedTargets {
+		t.Fatalf("failed rebuild changed active network access = %#v, %v", access, accessErr)
+	}
 	pending, err := db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID)
 	if err != nil || pending {
 		t.Fatalf("failed rebuild pending state = %v, %v", pending, err)
+	}
+}
+
+func TestConversationContainerNetworkSettingsSeparatesActiveAndPendingAccess(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	ctx := context.Background()
+	conversation, err := db.CreateConversation("network access state", database.ConversationCreateMeta{
+		RuntimeMode: database.ConversationRuntimeModeContainer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	active, err := db.EnsureConversationBoundarySnapshot(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.EnsureConversationEgressBinding(ctx, conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerBoundaryRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(ctx, spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(ctx, conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim runtime = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(ctx, conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "network-settings-provider", Status: containerruntime.StatusStopped,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, "", database.ConversationNetworkAccess{AllowRestrictedTargets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	payload, _ := json.Marshal(nil)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/conversations/"+conversation.ID+"/container/network-settings", bytes.NewReader(payload))
+	c.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+	c.Set(security.ContextSessionKey, security.Session{
+		UserID: owner.ID, Username: owner.Username, Scope: database.RBACScopeAssigned,
+		Permissions: map[string]bool{"boundary:read": true, "egress:read": true},
+	})
+	handler.GetConversationContainerNetworkSettings(c)
+	if response.Code != http.StatusOK {
+		t.Fatalf("network settings response = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		BoundarySnapshotID        string                             `json:"boundarySnapshotId"`
+		NetworkAccess             database.ConversationNetworkAccess `json:"networkAccess"`
+		PendingBoundarySnapshotID string                             `json:"pendingBoundarySnapshotId"`
+		PendingNetworkAccess      database.ConversationNetworkAccess `json:"pendingNetworkAccess"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.BoundarySnapshotID != active.SnapshotID || result.NetworkAccess.AllowRestrictedTargets || result.PendingBoundarySnapshotID != pending.SnapshotID || !result.PendingNetworkAccess.AllowRestrictedTargets {
+		t.Fatalf("active/pending network settings = %#v", result)
 	}
 }
 

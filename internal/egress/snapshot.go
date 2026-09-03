@@ -52,11 +52,12 @@ type SnapshotReport struct {
 }
 
 type snapshotEnvelope struct {
-	SchemaVersion int                  `json:"schemaVersion"`
-	PolicyID      string               `json:"policyId"`
-	Rules         []json.RawMessage    `json:"rules"`
-	TLSInspection *TLSInspectionPolicy `json:"tlsInspection,omitempty"`
-	DefaultAction string               `json:"defaultAction,omitempty"`
+	SchemaVersion int                     `json:"schemaVersion"`
+	PolicyID      string                  `json:"policyId"`
+	Rules         []json.RawMessage       `json:"rules"`
+	TLSInspection *TLSInspectionPolicy    `json:"tlsInspection,omitempty"`
+	DefaultAction string                  `json:"defaultAction,omitempty"`
+	NetworkAccess *boundary.NetworkAccess `json:"networkAccess,omitempty"`
 }
 
 type TLSInspectionPolicy struct {
@@ -260,16 +261,24 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: snapshot contains trailing data", ErrSnapshotIntegrity)
 	}
-	if (document.SchemaVersion != 1 && document.SchemaVersion != 2 && document.SchemaVersion != 3 && document.SchemaVersion != 4) || document.Rules == nil {
+	if (document.SchemaVersion != 1 && document.SchemaVersion != 2 && document.SchemaVersion != 3 && document.SchemaVersion != 4 && document.SchemaVersion != 5) || document.Rules == nil {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: unsupported snapshot document", ErrSnapshotIntegrity)
 	}
 	legacyDefaultAllow := document.SchemaVersion == 3 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection == nil && document.DefaultAction == "allow"
 	inspectedDefaultAllow := document.SchemaVersion == 4 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection != nil && document.DefaultAction == "allow"
-	defaultAllow := legacyDefaultAllow || inspectedDefaultAllow
+	networkDefaultAllow := document.SchemaVersion == 5 && document.PolicyID == "" && len(document.Rules) == 0 && document.TLSInspection != nil && document.DefaultAction == "allow"
+	defaultAllow := legacyDefaultAllow || inspectedDefaultAllow || networkDefaultAllow
 	if (document.SchemaVersion == 3 || document.SchemaVersion == 4) && !defaultAllow {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: no-boundary snapshot settings are inconsistent", ErrSnapshotIntegrity)
 	}
-	if document.SchemaVersion != 3 && document.SchemaVersion != 4 && document.DefaultAction != "" {
+	if document.SchemaVersion == 5 {
+		if document.NetworkAccess == nil || (document.PolicyID == "" && !networkDefaultAllow) || (document.PolicyID != "" && document.DefaultAction != "") {
+			return SnapshotReport{}, nil, nil, fmt.Errorf("%w: network access snapshot settings are inconsistent", ErrSnapshotIntegrity)
+		}
+	} else if document.NetworkAccess != nil {
+		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: legacy snapshot declares network access settings", ErrSnapshotIntegrity)
+	}
+	if document.SchemaVersion != 3 && document.SchemaVersion != 4 && document.SchemaVersion != 5 && document.DefaultAction != "" {
 		return SnapshotReport{}, nil, nil, fmt.Errorf("%w: policy snapshot declares a default action", ErrSnapshotIntegrity)
 	}
 	if document.PolicyID == "" && len(document.Rules) != 0 {
@@ -283,7 +292,11 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 			return SnapshotReport{}, nil, nil, fmt.Errorf("%w: %v", ErrSnapshotIntegrity, err)
 		}
 	}
-	policy, err := compileSnapshotPolicy(document.Rules, defaultAllow)
+	access := boundary.NetworkAccess{}
+	if document.NetworkAccess != nil {
+		access = *document.NetworkAccess
+	}
+	policy, err := compileSnapshotPolicy(document.Rules, defaultAllow, access)
 	if err != nil {
 		return SnapshotReport{}, nil, nil, err
 	}

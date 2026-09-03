@@ -121,9 +121,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"description": "每对话容器空闲策略。none 不自动处理；delete 默认保留专属或共享工作区。",
 	}
 	conversationRuntimeControlsSchema := conversationRuntimeControlsOpenAPISchema()
+	conversationNetworkAccessSchema := conversationNetworkAccessOpenAPISchema()
 	boundaryPolicyRequestSchema := map[string]interface{}{
 		"type":        "string",
-		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置边界，除 Docker/宿主机/保留地址外默认允许；HTTPS 仍默认解密并完整审计。",
+		"description": "仅在新建 container 对话时生效。首次启动前将草案生成不可变 canonical JSON 快照；之后编辑草案不会改变已绑定快照。留空表示不设置自定义边界并默认允许；受限目标仍由 networkAccess 高风险开关控制，HTTPS 默认解密并完整审计。",
 	}
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
@@ -590,9 +591,11 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 						"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 						"egressAuditMode":     conversationEgressAuditModeRequestSchema,
 						"runtimeControls":     conversationRuntimeControlsSchema,
+						"networkAccess":       conversationNetworkAccessSchema,
 					},
 				},
-				"ConversationIdlePolicy": idlePolicySchema,
+				"ConversationIdlePolicy":    idlePolicySchema,
+				"ConversationNetworkAccess": conversationNetworkAccessSchema,
 				"SetConversationProjectRequest": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
@@ -723,7 +726,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"properties": map[string]interface{}{
 						"snapshotId":     map[string]interface{}{"type": "string"},
 						"conversationId": map[string]interface{}{"type": "string"},
-						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示未设置边界：默认允许外部目标，但仍隔离 Docker、宿主机与保留地址"},
+						"policyId":       map[string]interface{}{"type": "string", "description": "空字符串表示未设置自定义边界：公网目标默认允许，受限目标由 networkAccess 控制"},
 						"sha256":         map[string]interface{}{"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
 						"canonicalJson":  map[string]interface{}{"type": "string"},
 						"runtimeGeneration": map[string]interface{}{
@@ -734,7 +737,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":     "object",
 							"required": []string{"schemaVersion", "policyId", "rules"},
 							"properties": map[string]interface{}{
-								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3, 4}, "description": "v4 表示未绑定边界策略、默认允许外部目标且默认启用 HTTPS 完整审计"},
+								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3, 4, 5}, "description": "v5 将会话级受限目标开关写入不可变快照；v1-v4 读取时按关闭处理"},
 								"policyId":      map[string]interface{}{"type": "string"},
 								"rules":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
 								"tlsInspection": map[string]interface{}{
@@ -745,6 +748,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 									},
 								},
 								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3/4 的无边界快照为 allow"},
+								"networkAccess": conversationNetworkAccessSchema,
 							},
 						},
 						"createdAt": map[string]interface{}{"type": "string", "format": "date-time"},
@@ -830,14 +834,20 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 					"type":        "object",
 					"description": "对话容器后台创建与启动前就绪校验的持久状态。created 仅表示停止状态容器已创建；启用工具清单校验时还必须达到 readinessStatus=ready，才可供后续 Agent 执行路径使用。",
 					"properties": map[string]interface{}{
-						"conversationId":      map[string]interface{}{"type": "string"},
-						"conversationTitle":   map[string]interface{}{"type": "string"},
-						"runtimeMode":         map[string]interface{}{"type": "string", "enum": []string{"host", "container"}},
-						"workspaceMode":       map[string]interface{}{"type": "string", "enum": []string{"ephemeral", "dedicated", "shared"}},
-						"workspacePersistent": map[string]interface{}{"type": "boolean"},
-						"idlePolicy":          idlePolicySchema,
-						"idleExpiresAt":       map[string]interface{}{"type": "string", "format": "date-time", "nullable": true},
-						"runtimeId":           map[string]interface{}{"type": "string"},
+						"conversationId":            map[string]interface{}{"type": "string"},
+						"conversationTitle":         map[string]interface{}{"type": "string"},
+						"runtimeMode":               map[string]interface{}{"type": "string", "enum": []string{"host", "container"}},
+						"workspaceMode":             map[string]interface{}{"type": "string", "enum": []string{"ephemeral", "dedicated", "shared"}},
+						"workspacePersistent":       map[string]interface{}{"type": "boolean"},
+						"idlePolicy":                idlePolicySchema,
+						"idleExpiresAt":             map[string]interface{}{"type": "string", "format": "date-time", "nullable": true},
+						"boundaryPolicyId":          map[string]interface{}{"type": "string"},
+						"boundarySnapshotId":        map[string]interface{}{"type": "string"},
+						"networkAccess":             conversationNetworkAccessSchema,
+						"pendingBoundaryPolicyId":   map[string]interface{}{"type": "string"},
+						"pendingBoundarySnapshotId": map[string]interface{}{"type": "string"},
+						"pendingNetworkAccess":      conversationNetworkAccessSchema,
+						"runtimeId":                 map[string]interface{}{"type": "string"},
 						"status": map[string]interface{}{
 							"type": "string",
 							"enum": []string{"not_requested", "queued", "creating", "created", "failed"},
@@ -3023,6 +3033,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"workspaceId":          workspaceIDRequestSchema,
 										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"networkAccess":        conversationNetworkAccessSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,
 										"egressMode":           conversationEgressModeRequestSchema,
@@ -3085,6 +3096,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"workspaceId":          workspaceIDRequestSchema,
 										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"networkAccess":        conversationNetworkAccessSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,
 										"egressMode":           conversationEgressModeRequestSchema,
@@ -3142,6 +3154,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"workspaceId":         workspaceIDRequestSchema,
 										"idlePolicy":          idlePolicySchema,
 										"boundaryPolicyId":    boundaryPolicyRequestSchema,
+										"networkAccess":       conversationNetworkAccessSchema,
 										"egressAuditEnabled":  map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":     conversationEgressAuditModeRequestSchema,
 										"egressMode":          conversationEgressModeRequestSchema,
@@ -3216,6 +3229,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"workspaceId":          workspaceIDRequestSchema,
 										"idlePolicy":           idlePolicySchema,
 										"boundaryPolicyId":     boundaryPolicyRequestSchema,
+										"networkAccess":        conversationNetworkAccessSchema,
 										"egressAuditEnabled":   map[string]interface{}{"type": "boolean", "default": true, "deprecated": true, "description": "兼容字段；推荐使用 egressAuditMode。false 等价于 off。"},
 										"egressAuditMode":      conversationEgressAuditModeRequestSchema,
 										"egressMode":           conversationEgressModeRequestSchema,
@@ -7858,7 +7872,7 @@ func conversationContainerLifecycleOpenAPIOperation(summary, operationID string)
 
 func conversationContainerRebuildOpenAPIOperation() map[string]interface{} {
 	operation := conversationContainerLifecycleOpenAPIOperation("按不可变规格重建对话容器", "rebuildConversationContainer")
-	operation["description"] = "显式重建对话容器。不传 boundaryPolicyId/egressMode 时沿用对应的已激活不可变配置；显式传入时暂存新边界快照和/或上游出口，只有容器重建成功后才与新 runtime generation 原子激活。空 boundaryPolicyId 表示默认允许边界，空 egressMode 表示重新解析项目/用户继承值。重建失败保留旧配置；并发或待处理重建返回 409。"
+	operation["description"] = "显式重建对话容器。不传 boundaryPolicyId/networkAccess/egressMode 时沿用对应的已激活不可变配置；显式传入时暂存新边界快照和/或上游出口，只有容器重建成功后才与新 runtime generation 原子激活。空 boundaryPolicyId 表示默认允许的自定义边界；networkAccess 控制受限目标资格；空 egressMode 表示重新解析项目/用户继承值。重建失败保留旧配置；并发或待处理重建返回 409。"
 	operation["requestBody"] = map[string]interface{}{
 		"required": false,
 		"content": map[string]interface{}{
@@ -7878,12 +7892,28 @@ func conversationContainerRebuildOpenAPIOperation() map[string]interface{} {
 						"egressProxyId":      map[string]interface{}{"type": "string"},
 						"egressProxyGroupId": map[string]interface{}{"type": "string"},
 						"runtimeControls":    conversationRuntimeControlsOpenAPISchema(),
+						"networkAccess":      conversationNetworkAccessOpenAPISchema(),
 					},
 				},
 			},
 		},
 	}
 	return operation
+}
+
+func conversationNetworkAccessOpenAPISchema() map[string]interface{} {
+	return map[string]interface{}{
+		"type":                 "object",
+		"additionalProperties": false,
+		"description":          "会话级高风险网络访问开关。关闭时系统隔离私网、宿主机/Docker 网络和云元数据；开启后这些目标仍需通过普通边界规则。",
+		"required":             []string{"allowRestrictedTargets"},
+		"properties": map[string]interface{}{
+			"allowRestrictedTargets": map[string]interface{}{
+				"type": "boolean", "default": false,
+				"description": "允许内网与基础设施目标测试（高风险）。仅解除系统网络隔离，不覆盖用户拒绝规则或自定义边界默认拒绝。",
+			},
+		},
+	}
 }
 
 func conversationRuntimeControlsOpenAPISchema() map[string]interface{} {
@@ -7906,10 +7936,24 @@ func conversationRuntimeControlsOpenAPISchema() map[string]interface{} {
 func conversationContainerNetworkSettingsOpenAPIOperation() map[string]interface{} {
 	return map[string]interface{}{
 		"tags": []string{"对话管理"}, "summary": "读取对话容器当前网络配置", "operationId": "getConversationContainerNetworkSettings",
-		"description": "返回当前已激活的边界策略和脱敏上游出口选择，不返回代理凭据或网关路由正文。",
+		"description": "返回当前已激活的边界策略、高风险网络访问开关和脱敏上游出口选择；存在重建时另行返回待生效快照及开关，不返回代理凭据或网关路由正文。",
 		"parameters":  []map[string]interface{}{{"name": "id", "in": "path", "required": true, "schema": map[string]interface{}{"type": "string"}}},
 		"responses": map[string]interface{}{
-			"200": map[string]interface{}{"description": "当前网络配置"},
+			"200": map[string]interface{}{
+				"description": "当前与待生效网络配置",
+				"content": map[string]interface{}{"application/json": map[string]interface{}{"schema": map[string]interface{}{
+					"type": "object", "required": []string{"conversationId", "boundarySnapshotId", "networkAccess"},
+					"properties": map[string]interface{}{
+						"conversationId":            map[string]interface{}{"type": "string"},
+						"boundaryPolicyId":          map[string]interface{}{"type": "string"},
+						"boundarySnapshotId":        map[string]interface{}{"type": "string"},
+						"networkAccess":             conversationNetworkAccessOpenAPISchema(),
+						"pendingBoundarySnapshotId": map[string]interface{}{"type": "string"},
+						"pendingBoundaryPolicyId":   map[string]interface{}{"type": "string"},
+						"pendingNetworkAccess":      conversationNetworkAccessOpenAPISchema(),
+					},
+				}}},
+			},
 			"403": map[string]interface{}{"description": "无权读取"},
 			"409": map[string]interface{}{"description": "容器配置尚未就绪"},
 		},

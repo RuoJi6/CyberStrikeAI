@@ -67,8 +67,8 @@ func TestConversationBoundarySnapshotCanonicalJSONAndSHA256(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const wantCanonical = `{"schemaVersion":2,"policyId":"policy-canonical","rules":[{"id":"rule-a","effect":"allow-visit","host":"api.example","schemes":["http","https"],"ports":[80,443],"pathPrefixes":["/","/v1/"],"methods":["GET","POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2.5,"burst":4},"expiresAt":null,"position":1},{"id":"rule-b","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}],"tlsInspection":{"enabled":true,"bypassDomains":[]}}`
-	const wantSHA256 = "sha256:bd6fd5831420ecf10543730c61920664e16dbfa53a67cb1b5ae0cdc8f0d37dee"
+	const wantCanonical = `{"schemaVersion":5,"policyId":"policy-canonical","rules":[{"id":"rule-a","effect":"allow-visit","host":"api.example","schemes":["http","https"],"ports":[80,443],"pathPrefixes":["/","/v1/"],"methods":["GET","POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2.5,"burst":4},"expiresAt":null,"position":1},{"id":"rule-b","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}],"tlsInspection":{"enabled":true,"bypassDomains":[]},"networkAccess":{"allowRestrictedTargets":false}}`
+	const wantSHA256 = "sha256:fdca0dcb3cc94d7502611a4814f2b54d5d6d44d2dbace2aef021a35e9d9287fc"
 	if snapshot.CanonicalJSON != wantCanonical {
 		t.Fatalf("canonical JSON = %s", snapshot.CanonicalJSON)
 	}
@@ -111,7 +111,7 @@ func TestConversationBoundarySnapshotFreezesTLSInspectionAndCanonicalBypassDomai
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Document.SchemaVersion != 2 || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 2 || snapshot.Document.TLSInspection.BypassDomains[0] != "pinned.example" {
+	if snapshot.Document.SchemaVersion != 5 || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 2 || snapshot.Document.TLSInspection.BypassDomains[0] != "pinned.example" || snapshot.Document.NetworkAccess == nil || snapshot.Document.NetworkAccess.AllowRestrictedTargets {
 		t.Fatalf("TLS snapshot = %#v", snapshot.Document)
 	}
 	if !strings.Contains(snapshot.CanonicalJSON, `"tlsInspection":{"enabled":true,"bypassDomains":["pinned.example","updates.example"]}`) {
@@ -219,7 +219,7 @@ func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.Document.DefaultAction != "allow" || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 0 || snapshot.CanonicalJSON != `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}` {
+	if snapshot.PolicyID != "" || len(snapshot.Document.Rules) != 0 || snapshot.Document.DefaultAction != "allow" || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 0 || snapshot.Document.NetworkAccess == nil || snapshot.Document.NetworkAccess.AllowRestrictedTargets || snapshot.CanonicalJSON != `{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow","networkAccess":{"allowRestrictedTargets":false}}` {
 		t.Fatalf("default-allow snapshot = %#v", snapshot)
 	}
 	host, err := db.CreateConversation("host", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeHost})
@@ -234,6 +234,34 @@ func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testi
 	}
 	if _, err := db.CreateConversation("missing policy", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer, BoundaryPolicyID: "missing"}); err == nil {
 		t.Fatal("missing boundary policy was accepted")
+	}
+}
+
+func TestConversationBoundarySnapshotCapturesInitialNetworkAccess(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	conversation, err := db.CreateConversation("restricted targets", ConversationCreateMeta{
+		RuntimeMode:   ConversationRuntimeModeContainer,
+		NetworkAccess: ConversationNetworkAccess{AllowRestrictedTargets: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Document.SchemaVersion != boundaryPolicyNetworkAccessSchemaVersion || snapshot.Document.NetworkAccess == nil || !snapshot.Document.NetworkAccess.AllowRestrictedTargets {
+		t.Fatalf("initial network access snapshot = %#v", snapshot.Document)
+	}
+	access, err := db.GetConversationNetworkAccess(context.Background(), conversation.ID)
+	if err != nil || !access.AllowRestrictedTargets {
+		t.Fatalf("stored network access = %#v, %v", access, err)
+	}
+	if _, err := db.CreateConversation("host restricted targets", ConversationCreateMeta{
+		RuntimeMode:   ConversationRuntimeModeHost,
+		NetworkAccess: ConversationNetworkAccess{AllowRestrictedTargets: true},
+	}); err == nil {
+		t.Fatal("host conversation accepted restricted target access")
 	}
 }
 
@@ -357,12 +385,18 @@ func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testin
 	if _, err := db.Exec(`UPDATE boundary_policy_rules SET host = ? WHERE id = ?`, "rebuilt.example", "rule-a"); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID)
+	pending, err := db.PrepareConversationBoundaryRebuild(ctx, conversation.ID, policy.ID, ConversationNetworkAccess{AllowRestrictedTargets: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pending.SnapshotID == initial.SnapshotID || pending.SHA256 == initial.SHA256 || pending.RuntimeGeneration != 2 {
 		t.Fatalf("pending snapshot = %#v; initial = %#v", pending, initial)
+	}
+	if pending.Document.NetworkAccess == nil || !pending.Document.NetworkAccess.AllowRestrictedTargets {
+		t.Fatalf("pending network access = %#v", pending.Document.NetworkAccess)
+	}
+	if access, accessErr := db.GetConversationNetworkAccess(ctx, conversation.ID); accessErr != nil || access.AllowRestrictedTargets {
+		t.Fatalf("pending setting changed active access = %#v, %v", access, accessErr)
 	}
 	resolvedPending, err := db.GetPendingConversationBoundarySnapshot(ctx, conversation.ID, pending.SnapshotID)
 	if err != nil || resolvedPending.SnapshotID != pending.SnapshotID || resolvedPending.SHA256 != pending.SHA256 || resolvedPending.CanonicalJSON != pending.CanonicalJSON {
@@ -410,6 +444,9 @@ func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testin
 	if err != nil || active.SnapshotID != initial.SnapshotID || active.RuntimeGeneration != 1 {
 		t.Fatalf("non-atomic snapshot rollback = %#v, %v", active, err)
 	}
+	if access, accessErr := db.GetConversationNetworkAccess(ctx, conversation.ID); accessErr != nil || access.AllowRestrictedTargets {
+		t.Fatalf("failed rebuild changed active access = %#v, %v", access, accessErr)
+	}
 	if _, err := db.Exec(`UPDATE conversation_boundary_rebuilds SET expected_runtime_generation = 2 WHERE conversation_id = ?`, conversation.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -423,6 +460,9 @@ func TestConversationBoundaryRebuildActivatesOnlyWithRuntimeGeneration(t *testin
 	active, err = db.GetConversationBoundarySnapshot(ctx, conversation.ID)
 	if err != nil || active.SnapshotID != pending.SnapshotID || active.RuntimeGeneration != rebuilt.RuntimeGeneration {
 		t.Fatalf("active rebuilt snapshot = %#v, %v", active, err)
+	}
+	if access, accessErr := db.GetConversationNetworkAccess(ctx, conversation.ID); accessErr != nil || !access.AllowRestrictedTargets {
+		t.Fatalf("successful rebuild did not activate access = %#v, %v", access, accessErr)
 	}
 	hasPending, err = db.HasPendingConversationBoundaryRebuild(ctx, conversation.ID)
 	if err != nil || hasPending {

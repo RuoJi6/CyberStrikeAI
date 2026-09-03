@@ -21,6 +21,7 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
     assert.match(template, /id="conversation-shared-workspace-create"/);
     assert.match(template, /id="container-conversation-options"/);
     assert.match(template, /id="boundary-policy-select"/);
+	assert.match(template, /type="checkbox"[^>]*id="conversation-restricted-targets-toggle"/);
     assert.match(template, /id="conversation-egress-mode-select"/);
     assert.match(template, /value=""[^>]*data-i18n="chat\.egressModeInherit"/);
     assert.match(template, /value="none"[^>]*data-i18n="chat\.egressModeNone"/);
@@ -74,6 +75,7 @@ test('shared workspace selection is included in container conversation creation'
         'conversation-egress-audit-mode': { value: 'compact' },
         'conversation-scan-rate-toggle': { checked: false },
         'conversation-resource-limit-toggle': { checked: false },
+		'conversation-restricted-targets-toggle': { checked: false },
     };
     const document = {
         getElementById(id) { return elements[id] || null; },
@@ -101,6 +103,7 @@ test('shared workspace selection is included in container conversation creation'
                 nanoCpus: 0,
                 memoryBytes: 0,
             },
+			networkAccess: { allowRestrictedTargets: false },
         },
     );
 });
@@ -115,6 +118,7 @@ test('new conversation request sends exact immutable selection fields only for c
         'conversation-egress-audit-mode': { value: 'full' },
 		'conversation-scan-rate-toggle': { checked: false },
 		'conversation-resource-limit-toggle': { checked: false },
+		'conversation-restricted-targets-toggle': { checked: true },
     };
     const document = {
         getElementById(id) { return elements[id] || null; },
@@ -129,7 +133,7 @@ test('new conversation request sends exact immutable selection fields only for c
 		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
-		} },
+		}, networkAccess: { allowRestrictedTargets: true } },
     );
     elements['conversation-egress-mode-select'].value = 'group';
     elements['conversation-egress-target-select'].value = 'group-1';
@@ -138,7 +142,7 @@ test('new conversation request sends exact immutable selection fields only for c
 		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
-		} },
+		}, networkAccess: { allowRestrictedTargets: true } },
     );
     elements['conversation-egress-mode-select'].value = '';
     assert.deepEqual(
@@ -146,7 +150,7 @@ test('new conversation request sends exact immutable selection fields only for c
 		{ workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, egressAuditEnabled: true, egressAuditMode: 'full', boundaryPolicyId: 'policy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
-		} },
+		}, networkAccess: { allowRestrictedTargets: true } },
     );
     assert.deepEqual(JSON.parse(JSON.stringify(window.readNewConversationContainerControls('host'))), {});
     assert.match(chat, /Object\.assign\(body, window\.readNewConversationContainerControls\(body\.runtimeMode\)\)/);
@@ -165,20 +169,22 @@ test('container creation copy is bilingual and cache-busted', () => {
 			'customResourcesLabel', 'customResourcesHint', 'cpuLimitLabel', 'memoryLimitLabel',
 			'containerIdleActionLabel', 'containerIdleDelete', 'containerIdleStop', 'containerIdleNone',
 			'containerIdleTimeoutLabel', 'containerIdleDeleteHint', 'containerIdleStopHint', 'containerIdleNoneHint',
+			'restrictedTargetsLabel', 'restrictedTargetsHint', 'restrictedTargetsWarning',
         ]) {
             assert.equal(typeof locale.chat[key], 'string', key);
             assert.ok(locale.chat[key].trim(), key);
         }
     }
-    assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /不限制/);
+    assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /公网.*默认允许/);
 	assert.match(zh.chat.boundaryPolicyDefaultAllowHint, /HTTPS 默认解密并完整审计/);
-	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /HTTPS is decrypted and fully audited by default/);
+	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /public.*allowed by default/i);
+	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /HTTPS is decrypted and fully audited/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-    assert.match(template, /style\.css\?v=20260901-3/);
+    assert.match(template, /style\.css\?v=20260903-1/);
 	assert.match(template, /chat\.js\?v=20260902-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-	assert.match(template, /conversation-container-settings\.js\?v=20260901-2/);
+	assert.match(template, /conversation-container-settings\.js\?v=20260903-1/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {
@@ -215,6 +221,7 @@ test('next-send network preparation rebuilds and verifies the active generation 
         'boundary-policy-hint': { textContent: '' },
         'conversation-egress-mode-select': mode,
         'conversation-egress-target-select': target,
+		'conversation-restricted-targets-toggle': { checked: false, disabled: false },
     };
     const document = {
         getElementById(id) { return elements[id] || null; },
@@ -223,6 +230,7 @@ test('next-send network preparation rebuilds and verifies the active generation 
     };
     let activeBoundary = 'policy-a';
     let generation = 3;
+	let allowRestrictedTargets = false;
     let rebuilds = 0;
     let failRebuild = false;
     const notifications = [];
@@ -243,6 +251,7 @@ test('next-send network preparation rebuilds and verifies the active generation 
                                 scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
                                 customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
                             },
+							networkAccess: { allowRestrictedTargets },
                         };
                     },
                 };
@@ -251,6 +260,7 @@ test('next-send network preparation rebuilds and verifies the active generation 
                 rebuilds++;
                 if (failRebuild) return { ok: false, status: 409, async json() { return { error: 'conflict' }; } };
                 activeBoundary = JSON.parse(options.body).boundaryPolicyId;
+				allowRestrictedTargets = !!JSON.parse(options.body).networkAccess.allowRestrictedTargets;
                 generation++;
                 return { ok: true, async json() { return {}; } };
             }
@@ -266,11 +276,15 @@ test('next-send network preparation rebuilds and verifies the active generation 
     assert.equal(activeBoundary, 'policy-b');
     assert.equal(await window.ensureConversationContainerNetworkSettings(), true);
     assert.equal(rebuilds, 1, 'unchanged settings must not rebuild again');
+	elements['conversation-restricted-targets-toggle'].checked = true;
+	assert.equal(await window.ensureConversationContainerNetworkSettings(), true);
+	assert.equal(rebuilds, 2);
+	assert.equal(allowRestrictedTargets, true);
 
     boundary.value = 'policy-c';
     failRebuild = true;
     assert.equal(await window.ensureConversationContainerNetworkSettings(), false);
-    assert.equal(rebuilds, 2);
+	assert.equal(rebuilds, 3);
     assert.ok(notifications.some((item) => item.type === 'error'));
 });
 

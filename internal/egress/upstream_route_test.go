@@ -279,10 +279,10 @@ func TestPolicyProxyUsesConfiguredUpstreamAndReturnsBadGatewayWithoutDirectFallb
 	proxy, err := NewProxy(policy, ProxyOptions{
 		UpstreamRoute: &route,
 		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
-			return []netip.Addr{netip.MustParseAddr("203.0.113.25")}, nil
+			return []netip.Addr{netip.MustParseAddr("93.184.216.34")}, nil
 		},
 		DialContext: func(_ context.Context, _, address string) (net.Conn, error) {
-			if address == "203.0.113.25:80" {
+			if address == "93.184.216.34:80" {
 				t.Fatal("policy proxy fell back to a direct target dial")
 			}
 			if address != "proxy.example:3128" {

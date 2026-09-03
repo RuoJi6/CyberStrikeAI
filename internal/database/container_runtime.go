@@ -618,8 +618,27 @@ func (db *DB) CompleteLifecycle(ctx context.Context, conversationID string, oper
 				INSERT INTO conversation_boundary_activations (
 					id, conversation_id, snapshot_id, runtime_generation, activated_at
 				) VALUES (?, ?, ?, ?, ?)
-			`, pendingSnapshotID, strings.TrimSpace(conversationID), pendingSnapshotID, runtimeGeneration, activatedAt); err != nil {
+				`, pendingSnapshotID, strings.TrimSpace(conversationID), pendingSnapshotID, runtimeGeneration, activatedAt); err != nil {
 				return containerruntime.InitializationRecord{}, fmt.Errorf("activate rebuilt boundary snapshot: %w", err)
+			}
+			var pendingCanonicalJSON, pendingSHA256 string
+			if err := tx.QueryRowContext(ctx, `
+					SELECT canonical_json, sha256 FROM boundary_policy_snapshots WHERE id = ?
+				`, pendingSnapshotID).Scan(&pendingCanonicalJSON, &pendingSHA256); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("load activated boundary snapshot network access: %w", err)
+			}
+			pendingDocument, err := validateCanonicalBoundarySnapshot(pendingCanonicalJSON, pendingSHA256)
+			if err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("validate activated boundary snapshot network access: %w", err)
+			}
+			allowRestrictedTargets := false
+			if pendingDocument.NetworkAccess != nil {
+				allowRestrictedTargets = pendingDocument.NetworkAccess.AllowRestrictedTargets
+			}
+			if _, err := tx.ExecContext(ctx, `
+					UPDATE conversations SET allow_restricted_targets = ? WHERE id = ?
+				`, allowRestrictedTargets, strings.TrimSpace(conversationID)); err != nil {
+				return containerruntime.InitializationRecord{}, fmt.Errorf("activate conversation network access: %w", err)
 			}
 			if _, err := tx.ExecContext(ctx, `
 				DELETE FROM conversation_boundary_rebuilds

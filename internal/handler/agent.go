@@ -430,25 +430,26 @@ type ChatFinalizationRequest struct {
 
 // ChatRequest 聊天请求
 type ChatRequest struct {
-	Message              string                           `json:"message" binding:"required"`
-	ConversationID       string                           `json:"conversationId,omitempty"`
-	ProjectID            string                           `json:"projectId,omitempty"`           // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
-	RuntimeMode          string                           `json:"runtimeMode,omitempty"`         // 新对话执行位置：host | container；存量对话忽略请求值
-	WorkspaceMode        string                           `json:"workspaceMode,omitempty"`       // 新容器对话工作区：ephemeral | dedicated | shared
-	WorkspacePersistent  *bool                            `json:"workspacePersistent,omitempty"` // 旧客户端兼容；显式 false 表示临时工作区
-	WorkspaceID          string                           `json:"workspaceId,omitempty"`         // 新容器对话要附加的共享工作区；空表示专属或临时
-	IdlePolicy           *database.ConversationIdlePolicy `json:"idlePolicy,omitempty"`          // 新容器对话空闲动作和时间
-	BoundaryPolicyID     string                           `json:"boundaryPolicyId,omitempty"`    // 新容器对话首次启动时锁定的边界策略草案；存量对话忽略
-	EgressMode           string                           `json:"egressMode,omitempty"`          // 新容器对话上游出口：none | proxy | group；存量对话忽略
-	EgressProxyID        string                           `json:"egressProxyId,omitempty"`       // mode=proxy 时必填
-	EgressProxyGroupID   string                           `json:"egressProxyGroupId,omitempty"`  // mode=group 时必填
-	Role                 string                           `json:"role,omitempty"`                // 角色名称
-	Attachments          []ChatAttachment                 `json:"attachments,omitempty"`
-	WebShellConnectionID string                           `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具
-	AIChannelID          string                           `json:"aiChannelId,omitempty"`          // 会话级 AI 通道；空则使用 ai.default_channel
-	Hitl                 *HITLRequest                     `json:"hitl,omitempty"`
-	Reasoning            *ChatReasoningRequest            `json:"reasoning,omitempty"`
-	Finalization         ChatFinalizationRequest          `json:"finalization,omitempty"`
+	Message              string                              `json:"message" binding:"required"`
+	ConversationID       string                              `json:"conversationId,omitempty"`
+	ProjectID            string                              `json:"projectId,omitempty"`           // 新对话绑定的项目（可选；未指定时可用 config.project.default_project_id）
+	RuntimeMode          string                              `json:"runtimeMode,omitempty"`         // 新对话执行位置：host | container；存量对话忽略请求值
+	WorkspaceMode        string                              `json:"workspaceMode,omitempty"`       // 新容器对话工作区：ephemeral | dedicated | shared
+	WorkspacePersistent  *bool                               `json:"workspacePersistent,omitempty"` // 旧客户端兼容；显式 false 表示临时工作区
+	WorkspaceID          string                              `json:"workspaceId,omitempty"`         // 新容器对话要附加的共享工作区；空表示专属或临时
+	IdlePolicy           *database.ConversationIdlePolicy    `json:"idlePolicy,omitempty"`          // 新容器对话空闲动作和时间
+	BoundaryPolicyID     string                              `json:"boundaryPolicyId,omitempty"`    // 新容器对话首次启动时锁定的边界策略草案；存量对话忽略
+	NetworkAccess        *database.ConversationNetworkAccess `json:"networkAccess,omitempty"`       // 新容器对话的内网与基础设施目标访问开关；存量对话忽略
+	EgressMode           string                              `json:"egressMode,omitempty"`          // 新容器对话上游出口：none | proxy | group；存量对话忽略
+	EgressProxyID        string                              `json:"egressProxyId,omitempty"`       // mode=proxy 时必填
+	EgressProxyGroupID   string                              `json:"egressProxyGroupId,omitempty"`  // mode=group 时必填
+	Role                 string                              `json:"role,omitempty"`                // 角色名称
+	Attachments          []ChatAttachment                    `json:"attachments,omitempty"`
+	WebShellConnectionID string                              `json:"webshellConnectionId,omitempty"` // WebShell 管理 - AI 助手：当前选中的连接 ID，仅使用 webshell_* 工具
+	AIChannelID          string                              `json:"aiChannelId,omitempty"`          // 会话级 AI 通道；空则使用 ai.default_channel
+	Hitl                 *HITLRequest                        `json:"hitl,omitempty"`
+	Reasoning            *ChatReasoningRequest               `json:"reasoning,omitempty"`
+	Finalization         ChatFinalizationRequest             `json:"finalization,omitempty"`
 	// Orchestration 仅对 /api/multi-agent、/api/multi-agent/stream：deep | plan_execute | supervisor；空则等同 deep。机器人/批量等无请求体时由服务端默认 deep。/api/eino-agent* 不使用此字段。
 	Orchestration string `json:"orchestration,omitempty"`
 }

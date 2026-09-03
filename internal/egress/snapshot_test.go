@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"os"
@@ -181,6 +182,35 @@ func TestLoadNoBoundaryTLSSnapshotDefaultsExternalTrafficToAllowAndDecryptsHTTPS
 	}
 	if tlsInspection == nil || !tlsInspection.Enabled || len(tlsInspection.BypassDomains) != 0 {
 		t.Fatalf("TLS inspection = %#v", tlsInspection)
+	}
+}
+
+func TestLoadNetworkAccessSnapshotControlsRestrictedTargets(t *testing.T) {
+	for name, allowed := range map[string]bool{"disabled": false, "enabled": true} {
+		t.Run(name, func(t *testing.T) {
+			content := `{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow","networkAccess":{"allowRestrictedTargets":` + fmt.Sprintf("%t", allowed) + `}}`
+			path := filepath.Join(t.TempDir(), "snapshot.json")
+			if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+				t.Fatal(err)
+			}
+			_, policy, _, err := LoadGatewaySnapshot(path, testSnapshot(t, content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			decision, err := policy.EvaluateNetwork("private.example", 8443, "tcp", []netip.Addr{netip.MustParseAddr("10.2.3.4")}, time.Now().UTC())
+			if err != nil || decision.Allowed != allowed {
+				t.Fatalf("restricted target decision = %#v, %v", decision, err)
+			}
+		})
+	}
+
+	missing := `{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}`
+	path := filepath.Join(t.TempDir(), "missing-network-access.json")
+	if err := os.WriteFile(path, []byte(missing), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := LoadGatewaySnapshot(path, testSnapshot(t, missing)); !errors.Is(err, ErrSnapshotIntegrity) {
+		t.Fatalf("missing v5 network access error = %v", err)
 	}
 }
 

@@ -95,6 +95,12 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			return nil, fmt.Errorf("当前用户或项目尚未开放容器执行，请使用本机执行")
 		}
 		boundaryPolicyID := strings.TrimSpace(req.BoundaryPolicyID)
+		if req.NetworkAccess != nil && runtimeMode != database.ConversationRuntimeModeContainer {
+			return nil, fmt.Errorf("新对话 networkAccess 只能用于 container")
+		}
+		if req.NetworkAccess != nil && req.NetworkAccess.AllowRestrictedTargets && !session.Permissions["boundary:read"] {
+			return nil, fmt.Errorf("启用受限目标访问需要 boundary:read 权限")
+		}
 		if boundaryPolicyID != "" {
 			if runtimeMode != database.ConversationRuntimeModeContainer {
 				return nil, fmt.Errorf("新对话 boundaryPolicyId 只能用于 container")
@@ -128,6 +134,9 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 		meta.WorkspaceID = strings.TrimSpace(req.WorkspaceID)
 		meta.IdlePolicy = idlePolicy
 		meta.BoundaryPolicyID = boundaryPolicyID
+		if req.NetworkAccess != nil {
+			meta.NetworkAccess = *req.NetworkAccess
+		}
 		meta.EgressMode = egressMode
 		meta.EgressProxyID = egressProxyID
 		meta.EgressProxyGroupID = egressProxyGroupID

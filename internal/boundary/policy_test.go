@@ -139,12 +139,12 @@ func TestPolicyExplicitDefaultAllowKeepsReservedTargetsBlocked(t *testing.T) {
 		t.Fatalf("reserved default = %#v, %v", blocked, err)
 	}
 	blockedDNS, err := policy.EvaluateNetwork("8.8.8.8", 53, "udp", nil, now)
-	if err != nil || blockedDNS.Allowed || blockedDNS.Reason != ReasonDNSServicePort || blockedDNS.RuleID != "" {
+	if err != nil || !blockedDNS.Allowed || blockedDNS.Reason != ReasonAllowVisit || blockedDNS.RuleID != "" {
 		t.Fatalf("default DNS service = %#v, %v", blockedDNS, err)
 	}
 }
 
-func TestPolicyDNSServicePortsRequireExplicitMatchingRule(t *testing.T) {
+func TestPolicyServicePortsFollowOrdinaryBoundaryRules(t *testing.T) {
 	now := time.Now().UTC()
 	policy, err := NewPolicy([]Rule{{
 		ID: "authorized-dns-service", Effect: EffectAllowVisit,
@@ -178,8 +178,52 @@ func TestPolicyDNSServicePortsRequireExplicitMatchingRule(t *testing.T) {
 	}
 
 	unmatched, err := policy.EvaluateNetwork("47.116.200.75", 53, "udp", nil, now)
-	if err != nil || unmatched.Allowed || unmatched.RuleID != "" || unmatched.Reason != ReasonDNSServicePort {
+	if err != nil || unmatched.Allowed || unmatched.RuleID != "" || unmatched.Reason != ReasonDefaultDeny {
 		t.Fatalf("unmatched DNS service = %#v, %v", unmatched, err)
+	}
+}
+
+func TestPolicyRestrictedTargetsCanBeEnabledWithoutOverridingRules(t *testing.T) {
+	now := time.Now().UTC()
+	open, err := NewPolicyWithNetworkAccess(nil, true, NetworkAccess{AllowRestrictedTargets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{"http://127.0.0.1/", "http://10.1.2.3/", "http://169.254.169.254/", "http://host.docker.internal/"} {
+		decision, evalErr := open.Evaluate(rawURL, "GET", nil, now)
+		if evalErr != nil || !decision.Allowed || decision.Reason != ReasonAllowVisit {
+			t.Fatalf("enabled restricted target %s = %#v, %v", rawURL, decision, evalErr)
+		}
+	}
+	rebound, err := open.Evaluate("http://internal.example/", "GET", []netip.Addr{netip.MustParseAddr("10.1.2.3")}, now)
+	if err != nil || !rebound.Allowed || rebound.Reason != ReasonAllowVisit {
+		t.Fatalf("enabled DNS resolution to restricted target = %#v, %v", rebound, err)
+	}
+	for _, rawURL := range []string{"http://0.0.0.1/", "http://224.0.0.1/", "http://192.0.2.1/"} {
+		decision, evalErr := open.Evaluate(rawURL, "GET", nil, now)
+		if evalErr != nil || decision.Allowed || decision.Reason != ReasonForbiddenAddress {
+			t.Fatalf("always invalid target %s = %#v, %v", rawURL, decision, evalErr)
+		}
+	}
+	bound, err := NewPolicyWithNetworkAccess([]Rule{{
+		ID: "private-service", Effect: EffectAllowVisit, Target: RuleTarget{Host: "10.1.2.3", Ports: []int{8080}},
+	}}, false, NetworkAccess{AllowRestrictedTargets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed, err := bound.EvaluateNetwork("10.1.2.3", 8080, "tcp", nil, now)
+	if err != nil || !allowed.Allowed || allowed.RuleID != "private-service" {
+		t.Fatalf("matched private target = %#v, %v", allowed, err)
+	}
+	denied, err := bound.EvaluateNetwork("10.1.2.3", 8081, "tcp", nil, now)
+	if err != nil || denied.Allowed || denied.Reason != ReasonDefaultDeny {
+		t.Fatalf("unmatched private target = %#v, %v", denied, err)
+	}
+	for _, port := range []int{53, 784, 853, 8853, 2375, 2376} {
+		decision, evalErr := open.EvaluateNetwork("93.184.216.34", port, "tcp", nil, now)
+		if evalErr != nil || !decision.Allowed || decision.RuleID != "" {
+			t.Fatalf("public service port %d = %#v, %v", port, decision, evalErr)
+		}
 	}
 }
 
@@ -252,9 +296,6 @@ func TestPolicyRejectsForbiddenTargetsBeforeAllowRules(t *testing.T) {
 		{name: "unspecified IPv6", url: "http://[::]/", wantReason: ReasonForbiddenAddress},
 		{name: "unique local IPv6", url: "http://[fd00:ec2::254]/", wantReason: ReasonForbiddenAddress},
 		{name: "carrier grade NAT", url: "http://100.64.0.1/", wantReason: ReasonForbiddenAddress},
-		{name: "Docker API", url: "https://example.com:2376/", wantReason: ReasonDockerAPIPort},
-		{name: "known DoH host", url: "https://dns.google/", wantReason: ReasonForbiddenDNSHost},
-		{name: "known DoH subdomain", url: "https://tenant.dns.nextdns.io/", wantReason: ReasonForbiddenDNSHost},
 		{name: "DNS rebinding", url: "https://allowed.example/", resolved: []netip.Addr{netip.MustParseAddr("192.168.1.5")}, wantReason: ReasonDNSRebinding},
 	}
 	for _, test := range tests {
@@ -275,15 +316,17 @@ func TestPolicyRejectsForbiddenTargetsBeforeAllowRules(t *testing.T) {
 	}
 }
 
-func TestPolicyDNSServiceHostnameMatchingDoesNotRejectLookalikes(t *testing.T) {
+func TestPolicyPublicServicePortsAndResolverHostsAreNotSpecial(t *testing.T) {
 	now := time.Now().UTC()
-	policy, err := NewPolicy([]Rule{{ID: "lookalike", Effect: EffectAllowVisit, Target: RuleTarget{Host: "notdns.google"}}})
+	policy, err := NewPolicyWithDefault(nil, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decision, err := policy.Evaluate("https://notdns.google/", "GET", nil, now)
-	if err != nil || !decision.Allowed || decision.RuleID != "lookalike" {
-		t.Fatalf("lookalike decision = %#v, %v", decision, err)
+	for _, rawURL := range []string{"https://dns.google/", "https://tenant.dns.nextdns.io/", "https://example.com:2376/", "http://example.com:53/"} {
+		decision, evalErr := policy.Evaluate(rawURL, "GET", nil, now)
+		if evalErr != nil || !decision.Allowed || decision.Reason != ReasonAllowVisit {
+			t.Fatalf("ordinary public target %s = %#v, %v", rawURL, decision, evalErr)
+		}
 	}
 }
 
@@ -338,7 +381,7 @@ func TestPolicyDNSAllowsOnlyNamesWithActiveRulesAndRejectsUnsafeAnswers(t *testi
 		{name: "blocked host", host: "blocked.example", reason: ReasonBlockedTarget},
 		{name: "expired", host: "expired.example", reason: ReasonDefaultDeny},
 		{name: "forbidden hostname", host: "metadata.google.internal", reason: ReasonForbiddenHostname},
-		{name: "known DoH hostname", host: "cloudflare-dns.com", reason: ReasonForbiddenDNSHost},
+		{name: "unmatched DoH hostname", host: "cloudflare-dns.com", reason: ReasonDefaultDeny},
 		{name: "private rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("192.168.1.2")}, reason: ReasonDNSRebinding},
 		{name: "mixed rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}, reason: ReasonDNSRebinding},
 		{name: "blocked public network", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}, reason: ReasonBlockedTarget},

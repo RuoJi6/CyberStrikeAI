@@ -216,6 +216,7 @@ func (db *DB) initTables() error {
 		custom_resources_enabled INTEGER NOT NULL DEFAULT 0 CHECK (custom_resources_enabled IN (0, 1)),
 		custom_nano_cpus INTEGER NOT NULL DEFAULT 0,
 		custom_memory_bytes INTEGER NOT NULL DEFAULT 0,
+		allow_restricted_targets INTEGER NOT NULL DEFAULT 0 CHECK (allow_restricted_targets IN (0, 1)),
 		last_react_input TEXT,
 		last_react_output TEXT
 	);`
@@ -838,6 +839,9 @@ func (db *DB) initTables() error {
 	}
 	if err := db.initConversationRuntimeControlColumns(); err != nil {
 		return fmt.Errorf("创建对话容器运行控制字段失败: %w", err)
+	}
+	if err := db.initConversationNetworkAccessColumns(); err != nil {
+		return fmt.Errorf("创建对话网络访问字段失败: %w", err)
 	}
 	if err := db.initContainerRuntimeTables(); err != nil {
 		return fmt.Errorf("创建对话容器运行时表失败: %w", err)

@@ -251,5 +251,6 @@ ls -lh data/
 | 初始化失败 | 检查 Agent/网关 digest、inventory digest、Docker 状态、资源限制和受信快照目录；不要改为 host 执行继续原请求。 |
 | `boundary snapshot/runtime generation mismatch` | 保留数据库和 Docker 现场，停止请求并检查删除/重建是否被中断；不得手工跳过。新版在删除运行时时预留下一 generation。 |
 | Agent 收到 403 | 这是边界规则的明确禁止反馈。核对 `X-CyberStrikeAI-Blocked`、命中规则和出站审计；不要通过移除代理变量绕过。 |
-| 直接 IP/自定义 DNS/DoH/TCP 无法访问 | 这是 internal 网络的失败关闭行为。只有经网关规范化并命中允许规则的 HTTP/HTTPS 请求才能外连。 |
+| 私网、宿主机/Docker 或云元数据目标显示“系统网络隔离” | 除非当前对话已明确授权基础设施测试，否则保持 `networkAccess.allowRestrictedTargets` 关闭；确需测试时开启高风险开关并重建运行时，使目标进入普通边界规则判定。 |
+| 公网非 HTTP 端口意外被拒绝 | 检查当前生效的边界快照和命中规则。系统不再仅因端口号类似 DNS 或 Docker API 而阻断；原始 TCP/UDP 仍必须经过网关并在那里接受审计。 |
 | 镜像继承了不可用的 healthcheck | 运行时应显式覆盖为 `NONE`，并使用 CyberStrikeAI readiness 校验，不依赖上游镜像的宿主环境健康检查。 |

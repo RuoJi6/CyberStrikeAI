@@ -138,7 +138,7 @@ func TestDockerManagerExecAppendsAggregatedBoundaryDenialAfterSuccessfulTool(t *
 	feedback := stderr.String()
 	if result.ExitCode != 0 || !strings.Contains(feedback, "本次工具执行触发 4 次网络阻断") ||
 		!strings.Contains(feedback, "TCP 47.116.200.74:22（2 次）：原因 blocked-target，规则 block-ssh") ||
-		!strings.Contains(feedback, "UDP time.example:123（1 次）：原因 default-deny，规则 默认策略") ||
+		!strings.Contains(feedback, "UDP time.example:123（1 次）：原因 default-deny，规则 边界默认拒绝") ||
 		!strings.Contains(feedback, "DNS blocked.example（1 次）：原因 blocked-target，规则 block-dns") ||
 		strings.Contains(feedback, "HEALTH") || strings.Contains(feedback, "upstream.example") ||
 		!strings.Contains(feedback, "以下请求未到达目标") ||

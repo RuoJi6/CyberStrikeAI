@@ -24,6 +24,7 @@ const (
 	boundaryPolicyTLSSnapshotSchemaVersion     = 2
 	boundaryPolicyOpenSnapshotSchemaVersion    = 3
 	boundaryPolicyOpenTLSSnapshotSchemaVersion = 4
+	boundaryPolicyNetworkAccessSchemaVersion   = 5
 )
 
 var (
@@ -41,6 +42,7 @@ type BoundaryPolicySnapshotDocument struct {
 	Rules         []BoundaryPolicySnapshotRule         `json:"rules"`
 	TLSInspection *BoundaryPolicyTLSInspectionSnapshot `json:"tlsInspection,omitempty"`
 	DefaultAction string                               `json:"defaultAction,omitempty"`
+	NetworkAccess *ConversationNetworkAccess           `json:"networkAccess,omitempty"`
 }
 
 type BoundaryPolicyTLSInspectionSnapshot struct {
@@ -158,7 +160,11 @@ func (db *DB) EnsureConversationBoundarySnapshot(ctx context.Context, conversati
 	if selectionErr != nil && !errors.Is(selectionErr, sql.ErrNoRows) {
 		return ConversationBoundarySnapshot{}, fmt.Errorf("load boundary policy selection: %w", selectionErr)
 	}
-	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID)
+	var allowRestrictedTargets bool
+	if err := tx.QueryRowContext(ctx, `SELECT allow_restricted_targets FROM conversations WHERE id = ?`, conversationID).Scan(&allowRestrictedTargets); err != nil {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("load conversation network access: %w", err)
+	}
+	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID, ConversationNetworkAccess{AllowRestrictedTargets: allowRestrictedTargets})
 	if err != nil {
 		return ConversationBoundarySnapshot{}, err
 	}
@@ -214,7 +220,7 @@ func (db *DB) EnsureConversationBoundarySnapshot(ctx context.Context, conversati
 // PrepareConversationBoundaryRebuild freezes a new immutable policy snapshot
 // without making it active. The corresponding container rebuild is the only
 // operation allowed to activate it.
-func (db *DB) PrepareConversationBoundaryRebuild(ctx context.Context, conversationID, policyID string) (ConversationBoundarySnapshot, error) {
+func (db *DB) PrepareConversationBoundaryRebuild(ctx context.Context, conversationID, policyID string, requestedAccess ...ConversationNetworkAccess) (ConversationBoundarySnapshot, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	policyID = strings.TrimSpace(policyID)
 	if conversationID == "" {
@@ -273,7 +279,17 @@ func (db *DB) PrepareConversationBoundaryRebuild(ctx context.Context, conversati
 		}
 	}
 
-	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID)
+	networkAccess := ConversationNetworkAccess{}
+	if active.Document.NetworkAccess != nil {
+		networkAccess = *active.Document.NetworkAccess
+	}
+	if len(requestedAccess) > 1 {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("only one network access selection may be supplied")
+	}
+	if len(requestedAccess) == 1 {
+		networkAccess = requestedAccess[0]
+	}
+	document, err := boundarySnapshotDocumentFromPolicy(ctx, tx, policyID, networkAccess)
 	if err != nil {
 		return ConversationBoundarySnapshot{}, err
 	}
@@ -373,6 +389,22 @@ func (db *DB) GetPendingConversationBoundarySnapshot(ctx context.Context, conver
 	`, conversationID, snapshotID))
 }
 
+// GetPendingConversationBoundaryRebuildSnapshot returns the one staged
+// replacement for a conversation, if present.
+func (db *DB) GetPendingConversationBoundaryRebuildSnapshot(ctx context.Context, conversationID string) (ConversationBoundarySnapshot, error) {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ConversationBoundarySnapshot{}, fmt.Errorf("conversation id is required")
+	}
+	return scanConversationBoundarySnapshot(db.QueryRowContext(ctx, `
+		SELECT s.id, br.conversation_id, s.source_policy_id, s.sha256, s.canonical_json,
+			s.created_at, br.requested_at, br.expected_runtime_generation
+		FROM conversation_boundary_rebuilds br
+		JOIN boundary_policy_snapshots s ON s.id = br.pending_snapshot_id
+		WHERE br.conversation_id = ?
+	`, conversationID))
+}
+
 // EnsureContainerRuntimeBoundarySnapshots upgrades durable runtime records from
 // deployments predating boundary snapshots. It intentionally touches only
 // conversations that already have a runtime record; unused container-mode
@@ -461,14 +493,14 @@ func scanConversationBoundarySnapshot(scanner boundarySnapshotScanner) (Conversa
 	return snapshot, nil
 }
 
-func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyID string) (BoundaryPolicySnapshotDocument, error) {
+func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyID string, networkAccess ConversationNetworkAccess) (BoundaryPolicySnapshotDocument, error) {
 	document := BoundaryPolicySnapshotDocument{
-		SchemaVersion: boundaryPolicySnapshotSchemaVersion,
+		SchemaVersion: boundaryPolicyNetworkAccessSchemaVersion,
 		PolicyID:      strings.TrimSpace(policyID),
 		Rules:         []BoundaryPolicySnapshotRule{},
+		NetworkAccess: &ConversationNetworkAccess{AllowRestrictedTargets: networkAccess.AllowRestrictedTargets},
 	}
 	if document.PolicyID == "" {
-		document.SchemaVersion = boundaryPolicyOpenTLSSnapshotSchemaVersion
 		document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: []string{}}
 		document.DefaultAction = "allow"
 		return document, nil
@@ -490,7 +522,6 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 		if err != nil || !reflect.DeepEqual(normalized, bypassDomains) {
 			return BoundaryPolicySnapshotDocument{}, fmt.Errorf("selected policy TLS bypass domains are not canonical")
 		}
-		document.SchemaVersion = boundaryPolicyTLSSnapshotSchemaVersion
 		document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: normalized}
 	}
 	rules, err := listBoundaryPolicyRulesForSnapshot(ctx, tx, document.PolicyID)
@@ -595,7 +626,7 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 }
 
 func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) error {
-	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion {
+	if document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyNetworkAccessSchemaVersion {
 		return fmt.Errorf("unsupported boundary snapshot schema version %d", document.SchemaVersion)
 	}
 	if document.SchemaVersion == boundaryPolicyOpenSnapshotSchemaVersion || document.SchemaVersion == boundaryPolicyOpenTLSSnapshotSchemaVersion {
@@ -604,16 +635,31 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 		if document.PolicyID != "" || len(document.Rules) != 0 || document.DefaultAction != "allow" || (!legacyOpen && !inspectedOpen) {
 			return fmt.Errorf("no-boundary snapshot settings are inconsistent")
 		}
+	} else if document.SchemaVersion == boundaryPolicyNetworkAccessSchemaVersion {
+		if document.PolicyID == "" {
+			if len(document.Rules) != 0 || document.DefaultAction != "allow" || document.TLSInspection == nil {
+				return fmt.Errorf("no-boundary network access snapshot settings are inconsistent")
+			}
+		} else if document.DefaultAction != "" {
+			return fmt.Errorf("policy boundary snapshot cannot declare a default action")
+		}
 	} else if document.DefaultAction != "" {
 		return fmt.Errorf("policy boundary snapshot cannot declare a default action")
 	}
-	if document.TLSInspection == nil && document.SchemaVersion != boundaryPolicySnapshotSchemaVersion {
+	if document.SchemaVersion == boundaryPolicyNetworkAccessSchemaVersion {
+		if document.NetworkAccess == nil {
+			return fmt.Errorf("network access snapshot settings are required")
+		}
+	} else if document.NetworkAccess != nil {
+		return fmt.Errorf("legacy boundary snapshot cannot declare network access settings")
+	}
+	if document.TLSInspection == nil && document.SchemaVersion != boundaryPolicySnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyNetworkAccessSchemaVersion {
 		if document.SchemaVersion != boundaryPolicyOpenSnapshotSchemaVersion {
 			return fmt.Errorf("TLS boundary snapshot must include TLS inspection settings")
 		}
 	}
 	if document.TLSInspection != nil {
-		if (document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion) || !document.TLSInspection.Enabled {
+		if (document.SchemaVersion != boundaryPolicyTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyOpenTLSSnapshotSchemaVersion && document.SchemaVersion != boundaryPolicyNetworkAccessSchemaVersion) || !document.TLSInspection.Enabled {
 			return fmt.Errorf("TLS inspection snapshot settings are inconsistent")
 		}
 		normalized, err := normalizeTLSBypassDomains(document.TLSInspection.BypassDomains)
@@ -673,7 +719,11 @@ func validateBoundarySnapshotDocument(document BoundaryPolicySnapshotDocument) e
 			AuthProfileID: authProfileID, RateLimit: limit, ExpiresAt: rule.ExpiresAt,
 		})
 	}
-	if _, err := boundary.NewPolicy(compiled); err != nil {
+	access := boundary.NetworkAccess{}
+	if document.NetworkAccess != nil {
+		access.AllowRestrictedTargets = document.NetworkAccess.AllowRestrictedTargets
+	}
+	if _, err := boundary.NewPolicyWithNetworkAccess(compiled, document.DefaultAction == "allow", access); err != nil {
 		return fmt.Errorf("compile boundary snapshot: %w", err)
 	}
 	return nil

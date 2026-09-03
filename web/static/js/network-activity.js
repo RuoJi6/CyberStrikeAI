@@ -328,6 +328,15 @@
         return t(`activityValues.${key}`, fallback || key);
     }
 
+    function policySource(event) {
+        if (event.ruleId) return `${t('activityRule', '规则')} ${event.ruleId}`;
+        if (['forbidden-address', 'forbidden-hostname', 'dns-rebinding'].includes(event.reason)) {
+            return t('activitySystemNetworkIsolation', '系统网络隔离');
+        }
+        if (event.reason === 'default-deny') return t('activityBoundaryDefaultDeny', '边界默认拒绝');
+        return activityText(event.reason || 'unknown', event.reason || 'unknown');
+    }
+
     function cell(label, primary, secondary, className) {
         const td = create('td', className || '');
         td.dataset.label = label;
@@ -351,7 +360,7 @@
             : (Array.isArray(event.dnsAnswers) && event.dnsAnswers.length ? event.dnsAnswers.join(' · ') : '—');
         const connected = event.connectedIp ? `${t('activityConnected', '连接')} ${event.connectedIp}` : '';
         const decision = activityText(event.decision, event.decision);
-        const rule = event.ruleId ? `${t('activityRule', '规则')} ${event.ruleId}` : activityText(event.reason || 'default-deny', event.reason || 'default-deny');
+        const rule = policySource(event);
         const agent = event.agent || 'container-agent';
         const tool = event.tool ? `${t('activityTool', '工具')} ${event.tool}` : t('activityToolUnknown', '工具未知');
         const route = event.upstreamRouteId ? `${t('activityRoute', '路由')} ${event.upstreamRouteId}` : t('activityDirectRoute', '直接出口');

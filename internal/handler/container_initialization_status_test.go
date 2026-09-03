@@ -258,6 +258,7 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		"lifecycleOperation", "lifecycleState", "lifecycleError", "runtimeGeneration", "runtimeObservedAt",
 		"lifecycleStartedAt", "lifecycleCompletedAt", "runtimeDrift", "conversationTitle", "runtimeMode",
 		"workspacePersistent", "desired", "observation", "observationError",
+		"boundaryPolicyId", "boundarySnapshotId", "networkAccess", "pendingBoundaryPolicyId", "pendingBoundarySnapshotId", "pendingNetworkAccess",
 	} {
 		if _, ok := properties[field]; !ok {
 			t.Fatalf("ContainerInitialization schema is missing %s", field)
@@ -285,6 +286,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	if _, ok := createProperties["runtimeControls"]; !ok {
 		t.Fatal("CreateConversationRequest schema is missing runtimeControls")
 	}
+	if _, ok := createProperties["networkAccess"]; !ok {
+		t.Fatal("CreateConversationRequest schema is missing networkAccess")
+	}
 	gateSchema, ok := schemas["ContainerExecutionGateResponse"].(map[string]interface{})
 	if !ok {
 		t.Fatal("ContainerExecutionGateResponse schema is missing")
@@ -311,6 +315,9 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 		if _, ok := requestProperties["boundaryPolicyId"]; !ok {
 			t.Fatalf("%s request schema is missing boundaryPolicyId", route)
 		}
+		if _, ok := requestProperties["networkAccess"]; !ok {
+			t.Fatalf("%s request schema is missing networkAccess", route)
+		}
 	}
 	rebuildPost := paths["/api/conversations/{id}/container/rebuild"].(map[string]interface{})["post"].(map[string]interface{})
 	rebuildRequestBody, ok := rebuildPost["requestBody"].(map[string]interface{})
@@ -321,7 +328,7 @@ func TestContainerInitializationStatusIsDocumentedInOpenAPI(t *testing.T) {
 	rebuildJSON := rebuildContent["application/json"].(map[string]interface{})
 	rebuildSchema := rebuildJSON["schema"].(map[string]interface{})
 	rebuildProperties := rebuildSchema["properties"].(map[string]interface{})
-	for _, field := range []string{"boundaryPolicyId", "egressMode", "egressProxyId", "egressProxyGroupId", "runtimeControls"} {
+	for _, field := range []string{"boundaryPolicyId", "egressMode", "egressProxyId", "egressProxyGroupId", "runtimeControls", "networkAccess"} {
 		if _, ok := rebuildProperties[field]; !ok {
 			t.Fatalf("container rebuild request schema is missing %s", field)
 		}

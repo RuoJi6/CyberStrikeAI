@@ -408,9 +408,16 @@ function renderConversationContainerDetail() {
     const policySwitch = containerRuntimeElement('section', 'container-boundary-policy-switch');
     const policyCopy = containerRuntimeElement('div', 'container-boundary-policy-switch-copy');
     policyCopy.append(
-        containerRuntimeElement('strong', '', containerManagementT('activeBoundaryPolicy', '边界策略')),
-        containerRuntimeElement('p', '', containerManagementT('boundaryPolicySwitchHint', '切换会重建当前容器、中断运行中任务，并为所选策略生成新的不可变快照。')),
+        containerRuntimeElement('strong', '', containerManagementT('activeBoundaryPolicy', '边界策略与受限目标访问')),
+        containerRuntimeElement('p', '', containerManagementT('boundaryPolicySwitchHint', '切换会重建当前容器、中断运行中任务，并为策略与访问开关生成新的不可变快照。')),
     );
+	if (record.pendingBoundarySnapshotId) {
+		const pendingEnabled = !!record.pendingNetworkAccess?.allowRestrictedTargets;
+		policyCopy.append(containerRuntimeElement('p', 'container-network-access-pending', containerManagementT(
+			'pendingNetworkAccess', '待生效：{{state}}',
+			{ state: pendingEnabled ? containerManagementT('restrictedTargetsEnabled', '允许受限目标') : containerManagementT('restrictedTargetsDisabled', '隔离受限目标') },
+		)));
+	}
     const policyControls = containerRuntimeElement('div', 'container-boundary-policy-switch-controls');
     const policySelect = containerRuntimeElement('select', 'container-boundary-policy-select');
     policySelect.setAttribute('aria-label', containerManagementT('activeBoundaryPolicy', '边界策略'));
@@ -430,14 +437,29 @@ function renderConversationContainerDetail() {
         policySelect.append(currentOption);
     }
     policySelect.value = String(record.boundaryPolicyId || '');
+	const currentRestrictedTargets = !!record.networkAccess?.allowRestrictedTargets;
+	const restrictedTargetsLabel = containerRuntimeElement('label', 'workspace-persistence-toggle container-restricted-targets-toggle');
+	const restrictedTargetsCopy = containerRuntimeElement('span', 'workspace-persistence-toggle-copy');
+	restrictedTargetsCopy.append(
+		containerRuntimeElement('span', 'workspace-persistence-toggle-title', containerManagementT('restrictedTargetsLabel', '允许内网与基础设施目标测试（高风险）')),
+		containerRuntimeElement('span', 'workspace-persistence-toggle-hint', containerManagementT('restrictedTargetsHint', '开启只解除系统网络隔离，仍服从所选边界策略；Docker Socket 始终不会挂载。')),
+	);
+	const restrictedTargetsToggle = containerRuntimeElement('input');
+	restrictedTargetsToggle.type = 'checkbox';
+	restrictedTargetsToggle.checked = currentRestrictedTargets;
+	restrictedTargetsToggle.disabled = record.lifecycleState === 'in_progress';
+	restrictedTargetsLabel.append(restrictedTargetsCopy, restrictedTargetsToggle, containerRuntimeElement('span', 'workspace-persistence-switch'));
     const policyButton = containerRuntimeElement('button', 'btn-primary', containerManagementT('switchBoundaryPolicy', '切换策略并重建'));
     policyButton.type = 'button';
-    policyButton.disabled = policySelect.value === String(record.boundaryPolicyId || '') || record.lifecycleState === 'in_progress';
-    policySelect.addEventListener('change', () => {
-        policyButton.disabled = policySelect.value === String(record.boundaryPolicyId || '') || record.lifecycleState === 'in_progress';
-    });
-    policyButton.addEventListener('click', () => switchConversationBoundaryPolicy(record, policySelect, policyButton));
-    policyControls.append(policySelect, policyButton);
+	const syncPolicyButton = () => {
+		const changed = policySelect.value !== String(record.boundaryPolicyId || '') || restrictedTargetsToggle.checked !== currentRestrictedTargets;
+		policyButton.disabled = !changed || record.lifecycleState === 'in_progress';
+	};
+	syncPolicyButton();
+	policySelect.addEventListener('change', syncPolicyButton);
+	restrictedTargetsToggle.addEventListener('change', syncPolicyButton);
+	policyButton.addEventListener('click', () => switchConversationBoundaryPolicy(record, policySelect, restrictedTargetsToggle, policyButton));
+	policyControls.append(policySelect, restrictedTargetsLabel, policyButton);
     policySwitch.append(policyCopy, policyControls);
     root.append(policySwitch);
     if (window.CyberStrikeSelect) {
@@ -599,19 +621,23 @@ async function runConversationContainerLifecycle(record, action, button) {
     }
 }
 
-async function switchConversationBoundaryPolicy(record, select, button) {
-    if (!record || !select || !button || button.disabled) return;
+async function switchConversationBoundaryPolicy(record, select, restrictedTargetsToggle, button) {
+	if (!record || !select || !restrictedTargetsToggle || !button || button.disabled) return;
     const policyId = String(select.value || '');
     const selectedPolicy = containerManagementState.boundaryPolicies.find((policy) => policy.id === policyId);
     const policyName = selectedPolicy ? selectedPolicy.name : containerManagementT('noBoundaryPolicy', '不设置边界（允许全部外部访问）');
-    if (!window.confirm(containerManagementT('boundaryPolicySwitchConfirm', '将对话“{{conversation}}”切换为“{{policy}}”？容器会重建，当前运行任务将被中断。', {
-        conversation: containerRuntimeRowTitle(record), policy: policyName,
-    }))) return;
+	const networkAccess = restrictedTargetsToggle.checked
+		? containerManagementT('restrictedTargetsEnabled', '允许受限目标')
+		: containerManagementT('restrictedTargetsDisabled', '隔离受限目标');
+	if (!window.confirm(containerManagementT('boundaryPolicySwitchConfirm', '将对话“{{conversation}}”切换为“{{policy}}”，并设置为“{{networkAccess}}”？容器会重建，当前运行任务将被中断。', {
+		conversation: containerRuntimeRowTitle(record), policy: policyName, networkAccess,
+	}))) return;
     button.disabled = true;
     button.textContent = containerManagementT('switchingBoundaryPolicy', '正在切换…');
     try {
         await containerRuntimeRequestJSON(`/api/conversations/${encodeURIComponent(record.conversationId)}/container/rebuild`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ boundaryPolicyId: policyId }),
+			method: 'POST', headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ boundaryPolicyId: policyId, networkAccess: { allowRestrictedTargets: restrictedTargetsToggle.checked } }),
         });
         if (typeof window.showNotification === 'function') window.showNotification(containerManagementT('boundaryPolicySwitched', '边界策略已切换，容器已重建'), 'success');
         await refreshContainerManagementData();

@@ -34,7 +34,7 @@ type snapshotRateLimit struct {
 	MaxConcurrent     int     `json:"maxConcurrent,omitempty"`
 }
 
-func compileSnapshotPolicy(encodedRules []json.RawMessage, defaultAllow bool) (*boundary.Policy, error) {
+func compileSnapshotPolicy(encodedRules []json.RawMessage, defaultAllow bool, access boundary.NetworkAccess) (*boundary.Policy, error) {
 	rules := make([]boundary.Rule, 0, len(encodedRules))
 	for index, encoded := range encodedRules {
 		decoder := json.NewDecoder(bytes.NewReader(encoded))
@@ -77,7 +77,7 @@ func compileSnapshotPolicy(encodedRules []json.RawMessage, defaultAllow bool) (*
 			AuthProfileID: authProfileID, RateLimit: limit, ExpiresAt: stored.ExpiresAt,
 		})
 	}
-	policy, err := boundary.NewPolicyWithDefault(rules, defaultAllow)
+	policy, err := boundary.NewPolicyWithNetworkAccess(rules, defaultAllow, access)
 	if err != nil {
 		return nil, fmt.Errorf("%w: compile boundary policy: %v", ErrSnapshotIntegrity, err)
 	}

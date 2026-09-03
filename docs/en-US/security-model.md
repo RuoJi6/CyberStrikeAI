@@ -54,8 +54,10 @@ Project closeout should include cleanup of uploads, WebShell connections, C2 pay
 
 ## Conversation Containers and Egress Boundaries
 
-- Each container conversation gets an internal network. The Agent has no public default route and no Docker socket.
-- HTTP/HTTPS uses the per-conversation gateway. Raw TCP, custom DNS, DoH, IPv6, and host-gateway bypasses fail closed.
+- Each container conversation gets an internal network. The Agent has no direct public route and no Docker socket; HTTP(S), raw TCP/UDP, DNS, ICMP, and IPv6 traffic must traverse the per-conversation gateway.
+- Public destination ports are not classified by number. The same boundary rules apply to ports such as 53, 784, 853, 8853, 2375, and 2376 as to any other public port.
+- `networkAccess.allowRestrictedTargets` is off by default. While off, system isolation rejects private, loopback, link-local, CGNAT, host/Docker, metadata, and rebinding destinations before user rules. Enabling the high-risk switch only makes those destinations eligible for ordinary boundary evaluation; it does not override deny rules or a custom policy's default deny.
+- An external DNS resolver can reduce visibility into managed DNS queries, but it cannot bypass destination enforcement: every resulting connection is evaluated again at the gateway.
 - The boundary policy becomes an immutable snapshot before initialization. Snapshot and runtime generations must match or every tool execution is rejected.
 - Deleting a container while retaining its named volume reserves the next runtime generation; the replacement reuses the snapshot and preserves `/workspace`.
 - A denied request returns 403, `X-CyberStrikeAI-Blocked: true`, and a clear Agent-visible prohibition reason. It never falls back to host execution or direct target access.

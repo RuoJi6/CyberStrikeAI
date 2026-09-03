@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/egress"
 	"github.com/google/uuid"
 	mobystdcopy "github.com/moby/moby/api/pkg/stdcopy"
@@ -420,12 +421,19 @@ func boundaryFeedbackTarget(event egress.ActivityEvent) string {
 
 func boundaryFeedbackRuleReason(event egress.ActivityEvent) (string, string) {
 	rule := strings.TrimSpace(event.RuleID)
-	if rule == "" {
-		rule = "默认策略"
-	}
 	reason := strings.TrimSpace(event.Reason)
 	if reason == "" {
 		reason = "policy_denied"
+	}
+	if rule == "" {
+		switch reason {
+		case boundary.ReasonForbiddenAddress, boundary.ReasonForbiddenHostname, boundary.ReasonDNSRebinding:
+			rule = "系统网络隔离"
+		case boundary.ReasonDefaultDeny:
+			rule = "边界默认拒绝"
+		default:
+			rule = "系统策略"
+		}
 	}
 	return rule, reason
 }

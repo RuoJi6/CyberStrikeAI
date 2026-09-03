@@ -424,6 +424,16 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		event.BytesUp = requestCapture.total
 	}
 	if err != nil {
+		if denied, ok := resolvedPolicyDenial(err); ok {
+			event.Decision = ActivityDecisionBlocked
+			event.RuleID = denied.RuleID
+			event.Reason = denied.Reason
+			event.Outcome = "policy_denied_after_resolution"
+			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, denied.Reason, denied.RuleID)
+			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
+			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
+			return
+		}
 		http.Error(writer, "upstream HTTP request failed", http.StatusBadGateway)
 		return
 	}
@@ -631,7 +641,14 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		ruleID: sniDecision.RuleID, effect: sniDecision.Effect, observation: dialObservation,
 	}, targetHost, targetPort)
 	if err != nil {
-		event.Outcome = "upstream_failed"
+		if denied, ok := resolvedPolicyDenial(err); ok {
+			event.Decision = ActivityDecisionBlocked
+			event.RuleID = denied.RuleID
+			event.Reason = denied.Reason
+			event.Outcome = "policy_denied_after_resolution"
+		} else {
+			event.Outcome = "upstream_failed"
+		}
 		return
 	}
 	defer upstream.Close()
@@ -796,6 +813,22 @@ type proxyDialAuthorization struct {
 	observation   *activityDialObservation
 }
 
+type resolvedPolicyDenialError struct {
+	decision boundary.Decision
+}
+
+func (e *resolvedPolicyDenialError) Error() string {
+	return "resolved egress target denied by boundary policy"
+}
+
+func resolvedPolicyDenial(err error) (boundary.Decision, bool) {
+	var denied *resolvedPolicyDenialError
+	if !errors.As(err, &denied) || denied == nil {
+		return boundary.Decision{}, false
+	}
+	return denied.decision, true
+}
+
 type activityDialObservation struct {
 	mu          sync.Mutex
 	resolvedIPs []string
@@ -876,7 +909,13 @@ func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAutho
 	}
 	authorization.observation.recordResolution(addresses)
 	decision, err := p.policy.Evaluate(authorization.rawURL, authorization.method, addresses, p.now().UTC())
-	if err != nil || !decision.Allowed || decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || decision.AuthProfileID != authorization.authProfileID ||
+	if err != nil {
+		return nil, fmt.Errorf("re-evaluate resolved egress target: %w", err)
+	}
+	if !decision.Allowed {
+		return nil, &resolvedPolicyDenialError{decision: decision}
+	}
+	if decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || decision.AuthProfileID != authorization.authProfileID ||
 		(decision.Effect == boundary.EffectAuthOnly && p.authProfiles[decision.AuthProfileID].ID == "") ||
 		(decision.Effect != boundary.EffectAuthOnly && !proxyDecisionAllowed(decision)) {
 		return nil, errors.New("resolved egress target failed policy re-evaluation")

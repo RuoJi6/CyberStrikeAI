@@ -96,6 +96,54 @@ func TestCreateConversationPersistsRuntimeModeAndRejectsInvalidValue(t *testing.
 	}
 }
 
+func TestCreateConversationNetworkAccessIsContainerOnlyAndPermissionGated(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, user := setupConversationRBACTest(t)
+	handler := NewConversationHandler(db, zap.NewNop())
+	perform := func(allowBoundaryRead bool, runtimeMode string) *httptest.ResponseRecorder {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"title":       "restricted target test",
+			"runtimeMode": runtimeMode,
+			"networkAccess": map[string]interface{}{
+				"allowRestrictedTargets": true,
+			},
+		})
+		response := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(response)
+		context.Request = httptest.NewRequest(http.MethodPost, "/api/conversations", bytes.NewReader(payload))
+		context.Request.Header.Set("Content-Type", "application/json")
+		context.Set(security.ContextSessionKey, security.Session{
+			UserID: user.ID, Username: user.Username, Scope: database.RBACScopeAssigned,
+			Permissions: map[string]bool{"chat:write": true, "boundary:read": allowBoundaryRead},
+		})
+		handler.CreateConversation(context)
+		return response
+	}
+
+	if response := perform(true, database.ConversationRuntimeModeHost); response.Code != http.StatusBadRequest {
+		t.Fatalf("host network access status = %d: %s", response.Code, response.Body.String())
+	}
+	if response := perform(false, database.ConversationRuntimeModeContainer); response.Code != http.StatusForbidden {
+		t.Fatalf("unprivileged network access status = %d: %s", response.Code, response.Body.String())
+	}
+	response := perform(true, database.ConversationRuntimeModeContainer)
+	if response.Code != http.StatusOK {
+		t.Fatalf("authorized network access status = %d: %s", response.Code, response.Body.String())
+	}
+	var conversation database.Conversation
+	if err := json.Unmarshal(response.Body.Bytes(), &conversation); err != nil {
+		t.Fatal(err)
+	}
+	access, err := db.GetConversationNetworkAccess(t.Context(), conversation.ID)
+	if err != nil || !access.AllowRestrictedTargets {
+		t.Fatalf("stored network access = %#v, %v", access, err)
+	}
+	snapshot, err := db.EnsureConversationBoundarySnapshot(t.Context(), conversation.ID)
+	if err != nil || snapshot.Document.NetworkAccess == nil || !snapshot.Document.NetworkAccess.AllowRestrictedTargets {
+		t.Fatalf("initial network access snapshot = %#v, %v", snapshot, err)
+	}
+}
+
 type conversationRuntimeModeIdleRunner struct {
 	busy bool
 }

@@ -19,6 +19,7 @@ type ConversationCreateMeta struct {
 	EgressAuditEnabled   *bool
 	EgressAuditMode      string
 	RuntimeControls      ConversationRuntimeControls
+	NetworkAccess        ConversationNetworkAccess
 	ClientIP             string
 	SessionHint          string
 }

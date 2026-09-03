@@ -18,11 +18,15 @@ const (
 	ReasonAuthOnly          = "auth-only"
 	ReasonForbiddenHostname = "forbidden-hostname"
 	ReasonForbiddenAddress  = "forbidden-address"
-	ReasonDockerAPIPort     = "docker-api-port"
-	ReasonDNSServicePort    = "dns-service-port"
-	ReasonForbiddenDNSHost  = "forbidden-dns-service"
 	ReasonDNSRebinding      = "dns-rebinding"
 )
+
+// NetworkAccess controls whether a conversation may reach infrastructure and
+// non-public address ranges. It is immutable for the lifetime of one boundary
+// snapshot and defaults to false for every legacy caller and snapshot.
+type NetworkAccess struct {
+	AllowRestrictedTargets bool `json:"allowRestrictedTargets"`
+}
 
 type Rule struct {
 	ID            string     `json:"id"`
@@ -67,8 +71,9 @@ type DNSDecision struct {
 }
 
 type Policy struct {
-	rules        []compiledRule
-	defaultAllow bool
+	rules                  []compiledRule
+	defaultAllow           bool
+	allowRestrictedTargets bool
 }
 
 type compiledRule struct {
@@ -84,6 +89,14 @@ func NewPolicy(rules []Rule) (*Policy, error) {
 // Existing policy documents remain fail-closed; only the canonical no-boundary
 // snapshot opts into defaultAllow.
 func NewPolicyWithDefault(rules []Rule, defaultAllow bool) (*Policy, error) {
+	return NewPolicyWithNetworkAccess(rules, defaultAllow, NetworkAccess{})
+}
+
+// NewPolicyWithNetworkAccess compiles a policy with its immutable fallback and
+// conversation-scoped restricted-target gate. The gate only makes restricted
+// targets eligible for normal policy evaluation; it never overrides a user
+// rule or a custom policy's default deny.
+func NewPolicyWithNetworkAccess(rules []Rule, defaultAllow bool, access NetworkAccess) (*Policy, error) {
 	compiled := make([]compiledRule, 0, len(rules))
 	seenIDs := make(map[string]struct{}, len(rules))
 	for _, rule := range rules {
@@ -130,7 +143,7 @@ func NewPolicyWithDefault(rules []Rule, defaultAllow bool) (*Policy, error) {
 		}
 		compiled = append(compiled, compiledRule{Rule: rule, prefix: prefix})
 	}
-	return &Policy{rules: compiled, defaultAllow: defaultAllow}, nil
+	return &Policy{rules: compiled, defaultAllow: defaultAllow, allowRestrictedTargets: access.AllowRestrictedTargets}, nil
 }
 
 // Evaluate normalizes every request independently, so redirects must call it
@@ -141,28 +154,23 @@ func (p *Policy) Evaluate(rawURL, method string, resolvedIPs []netip.Addr, now t
 		return Decision{}, err
 	}
 	decision := p.defaultDecision(target)
-	if reason := forbiddenHostnameReason(target.Host); reason != "" {
+	if reason := p.forbiddenHostnameReason(target.Host); reason != "" {
 		decision.Allowed, decision.Reason = false, reason
 		return decision, nil
 	}
-	if target.Port == 2375 || target.Port == 2376 {
-		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
-		return decision, nil
-	}
 	if address, err := netip.ParseAddr(target.Host); err == nil {
-		if forbiddenAddress(address) {
+		if p.forbiddenAddress(address) {
 			decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
 			return decision, nil
 		}
 	}
 	for _, address := range resolvedIPs {
-		if !address.IsValid() || forbiddenAddress(address.Unmap()) {
+		if !address.IsValid() || p.forbiddenAddress(address.Unmap()) {
 			decision.Allowed, decision.Reason = false, ReasonDNSRebinding
 			return decision, nil
 		}
 	}
-	decision = p.evaluateTarget(target, decision, now)
-	return requireExplicitDNSServiceAuthorization(decision), nil
+	return p.evaluateTarget(target, decision, now), nil
 }
 
 // EvaluateNetwork applies the same immutable rules to a raw TCP, UDP or ICMP target.
@@ -184,43 +192,21 @@ func (p *Policy) EvaluateNetwork(rawHost string, port int, protocol string, reso
 	}
 	target := RequestTarget{Scheme: protocol, Host: host, Port: port, Path: "/"}
 	decision := p.defaultDecision(target)
-	if reason := forbiddenHostnameReason(host); reason != "" {
+	if reason := p.forbiddenHostnameReason(host); reason != "" {
 		decision.Allowed, decision.Reason = false, reason
 		return decision, nil
 	}
-	if protocol != "icmp" && (port == 2375 || port == 2376) {
-		decision.Allowed, decision.Reason = false, ReasonDockerAPIPort
-		return decision, nil
-	}
-	if address, parseErr := netip.ParseAddr(host); parseErr == nil && forbiddenAddress(address) {
+	if address, parseErr := netip.ParseAddr(host); parseErr == nil && p.forbiddenAddress(address) {
 		decision.Allowed, decision.Reason = false, ReasonForbiddenAddress
 		return decision, nil
 	}
 	for _, address := range resolvedIPs {
-		if !address.IsValid() || forbiddenAddress(address.Unmap()) {
+		if !address.IsValid() || p.forbiddenAddress(address.Unmap()) {
 			decision.Allowed, decision.Reason = false, ReasonDNSRebinding
 			return decision, nil
 		}
 	}
-	decision = p.evaluateTarget(target, decision, now)
-	return requireExplicitDNSServiceAuthorization(decision), nil
-}
-
-// requireExplicitDNSServiceAuthorization preserves the DNS-bypass guard for
-// default decisions while allowing an operator-authored rule to authorize a
-// known DNS service endpoint. This keeps a no-boundary/default-allow snapshot
-// from silently enabling alternate resolvers, but makes an explicit matching
-// target rule authoritative.
-func requireExplicitDNSServiceAuthorization(decision Decision) Decision {
-	if !forbiddenDNSServicePort(decision.Target.Port) || decision.RuleID != "" {
-		return decision
-	}
-	decision.Allowed = false
-	decision.Effect = ""
-	decision.AuthProfileID = ""
-	decision.RateLimit = RateLimit{}
-	decision.Reason = ReasonDNSServicePort
-	return decision
+	return p.evaluateTarget(target, decision, now), nil
 }
 
 func (p *Policy) defaultDecision(target RequestTarget) Decision {
@@ -327,16 +313,16 @@ func (p *Policy) EvaluateDNS(rawHost string, resolvedIPs []netip.Addr, now time.
 		decision.Effect = EffectAllowVisit
 		decision.Reason = ReasonAllowVisit
 	}
-	if reason := forbiddenHostnameReason(host); reason != "" {
+	if reason := p.forbiddenHostnameReason(host); reason != "" {
 		decision.Reason = reason
 		return decision, nil
 	}
-	if address, parseErr := netip.ParseAddr(host); parseErr == nil && forbiddenAddress(address) {
+	if address, parseErr := netip.ParseAddr(host); parseErr == nil && p.forbiddenAddress(address) {
 		decision.Reason = ReasonForbiddenAddress
 		return decision, nil
 	}
 	for _, address := range resolvedIPs {
-		if !address.IsValid() || address.Zone() != "" || forbiddenAddress(address.Unmap()) {
+		if !address.IsValid() || address.Zone() != "" || p.forbiddenAddress(address.Unmap()) {
 			decision.Reason = ReasonDNSRebinding
 			return decision, nil
 		}
@@ -523,55 +509,44 @@ func containsIntOrAny(values []int, target int) bool {
 	return index < len(values) && values[index] == target
 }
 
-func forbiddenHostnameReason(host string) string {
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "localhost.localdomain" ||
+func (p *Policy) forbiddenHostnameReason(host string) string {
+	if !p.allowRestrictedTargets && (host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "localhost.localdomain" ||
 		host == "host.docker.internal" || host == "gateway.docker.internal" || host == "docker.for.mac.host.internal" ||
-		host == "metadata.google.internal" || host == "instance-data.ec2.internal" {
+		host == "metadata.google.internal" || host == "instance-data.ec2.internal") {
 		return ReasonForbiddenHostname
-	}
-	for _, forbidden := range forbiddenDNSServiceHosts {
-		if host == forbidden || strings.HasSuffix(host, "."+forbidden) {
-			return ReasonForbiddenDNSHost
-		}
 	}
 	return ""
 }
 
-func forbiddenDNSServicePort(port int) bool {
-	switch port {
-	case 53, 784, 853, 8853:
-		return true
-	default:
-		return false
-	}
-}
-
-var forbiddenDNSServiceHosts = []string{
-	"cloudflare-dns.com",
-	"security.cloudflare-dns.com",
-	"family.cloudflare-dns.com",
-	"one.one.one.one",
-	"dns.google",
-	"dns.quad9.net",
-	"doh.opendns.com",
-	"dns.nextdns.io",
-	"dns.adguard-dns.com",
-	"dns.alidns.com",
-	"doh.cleanbrowsing.org",
-}
-
-var specialUsePrefixes = mustPrefixes(
-	"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24",
-	"198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
-	"2001:db8::/32",
+var alwaysInvalidPrefixes = mustPrefixes(
+	"0.0.0.0/8", "192.0.0.0/24", "192.0.2.0/24", "198.51.100.0/24",
+	"203.0.113.0/24", "240.0.0.0/4", "2001:db8::/32",
 )
 
-func forbiddenAddress(address netip.Addr) bool {
-	address = address.Unmap()
-	if address.IsUnspecified() || address.IsLoopback() || address.IsPrivate() || address.IsMulticast() || address.IsLinkLocalUnicast() || address.IsLinkLocalMulticast() {
+var restrictedTargetPrefixes = mustPrefixes(
+	"100.64.0.0/10", "198.18.0.0/15",
+)
+
+func (p *Policy) forbiddenAddress(address netip.Addr) bool {
+	if address.Zone() != "" {
 		return true
 	}
-	for _, prefix := range specialUsePrefixes {
+	address = address.Unmap()
+	if address.IsUnspecified() || address.IsMulticast() || address.IsLinkLocalMulticast() {
+		return true
+	}
+	for _, prefix := range alwaysInvalidPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	if p.allowRestrictedTargets {
+		return false
+	}
+	if address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, prefix := range restrictedTargetPrefixes {
 		if prefix.Contains(address) {
 			return true
 		}

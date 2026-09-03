@@ -408,8 +408,14 @@
             egressProxyId: mode === 'proxy' && target ? String(target.value || '').trim() : '',
             egressProxyGroupId: mode === 'group' && target ? String(target.value || '').trim() : '',
             runtimeControls: currentRuntimeControls(),
+			networkAccess: currentNetworkAccess(),
         };
     }
+
+	function currentNetworkAccess() {
+		const toggle = selectElement('conversation-restricted-targets-toggle');
+		return { allowRestrictedTargets: !!(toggle && toggle.checked) };
+	}
 
     function numericValue(id, fallback) {
         const element = selectElement(id);
@@ -457,7 +463,8 @@
 
     function networkSelectionSignature(selection) {
         const value = selection || currentNetworkSelection();
-        return [value.boundaryPolicyId, value.egressMode, value.egressProxyId, value.egressProxyGroupId, JSON.stringify(value.runtimeControls || {})].join('\u0000');
+		return [value.boundaryPolicyId, value.egressMode, value.egressProxyId, value.egressProxyGroupId,
+			JSON.stringify(value.runtimeControls || {}), JSON.stringify(value.networkAccess || {})].join('\u0000');
     }
 
     function activeNetworkSelection(payload) {
@@ -470,6 +477,7 @@
             egressProxyId: mode === 'proxy' ? String(value.egressProxyId || '').trim() : '',
             egressProxyGroupId: mode === 'group' ? String(value.egressProxyGroupId || '').trim() : '',
             runtimeControls: value.runtimeControls || {},
+			networkAccess: value.networkAccess || { allowRestrictedTargets: false },
         };
     }
 
@@ -497,6 +505,8 @@
         const resourceToggle = selectElement('conversation-resource-limit-toggle');
         if (rateToggle) rateToggle.checked = controls.scanRateEnabled === true;
         if (resourceToggle) resourceToggle.checked = controls.customResourcesEnabled === true;
+		const restrictedTargetsToggle = selectElement('conversation-restricted-targets-toggle');
+		if (restrictedTargetsToggle) restrictedTargetsToggle.checked = !!(payload.networkAccess && payload.networkAccess.allowRestrictedTargets === true);
         const values = {
             'conversation-http-rate': controls.httpRequestsPerSecond || 20,
             'conversation-tcp-rate': controls.tcpConnectionsPerSecond || 20,
@@ -561,6 +571,7 @@
             boundaryPolicyId: selection.boundaryPolicyId,
             egressMode: selection.egressMode,
             runtimeControls: selection.runtimeControls,
+			networkAccess: selection.networkAccess,
         };
         const previousGeneration = Number(state.activeNetworkPayload && state.activeNetworkPayload.runtimeGeneration || 0);
         if (selection.egressProxyId) body.egressProxyId = selection.egressProxyId;
@@ -575,7 +586,8 @@
             const activeSelection = activeNetworkSelection(active || {});
             const expectedPolicy = String(selection.boundaryPolicyId || '').trim();
             const activeGeneration = Number(active && active.runtimeGeneration || 0);
-            if (activeSelection.boundaryPolicyId !== expectedPolicy ||
+			if (activeSelection.boundaryPolicyId !== expectedPolicy ||
+				!!activeSelection.networkAccess.allowRestrictedTargets !== !!selection.networkAccess.allowRestrictedTargets ||
                 (!expectedPolicy && String(active && active.boundaryDefaultAction || '').trim().toLowerCase() !== 'allow') ||
                 activeGeneration <= previousGeneration) {
                 throw new Error(translate('chat.containerNetworkVerificationFailed', '容器已重建，但激活的边界快照未通过确认。'));
@@ -853,7 +865,8 @@
         const container = selectElement('container-conversation-options');
         if (container) container.classList.toggle('locked', !!locked);
         const networkLocked = !!locked || state.applyingNetwork;
-        ['boundary-policy-select', 'conversation-egress-mode-select', 'conversation-egress-target-select',
+		['boundary-policy-select', 'conversation-egress-mode-select', 'conversation-egress-target-select',
+			'conversation-restricted-targets-toggle',
             'conversation-scan-rate-toggle', 'conversation-http-rate', 'conversation-tcp-rate', 'conversation-udp-rate',
             'conversation-resource-limit-toggle', 'conversation-cpu-limit', 'conversation-memory-limit'].forEach(function (id) {
             const control = selectElement(id);
@@ -893,6 +906,8 @@
         const resourceToggle = selectElement('conversation-resource-limit-toggle');
         if (rateToggle) rateToggle.checked = false;
         if (resourceToggle) resourceToggle.checked = false;
+		const restrictedTargetsToggle = selectElement('conversation-restricted-targets-toggle');
+		if (restrictedTargetsToggle) restrictedTargetsToggle.checked = false;
         applyWorkspaceModeToControls('dedicated', '');
         applyIdlePolicyToControls({ action: 'delete', timeoutSeconds: 1800 });
         refreshEnhancedSelect(boundary);
@@ -917,6 +932,7 @@
         result.egressAuditEnabled = !auditToggle || auditToggle.checked;
         result.egressAuditMode = result.egressAuditEnabled && auditMode && auditMode.value === 'full' ? 'full' : (result.egressAuditEnabled ? 'compact' : 'off');
         result.runtimeControls = validateRuntimeControls(currentRuntimeControls());
+		result.networkAccess = currentNetworkAccess();
         const boundary = selectElement('boundary-policy-select');
         const boundaryPolicyId = boundary ? String(boundary.value || '').trim() : '';
         if (boundaryPolicyId) result.boundaryPolicyId = boundaryPolicyId;

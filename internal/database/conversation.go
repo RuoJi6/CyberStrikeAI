@@ -124,6 +124,9 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if runtimeMode != ConversationRuntimeModeContainer && (runtimeControls.ScanRateEnabled || runtimeControls.CustomResourcesEnabled) {
 		return nil, fmt.Errorf("容器运行控制只能用于 container 对话")
 	}
+	if runtimeMode != ConversationRuntimeModeContainer && meta.NetworkAccess.AllowRestrictedTargets {
+		return nil, fmt.Errorf("网络访问设置只能用于 container 对话")
+	}
 	boundaryPolicyID := strings.TrimSpace(meta.BoundaryPolicyID)
 	if boundaryPolicyID != "" {
 		if runtimeMode != ConversationRuntimeModeContainer {
@@ -188,10 +191,11 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 	if runtimeMode == ConversationRuntimeModeContainer {
 		if _, err = tx.Exec(`
 			UPDATE conversations SET scan_rate_enabled = ?, scan_http_rps = ?, scan_tcp_cps = ?, scan_udp_dps = ?,
-				custom_resources_enabled = ?, custom_nano_cpus = ?, custom_memory_bytes = ? WHERE id = ?
+				custom_resources_enabled = ?, custom_nano_cpus = ?, custom_memory_bytes = ?,
+				allow_restricted_targets = ? WHERE id = ?
 		`, runtimeControls.ScanRateEnabled, runtimeControls.HTTPRequestsPerSecond, runtimeControls.TCPConnectionsPerSecond,
 			runtimeControls.UDPDatagramsPerSecond, runtimeControls.CustomResourcesEnabled, runtimeControls.NanoCPUs,
-			runtimeControls.MemoryBytes, id); err != nil {
+			runtimeControls.MemoryBytes, meta.NetworkAccess.AllowRestrictedTargets, id); err != nil {
 			return nil, fmt.Errorf("保存对话容器运行控制失败: %w", err)
 		}
 		auditEnabled := true

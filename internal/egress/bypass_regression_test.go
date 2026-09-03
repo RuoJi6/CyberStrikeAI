@@ -2,6 +2,7 @@ package egress
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -54,17 +55,16 @@ func TestProxyProtocolRejectsMalformedCONNECTAuthoritiesBeforeNetwork(t *testing
 	}
 }
 
-func TestProxyBypassRegressionRejectsDNSPrivateAndMetadataTargetsBeforeNetwork(t *testing.T) {
+func TestProxyBypassRegressionOnlyRejectsRestrictedTargetsBeforeNetwork(t *testing.T) {
 	policy := testProxyPolicy(t,
-		boundary.Rule{ID: "allowed", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http", "https"}, Ports: []int{80, 443}}},
+		boundary.Rule{ID: "allowed", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"http", "https"}, Ports: []int{53, 784, 853, 8853, 2375, 2376}}},
 		boundary.Rule{ID: "doh", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "dns.google", Schemes: []string{"https"}, Ports: []int{443}}},
 		boundary.Rule{ID: "metadata", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "metadata.google.internal", Schemes: []string{"http"}, Ports: []int{80}}},
 		boundary.Rule{ID: "docker-host", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "host.docker.internal", Schemes: []string{"http"}, Ports: []int{80}}},
 	)
 	proxy, err := NewProxy(policy, ProxyOptions{
 		DialContext: func(context.Context, string, string) (net.Conn, error) {
-			t.Fatal("bypass regression reached dial")
-			return nil, nil
+			return nil, errors.New("test dial stopped after policy authorization")
 		},
 	})
 	if err != nil {
@@ -72,17 +72,19 @@ func TestProxyBypassRegressionRejectsDNSPrivateAndMetadataTargetsBeforeNetwork(t
 	}
 	tests := []struct {
 		name, method, target, host string
-		want                       int
+		blocked                    bool
 	}{
-		{name: "plain DNS port", method: http.MethodGet, target: "http://allowed.example:53/", host: "allowed.example:53", want: http.StatusForbidden},
-		{name: "DNS over QUIC port", method: http.MethodConnect, host: "allowed.example:784", want: http.StatusForbidden},
-		{name: "DNS over TLS port", method: http.MethodConnect, host: "allowed.example:853", want: http.StatusForbidden},
-		{name: "alternate DNS over QUIC port", method: http.MethodConnect, host: "allowed.example:8853", want: http.StatusForbidden},
-		{name: "known encrypted DNS host", method: http.MethodConnect, host: "dns.google:443", want: http.StatusForbidden},
-		{name: "metadata hostname", method: http.MethodGet, target: "http://metadata.google.internal/", host: "metadata.google.internal", want: http.StatusForbidden},
-		{name: "loopback IPv4", method: http.MethodGet, target: "http://127.0.0.1/", host: "127.0.0.1", want: http.StatusForbidden},
-		{name: "loopback IPv6", method: http.MethodGet, target: "http://[::1]/", host: "[::1]", want: http.StatusForbidden},
-		{name: "Docker host gateway", method: http.MethodGet, target: "http://host.docker.internal/", host: "host.docker.internal", want: http.StatusForbidden},
+		{name: "public service on port 53", method: http.MethodGet, target: "http://allowed.example:53/", host: "allowed.example:53"},
+		{name: "public service on port 784", method: http.MethodConnect, host: "allowed.example:784"},
+		{name: "public service on port 853", method: http.MethodConnect, host: "allowed.example:853"},
+		{name: "public service on port 8853", method: http.MethodConnect, host: "allowed.example:8853"},
+		{name: "public service on port 2375", method: http.MethodConnect, host: "allowed.example:2375"},
+		{name: "public service on port 2376", method: http.MethodConnect, host: "allowed.example:2376"},
+		{name: "public resolver hostname is ordinary", method: http.MethodConnect, host: "dns.google:443"},
+		{name: "metadata hostname", method: http.MethodGet, target: "http://metadata.google.internal/", host: "metadata.google.internal", blocked: true},
+		{name: "loopback IPv4", method: http.MethodGet, target: "http://127.0.0.1/", host: "127.0.0.1", blocked: true},
+		{name: "loopback IPv6", method: http.MethodGet, target: "http://[::1]/", host: "[::1]", blocked: true},
+		{name: "Docker host gateway", method: http.MethodGet, target: "http://host.docker.internal/", host: "host.docker.internal", blocked: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -95,8 +97,8 @@ func TestProxyBypassRegressionRejectsDNSPrivateAndMetadataTargetsBeforeNetwork(t
 			}
 			recorder := httptest.NewRecorder()
 			proxy.ServeHTTP(recorder, request)
-			if recorder.Code != test.want {
-				t.Fatalf("bypass status = %d, want %d", recorder.Code, test.want)
+			if (recorder.Code == http.StatusForbidden) != test.blocked {
+				t.Fatalf("bypass status = %d, blocked=%v", recorder.Code, test.blocked)
 			}
 		})
 	}

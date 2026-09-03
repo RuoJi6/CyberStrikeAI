@@ -376,7 +376,12 @@
 		const reason = event.eventType === 'health'
 			? t(`healthSignal.${event.reason || 'unknown'}`, event.reason || '')
 			: (event.reason ? t(`activityValues.${event.reason}`, event.reason) : '');
-		const rule = event.ruleId || reason || event.lifecycleState;
+		let rule = event.ruleId || reason || event.lifecycleState;
+		if (!event.ruleId && ['forbidden-address', 'forbidden-hostname', 'dns-rebinding'].includes(event.reason)) {
+			rule = t('activitySystemNetworkIsolation', '系统网络隔离');
+		} else if (!event.ruleId && event.reason === 'default-deny') {
+			rule = t('activityBoundaryDefaultDeny', '边界默认拒绝');
+		}
         const tracePrimary = event.snapshotSha256 ? shortHash(event.snapshotSha256) : t('auditGeneration', '代次 {{generation}}', { generation: event.runtimeGeneration });
         const traceSecondary = [`#${event.chainSequence}`, shortHash(event.eventHash), shortHash(event.containerId), event.upstreamRouteId].filter((value) => value && value !== '—').join(' · ');
         const outcome = outcomeLabel(event);

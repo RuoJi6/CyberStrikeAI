@@ -420,11 +420,14 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	documentSchema := snapshotProperties["document"].(map[string]interface{})
 	documentProperties := documentSchema["properties"].(map[string]interface{})
 	schemaVersions, ok := documentProperties["schemaVersion"].(map[string]interface{})["enum"].([]interface{})
-	if !ok || len(schemaVersions) != 4 || schemaVersions[3] != float64(4) {
+	if !ok || len(schemaVersions) != 5 || schemaVersions[4] != float64(5) {
 		t.Fatalf("ConversationBoundarySnapshot schema versions = %#v", schemaVersions)
 	}
 	if _, ok := documentProperties["tlsInspection"]; !ok {
 		t.Fatal("ConversationBoundarySnapshot tlsInspection is missing")
+	}
+	if _, ok := documentProperties["networkAccess"]; !ok {
+		t.Fatal("ConversationBoundarySnapshot networkAccess is missing")
 	}
 }
 

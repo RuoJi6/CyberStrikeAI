@@ -162,6 +162,36 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 	}
 }
 
+func TestProxyReportsRestrictedResolutionAsSystemBoundaryDenial(t *testing.T) {
+	policy, err := boundary.NewPolicyWithDefault(nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []ActivityEvent
+	proxy, err := NewProxy(policy, ProxyOptions{
+		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return []netip.Addr{netip.MustParseAddr("10.42.0.9")}, nil
+		},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			t.Fatal("restricted resolved address reached the network")
+			return nil, nil
+		},
+		ActivitySink: func(event ActivityEvent) { events = append(events, event) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://internal.example/", nil)
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonDNSRebinding {
+		t.Fatalf("resolved boundary response = %d headers=%#v body=%q", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+	if len(events) != 1 || events[0].Decision != ActivityDecisionBlocked || events[0].Reason != boundary.ReasonDNSRebinding || events[0].RuleID != "" || events[0].Outcome != "policy_denied_after_resolution" || len(events[0].ResolvedIPs) != 1 || events[0].ResolvedIPs[0] != "10.42.0.9" {
+		t.Fatalf("resolved boundary event = %#v", events)
+	}
+}
+
 func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t *testing.T) {
 	policy := testProxyPolicy(t,
 		boundary.Rule{ID: "allow-safe", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"GET"}, PathPrefixes: []string{"/safe"}}},
@@ -479,11 +509,10 @@ func TestProxyReevaluatesRedirectDestinationsAndNeverFollowsUpstreamLocation(t *
 	}
 }
 
-func TestProxyRejectsKnownEncryptedDNSCONNECTBeforeHijackOrDial(t *testing.T) {
+func TestProxyTreatsPublicResolverHostnameAsOrdinaryTarget(t *testing.T) {
 	policy := testProxyPolicy(t, boundary.Rule{ID: "would-allow", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "dns.google", Schemes: []string{"https"}}})
 	proxy, err := NewProxy(policy, ProxyOptions{DialContext: func(context.Context, string, string) (net.Conn, error) {
-		t.Fatal("known encrypted DNS target reached dial")
-		return nil, nil
+		return nil, errors.New("test dial stopped after policy authorization")
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -493,8 +522,8 @@ func TestProxyRejectsKnownEncryptedDNSCONNECTBeforeHijackOrDial(t *testing.T) {
 	request.RequestURI = request.Host
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusForbidden {
-		t.Fatalf("known encrypted DNS CONNECT status = %d", recorder.Code)
+	if recorder.Code == http.StatusForbidden {
+		t.Fatalf("public resolver CONNECT was incorrectly blocked: status = %d", recorder.Code)
 	}
 }
 
@@ -612,8 +641,8 @@ func TestProxyManagedHTTPTransportPinsValidatedResolutionAndRejectsRebinding(t *
 	}
 	recorder = httptest.NewRecorder()
 	rebindingProxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("rebinding response = %d", recorder.Code)
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonDNSRebinding {
+		t.Fatalf("rebinding response = %d headers=%#v", recorder.Code, recorder.Header())
 	}
 }
 
@@ -633,8 +662,8 @@ func TestProxyRejectsMixedPublicAndPrivateIPv6ResolutionWithoutDial(t *testing.T
 	}
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://allowed.example/", nil))
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("mixed IPv6 response = %d", recorder.Code)
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonDNSRebinding {
+		t.Fatalf("mixed IPv6 response = %d headers=%#v", recorder.Code, recorder.Header())
 	}
 }
 

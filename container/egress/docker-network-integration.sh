@@ -5,7 +5,7 @@ set -euo pipefail
 : "${CYBERSTRIKE_AGENT_IMAGE:?CYBERSTRIKE_AGENT_IMAGE is required}"
 
 snapshot_id=12345678-1234-1234-1234-123456789ab6
-snapshot_json='{"schemaVersion":1,"policyId":"stage4-item6-policy","rules":[{"id":"block-example-tcp-81","effect":"blocked","host":"example.com","schemes":["tcp"],"ports":[81],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-example-web","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[80,443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-example-tcp","effect":"allow-visit","host":"example.com","schemes":["tcp"],"ports":[80],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-example-icmp","effect":"allow-visit","host":"example.com","schemes":["icmp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-ntp-124","effect":"blocked","host":"time.cloudflare.com","schemes":["udp"],"ports":[124],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":6},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":7},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":8},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":9}]}'
+snapshot_json='{"schemaVersion":5,"policyId":"stage4-item6-policy","rules":[{"id":"block-example-tcp-81","effect":"blocked","host":"example.com","schemes":["tcp"],"ports":[81],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1},{"id":"allow-example-web","effect":"allow-visit","host":"example.com","schemes":["http","https"],"ports":[53,80,443,784,853,8853,2375,2376],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":2},{"id":"allow-example-tcp","effect":"allow-visit","host":"example.com","schemes":["tcp"],"ports":[80],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":3},{"id":"allow-example-icmp","effect":"allow-visit","host":"example.com","schemes":["icmp"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":4},{"id":"block-ntp-124","effect":"blocked","host":"time.cloudflare.com","schemes":["udp"],"ports":[124],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":5},{"id":"allow-ntp","effect":"allow-visit","host":"time.cloudflare.com","schemes":["udp"],"ports":[123],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":6},{"id":"would-allow-doh","effect":"allow-visit","host":"dns.google","schemes":["https"],"ports":[443],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":7},{"id":"allow-public-ip","effect":"allow-visit","host":"1.1.1.1","schemes":["http","https"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":8},{"id":"block-example","effect":"blocked","host":"blocked.example","schemes":[],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":9}],"networkAccess":{"allowRestrictedTargets":false}}'
 snapshot_sha="sha256:$(printf '%s\n' "$snapshot_json" | sha256sum | awk '{print $1}')"
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/cyberstrike-egress-integration.XXXXXX")
 test_suffix=${CYBERSTRIKE_EGRESS_TEST_SUFFIX:-"$$"}
@@ -14,6 +14,7 @@ egress_network="cs-egress-out-$test_suffix"
 gateway_container="cs-egress-gateway-$test_suffix"
 agent_container="cs-egress-agent-$test_suffix"
 capture_container="cs-egress-auth-capture-$test_suffix"
+restricted_container="cs-egress-restricted-target-$test_suffix"
 snapshot_path="$test_root/boundary.json"
 route_path="$test_root/upstream.json"
 auth_route_path="$test_root/auth-upstream.json"
@@ -21,6 +22,7 @@ auth_snapshot_path="$test_root/auth-boundary.json"
 auth_profiles_path="$test_root/auth-profiles.json"
 mismatch_profiles_path="$test_root/auth-profiles-mismatch.json"
 open_snapshot_path="$test_root/open-boundary.json"
+open_restricted_snapshot_path="$test_root/open-restricted-boundary.json"
 
 gateway_security_args=(
   --read-only
@@ -97,7 +99,7 @@ assert_agent_security() {
 }
 
 cleanup() {
-  docker rm -f "$agent_container" "$gateway_container" "$capture_container" >/dev/null 2>&1 || true
+  docker rm -f "$agent_container" "$gateway_container" "$capture_container" "$restricted_container" >/dev/null 2>&1 || true
   docker network rm "$internal_network" "$egress_network" >/dev/null 2>&1 || true
   rm -rf -- "$test_root"
 }
@@ -122,6 +124,17 @@ expect_status() {
     fail "HTTP status command failed: $*"
   fi
   [[ "$actual" == "$expected" ]] || fail "HTTP status $actual, want $expected: $*"
+}
+
+assert_public_service_port_allowed() {
+  local port=$1
+  docker exec "$agent_container" curl -sS --connect-timeout 2 --max-time 4 -o /dev/null "http://example.com:$port/" >/dev/null 2>&1 || true
+  docker logs "$gateway_container" 2>&1 \
+    | grep '"requestType":"http"' \
+    | grep "\"port\":$port" \
+    | grep '"decision":"allowed"' \
+    | grep -q '"ruleId":"allow-example-web"' \
+    || fail "public service port $port was blocked or not audited as an ordinary allowed port"
 }
 
 gateway_is_absent() {
@@ -232,6 +245,9 @@ expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://blocked.example/
 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -X POST -o /dev/null http://example.com/write || true
 docker logs "$gateway_container" 2>&1 | grep '"method":"POST"' | grep -q '"decision":"allowed"' || fail "empty methods did not allow POST"
+for public_port in 53 784 853 8853 2375 2376; do
+  assert_public_service_port_allowed "$public_port"
+done
 docker exec "$agent_container" curl -sS --connect-timeout 8 --max-time 15 --proxy "$socks_proxy" -o /dev/null http://example.com/
 docker logs "$gateway_container" 2>&1 | grep -q '"requestType":"tcp".*"decision":"allowed"' || fail "SOCKS5 TCP request was not allowed and audited"
 run_udp_probe "$agent_container" "$gateway_ip" time.cloudflare.com 123
@@ -241,7 +257,6 @@ for _ in $(seq 1 80); do
 done
 docker logs "$gateway_container" 2>&1 | grep -q '"requestType":"udp".*"decision":"allowed".*"ruleId":"allow-ntp"' || fail "SOCKS5 UDP request was not allowed and audited"
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1/
-expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com:853/
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com/dns-query
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -H 'Accept: application/dns-json' -o /dev/null -w '%{http_code}' http://example.com/api
 expect_failure docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null https://dns.google/dns-query
@@ -288,14 +303,16 @@ expect_failure docker exec "$agent_container" /bin/sh -c 'unset HTTP_PROXY HTTPS
 [[ "$(docker inspect --format '{{.State.Running}}' "$agent_container")" == true ]] || fail "agent stopped with the gateway"
 
 # A conversation without a selected boundary policy receives the immutable
-# schema-v3 open snapshot. External HTTP, HTTPS, TCP and UDP are allowed by
-# default while the hard-coded private/reserved-address protections remain.
+# schema-v5 open snapshot. Public HTTP, HTTPS, TCP and UDP are allowed by
+# default while the conversation's restricted-target switch remains off.
 docker rm -f "$agent_container" "$gateway_container" >/dev/null
 open_snapshot_id=22345678-1234-4234-8234-123456789ab8
-open_snapshot_json='{"schemaVersion":3,"policyId":"","rules":[],"defaultAction":"allow"}'
+open_snapshot_json='{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow","networkAccess":{"allowRestrictedTargets":false}}'
 printf '%s\n' "$open_snapshot_json" >"$open_snapshot_path"
 chmod 0444 "$open_snapshot_path"
 open_snapshot_sha="sha256:$(sha256sum "$open_snapshot_path" | awk '{print $1}')"
+docker run -d --name "$restricted_container" --network "$egress_network" --network-alias restricted-target \
+  --entrypoint python3 "$CYBERSTRIKE_AGENT_IMAGE" -m http.server 18081 >/dev/null
 docker run -d --name "$gateway_container" --network "$internal_network" \
   "${gateway_security_args[@]}" \
   --mount type=bind,source="$open_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
@@ -338,7 +355,47 @@ docker logs "$gateway_container" 2>&1 | grep -q '"requestType":"connect".*"decis
 docker logs "$gateway_container" 2>&1 | grep -q '"requestType":"tcp".*"decision":"allowed"' || fail "open-boundary did not allow TCP"
 docker logs "$gateway_container" 2>&1 | grep -q '"requestType":"udp".*"decision":"allowed"' || fail "open-boundary did not allow UDP"
 expect_status 403 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://127.0.0.1/
+restricted_off_status=$(docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://restricted-target:18081/ || true)
+[[ "$restricted_off_status" != 200 ]] || fail "restricted Docker-network target was allowed while the high-risk switch was off"
+docker logs "$gateway_container" 2>&1 | grep '"domain":"restricted-target"' | grep '"decision":"blocked"' | grep -q '"reason":"dns-rebinding"' || fail "restricted Docker-network denial was not audited as system isolation"
 docker rm -f "$agent_container" "$gateway_container" >/dev/null
+
+# The same conversation-level switch makes private, Docker-network and
+# metadata-style targets eligible without overriding ordinary boundary rules.
+# Use a private Docker-network HTTP target so this is a real routed test rather
+# than a policy-only assertion.
+open_restricted_snapshot_id=32345678-1234-4234-8234-123456789ab8
+open_restricted_snapshot_json='{"schemaVersion":5,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow","networkAccess":{"allowRestrictedTargets":true}}'
+printf '%s\n' "$open_restricted_snapshot_json" >"$open_restricted_snapshot_path"
+chmod 0444 "$open_restricted_snapshot_path"
+open_restricted_snapshot_sha="sha256:$(sha256sum "$open_restricted_snapshot_path" | awk '{print $1}')"
+docker run -d --name "$gateway_container" --network "$internal_network" \
+  "${gateway_security_args[@]}" \
+  --mount type=bind,source="$open_restricted_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
+  "$CYBERSTRIKE_EGRESS_IMAGE" run \
+  --snapshot-path /etc/cyberstrike/boundary.json \
+  --snapshot-id "$open_restricted_snapshot_id" \
+  --snapshot-sha256 "$open_restricted_snapshot_sha" >/dev/null
+docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
+for _ in $(seq 1 60); do
+  docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
+  sleep 0.1
+done
+docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' || fail "restricted-target gateway did not start"
+gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.IPAddress}}{{end}}" "$gateway_container")
+proxy="http://$gateway_ip:3128"
+socks_proxy="socks5h://$gateway_ip:1080"
+docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
+  "${agent_security_args[@]}" \
+  "${agent_workspace_env[@]}" \
+  --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
+  --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
+  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
+configure_agent_route "$agent_container" "$gateway_ip"
+assert_agent_security "$agent_container"
+expect_status 200 docker exec "$agent_container" curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://restricted-target:18081/
+docker logs "$gateway_container" 2>&1 | grep '"domain":"restricted-target"' | grep -q '"decision":"allowed"' || fail "enabled restricted target was not audited as allowed"
+docker rm -f "$agent_container" "$gateway_container" "$restricted_container" >/dev/null
 
 # A configured upstream is a mandatory hop. Recreate the gateway with an
 # unreachable HTTP proxy and a synthetic credential marker: allowed targets
@@ -546,8 +603,8 @@ docker logs "$gateway_container" 2>&1 | grep '"httpPacket"' | grep -Fq "$auth_se
 expect_failure docker exec "$agent_container" curl -sS --connect-timeout 2 --max-time 4 -o /dev/null http://example.com/
 
 printf 'docker_topology=isolated internal=2 egress=1\n'
-printf 'proxy_protocol=allowed_http_%s default_post_and_blocked_dns_gateway_denied\n' "$allowed_status"
-printf 'default_boundary=open http=%s https_connect=allowed tcp=allowed udp=allowed private_reserved=blocked\n' "$open_http_status"
+printf 'proxy_protocol=allowed_http_%s public_service_ports=ordinary default_post_and_blocked_dns_gateway_denied\n' "$allowed_status"
+printf 'default_boundary=open http=%s https_connect=allowed tcp=allowed udp=allowed restricted_off=blocked restricted_on=allowed\n' "$open_http_status"
 printf 'packet_gateway=direct_tcp_allowed disallowed_ip,doh,ipv6,external_proxy_blocked\n'
 printf 'gateway_crash=proxy_and_direct_blocked agent_running=true\n'
 printf 'upstream_unavailable=http_502 direct_fallback=false credential_metadata_leak=false\n'

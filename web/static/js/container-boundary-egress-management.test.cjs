@@ -169,9 +169,12 @@ test('对话容器详情可以切换边界策略并显式重建', () => {
     assert.match(management, /container-boundary-policy-switch/);
     assert.match(management, /\/api\/boundary-policies\?page=1&page_size=100/);
     assert.match(management, /\/container\/rebuild/);
-    assert.match(management, /JSON\.stringify\(\{ boundaryPolicyId: policyId \}\)/);
+	assert.match(management, /networkAccess:\s*\{ allowRestrictedTargets: restrictedTargetsToggle\.checked \}/);
+	assert.match(management, /record\.networkAccess\?\.allowRestrictedTargets/);
+	assert.match(management, /record\.pendingNetworkAccess\?\.allowRestrictedTargets/);
     assert.match(management, /record\.boundaryPolicyId/);
     assert.match(management, /CyberStrikeSelect\.enhance\(policySelect\)/);
     assert.match(styles, /\.container-boundary-policy-switch\s*\{/);
-    assert.match(styles, /\.container-boundary-policy-switch-controls \.unified-select-trigger\s*\{/);
+	assert.match(styles, /\.container-boundary-policy-switch-controls \.unified-select-trigger\s*\{/);
+	assert.match(styles, /\.container-restricted-targets-toggle\s*\{/);
 });

@@ -172,8 +172,10 @@ HITL 的风险在于审批者看到的是“工具名 + 参数 + 上下文摘要
 
 ## 对话容器与出站边界
 
-- 每个容器对话使用独立 internal 网络，Agent 没有公网默认路由，不挂载 Docker socket。
-- HTTP/HTTPS 通过该对话的出站网关；原始 TCP、自定义 DNS、DoH、IPv6 和宿主网关绕过失败关闭。
+- 每个容器对话使用独立 internal 网络，Agent 没有直连公网路由且不挂载 Docker socket；HTTP(S)、原始 TCP/UDP、DNS、ICMP 和 IPv6 流量都必须经过该对话的出站网关。
+- 公网服务不按端口号猜测类型；53、784、853、8853、2375、2376 等端口与其他公网端口使用完全相同的边界规则。
+- `networkAccess.allowRestrictedTargets` 默认关闭。关闭时，系统网络隔离会在用户规则之前阻止私网、回环、链路本地、CGNAT、宿主机/Docker、云元数据以及重绑定目标；开启高风险开关只使这些目标可以进入普通边界判定，不会覆盖用户拒绝规则或自定义策略的默认拒绝。
+- 外部 DNS 解析器可能减少受管 DNS 的查询可见性，但不能绕过最终目标控制；解析后的每个实际连接仍会在网关重新判定。
 - 边界规则在首次容器初始化前冻结为不可变快照。快照 generation 必须与运行时 generation 一致，不一致时所有工具执行失败关闭。
 - 删除容器但保留 named volume 时，控制面预留下一代 generation；重建后沿用同一快照并保持 `/workspace`。
 - 命中禁止规则时，网关返回 403、`X-CyberStrikeAI-Blocked: true` 和明确的 Agent 可见禁止原因；不回退宿主执行或目标直连。
