@@ -223,10 +223,11 @@ func (c *LifecycleController) Start(ctx context.Context, conversationID string) 
 	if err != nil {
 		return record, err
 	}
-	if _, err := c.verifyBeforeMutation(ctx, record, false); err != nil {
+	operationCtx := context.WithoutCancel(ctx)
+	if _, err := c.verifyBeforeMutation(operationCtx, record, false); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationStart, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 	}
-	runtime, err := c.manager.Start(ctx, record.RuntimeID)
+	runtime, err := c.manager.Start(operationCtx, record.RuntimeID)
 	if err != nil {
 		return c.failAfterMutation(record, LifecycleOperationStart, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
 	}
@@ -277,12 +278,13 @@ func (c *LifecycleController) ApplyIdle(ctx context.Context, candidate IdleRunti
 	if candidate.Action == "stop" {
 		return c.stopPrepared(ctx, record)
 	}
-	_, err = c.verifyBeforeMutation(ctx, record, true)
+	operationCtx := context.WithoutCancel(ctx)
+	_, err = c.verifyBeforeMutation(operationCtx, record, true)
 	if err != nil {
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 		return record, errors.Join(err, failErr)
 	}
-	err = c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: false})
+	err = c.manager.Delete(operationCtx, record.RuntimeID, DeleteOptions{RemoveWorkspace: false})
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
 		return record, errors.Join(err, failErr)
@@ -296,12 +298,17 @@ func (c *LifecycleController) ApplyIdle(ctx context.Context, candidate IdleRunti
 }
 
 func (c *LifecycleController) stopPrepared(ctx context.Context, record InitializationRecord) (InitializationRecord, error) {
-	if _, err := c.verifyBeforeMutation(ctx, record, false); err != nil {
+	operationCtx := context.WithoutCancel(ctx)
+	if _, err := c.verifyBeforeMutation(operationCtx, record, false); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationStop, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 	}
-	runtime, err := c.manager.Stop(ctx, record.RuntimeID, StopOptions{})
+	runtime, err := c.manager.Stop(operationCtx, record.RuntimeID, StopOptions{})
 	if err != nil {
-		return c.failAfterMutation(record, LifecycleOperationStop, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
+		failure := LifecycleFailure{RuntimeStatus: record.RuntimeStatus}
+		if validateObservedRuntime(record, runtime) == nil {
+			failure.RuntimeStatus = runtime.Status
+		}
+		return c.failAfterMutation(record, LifecycleOperationStop, err, failure)
 	}
 	if err := validateObservedRuntime(record, runtime); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationStop, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: "specification_drift"})
@@ -314,13 +321,14 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 	if err != nil {
 		return record, err
 	}
-	if _, err := c.verifyBeforeMutation(ctx, record, true); err != nil {
+	operationCtx := context.WithoutCancel(ctx)
+	if _, err := c.verifyBeforeMutation(operationCtx, record, true); err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err), ReadinessFailed: record.Spec.Readiness.Enabled,
 		})
 	}
 	target := record
-	target.Spec, err = c.upgradeRuntimeSpec(ctx, target.Spec, BoundaryRebuildSnapshotFromContext(ctx))
+	target.Spec, err = c.upgradeRuntimeSpec(operationCtx, target.Spec, BoundaryRebuildSnapshotFromContext(operationCtx))
 	if err != nil {
 		return c.failAfterMutation(record, LifecycleOperationRebuild, err, LifecycleFailure{
 			RuntimeStatus: record.RuntimeStatus, Drift: "boundary_snapshot_unavailable", ReadinessFailed: record.Spec.Readiness.Enabled,
@@ -337,7 +345,7 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 		}
 		target.Spec.EgressGateway = &gateway
 	}
-	runtime, err := c.manager.Rebuild(ctx, record.RuntimeID, RebuildOptions{
+	runtime, err := c.manager.Rebuild(operationCtx, record.RuntimeID, RebuildOptions{
 		Spec:                          target.Spec,
 		AuthorizedWorkspaceSpecDigest: RuntimeSpecDigest(record.Spec),
 	})
@@ -363,7 +371,7 @@ func (c *LifecycleController) Rebuild(ctx context.Context, conversationID string
 			err = fmt.Errorf("%w: runtime manager does not implement readiness validation", ErrRuntimeNotReady)
 		} else {
 			var report ReadinessReport
-			report, err = c.checker.ValidateReadiness(ctx, runtime, target.Spec)
+			report, err = c.checker.ValidateReadiness(operationCtx, runtime, target.Spec)
 			if err == nil {
 				completion.Readiness = &report
 			}
@@ -386,7 +394,8 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 	if err != nil {
 		return err
 	}
-	missing, err := c.verifyBeforeMutation(ctx, record, true)
+	operationCtx := context.WithoutCancel(ctx)
+	missing, err := c.verifyBeforeMutation(operationCtx, record, true)
 	if err != nil {
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 		return errors.Join(err, failErr)
@@ -395,7 +404,7 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 		// The provider may have disappeared after a partial delete. Give the
 		// manager one final ownership-checked chance to remove its conversation
 		// network and, when requested, its named workspace volume.
-		if deleteErr := c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace}); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
+		if deleteErr := c.manager.Delete(operationCtx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace}); deleteErr != nil && !errors.Is(deleteErr, ErrNotFound) {
 			_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, deleteErr, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(deleteErr)})
 			return errors.Join(deleteErr, failErr)
 		}
@@ -403,7 +412,7 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 		defer cancel()
 		return c.store.DeleteLifecycle(writeCtx, record.ConversationID, LifecycleOperationDelete)
 	}
-	err = c.manager.Delete(ctx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace})
+	err = c.manager.Delete(operationCtx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace})
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
 		return errors.Join(err, failErr)
@@ -449,7 +458,8 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 	if err != nil {
 		return record, err
 	}
-	runtime, inspectErr := c.manager.Inspect(ctx, record.RuntimeID)
+	operationCtx := context.WithoutCancel(ctx)
+	runtime, inspectErr := inspectLifecycleRuntime(c.manager, operationCtx, record.RuntimeID)
 	if inspectErr != nil {
 		switch {
 		case errors.Is(inspectErr, ErrNotFound):
@@ -468,7 +478,7 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		// the lifecycle completion transaction committed. Adopt only the exact
 		// configured topology transition; every other mismatch remains fail-closed.
 		target := record
-		target.Spec, err = c.upgradeRuntimeSpec(ctx, target.Spec, "")
+		target.Spec, err = c.upgradeRuntimeSpec(operationCtx, target.Spec, "")
 		incrementGeneration := false
 		if err == nil {
 			incrementGeneration = adoptObservedAttributionBinding(&target.Spec, runtime.Spec, record.RuntimeGeneration)
@@ -732,7 +742,7 @@ func ensureBoundGatewayAttribution(spec *RuntimeSpec) {
 }
 
 func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record InitializationRecord, allowMissing bool) (bool, error) {
-	runtime, err := c.manager.Inspect(ctx, record.RuntimeID)
+	runtime, err := inspectLifecycleRuntime(c.manager, ctx, record.RuntimeID)
 	if err != nil {
 		if allowMissing && errors.Is(err, ErrNotFound) {
 			return true, nil
@@ -740,6 +750,17 @@ func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record I
 		return false, err
 	}
 	return false, validateObservedRuntime(record, runtime)
+}
+
+type lifecycleRuntimeInspector interface {
+	InspectLifecycle(context.Context, RuntimeID) (Runtime, error)
+}
+
+func inspectLifecycleRuntime(manager RuntimeManager, ctx context.Context, id RuntimeID) (Runtime, error) {
+	if inspector, ok := manager.(lifecycleRuntimeInspector); ok {
+		return inspector.InspectLifecycle(ctx, id)
+	}
+	return manager.Inspect(ctx, id)
 }
 
 func lifecycleDriftForError(err error) string {

@@ -114,6 +114,18 @@ func (r *conversationExecutionBackendResolver) resolveContainer(ctx context.Cont
 		(record.ReadinessStatus != containerruntime.ReadinessReady && record.ReadinessStatus != containerruntime.ReadinessNotRequired) {
 		return nil, fmt.Errorf("container runtime for conversation %s is not ready", conversationID)
 	}
+	if record.LifecycleState == containerruntime.LifecycleFailed {
+		record, err = r.lifecycle.Reconcile(ctx, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("reconcile failed container lifecycle for conversation %s: %w", conversationID, err)
+		}
+		// Reconciliation may recover a rebuild that reached Docker before its
+		// durable generation/snapshot transaction completed.
+		snapshot, err = r.db.GetConversationBoundarySnapshot(ctx, conversationID)
+		if err != nil {
+			return nil, fmt.Errorf("reload boundary snapshot for conversation %s: %w", conversationID, err)
+		}
+	}
 	if snapshot.RuntimeGeneration != record.RuntimeGeneration {
 		return nil, fmt.Errorf("boundary snapshot/runtime generation mismatch for conversation %s", conversationID)
 	}

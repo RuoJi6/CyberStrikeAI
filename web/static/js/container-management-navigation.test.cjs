@@ -85,7 +85,7 @@ test('容器管理初始化只标记当前独立页面', () => {
     assert.deepEqual(initialized, ['boundary-rules', 'egress-proxies']);
 });
 
-test('出站暂停或冷却优先于容器运行状态展示', () => {
+test('生命周期失败优先显示，健康运行时再展示出站暂停或冷却', () => {
     const context = {
         window: {},
         document: {
@@ -94,6 +94,12 @@ test('出站暂停或冷却优先于容器运行状态展示', () => {
         },
     };
     vm.runInNewContext(management, context);
+	assert.equal(context.containerRuntimePrimaryStatus({
+		runtimeStatus: 'running',
+		lifecycleState: 'failed',
+		observation: { agent: { status: 'running' } },
+		egressHealth: { status: 'paused' },
+	}), 'failed');
     assert.equal(context.containerRuntimePrimaryStatus({
         runtimeStatus: 'running',
         observation: { agent: { status: 'running' } },

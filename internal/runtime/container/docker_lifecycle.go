@@ -33,6 +33,23 @@ func (m *DockerManager) Inspect(ctx context.Context, id RuntimeID) (Runtime, err
 	return m.inspectOwned(operationCtx, id)
 }
 
+// InspectLifecycle verifies the immutable ownership and security configuration
+// while allowing the agent and its egress gateway to be in different process
+// states. A lifecycle operation can legitimately observe that skew after an
+// interrupted start/stop. Execution paths continue to use Inspect, whose
+// topology-state check remains strict.
+func (m *DockerManager) InspectLifecycle(ctx context.Context, id RuntimeID) (Runtime, error) {
+	if err := validateRuntimeID(id); err != nil {
+		return Runtime{}, err
+	}
+	operationCtx, cancel, err := m.operationContext(ctx)
+	if err != nil {
+		return Runtime{}, err
+	}
+	defer cancel()
+	return m.inspectOwnedLifecycle(operationCtx, id)
+}
+
 func (m *DockerManager) ListOwned(ctx context.Context) ([]Runtime, error) {
 	operationCtx, cancel, err := m.operationContext(ctx)
 	if err != nil {
@@ -84,26 +101,32 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 		return Runtime{}, err
 	}
 	defer cancel()
-	runtime, err := m.inspectOwned(operationCtx, id)
+	runtime, err := m.inspectOwnedLifecycle(operationCtx, id)
 	if err != nil {
 		return Runtime{}, err
 	}
-	if runtime.Status == StatusRunning {
-		return runtime, nil
-	}
-	if runtime.Status != StatusStopped {
+	if runtime.Status != StatusRunning && runtime.Status != StatusStopped {
 		return Runtime{}, fmt.Errorf("%w: cannot start runtime %s in %s", ErrRuntimeStateConflict, id, runtime.Status)
 	}
-	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime)
+	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime, true)
 	if err != nil {
 		return Runtime{}, err
 	}
+	if spec.EgressGateway == nil && runtime.Status == StatusRunning {
+		return runtime, nil
+	}
 	if spec.EgressGateway != nil {
-		if _, err := m.api.ContainerStart(operationCtx, gateway.ID, mobyclient.ContainerStartOptions{}); err != nil {
-			if containerderrdefs.IsNotFound(err) {
-				return Runtime{}, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id)
+		gatewayStatus, _ := observedRuntimeStatus(gateway.State)
+		if gatewayStatus != StatusRunning && gatewayStatus != StatusStopped {
+			return Runtime{}, fmt.Errorf("%w: cannot start egress gateway for runtime %s in %s", ErrRuntimeStateConflict, id, gatewayStatus)
+		}
+		if gatewayStatus == StatusStopped {
+			if _, err := m.api.ContainerStart(operationCtx, gateway.ID, mobyclient.ContainerStartOptions{}); err != nil {
+				if containerderrdefs.IsNotFound(err) {
+					return Runtime{}, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id)
+				}
+				return Runtime{}, fmt.Errorf("start egress gateway for runtime %s: %w", id, err)
 			}
-			return Runtime{}, fmt.Errorf("start egress gateway for runtime %s: %w", id, err)
 		}
 		if spec.EgressGateway.BoundarySnapshot != nil {
 			if err := m.waitForEgressGatewaySnapshot(operationCtx, spec, gateway.ID); err != nil {
@@ -118,18 +141,20 @@ func (m *DockerManager) Start(ctx context.Context, id RuntimeID) (Runtime, error
 			}
 		}
 	}
-	if _, err := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{}); err != nil {
-		if spec.EgressGateway != nil {
-			seconds := int(defaultRuntimeStopTimeout / time.Second)
-			_, rollbackErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
-			if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
-				err = errors.Join(err, fmt.Errorf("rollback egress gateway start: %w", rollbackErr))
+	if runtime.Status == StatusStopped {
+		if _, err := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{}); err != nil {
+			if spec.EgressGateway != nil {
+				seconds := int(defaultRuntimeStopTimeout / time.Second)
+				_, rollbackErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds})
+				if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
+					err = errors.Join(err, fmt.Errorf("rollback egress gateway start: %w", rollbackErr))
+				}
 			}
+			if containerderrdefs.IsNotFound(err) {
+				return Runtime{}, fmt.Errorf("%w: runtime %s", ErrNotFound, id)
+			}
+			return Runtime{}, fmt.Errorf("start runtime %s: %w", id, err)
 		}
-		if containerderrdefs.IsNotFound(err) {
-			return Runtime{}, fmt.Errorf("%w: runtime %s", ErrNotFound, id)
-		}
-		return Runtime{}, fmt.Errorf("start runtime %s: %w", id, err)
 	}
 	if spec.EgressGateway != nil {
 		if err := m.configureRuntimeDefaultRoute(operationCtx, spec, runtime.ProviderID, gateway); err != nil {
@@ -268,50 +293,55 @@ func (m *DockerManager) Stop(ctx context.Context, id RuntimeID, options StopOpti
 		return Runtime{}, err
 	}
 	defer cancel()
-	runtime, err := m.inspectOwned(operationCtx, id)
+	runtime, err := m.inspectOwnedLifecycle(operationCtx, id)
 	if err != nil {
 		return Runtime{}, err
 	}
-	if runtime.Status == StatusStopped {
-		return runtime, nil
-	}
-	if runtime.Status != StatusRunning && runtime.Status != StatusStarting {
+	if runtime.Status != StatusStopped && runtime.Status != StatusRunning && runtime.Status != StatusStarting {
 		return Runtime{}, fmt.Errorf("%w: cannot stop runtime %s in %s", ErrRuntimeStateConflict, id, runtime.Status)
 	}
-	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime)
+	spec, gateway, err := m.inspectRuntimeTopology(operationCtx, runtime, true)
 	if err != nil {
 		return Runtime{}, err
 	}
 	seconds := int((timeout + time.Second - 1) / time.Second)
-	if _, err := m.api.ContainerStop(operationCtx, runtime.ProviderID, mobyclient.ContainerStopOptions{Timeout: &seconds}); err != nil {
-		if containerderrdefs.IsNotFound(err) {
-			return Runtime{}, fmt.Errorf("%w: runtime %s", ErrNotFound, id)
+	var stopErrors []error
+	if runtime.Status != StatusStopped {
+		if _, stopErr := m.api.ContainerStop(operationCtx, runtime.ProviderID, mobyclient.ContainerStopOptions{Timeout: &seconds}); stopErr != nil {
+			if containerderrdefs.IsNotFound(stopErr) {
+				stopErrors = append(stopErrors, fmt.Errorf("%w: runtime %s", ErrNotFound, id))
+			} else {
+				stopErrors = append(stopErrors, fmt.Errorf("stop runtime %s: %w", id, stopErr))
+			}
 		}
-		return Runtime{}, fmt.Errorf("stop runtime %s: %w", id, err)
 	}
 	if spec.EgressGateway != nil {
-		if _, err := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds}); err != nil {
-			_, rollbackErr := m.api.ContainerStart(operationCtx, runtime.ProviderID, mobyclient.ContainerStartOptions{})
-			if rollbackErr != nil && !containerderrdefs.IsNotFound(rollbackErr) {
-				err = errors.Join(err, fmt.Errorf("rollback agent stop: %w", rollbackErr))
+		gatewayStatus, _ := observedRuntimeStatus(gateway.State)
+		if gatewayStatus != StatusStopped {
+			if _, stopErr := m.api.ContainerStop(operationCtx, gateway.ID, mobyclient.ContainerStopOptions{Timeout: &seconds}); stopErr != nil {
+				if containerderrdefs.IsNotFound(stopErr) {
+					stopErrors = append(stopErrors, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id))
+				} else {
+					stopErrors = append(stopErrors, fmt.Errorf("stop egress gateway for runtime %s: %w", id, stopErr))
+				}
 			}
-			if containerderrdefs.IsNotFound(err) {
-				return Runtime{}, fmt.Errorf("%w: egress gateway for runtime %s", ErrNotFound, id)
-			}
-			return Runtime{}, fmt.Errorf("stop egress gateway for runtime %s: %w", id, err)
 		}
 	}
 	stopped, err := m.inspectOwned(operationCtx, id)
 	if err != nil {
-		return Runtime{}, err
+		return runtime, errors.Join(append(stopErrors, err)...)
 	}
 	if stopped.Status != StatusStopped {
-		return Runtime{}, fmt.Errorf("%w: runtime %s did not enter stopped state", ErrRuntimeStateConflict, id)
+		stopErrors = append(stopErrors, fmt.Errorf("%w: runtime %s did not enter stopped state", ErrRuntimeStateConflict, id))
+		return stopped, errors.Join(stopErrors...)
 	}
+	// Docker can report a canceled stop request after both processes have
+	// already reached the requested state. The verified final observation is
+	// authoritative and prevents a false failed/running durable record.
 	return stopped, nil
 }
 
-func (m *DockerManager) inspectRuntimeTopology(ctx context.Context, runtime Runtime) (RuntimeSpec, mobycontainer.InspectResponse, error) {
+func (m *DockerManager) inspectRuntimeTopology(ctx context.Context, runtime Runtime, allowLifecycleSkew bool) (RuntimeSpec, mobycontainer.InspectResponse, error) {
 	result, err := m.api.ContainerInspect(ctx, runtime.ProviderID, mobyclient.ContainerInspectOptions{Size: false})
 	if err != nil {
 		return RuntimeSpec{}, mobycontainer.InspectResponse{}, fmt.Errorf("inspect runtime topology %s: %w", runtime.ID, err)
@@ -326,7 +356,7 @@ func (m *DockerManager) inspectRuntimeTopology(ctx context.Context, runtime Runt
 	if spec.EgressGateway == nil {
 		return spec, mobycontainer.InspectResponse{}, nil
 	}
-	gateway, err := m.inspectOwnedEgressGateway(ctx, spec, &result.Container, runtime.Status)
+	gateway, err := m.inspectOwnedEgressGatewayMode(ctx, spec, &result.Container, runtime.Status, allowLifecycleSkew)
 	return spec, gateway, err
 }
 
@@ -355,7 +385,7 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 			authorizedWorkspaceSpecDigest = observedDigest
 		}
 	}
-	current, err := m.Inspect(ctx, id)
+	current, err := m.InspectLifecycle(ctx, id)
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Runtime{}, err
 	}
@@ -365,6 +395,12 @@ func (m *DockerManager) Rebuild(ctx context.Context, id RuntimeID, options Rebui
 		}
 		if current.Status != StatusStopped {
 			return Runtime{}, fmt.Errorf("%w: runtime %s must be stopped before rebuild", ErrRuntimeStateConflict, id)
+		}
+		// An interrupted stop may leave the Agent stopped while the gateway is
+		// still running. Finish that idempotent stop before removing topology.
+		current, err = m.Stop(ctx, id, StopOptions{})
+		if err != nil {
+			return Runtime{}, fmt.Errorf("converge stopped runtime %s before rebuild: %w", id, err)
 		}
 		operationCtx, cancel, contextErr := m.operationContext(ctx)
 		if contextErr != nil {
@@ -460,7 +496,7 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 		return err
 	}
 	defer cancel()
-	runtime, err := m.inspectOwned(operationCtx, id)
+	runtime, err := m.inspectOwnedLifecycle(operationCtx, id)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			removedGateway, gatewayErr := m.deleteOwnedEgressGatewayByRuntimeID(operationCtx, id)
@@ -490,6 +526,12 @@ func (m *DockerManager) Delete(ctx context.Context, id RuntimeID, options Delete
 	}
 	if runtime.Status != StatusStopped && runtime.Status != StatusFailed {
 		return fmt.Errorf("%w: runtime %s must be stopped before deletion", ErrRuntimeStateConflict, id)
+	}
+	if runtime.Status == StatusStopped {
+		runtime, err = m.Stop(operationCtx, id, StopOptions{})
+		if err != nil {
+			return fmt.Errorf("converge stopped runtime %s before deletion: %w", id, err)
+		}
 	}
 	inspection, err := m.api.ContainerInspect(operationCtx, runtime.ProviderID, mobyclient.ContainerInspectOptions{Size: false})
 	if err != nil {
@@ -781,6 +823,14 @@ func (m *DockerManager) operationContext(ctx context.Context) (context.Context, 
 }
 
 func (m *DockerManager) inspectOwned(ctx context.Context, id RuntimeID) (Runtime, error) {
+	return m.inspectOwnedMode(ctx, id, false)
+}
+
+func (m *DockerManager) inspectOwnedLifecycle(ctx context.Context, id RuntimeID) (Runtime, error) {
+	return m.inspectOwnedMode(ctx, id, true)
+}
+
+func (m *DockerManager) inspectOwnedMode(ctx context.Context, id RuntimeID, allowLifecycleSkew bool) (Runtime, error) {
 	result, err := m.api.ContainerInspect(ctx, runtimeContainerName(id), mobyclient.ContainerInspectOptions{Size: false})
 	if err != nil {
 		if containerderrdefs.IsNotFound(err) {
@@ -788,10 +838,14 @@ func (m *DockerManager) inspectOwned(ctx context.Context, id RuntimeID) (Runtime
 		}
 		return Runtime{}, fmt.Errorf("inspect runtime %s: %w", id, err)
 	}
-	return m.runtimeFromInspection(ctx, id, result.Container)
+	return m.runtimeFromInspectionMode(ctx, id, result.Container, allowLifecycleSkew)
 }
 
 func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID RuntimeID, actual mobycontainer.InspectResponse) (Runtime, error) {
+	return m.runtimeFromInspectionMode(ctx, expectedID, actual, false)
+}
+
+func (m *DockerManager) runtimeFromInspectionMode(ctx context.Context, expectedID RuntimeID, actual mobycontainer.InspectResponse, allowLifecycleSkew bool) (Runtime, error) {
 	if strings.TrimSpace(actual.ID) == "" || actual.Config == nil || actual.State == nil || actual.HostConfig == nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s has an incomplete engine inspection", ErrRuntimeStateConflict, expectedID)
 	}
@@ -814,7 +868,7 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 	if err != nil {
 		return Runtime{}, fmt.Errorf("%w: runtime %s image labels mismatch", ErrRuntimeStateConflict, expectedID)
 	}
-	if err := m.verifyObservedSecurityBaseline(ctx, actual); err != nil {
+	if err := m.verifyObservedSecurityBaselineMode(ctx, actual, allowLifecycleSkew); err != nil {
 		return Runtime{}, err
 	}
 	createdAt, err := time.Parse(time.RFC3339Nano, actual.Created)
@@ -830,8 +884,15 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 		return Runtime{}, fmt.Errorf("%w: runtime %s keepalive process drifted", ErrRuntimeStateConflict, expectedID)
 	}
 	if securitySpec.EgressGateway != nil {
-		if _, err := m.inspectOwnedEgressGateway(ctx, securitySpec, &actual, status); err != nil {
+		gateway, err := m.inspectOwnedEgressGatewayMode(ctx, securitySpec, &actual, status, allowLifecycleSkew)
+		if err != nil {
 			return Runtime{}, err
+		}
+		if allowLifecycleSkew {
+			gatewayStatus, _ := observedRuntimeStatus(gateway.State)
+			if gatewayStatus != status {
+				warnings = append(warnings, fmt.Sprintf("egress gateway state %s differs from agent state %s", gatewayStatus, status))
+			}
 		}
 	}
 	updatedAt := latestRuntimeTimestamp(createdAt, actual.State.StartedAt, actual.State.FinishedAt)
@@ -884,6 +945,10 @@ func imageReferenceFromRuntime(configured string, labels map[string]string) (Ima
 }
 
 func (m *DockerManager) verifyObservedSecurityBaseline(ctx context.Context, actual mobycontainer.InspectResponse) error {
+	return m.verifyObservedSecurityBaselineMode(ctx, actual, false)
+}
+
+func (m *DockerManager) verifyObservedSecurityBaselineMode(ctx context.Context, actual mobycontainer.InspectResponse, allowLifecycleSkew bool) error {
 	host := actual.HostConfig
 	config := actual.Config
 	if config == nil || host == nil || actual.State == nil {
@@ -902,7 +967,7 @@ func (m *DockerManager) verifyObservedSecurityBaseline(ctx context.Context, actu
 		if config.NetworkDisabled || host.NetworkMode != mobycontainer.NetworkMode(ConversationNetworkName(expected.ID)) {
 			return fmt.Errorf("%w: owned runtime internal network mode drifted", ErrRuntimeStateConflict)
 		}
-		if err := m.verifyAttachedConversationNetwork(ctx, actual, expected); err != nil {
+		if err := m.verifyAttachedConversationNetworkMode(ctx, actual, expected, allowLifecycleSkew); err != nil {
 			return err
 		}
 	default:
@@ -920,6 +985,10 @@ func (m *DockerManager) verifyObservedSecurityBaseline(ctx context.Context, actu
 }
 
 func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, actual mobycontainer.InspectResponse, spec RuntimeSpec) error {
+	return m.verifyAttachedConversationNetworkMode(ctx, actual, spec, false)
+}
+
+func (m *DockerManager) verifyAttachedConversationNetworkMode(ctx context.Context, actual mobycontainer.InspectResponse, spec RuntimeSpec, allowLifecycleSkew bool) error {
 	if m.networkAPI == nil {
 		return fmt.Errorf("%w: engine client does not support conversation network inspection", ErrEngineUnavailable)
 	}
@@ -951,17 +1020,21 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 	if len(result.Network.Services) != 0 || len(result.Network.Containers) > expectedAttachments {
 		return fmt.Errorf("%w: conversation network has unexpected attached workloads", ErrRuntimeStateConflict)
 	}
+	agentRunning := actual.State != nil && actual.State.Running
 	if len(result.Network.Containers) == 0 {
-		if actual.State == nil || actual.State.Running {
+		if actual.State == nil || agentRunning {
 			return fmt.Errorf("%w: conversation network attachment is missing", ErrRuntimeStateConflict)
 		}
 		return nil
 	}
-	if actual.State == nil || !actual.State.Running || len(result.Network.Containers) != expectedAttachments {
+	if !allowLifecycleSkew && (actual.State == nil || !agentRunning || len(result.Network.Containers) != expectedAttachments) {
 		return fmt.Errorf("%w: conversation network active attachment count mismatch", ErrRuntimeStateConflict)
 	}
-	attached, ok := result.Network.Containers[actual.ID]
-	if !ok || (strings.TrimSpace(attached.Name) != "" && strings.TrimSpace(attached.Name) != strings.TrimPrefix(actual.Name, "/")) {
+	attached, agentAttached := result.Network.Containers[actual.ID]
+	if agentRunning != agentAttached {
+		return fmt.Errorf("%w: conversation network agent attachment state mismatch", ErrRuntimeStateConflict)
+	}
+	if agentAttached && strings.TrimSpace(attached.Name) != "" && strings.TrimSpace(attached.Name) != strings.TrimPrefix(actual.Name, "/") {
 		return fmt.Errorf("%w: conversation network attachment identity mismatch", ErrRuntimeStateConflict)
 	}
 	if spec.EgressGateway != nil {
@@ -974,11 +1047,23 @@ func (m *DockerManager) verifyAttachedConversationNetwork(ctx context.Context, a
 				foundGateway = true
 			}
 		}
-		if !foundGateway {
+		if !allowLifecycleSkew && !foundGateway {
 			return fmt.Errorf("%w: conversation network gateway attachment identity mismatch", ErrRuntimeStateConflict)
 		}
+		if allowLifecycleSkew && len(result.Network.Containers) != boolInt(agentAttached)+boolInt(foundGateway) {
+			return fmt.Errorf("%w: conversation network has unexpected attached workloads", ErrRuntimeStateConflict)
+		}
+	} else if allowLifecycleSkew && len(result.Network.Containers) != boolInt(agentAttached) {
+		return fmt.Errorf("%w: conversation network has unexpected attached workloads", ErrRuntimeStateConflict)
 	}
 	return nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func runtimeSecuritySpecFromLabels(labels map[string]string) (RuntimeSpec, error) {

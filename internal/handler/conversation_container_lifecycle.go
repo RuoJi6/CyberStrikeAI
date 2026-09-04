@@ -258,14 +258,17 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		}
 	}
 
-	rebuildCtx := c.Request.Context()
+	// Once all user-controlled rebuild inputs have been validated and staged,
+	// the durable lifecycle transition must converge even if the browser closes
+	// or its request deadline expires while Docker is stopping the Agent.
+	rebuildCtx := context.WithoutCancel(c.Request.Context())
 	if staged != nil {
 		rebuildCtx = containerruntime.WithBoundaryRebuildSnapshot(rebuildCtx, staged.SnapshotID)
 	}
 	if egressChanged {
 		rebuildCtx = containerruntime.WithEgressRebuildRoute(rebuildCtx, stagedRoute)
 	}
-	current, err := h.db.GetContainerInitialization(c.Request.Context(), id)
+	current, err := h.db.GetContainerInitialization(rebuildCtx, id)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) && !errors.Is(err, containerruntime.ErrNotFound) {
 		h.cancelStagedBoundaryRebuild(id, staged)
 		if egressChanged {
@@ -275,7 +278,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		return
 	}
 	if err == nil && current.RuntimeStatus == containerruntime.StatusRunning {
-		if _, err := h.containerLifecycle.Stop(c.Request.Context(), id); err != nil {
+		if _, err := h.containerLifecycle.Stop(rebuildCtx, id); err != nil {
 			h.cancelStagedBoundaryRebuild(id, staged)
 			if egressChanged {
 				h.cancelStagedEgressRebuild(id)
@@ -313,7 +316,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 			}
 		}
 		rebuildCtx = containerruntime.WithRuntimeControls(rebuildCtx, resources, traffic)
-		if _, err := h.db.SetConversationRuntimeControls(c.Request.Context(), id, requestedRuntimeControls); err != nil {
+		if _, err := h.db.SetConversationRuntimeControls(rebuildCtx, id, requestedRuntimeControls); err != nil {
 			h.cancelStagedBoundaryRebuild(id, staged)
 			if egressChanged {
 				h.cancelStagedEgressRebuild(id)
@@ -335,7 +338,7 @@ func (h *ConversationHandler) RebuildConversationContainer(c *gin.Context) {
 		return
 	}
 	if staged != nil {
-		active, activeErr := h.db.GetConversationBoundarySnapshot(c.Request.Context(), id)
+		active, activeErr := h.db.GetConversationBoundarySnapshot(rebuildCtx, id)
 		if activeErr != nil || active.SnapshotID != staged.SnapshotID || active.RuntimeGeneration != record.RuntimeGeneration {
 			h.logger.Error("边界快照未随容器重建原子激活",
 				zap.String("conversationId", id), zap.String("snapshotId", staged.SnapshotID), zap.Error(activeErr))

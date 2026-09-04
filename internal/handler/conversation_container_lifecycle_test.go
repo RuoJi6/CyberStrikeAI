@@ -24,6 +24,7 @@ type fakeConversationContainerLifecycle struct {
 	conversationID  string
 	removeWorkspace bool
 	deleteCalls     int
+	stop            func(context.Context, string) (containerruntime.InitializationRecord, error)
 	rebuild         func(context.Context, string) (containerruntime.InitializationRecord, error)
 	actions         []string
 }
@@ -51,6 +52,12 @@ func (f *fakeConversationContainerLifecycle) Start(ctx context.Context, id strin
 }
 
 func (f *fakeConversationContainerLifecycle) Stop(ctx context.Context, id string) (containerruntime.InitializationRecord, error) {
+	if f.stop != nil {
+		f.action = "stop"
+		f.actions = append(f.actions, "stop")
+		f.conversationID = id
+		return f.stop(ctx, id)
+	}
 	return f.call(ctx, "stop", id)
 }
 
@@ -512,11 +519,64 @@ func TestConversationContainerNetworkChangeStopsRunningRuntimeBeforeRebuild(t *t
 	}
 }
 
+func TestConversationContainerRebuildConvergesAfterRequestCancellation(t *testing.T) {
+	db, owner := setupConversationRBACTest(t)
+	conversation, err := db.CreateConversation("canceled network rebuild", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AssignResourceToUser(owner.ID, "conversation", conversation.ID); err != nil {
+		t.Fatal(err)
+	}
+	spec := handlerBoundaryRuntimeSpec(conversation.ID)
+	if _, _, err := db.Queue(context.Background(), spec, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, claimed, err := db.Claim(context.Background(), conversation.ID); err != nil || !claimed {
+		t.Fatalf("claim = %v, %v", claimed, err)
+	}
+	if _, err := db.Complete(context.Background(), conversation.ID, containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "canceled-provider", Status: containerruntime.StatusRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	controller := &fakeConversationContainerLifecycle{}
+	controller.stop = func(ctx context.Context, _ string) (containerruntime.InitializationRecord, error) {
+		if ctx.Err() != nil {
+			t.Fatalf("stop received canceled lifecycle context: %v", ctx.Err())
+		}
+		cancelRequest()
+		return containerruntime.InitializationRecord{ConversationID: conversation.ID, RuntimeStatus: containerruntime.StatusStopped}, nil
+	}
+	controller.rebuild = func(ctx context.Context, _ string) (containerruntime.InitializationRecord, error) {
+		if ctx.Err() != nil {
+			t.Fatalf("rebuild inherited request cancellation: %v", ctx.Err())
+		}
+		return containerruntime.InitializationRecord{ConversationID: conversation.ID, RuntimeGeneration: 2}, nil
+	}
+	handler := NewConversationHandler(db, zap.NewNop())
+	handler.SetContainerLifecycleController(controller)
+	handler.SetConversationEgressRebuildPreparer(func(context.Context, string, string, string, string, bool) (*containerruntime.EgressUpstreamRouteSpec, error) {
+		return nil, nil
+	})
+
+	response := performBoundaryRebuildRequestWithContext(requestCtx, owner, conversation.ID, map[string]interface{}{"egressMode": "none"}, handler.RebuildConversationContainer)
+	if response.Code != http.StatusOK || len(controller.actions) != 2 || controller.actions[0] != "stop" || controller.actions[1] != "rebuild" {
+		t.Fatalf("response=%d %s actions=%v", response.Code, response.Body.String(), controller.actions)
+	}
+}
+
 func performBoundaryRebuildRequest(user *database.RBACUser, conversationID string, body interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
+	return performBoundaryRebuildRequestWithContext(context.Background(), user, conversationID, body, handler)
+}
+
+func performBoundaryRebuildRequestWithContext(ctx context.Context, user *database.RBACUser, conversationID string, body interface{}, handler gin.HandlerFunc) *httptest.ResponseRecorder {
 	payload, _ := json.Marshal(body)
 	response := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(response)
-	c.Request = httptest.NewRequest(http.MethodPost, "/api/conversations/"+conversationID+"/container/rebuild", bytes.NewReader(payload))
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/conversations/"+conversationID+"/container/rebuild", bytes.NewReader(payload)).WithContext(ctx)
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Params = gin.Params{{Key: "id", Value: conversationID}}
 	c.Set(security.ContextSessionKey, security.Session{

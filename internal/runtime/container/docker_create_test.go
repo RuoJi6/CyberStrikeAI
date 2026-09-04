@@ -46,6 +46,7 @@ type fakeDockerCreationAPI struct {
 	healthOutputs           map[string]string
 	stopErr                 error
 	stopErrs                map[string]error
+	stopAfterMutationErrs   map[string]error
 	startedID               string
 	startedIDs              []string
 	stoppedID               string
@@ -376,7 +377,11 @@ func (f *fakeDockerCreationAPI) ContainerStop(_ context.Context, id string, opti
 	if f.stopErrs != nil && f.stopErrs[id] != nil {
 		stopErr = f.stopErrs[id]
 	}
-	if stopErr == nil {
+	afterMutationErr := error(nil)
+	if f.stopAfterMutationErrs != nil {
+		afterMutationErr = f.stopAfterMutationErrs[id]
+	}
+	if stopErr == nil || afterMutationErr != nil {
 		if f.containerResults == nil && f.containerResult.Container.State != nil {
 			f.containerResult.Container.State.Status = mobycontainer.StateExited
 			f.containerResult.Container.State.Running = false
@@ -392,6 +397,9 @@ func (f *fakeDockerCreationAPI) ContainerStop(_ context.Context, id string, opti
 			delete(network.Containers, id)
 			f.networks[name] = network
 		}
+	}
+	if afterMutationErr != nil {
+		return mobyclient.ContainerStopResult{}, afterMutationErr
 	}
 	return mobyclient.ContainerStopResult{}, stopErr
 }

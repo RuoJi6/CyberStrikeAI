@@ -39,7 +39,7 @@ func (m *DockerManager) Observe(ctx context.Context, spec RuntimeSpec) (RuntimeO
 		}
 		return RuntimeObservation{}, fmt.Errorf("inspect runtime %s: %w", spec.ID, err)
 	}
-	runtime, err := m.runtimeFromInspection(operationCtx, spec.ID, agentInspection.Container)
+	runtime, err := m.runtimeFromInspectionMode(operationCtx, spec.ID, agentInspection.Container, true)
 	if err != nil {
 		return RuntimeObservation{}, err
 	}
@@ -60,7 +60,7 @@ func (m *DockerManager) Observe(ctx context.Context, spec RuntimeSpec) (RuntimeO
 	}
 
 	if spec.EgressGateway != nil {
-		gatewayInspection, inspectErr := m.inspectOwnedEgressGateway(operationCtx, spec, &agentInspection.Container, runtime.Status)
+		gatewayInspection, inspectErr := m.inspectOwnedEgressGatewayMode(operationCtx, spec, &agentInspection.Container, runtime.Status, true)
 		if inspectErr != nil {
 			return RuntimeObservation{}, inspectErr
 		}

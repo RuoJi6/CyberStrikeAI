@@ -286,6 +286,10 @@ func (m *DockerManager) conversationNetworkPolicyDNSAddress(ctx context.Context,
 }
 
 func (m *DockerManager) inspectOwnedEgressGateway(ctx context.Context, spec RuntimeSpec, agent *mobycontainer.InspectResponse, expectedStatus Status) (mobycontainer.InspectResponse, error) {
+	return m.inspectOwnedEgressGatewayMode(ctx, spec, agent, expectedStatus, false)
+}
+
+func (m *DockerManager) inspectOwnedEgressGatewayMode(ctx context.Context, spec RuntimeSpec, agent *mobycontainer.InspectResponse, expectedStatus Status, allowLifecycleSkew bool) (mobycontainer.InspectResponse, error) {
 	result, err := m.api.ContainerInspect(ctx, EgressGatewayContainerName(spec.ID), mobyclient.ContainerInspectOptions{Size: false})
 	if err != nil {
 		if containerderrdefs.IsNotFound(err) {
@@ -297,13 +301,17 @@ func (m *DockerManager) inspectOwnedEgressGateway(ctx context.Context, spec Runt
 	if agent != nil && agent.Config != nil {
 		expectedSpecDigest = agent.Config.Labels[LabelSpecDigest]
 	}
-	if err := m.verifyEgressGatewayInspection(ctx, spec, result.Container, agent, expectedStatus, expectedSpecDigest); err != nil {
+	if err := m.verifyEgressGatewayInspectionMode(ctx, spec, result.Container, agent, expectedStatus, expectedSpecDigest, allowLifecycleSkew); err != nil {
 		return mobycontainer.InspectResponse{}, err
 	}
 	return result.Container, nil
 }
 
 func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec RuntimeSpec, actual mobycontainer.InspectResponse, agent *mobycontainer.InspectResponse, expectedStatus Status, expectedSpecDigest string) error {
+	return m.verifyEgressGatewayInspectionMode(ctx, spec, actual, agent, expectedStatus, expectedSpecDigest, false)
+}
+
+func (m *DockerManager) verifyEgressGatewayInspectionMode(ctx context.Context, spec RuntimeSpec, actual mobycontainer.InspectResponse, agent *mobycontainer.InspectResponse, expectedStatus Status, expectedSpecDigest string, allowLifecycleSkew bool) error {
 	if spec.EgressGateway == nil || strings.TrimSpace(actual.ID) == "" || actual.Config == nil || actual.HostConfig == nil || actual.State == nil {
 		return fmt.Errorf("%w: egress gateway inspection is incomplete", ErrRuntimeStateConflict)
 	}
@@ -319,10 +327,10 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 		}
 	}
 	status, _ := observedRuntimeStatus(actual.State)
-	if status != expectedStatus {
+	if !allowLifecycleSkew && status != expectedStatus {
 		return fmt.Errorf("%w: egress gateway state %s does not match agent state %s", ErrRuntimeStateConflict, status, expectedStatus)
 	}
-	if expectedStatus == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec), authProfilesReference(spec), tlsAuthorityReference(spec)) {
+	if status == StatusRunning && requiresPolicyDNS(spec) && !healthySnapshotReport(actual.State.Health, boundarySnapshotReference(spec), upstreamRouteReference(spec), authProfilesReference(spec), tlsAuthorityReference(spec)) {
 		return fmt.Errorf("%w: running egress gateway does not report the exact healthy snapshot", ErrRuntimeStateConflict)
 	}
 	if actual.Config.NetworkDisabled || actual.Config.User != gatewayUser || actual.Config.WorkingDir != "/" || len(actual.Config.Entrypoint) != 1 || actual.Config.Entrypoint[0] != gatewayBinaryPath {
@@ -344,7 +352,7 @@ func (m *DockerManager) verifyEgressGatewayInspection(ctx context.Context, spec 
 	if _, err := m.VerifyRuntimeImage(ctx, actual.ID, spec.EgressGateway.Image); err != nil {
 		return err
 	}
-	if err := m.verifyEgressGatewayNetworks(ctx, spec, actual, agent, expectedStatus); err != nil {
+	if err := m.verifyEgressGatewayNetworksMode(ctx, spec, actual, agent, expectedStatus, allowLifecycleSkew); err != nil {
 		return err
 	}
 	return nil
@@ -839,6 +847,10 @@ func egressGatewayNetworkingConfig(spec RuntimeSpec, conversationNetwork, egress
 }
 
 func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec RuntimeSpec, gateway mobycontainer.InspectResponse, agent *mobycontainer.InspectResponse, expectedStatus Status) error {
+	return m.verifyEgressGatewayNetworksMode(ctx, spec, gateway, agent, expectedStatus, false)
+}
+
+func (m *DockerManager) verifyEgressGatewayNetworksMode(ctx context.Context, spec RuntimeSpec, gateway mobycontainer.InspectResponse, agent *mobycontainer.InspectResponse, expectedStatus Status, allowLifecycleSkew bool) error {
 	if gateway.NetworkSettings == nil || len(gateway.NetworkSettings.Networks) != 2 {
 		return fmt.Errorf("%w: egress gateway is not attached to exactly two networks", ErrRuntimeStateConflict)
 	}
@@ -895,6 +907,30 @@ func (m *DockerManager) verifyEgressGatewayNetworks(ctx context.Context, spec Ru
 		if err := verifyRuntimeProxyEnvironment(agent.Config.Env, spec, ""); err != nil {
 			return err
 		}
+	}
+	if allowLifecycleSkew {
+		gatewayRunning := gateway.State != nil && gateway.State.Running
+		agentRunning := agent != nil && agent.State != nil && agent.State.Running
+		expectedInternalAttachments := boolInt(gatewayRunning) + boolInt(agentRunning)
+		expectedEgressAttachments := boolInt(gatewayRunning)
+		if len(internalResult.Network.Containers) != expectedInternalAttachments || len(egressResult.Network.Containers) != expectedEgressAttachments {
+			return fmt.Errorf("%w: lifecycle gateway network attachment count mismatch", ErrRuntimeStateConflict)
+		}
+		if _, ok := internalResult.Network.Containers[gateway.ID]; ok != gatewayRunning {
+			return fmt.Errorf("%w: gateway internal attachment state mismatch", ErrRuntimeStateConflict)
+		}
+		if _, ok := egressResult.Network.Containers[gateway.ID]; ok != gatewayRunning {
+			return fmt.Errorf("%w: gateway egress attachment state mismatch", ErrRuntimeStateConflict)
+		}
+		if agent != nil {
+			if _, ok := internalResult.Network.Containers[agent.ID]; ok != agentRunning {
+				return fmt.Errorf("%w: agent internal attachment state mismatch", ErrRuntimeStateConflict)
+			}
+		}
+		if gatewayRunning && requiresPolicyDNS(spec) && !validPolicyDNSAddress(internalEndpoint.IPAddress) {
+			return fmt.Errorf("%w: running egress gateway has no operational policy DNS address", ErrRuntimeStateConflict)
+		}
+		return nil
 	}
 	if expectedStatus == StatusRunning {
 		if requiresPolicyDNS(spec) && !validPolicyDNSAddress(internalEndpoint.IPAddress) {

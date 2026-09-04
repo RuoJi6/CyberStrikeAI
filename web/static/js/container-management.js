@@ -185,6 +185,9 @@ function containerRuntimeAgentStatus(record) {
 }
 
 function containerRuntimePrimaryStatus(record) {
+	if (record.status === 'failed' || record.lifecycleState === 'failed') {
+		return 'failed';
+	}
     const egressHealthStatus = String(record.egressHealth?.status || '').toLowerCase();
     if (egressHealthStatus === 'paused' || egressHealthStatus === 'cooldown') {
         return egressHealthStatus;

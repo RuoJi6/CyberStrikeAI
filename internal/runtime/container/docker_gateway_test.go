@@ -218,7 +218,7 @@ func TestDockerManagerGatewayStartFailureRollsBackToStoppedTopology(t *testing.T
 	}
 }
 
-func TestDockerManagerGatewayStopFailureRestoresRunningTopology(t *testing.T) {
+func TestDockerManagerGatewayStopFailureCanBeHealedByRetry(t *testing.T) {
 	spec := gatewayCreationSpec()
 	api := newSuccessfulGatewayCreationAPI(spec, "instance-01")
 	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
@@ -235,12 +235,49 @@ func TestDockerManagerGatewayStopFailureRestoresRunningTopology(t *testing.T) {
 	if _, err := manager.Stop(context.Background(), spec.ID, StopOptions{}); err == nil {
 		t.Fatal("stop unexpectedly succeeded")
 	}
-	observed, err := manager.Inspect(context.Background(), spec.ID)
-	if err != nil {
-		t.Fatalf("inspect restored topology: %v", err)
+	if _, err := manager.Inspect(context.Background(), spec.ID); !errors.Is(err, ErrRuntimeStateConflict) {
+		t.Fatalf("strict inspect error = %v, want state conflict", err)
 	}
-	if observed.Status != StatusRunning || len(api.networks[ConversationNetworkName(spec.ID)].Containers) != 2 || len(api.networks[EgressNetworkName(spec.ID)].Containers) != 1 {
-		t.Fatalf("stop rollback state = %#v / %#v / %#v", observed, api.networks[ConversationNetworkName(spec.ID)].Containers, api.networks[EgressNetworkName(spec.ID)].Containers)
+	partial, err := manager.InspectLifecycle(context.Background(), spec.ID)
+	if err != nil {
+		t.Fatalf("inspect partial topology: %v", err)
+	}
+	if partial.Status != StatusStopped || len(api.networks[ConversationNetworkName(spec.ID)].Containers) != 1 || len(api.networks[EgressNetworkName(spec.ID)].Containers) != 1 {
+		t.Fatalf("partial stop state = %#v / %#v / %#v", partial, api.networks[ConversationNetworkName(spec.ID)].Containers, api.networks[EgressNetworkName(spec.ID)].Containers)
+	}
+	api.stopErrs = nil
+	healed, err := manager.Stop(context.Background(), spec.ID, StopOptions{})
+	if err != nil {
+		t.Fatalf("heal partial stop: %v", err)
+	}
+	if healed.Status != StatusStopped || len(api.networks[ConversationNetworkName(spec.ID)].Containers) != 0 || len(api.networks[EgressNetworkName(spec.ID)].Containers) != 0 {
+		t.Fatalf("healed stop state = %#v / %#v / %#v", healed, api.networks[ConversationNetworkName(spec.ID)].Containers, api.networks[EgressNetworkName(spec.ID)].Containers)
+	}
+}
+
+func TestDockerManagerStopTrustsVerifiedFinalStateAfterCanceledResponses(t *testing.T) {
+	spec := gatewayCreationSpec()
+	api := newSuccessfulGatewayCreationAPI(spec, "instance-01")
+	manager, err := newDockerManager(api, DockerManagerOptions{OwnerID: "instance-01"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Create(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Start(context.Background(), spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	api.stopAfterMutationErrs = map[string]error{
+		"provider-agent-1":   context.Canceled,
+		"provider-gateway-1": context.Canceled,
+	}
+	stopped, err := manager.Stop(context.Background(), spec.ID, StopOptions{})
+	if err != nil {
+		t.Fatalf("stop after verified cancellation: %v", err)
+	}
+	if stopped.Status != StatusStopped {
+		t.Fatalf("stopped status = %s", stopped.Status)
 	}
 }
 
