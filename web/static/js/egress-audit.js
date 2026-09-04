@@ -471,8 +471,7 @@
         if (encoding === 'hex') bodyText = formatPacketHex(body);
         else if (encoding === 'base64') bodyText = packetBase64AsHex(body);
         const notices = [];
-        if (decoded && contentEncoding) notices.push(`[正文已按 Content-Encoding 解压：${contentEncoding}；报文头保留原始捕获值]`);
-        else if (contentEncoding) notices.push(`[正文未能按 Content-Encoding 解压：${contentEncoding}；以下为原始捕获正文]`);
+        if (!decoded && contentEncoding) notices.push(`[正文未能按 Content-Encoding 解压：${contentEncoding}；以下为原始捕获正文]`);
         if (encoding === 'hex' || encoding === 'base64') notices.push('[二进制正文 · Hex]');
         if (bodyText) notices.push(bodyText);
         if (truncated) notices.push('[正文已在 32 KiB 显示上限处截断，完整原始证据请在流量证据中查看]');

@@ -238,7 +238,6 @@
         if (view) {
             const content = view.format === 'hex' ? formatHexBody(view.content) : String(view.content || '');
             const notices = [];
-            if (view.decoded && view.content_encoding) notices.push(`[正文已按 Content-Encoding 解压：${view.content_encoding}；报文头保留原始捕获值]`);
             if (view.format === 'hex') notices.push('[二进制正文 · Hex]');
             const fallbackLabel = view.format === 'hex' ? '原始字节 Hex' : '未解压的原始正文';
             if (view.error === 'unsupported_content_encoding') notices.push(`[不支持该 Content-Encoding，以下为${fallbackLabel}]`);

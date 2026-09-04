@@ -83,7 +83,7 @@ test('egress audit renders decoded content and legacy binary packets without Bas
         responseBody: '<html>完整响应</html>', responseBodyEncoding: 'utf8', responseContentEncoding: 'br', responseBodyDecoded: true,
     }, 'response');
     assert.match(decoded, /HTTP\/1\.1 200 OK\nContent-Encoding: br/);
-    assert.match(decoded, /正文已按 Content-Encoding 解压：br/);
+    assert.doesNotMatch(decoded, /正文已按 Content-Encoding 解压/);
     assert.match(decoded, /<html>完整响应<\/html>/);
     assert.doesNotMatch(decoded, /base64/i);
 
@@ -122,7 +122,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260904-2/);
+    assert.match(template, /egress-audit\.js\?v=20260904-3/);
     assert.equal(zh.containerManagement.auditReconcile, '状态校准');
     assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);

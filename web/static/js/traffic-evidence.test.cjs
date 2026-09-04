@@ -17,7 +17,7 @@ test('流量证据列表不再展示常驻的不可信内容提示', () => {
     assert.doesNotMatch(html, /目标内容不可信/);
     assert.match(html, /style\.css\?v=20260904-1/);
     assert.match(html, /router\.js\?v=20260827-2/);
-    assert.match(html, /traffic-evidence\.js\?v=6/);
+    assert.match(html, /traffic-evidence\.js\?v=7/);
 });
 
 test('漏洞详情以紧凑按钮在当前页弹窗显示多个完整数据包', () => {
@@ -34,15 +34,15 @@ test('漏洞详情以紧凑按钮在当前页弹窗显示多个完整数据包',
     assert.match(styles, /\.vulnerability-traffic-evidence\s*\{[\s\S]*?width: fit-content/);
     assert.match(styles, /\.vulnerability-packet-body\s*\{[\s\S]*?grid-template-columns:/);
     assert.match(styles, /\.vulnerability-packet-stages\s*\{[\s\S]*?grid-template-columns: repeat\(2/);
-    assert.match(html, /vulnerability\.js\?v=19/);
+    assert.match(html, /vulnerability\.js\?v=20/);
 });
 
 test('压缩响应默认显示解压正文，二进制回退为 Hex 而不是 Base64', () => {
-    assert.match(script, /正文已按 Content-Encoding 解压/);
+    assert.doesNotMatch(script, /正文已按 Content-Encoding 解压/);
     assert.match(script, /二进制正文 · Hex/);
     assert.match(script, /body_view/);
     assert.doesNotMatch(script, /\[base64 encoded body\]/);
-    assert.match(vulnerabilityScript, /正文已按 Content-Encoding 解压/);
+    assert.doesNotMatch(vulnerabilityScript, /正文已按 Content-Encoding 解压/);
     assert.match(vulnerabilityScript, /二进制正文 · Hex/);
     assert.doesNotMatch(vulnerabilityScript, /\[base64 encoded body\]/);
 });
