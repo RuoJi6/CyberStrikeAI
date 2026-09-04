@@ -68,6 +68,19 @@ test('background gateway retries preserve a stable waiting or error badge', () =
     assert.match(source, /if \(frame\.event === 'stream_error'\) \{[\s\S]*?cancelReadyAnnouncement\(\)/);
 });
 
+test('conversation picker sorts all runtime modes by recency and distinguishes duplicate titles', () => {
+	const records = activity.sortConversationRecordsForTest([
+		{ conversationId: 'container-old-1111', conversationTitle: '同名对话', runtimeStatus: 'running', updatedAt: '2026-09-04T10:00:00Z' },
+		{ conversationId: 'host-new-2222222', conversationTitle: '同名对话', runtimeStatus: 'host_mitm', runtimeMode: 'host', updatedAt: '2026-09-04T10:02:00Z' },
+		{ conversationId: 'container-new-333', conversationTitle: '另一个对话', runtimeStatus: 'running', updatedAt: '2026-09-04T10:01:00Z' },
+	]);
+	assert.deepEqual(records.map((record) => record.conversationId), ['host-new-2222222', 'container-new-333', 'container-old-1111']);
+	assert.match(activity.conversationOptionLabelForTest(records[0]), /同名对话 · 本机 MITM · 实时 · host-new/);
+	assert.match(activity.conversationOptionLabelForTest(records[2]), /同名对话 · 容器 · running · containe/);
+	assert.match(source, /state\.conversations = sortConversationRecords\(state\.conversations\)/);
+	assert.match(source, /createdAt: conversation\.createdAt, updatedAt: conversation\.updatedAt/);
+});
+
 test('network activity page is a real incremental authenticated stream UI', () => {
     for (const id of [
         'network-activity-conversation', 'network-activity-connection', 'network-activity-domain',
@@ -75,7 +88,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
 		'network-activity-tool', 'network-activity-runtime', 'network-activity-attribution', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-    assert.match(template, /network-activity\.js\?v=20260903-2/);
+	assert.match(template, /network-activity\.js\?v=20260904-1/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);

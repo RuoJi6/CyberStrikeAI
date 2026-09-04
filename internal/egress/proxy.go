@@ -32,6 +32,8 @@ const (
 	defaultClientHelloTimeout = 5 * time.Second
 )
 
+var errInspectedClientTLSHandshake = errors.New("inspected client TLS handshake failed")
+
 type DialContextFunc func(context.Context, string, string) (net.Conn, error)
 type LookupNetIPFunc func(context.Context, string, string) ([]netip.Addr, error)
 
@@ -465,9 +467,14 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, denied.Reason, denied.RuleID)
 			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
 			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
+			p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, trafficFailureSummary(event.Outcome))
 			return
 		}
+		event.Outcome, _ = classifyTrafficFailure(err)
+		event.HTTPStatus = http.StatusBadGateway
 		http.Error(writer, "upstream HTTP request failed", http.StatusBadGateway)
+		_, summary := classifyTrafficFailure(err)
+		p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, summary)
 		return
 	}
 	defer response.Body.Close()
@@ -500,61 +507,118 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		event.Outcome = "response_interrupted"
 	}
 	completedAt := p.now().UTC()
+	errorCode, errorSummary := "", ""
+	if copyErr != nil {
+		errorCode, errorSummary = event.Outcome, trafficFailureSummary(event.Outcome)
+	}
+	p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, response, fullResponseCapture, startedAt, completedAt, copyErr == nil, errorCode, errorSummary)
+}
+
+func (p *Proxy) emitForwardTrafficEvidence(
+	ctx context.Context,
+	request *http.Request,
+	attribution trafficAttribution,
+	decision boundary.Decision,
+	event ActivityEvent,
+	authProfile *GatewayAuthProfile,
+	requestCapture *fullBodyCapture,
+	response *http.Response,
+	responseCapture *fullBodyCapture,
+	startedAt, completedAt time.Time,
+	responseComplete bool,
+	errorCode, errorSummary string,
+) {
+	if request == nil || requestCapture == nil {
+		return
+	}
 	transactionID := uuid.NewString()
 	redactHeader := ""
 	if authProfile != nil {
 		redactHeader = authProfile.HeaderName
 	}
-	requestProtocol := outbound.Proto
+	requestProtocol := strings.TrimSpace(request.Proto)
 	if requestProtocol == "" {
 		requestProtocol = "HTTP/1.1"
 	}
-	requestHeaders := trafficHeaders(outbound.Header, outbound.Host, redactHeader)
-	responseHeadersForTraffic := trafficHeaders(response.Header, "", "")
-	messages := []traffic.Message{
-		fullRequestCapture.message(
-			transactionID, traffic.StageUpstreamRequest, traffic.MessageKindRequest,
-			outbound.Method, packetRequestTarget(outbound, event.Path), 0, requestProtocol,
-			requestHeaders, startedAt,
-		),
-		fullResponseCapture.message(
+	path := packetRequestTarget(request, event.Path)
+	messages := []traffic.Message{requestCapture.message(
+		transactionID, traffic.StageUpstreamRequest, traffic.MessageKindRequest,
+		request.Method, path, 0, requestProtocol,
+		trafficHeaders(request.Header, request.Host, redactHeader), startedAt,
+	)}
+	if response != nil && responseCapture != nil {
+		responseProtocol := strings.TrimSpace(response.Proto)
+		if responseProtocol == "" {
+			responseProtocol = "HTTP/1.1"
+		}
+		message := responseCapture.message(
 			transactionID, traffic.StageUpstreamResponse, traffic.MessageKindResponse,
 			"", "", response.StatusCode, responseProtocol,
-			responseHeadersForTraffic, completedAt,
-		),
+			trafficHeaders(response.Header, "", ""), completedAt,
+		)
+		message.Complete = responseComplete && message.Complete
+		messages = append(messages, message)
 	}
 	transaction := traffic.Transaction{
-		ID:                   transactionID,
-		EventID:              event.EventID,
-		ConversationID:       p.conversationID,
-		AgentID:              attribution.provenance.AgentID,
-		ToolName:             attribution.provenance.ToolName,
-		ExecutionID:          attribution.provenance.ExecutionID,
-		ToolCallID:           attribution.provenance.ToolCallID,
-		ActivityScopeID:      attribution.provenance.ActivityScopeID,
-		RuntimeMode:          p.runtimeMode,
-		RuntimeGeneration:    attribution.provenance.RuntimeGeneration,
+		ID: transactionID, EventID: event.EventID, ConversationID: p.conversationID,
+		AgentID: attribution.provenance.AgentID, ToolName: attribution.provenance.ToolName,
+		ExecutionID: attribution.provenance.ExecutionID, ToolCallID: attribution.provenance.ToolCallID,
+		ActivityScopeID: attribution.provenance.ActivityScopeID,
+		RuntimeMode:     p.runtimeMode, RuntimeGeneration: attribution.provenance.RuntimeGeneration,
 		RuntimeInstanceID:    attribution.provenance.RuntimeInstanceID,
 		AttributionStatus:    attribution.provenance.AttributionStatus,
 		DeclaredActivityKind: attribution.provenance.DeclaredActivityKind,
 		ObservedActivityKind: attribution.provenance.ObservedActivityKind,
-		CaptureCoverage:      p.captureCoverage,
-		Scheme:               decision.Target.Scheme,
-		Host:                 decision.Target.Host,
-		Port:                 decision.Target.Port,
-		Method:               outbound.Method,
-		Path:                 packetRequestTarget(outbound, event.Path),
-		HTTPStatus:           response.StatusCode,
-		StartedAt:            startedAt,
-		CompletedAt:          &completedAt,
-		LatencyMS:            activityLatencyMS(startedAt, completedAt),
-		BytesUp:              fullRequestCapture.total,
-		BytesDown:            fullResponseCapture.total,
-		BoundarySnapshotID:   p.boundarySnapshotID,
-		RuleID:               decision.RuleID,
-		UpstreamRouteID:      p.upstreamRouteID,
+		CaptureCoverage:      p.captureCoverage, Scheme: decision.Target.Scheme,
+		Host: decision.Target.Host, Port: decision.Target.Port, Method: request.Method, Path: path,
+		HTTPStatus: event.HTTPStatus, Outcome: event.Outcome, ErrorCode: errorCode, ErrorSummary: errorSummary,
+		StartedAt: startedAt, CompletedAt: &completedAt, LatencyMS: activityLatencyMS(startedAt, completedAt),
+		BytesUp: requestCapture.total, BoundarySnapshotID: p.boundarySnapshotID,
+		RuleID: event.RuleID, UpstreamRouteID: p.upstreamRouteID,
 	}
-	emitTraffic(p.trafficSink, context.WithoutCancel(request.Context()), transaction, messages)
+	if responseCapture != nil {
+		transaction.BytesDown = responseCapture.total
+	}
+	emitTraffic(p.trafficSink, ctx, transaction, messages)
+}
+
+func classifyTrafficFailure(err error) (string, string) {
+	code := "upstream_failed"
+	if errors.Is(err, context.DeadlineExceeded) {
+		code = "upstream_timeout"
+	} else {
+		var dnsError *net.DNSError
+		var networkError net.Error
+		var operationError *net.OpError
+		switch {
+		case errors.As(err, &dnsError):
+			code = "dns_failed"
+		case errors.As(err, &networkError) && networkError.Timeout():
+			code = "upstream_timeout"
+		case strings.Contains(strings.ToLower(err.Error()), "tls:") || strings.Contains(strings.ToLower(err.Error()), "x509:"):
+			code = "tls_handshake_failed"
+		case errors.As(err, &operationError) && (operationError.Op == "dial" || operationError.Op == "connect"):
+			code = "upstream_connect_failed"
+		}
+	}
+	return code, trafficFailureSummary(code)
+}
+
+func trafficFailureSummary(code string) string {
+	return map[string]string{
+		"policy_denied":                  "The boundary policy denied the request",
+		"policy_denied_after_resolution": "The resolved upstream address was denied by the boundary policy",
+		"invalid_client_hello":           "The client TLS handshake could not be parsed safely",
+		"sni_mismatch":                   "The TLS server name does not match the CONNECT target",
+		"tls_inspection_failed":          "The inspected TLS exchange did not complete",
+		"tls_handshake_failed":           "The upstream TLS handshake did not complete",
+		"dns_failed":                     "The upstream host could not be resolved",
+		"upstream_connect_failed":        "A connection to the upstream target could not be established",
+		"upstream_timeout":               "The upstream operation timed out",
+		"upstream_failed":                "The upstream request failed before a response was established",
+		"upstream_write_failed":          "The request could not be written completely to the upstream connection",
+		"response_interrupted":           "The upstream response ended before its body was complete",
+	}[strings.TrimSpace(code)]
 }
 
 func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) {
@@ -593,21 +657,39 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		Domain: targetHost, Port: targetPort, Decision: ActivityDecisionBlocked,
 		RuleID: decision.RuleID, Reason: decision.Reason, Outcome: "policy_denied", Provenance: attribution.provenance,
 	}
+	clientResponseStatus := 0
+	var clientResponseHeaders http.Header
+	clientResponseBody := ""
+	connectErrorSummary := ""
+	connectErrorCode := ""
 	dialObservation := &activityDialObservation{}
 	defer func() {
 		completedAt := p.now().UTC()
 		event.ResolvedIPs, event.ConnectedIP = dialObservation.snapshot()
 		event.LatencyMS = activityLatencyMS(startedAt, completedAt)
 		emitActivity(p.activitySink, event)
-		if !interceptTLS && event.Decision == ActivityDecisionAllowed && event.Outcome == "tunnel_closed" {
+		if event.Outcome != "tls_inspection_closed" {
+			errorCode := ""
+			if event.Outcome != "tunnel_closed" {
+				errorCode = event.Outcome
+			}
+			if connectErrorCode != "" {
+				errorCode = connectErrorCode
+			}
+			if connectErrorSummary == "" {
+				connectErrorSummary = trafficFailureSummary(errorCode)
+			}
 			transaction, messages := p.connectTrafficEvidence(
-				request, attribution, targetAuthority, targetHost, targetPort, event, startedAt, completedAt,
+				request, attribution, targetAuthority, targetHost, targetPort, event,
+				clientResponseStatus, clientResponseHeaders, clientResponseBody,
+				errorCode, connectErrorSummary, startedAt, completedAt,
 			)
 			emitTraffic(p.trafficSink, context.WithoutCancel(request.Context()), transaction, messages)
 		}
 	}()
 	if !decision.Allowed || (!interceptTLS && !proxyDecisionAllowed(decision)) {
-		writeBoundaryDeniedResponse(writer, targetHost, decision.Reason, decision.RuleID)
+		clientResponseHeaders, clientResponseBody = writeBoundaryDeniedResponse(writer, targetHost, decision.Reason, decision.RuleID)
+		clientResponseStatus = http.StatusForbidden
 		return
 	}
 	event.Decision = ActivityDecisionAllowed
@@ -621,6 +703,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 			event.Outcome = block.outcome
 			event.RetryAfterMS = block.retryAfterMS
 			writeRateLimitResponse(writer, block.retryAfterMS)
+			clientResponseStatus = http.StatusTooManyRequests
 			return
 		}
 		defer release()
@@ -629,6 +712,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	if !ok {
 		event.Outcome = "hijack_unavailable"
 		http.Error(writer, "CONNECT tunneling unavailable", http.StatusInternalServerError)
+		clientResponseStatus = http.StatusInternalServerError
 		return
 	}
 	client, buffered, err := hijacker.Hijack()
@@ -645,13 +729,20 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		event.Outcome = "client_write_failed"
 		return
 	}
+	clientResponseStatus = http.StatusOK
 	if err := client.SetReadDeadline(time.Now().Add(p.clientHelloTimeout)); err != nil {
 		event.Outcome = "client_deadline_failed"
 		return
 	}
-	clientHello, serverName, err := readClientHelloSNI(buffered.Reader, p.maxClientHello)
-	if err != nil || serverName != targetHost {
+	clientHello, serverName, err := readClientHelloForTarget(buffered.Reader, p.maxClientHello, targetHost)
+	if err != nil {
+		event.Outcome = "invalid_client_hello"
+		connectErrorSummary = trafficFailureSummary(event.Outcome)
+		return
+	}
+	if !clientHelloMatchesTarget(serverName, targetHost) {
 		event.Outcome = "sni_mismatch"
+		connectErrorSummary = trafficFailureSummary(event.Outcome)
 		return
 	}
 	if err := client.SetReadDeadline(time.Time{}); err != nil {
@@ -662,13 +753,20 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	if interceptTLS {
 		event.Outcome = "tls_inspection_failed"
 		if err := p.serveInterceptedTLS(client, buffered.Reader, clientHello, targetAuthority, targetHost, attribution.provenance); err != nil {
+			if errors.Is(err, errInspectedClientTLSHandshake) {
+				connectErrorCode = "tls_handshake_failed"
+			}
+			connectErrorSummary = trafficFailureSummary(connectErrorCode)
+			if connectErrorSummary == "" {
+				connectErrorSummary = trafficFailureSummary(event.Outcome)
+			}
 			return
 		}
 		event.Outcome = "tls_inspection_closed"
 		return
 	}
 	sniDecision, err := p.policy.Evaluate(sniURL, http.MethodConnect, nil, p.now().UTC())
-	if err != nil || !proxyDecisionAllowed(sniDecision) || sniDecision.Target.Host != serverName || sniDecision.Target.Port != targetPort {
+	if err != nil || !proxyDecisionAllowed(sniDecision) || !clientHelloMatchesTarget(serverName, sniDecision.Target.Host) || sniDecision.Target.Port != targetPort {
 		event.Decision = ActivityDecisionBlocked
 		event.Outcome = "sni_policy_denied"
 		if err == nil {
@@ -691,13 +789,14 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 			event.Reason = denied.Reason
 			event.Outcome = "policy_denied_after_resolution"
 		} else {
-			event.Outcome = "upstream_failed"
+			event.Outcome, connectErrorSummary = classifyTrafficFailure(err)
 		}
 		return
 	}
 	defer upstream.Close()
 	if err := writeAll(upstream, clientHello); err != nil {
 		event.Outcome = "upstream_write_failed"
+		connectErrorSummary = trafficFailureSummary(event.Outcome)
 		return
 	}
 	event.BytesUp = int64(len(clientHello))
@@ -717,6 +816,10 @@ func (p *Proxy) connectTrafficEvidence(
 	authority, host string,
 	port int,
 	event ActivityEvent,
+	clientResponseStatus int,
+	clientResponseHeaders http.Header,
+	clientResponseBody string,
+	errorCode, errorSummary string,
 	startedAt, completedAt time.Time,
 ) (traffic.Transaction, []traffic.Message) {
 	transactionID := uuid.NewString()
@@ -728,13 +831,17 @@ func (p *Proxy) connectTrafficEvidence(
 	messages := []traffic.Message{
 		empty.message(
 			transactionID, traffic.StageClientRequest, traffic.MessageKindRequest,
-			http.MethodConnect, "/", 0, protocol,
+			http.MethodConnect, authority, 0, protocol,
 			trafficHeaders(request.Header, authority, ""), startedAt,
 		),
-		empty.message(
+	}
+	if clientResponseStatus > 0 {
+		responseCapture := &fullBodyCapture{}
+		_, _ = responseCapture.Write([]byte(clientResponseBody))
+		messages = append(messages, responseCapture.message(
 			transactionID, traffic.StageClientResponse, traffic.MessageKindResponse,
-			"", "", http.StatusOK, "HTTP/1.1", nil, completedAt,
-		),
+			"", "", clientResponseStatus, "HTTP/1.1", trafficHeaders(clientResponseHeaders, "", ""), completedAt,
+		))
 	}
 	return traffic.Transaction{
 		ID:                   transactionID,
@@ -757,7 +864,10 @@ func (p *Proxy) connectTrafficEvidence(
 		Port:                 port,
 		Method:               http.MethodConnect,
 		Path:                 "/",
-		HTTPStatus:           http.StatusOK,
+		HTTPStatus:           clientResponseStatus,
+		Outcome:              event.Outcome,
+		ErrorCode:            errorCode,
+		ErrorSummary:         errorSummary,
 		StartedAt:            startedAt,
 		CompletedAt:          &completedAt,
 		LatencyMS:            event.LatencyMS,
@@ -830,7 +940,7 @@ func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, cli
 		}},
 	})
 	if err := tlsClient.Handshake(); err != nil {
-		return fmt.Errorf("complete inspected TLS handshake: %w", err)
+		return fmt.Errorf("%w: %v", errInspectedClientTLSHandshake, err)
 	}
 	request, err := http.ReadRequest(bufio.NewReader(tlsClient))
 	if err != nil {

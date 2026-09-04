@@ -435,6 +435,68 @@ func TestProxyTLSInspectionBypassMatchesPinnedDomainAndSubdomainsOnly(t *testing
 	}
 }
 
+func TestProxyTLSInspectionAllowsMissingSNIOnlyForExplicitIPTarget(t *testing.T) {
+	const target = "47.116.200.74"
+	policy := testProxyPolicy(t, boundary.Rule{
+		ID: "allow-ip", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: target, Schemes: []string{"https"}, Methods: []string{"GET"}, Ports: []int{443}},
+	})
+	authority, err := GenerateTLSAuthority("conversation-ip", time.Now().UTC(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := NewProxy(policy, ProxyOptions{
+		TLSInspection: &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{}}, TLSAuthority: authority,
+		ConversationID: "conversation-ip", RuntimeMode: traffic.RuntimeModeContainer,
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Host != target+":443" {
+				t.Fatalf("IP inspection target = %s", request.URL)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ip-ok")), Request: request}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM(authority.CertificatePEM) {
+		t.Fatal("append IP inspection CA")
+	}
+	clientSide, proxySide := net.Pipe()
+	writer := &hijackResponseWriter{header: make(http.Header), conn: proxySide, reader: bufio.NewReader(proxySide), writer: bufio.NewWriter(proxySide)}
+	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
+	connect.Host, connect.RequestURI = target+":443", target+":443"
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		proxy.ServeHTTP(writer, connect)
+	}()
+	reader := bufio.NewReader(clientSide)
+	connectResponse, err := http.ReadResponse(reader, &http.Request{Method: http.MethodConnect})
+	if err != nil || connectResponse.StatusCode != http.StatusOK {
+		t.Fatalf("IP CONNECT response = %#v / %v", connectResponse, err)
+	}
+	_ = connectResponse.Body.Close()
+	tlsClient := tls.Client(&replayConn{Conn: clientSide, reader: reader}, &tls.Config{ServerName: target, RootCAs: roots, MinVersion: tls.VersionTLS12})
+	if err := tlsClient.Handshake(); err != nil {
+		t.Fatalf("IP TLS handshake: %v", err)
+	}
+	if _, err := io.WriteString(tlsClient, "GET / HTTP/1.1\r\nHost: "+target+":443\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(tlsClient), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	_ = tlsClient.Close()
+	<-done
+	if response.StatusCode != http.StatusOK || string(body) != "ip-ok" {
+		t.Fatalf("IP inspected response = %d %q", response.StatusCode, body)
+	}
+}
+
 type hijackResponseWriter struct {
 	header http.Header
 	conn   net.Conn
@@ -839,6 +901,53 @@ func TestProxyCONNECTRejectsDeniedMissingAndMismatchedSNIWithoutDial(t *testing.
 	case address := <-dialed:
 		t.Fatalf("invalid CONNECT dialed %q", address)
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+func TestProxyCONNECTPersistsMismatchedSNIWithoutFakeUpstreamResponse(t *testing.T) {
+	policy := testProxyPolicy(t, boundary.Rule{ID: "connect", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example", Schemes: []string{"https"}}})
+	type capturedTraffic struct {
+		transaction traffic.Transaction
+		messages    []traffic.Message
+	}
+	captured := make(chan capturedTraffic, 1)
+	proxy, err := NewProxy(policy, ProxyOptions{
+		ConversationID: "conversation-connect-failure", RuntimeMode: traffic.RuntimeModeContainer,
+		CaptureCoverage: traffic.CaptureCoverageEnforced,
+		TrafficSink: func(_ context.Context, transaction traffic.Transaction, messages []traffic.Message) error {
+			captured <- capturedTraffic{transaction: transaction, messages: append([]traffic.Message(nil), messages...)}
+			return nil
+		},
+		DialContext: func(context.Context, string, string) (net.Conn, error) {
+			t.Fatal("mismatched SNI reached upstream dial")
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+	client := openCONNECT(t, server.Listener.Addr().String(), "allowed.example:443", http.StatusOK)
+	_, _ = client.Write(testClientHello("other.example", 0))
+	_ = client.SetReadDeadline(time.Now().Add(time.Second))
+	_, _ = client.Read(make([]byte, 1))
+	_ = client.Close()
+	select {
+	case result := <-captured:
+		if result.transaction.ErrorCode != "sni_mismatch" || result.transaction.Outcome != "sni_mismatch" || result.transaction.HTTPStatus != http.StatusOK {
+			t.Fatalf("CONNECT failure transaction = %#v", result.transaction)
+		}
+		if len(result.messages) != 2 || result.messages[0].Stage != traffic.StageClientRequest || result.messages[0].Path != "allowed.example:443" || result.messages[1].Stage != traffic.StageClientResponse {
+			t.Fatalf("CONNECT failure messages = %#v", result.messages)
+		}
+		for _, message := range result.messages {
+			if message.Stage == traffic.StageUpstreamResponse {
+				t.Fatalf("failed CONNECT invented an upstream response: %#v", result.messages)
+			}
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed CONNECT traffic evidence was not persisted")
 	}
 }
 

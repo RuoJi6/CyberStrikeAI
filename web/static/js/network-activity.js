@@ -265,16 +265,54 @@
         return t(key, String(value || 'unknown'));
     }
 
+    function conversationRuntimeMode(record) {
+		return record && (record.runtimeMode === 'host' || record.runtimeStatus === 'host_mitm') ? 'host_mitm' : 'container';
+	}
+
+	function conversationTimestamp(record) {
+		for (const value of [record?.updatedAt, record?.startedAt, record?.requestedAt, record?.createdAt]) {
+			const timestamp = new Date(value || '').getTime();
+			if (Number.isFinite(timestamp)) return timestamp;
+		}
+		return 0;
+	}
+
+	function sortConversationRecords(records) {
+		return [...records].sort(function (left, right) {
+			const timeDifference = conversationTimestamp(right) - conversationTimestamp(left);
+			if (timeDifference) return timeDifference;
+			const leftActive = left?.runtimeStatus === 'running' || conversationRuntimeMode(left) === 'host_mitm';
+			const rightActive = right?.runtimeStatus === 'running' || conversationRuntimeMode(right) === 'host_mitm';
+			if (leftActive !== rightActive) return rightActive ? 1 : -1;
+			const titleDifference = String(left?.conversationTitle || '').localeCompare(String(right?.conversationTitle || ''));
+			if (titleDifference) return titleDifference;
+			return String(left?.conversationId || '').localeCompare(String(right?.conversationId || ''));
+		});
+	}
+
+	function conversationOptionLabel(record) {
+		const id = String(record?.conversationId || '');
+		const title = record?.conversationTitle || id || t('untitled', '未命名对话');
+		const runtimeMode = conversationRuntimeMode(record);
+		const runtime = runtimeMode === 'host_mitm'
+			? t('activityRuntimeHostMITM', '本机 MITM')
+			: t('activityRuntimeContainer', '容器');
+		const status = runtimeMode === 'host_mitm'
+			? t('activityStatusLive', '实时')
+			: statusLabel(record?.runtimeStatus || record?.status);
+		return `${title} · ${runtime} · ${status} · ${id.slice(0, 8) || '--------'}`;
+	}
+
     function renderConversationOptions() {
         const select = element('network-activity-conversation');
         if (!select) return;
-        const placeholder = create('option', '', t('activitySelectConversation', '选择一个已创建的对话容器'));
+		const placeholder = create('option', '', t('activitySelectConversation', '选择一个对话'));
         placeholder.value = '';
         select.replaceChildren(placeholder);
         state.conversations.forEach(function (record) {
             const option = create('option');
             option.value = String(record.conversationId || '');
-            option.textContent = `${record.conversationTitle || record.conversationId || t('untitled', '未命名对话')} · ${statusLabel(record.runtimeStatus || record.status)}`;
+			option.textContent = conversationOptionLabel(record);
             select.appendChild(option);
         });
         select.value = state.selectedConversationId;
@@ -730,7 +768,7 @@
                 totalPages = Math.min(100, Math.max(1, Number(payload.totalPages || 1)));
                 page += 1;
             } while (page <= totalPages);
-            state.conversations = records.filter(function (record) {
+			state.conversations = records.filter(function (record) {
                 return record && record.status === 'created' && record.desired && record.desired.gatewayImageDigest;
             });
             try {
@@ -738,9 +776,14 @@
                 const known = new Set(state.conversations.map((record) => String(record.conversationId || '')));
                 (Array.isArray(conversations.conversations) ? conversations.conversations : []).forEach(function (conversation) {
                     if (!conversation || conversation.runtimeMode !== 'host' || known.has(String(conversation.id || ''))) return;
-                    state.conversations.push({ conversationId: conversation.id, conversationTitle: conversation.title, status: 'created', runtimeStatus: 'host_mitm' });
+					state.conversations.push({
+						conversationId: conversation.id, conversationTitle: conversation.title,
+						status: 'created', runtimeStatus: 'host_mitm', runtimeMode: 'host',
+						createdAt: conversation.createdAt, updatedAt: conversation.updatedAt,
+					});
                 });
             } catch (_) { /* container-only fallback */ }
+			state.conversations = sortConversationRecords(state.conversations);
             if (!state.conversations.some((record) => record.conversationId === state.selectedConversationId)) {
                 const preferred = state.conversations.find((record) => record.runtimeStatus === 'running') || state.conversations[0];
                 state.selectedConversationId = preferred ? String(preferred.conversationId) : '';
@@ -902,6 +945,8 @@
         activityEventKey,
         shouldShowConnectingForTest: shouldShowConnecting,
         connectionStatusNeedsUpdateForTest: connectionStatusNeedsUpdate,
+		conversationOptionLabelForTest: conversationOptionLabel,
+		sortConversationRecordsForTest: sortConversationRecords,
         readyStabilityMsForTest: READY_STABILITY_MS,
         maxRenderedEventsForTest: MAX_RENDERED_EVENTS,
         renderThrottleMsForTest: RENDER_THROTTLE_MS,

@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS traffic_transactions (
 	method TEXT NOT NULL,
 	path TEXT NOT NULL,
 	http_status INTEGER NOT NULL DEFAULT 0 CHECK (http_status >= 0 AND http_status <= 999),
+	outcome TEXT NOT NULL DEFAULT '',
+	error_code TEXT NOT NULL DEFAULT '',
+	error_summary TEXT NOT NULL DEFAULT '',
 	started_at DATETIME NOT NULL,
 	completed_at DATETIME,
 	latency_ms INTEGER NOT NULL DEFAULT 0 CHECK (latency_ms >= 0),
@@ -117,9 +120,12 @@ func (db *DB) initTrafficTables() error {
 		{"attribution_status", `ALTER TABLE traffic_transactions ADD COLUMN attribution_status TEXT NOT NULL DEFAULT 'legacy_unattributed'`},
 		{"declared_activity_kind", `ALTER TABLE traffic_transactions ADD COLUMN declared_activity_kind TEXT NOT NULL DEFAULT 'unknown'`},
 		{"observed_activity_kind", `ALTER TABLE traffic_transactions ADD COLUMN observed_activity_kind TEXT NOT NULL DEFAULT 'single'`},
+		{"outcome", `ALTER TABLE traffic_transactions ADD COLUMN outcome TEXT NOT NULL DEFAULT ''`},
+		{"error_code", `ALTER TABLE traffic_transactions ADD COLUMN error_code TEXT NOT NULL DEFAULT ''`},
+		{"error_summary", `ALTER TABLE traffic_transactions ADD COLUMN error_summary TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := db.addColumnIfMissing("traffic_transactions", column.name, column.statement); err != nil {
-			return fmt.Errorf("initialize traffic provenance column %s: %w", column.name, err)
+			return fmt.Errorf("initialize traffic transaction column %s: %w", column.name, err)
 		}
 	}
 	for _, statement := range []string{
@@ -170,7 +176,8 @@ func scanTrafficTransaction(scanner trafficTransactionScanner) (traffic.Transact
 		&item.ID, &item.EventID, &conversationID, &projectID, &item.AgentID, &item.ToolName, &item.ExecutionID, &item.ToolCallID, &item.ActivityScopeID,
 		&item.RuntimeGeneration, &item.RuntimeInstanceID, &item.AttributionStatus, &item.DeclaredActivityKind, &item.ObservedActivityKind,
 		&item.RuntimeMode, &item.CaptureCoverage, &item.Scheme, &item.Host, &item.Port, &item.Method, &item.Path,
-		&item.HTTPStatus, &item.StartedAt, &completedAt, &item.LatencyMS, &item.BytesUp, &item.BytesDown,
+		&item.HTTPStatus, &item.Outcome, &item.ErrorCode, &item.ErrorSummary,
+		&item.StartedAt, &completedAt, &item.LatencyMS, &item.BytesUp, &item.BytesDown,
 		&item.BoundarySnapshotID, &item.RuleID, &item.UpstreamRouteID,
 		&item.TransformBindingID, &item.TransformRevisionID, &item.TransformResult,
 		&item.AggregateKind, &item.AggregateCount, &aggregateFirstAt, &aggregateLastAt, &item.AggregateSummaryJSON,
@@ -200,7 +207,7 @@ const trafficTransactionSelect = `
 	SELECT id, event_id, conversation_id, project_id, agent_id, tool_name, execution_id, tool_call_id, activity_scope_id,
 		CAST(COALESCE(NULLIF(TRIM(runtime_generation), ''), '0') AS INTEGER) AS runtime_generation,
 		runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
-		runtime_mode, capture_coverage, scheme, host, port, method, path, http_status,
+		runtime_mode, capture_coverage, scheme, host, port, method, path, http_status, outcome, error_code, error_summary,
 		started_at, completed_at, latency_ms, bytes_up, bytes_down,
 		boundary_snapshot_id, rule_id, upstream_route_id,
 		transform_binding_id, transform_revision_id, transform_result,
@@ -308,16 +315,16 @@ func (db *DB) CreateTrafficTransaction(ctx context.Context, item *traffic.Transa
 		INSERT INTO traffic_transactions (
 			id, event_id, conversation_id, project_id, agent_id, tool_name, execution_id, tool_call_id, activity_scope_id,
 			runtime_generation, runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
-			runtime_mode, capture_coverage, scheme, host, port, method, path, http_status,
+			runtime_mode, capture_coverage, scheme, host, port, method, path, http_status, outcome, error_code, error_summary,
 			started_at, completed_at, latency_ms, bytes_up, bytes_down,
 			boundary_snapshot_id, rule_id, upstream_route_id,
 			transform_binding_id, transform_revision_id, transform_result,
 			aggregate_kind, aggregate_count, aggregate_first_at, aggregate_last_at, aggregate_summary_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, copyItem.ID, copyItem.EventID, nullIfEmpty(copyItem.ConversationID), nullIfEmpty(copyItem.ProjectID), copyItem.AgentID, copyItem.ToolName, copyItem.ExecutionID, copyItem.ToolCallID, copyItem.ActivityScopeID,
 		copyItem.RuntimeGeneration, copyItem.RuntimeInstanceID, copyItem.AttributionStatus, copyItem.DeclaredActivityKind, copyItem.ObservedActivityKind,
-		copyItem.RuntimeMode, copyItem.CaptureCoverage, copyItem.Scheme, copyItem.Host, copyItem.Port, copyItem.Method, copyItem.Path, copyItem.HTTPStatus,
+		copyItem.RuntimeMode, copyItem.CaptureCoverage, copyItem.Scheme, copyItem.Host, copyItem.Port, copyItem.Method, copyItem.Path, copyItem.HTTPStatus, copyItem.Outcome, copyItem.ErrorCode, copyItem.ErrorSummary,
 		copyItem.StartedAt, copyItem.CompletedAt, copyItem.LatencyMS, copyItem.BytesUp, copyItem.BytesDown,
 		copyItem.BoundarySnapshotID, copyItem.RuleID, copyItem.UpstreamRouteID,
 		copyItem.TransformBindingID, copyItem.TransformRevisionID, copyItem.TransformResult,

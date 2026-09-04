@@ -81,6 +81,23 @@ func TestReadClientHelloSNIRejectsIPAndNonASCIINames(t *testing.T) {
 	}
 }
 
+func TestReadClientHelloForIPTargetAllowsOnlyMissingSNI(t *testing.T) {
+	wire := testClientHelloWithExtensions(nil, 0)
+	raw, serverName, err := readClientHelloForTarget(bytes.NewReader(wire), defaultMaxClientHello, "47.116.200.74")
+	if err != nil || serverName != "" || !bytes.Equal(raw, wire) {
+		t.Fatalf("IP ClientHello = name %q / raw %v / error %v", serverName, bytes.Equal(raw, wire), err)
+	}
+	if !clientHelloMatchesTarget("", "47.116.200.74") {
+		t.Fatal("missing SNI must be accepted for an explicit IP CONNECT target")
+	}
+	if clientHelloMatchesTarget("other.example", "47.116.200.74") || clientHelloMatchesTarget("", "allowed.example") {
+		t.Fatal("missing or different SNI must not be accepted for a DNS CONNECT target")
+	}
+	if _, _, err := readClientHelloForTarget(bytes.NewReader(wire), defaultMaxClientHello, "allowed.example"); !errors.Is(err, ErrInvalidClientHello) {
+		t.Fatalf("DNS target missing SNI error = %v", err)
+	}
+}
+
 func testClientHello(serverName string, split int) []byte {
 	return testClientHelloWithExtensions(testSNIExtension(serverName), split)
 }

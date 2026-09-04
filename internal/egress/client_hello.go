@@ -27,6 +27,18 @@ var ErrInvalidClientHello = errors.New("invalid TLS ClientHello")
 // first ClientHello. raw contains every consumed byte so the proxy can forward
 // the handshake unchanged after policy and SNI validation.
 func readClientHelloSNI(reader io.Reader, maxBytes int) ([]byte, string, error) {
+	return readClientHello(reader, maxBytes, false)
+}
+
+// readClientHelloForTarget permits a missing DNS SNI only when CONNECT is
+// explicitly addressed to an IP literal. A different DNS name is never
+// accepted for an IP target, so an absent SNI cannot redirect the connection.
+func readClientHelloForTarget(reader io.Reader, maxBytes int, targetHost string) ([]byte, string, error) {
+	_, addressErr := netip.ParseAddr(strings.TrimSpace(targetHost))
+	return readClientHello(reader, maxBytes, addressErr == nil)
+}
+
+func readClientHello(reader io.Reader, maxBytes int, allowMissingSNI bool) ([]byte, string, error) {
 	if reader == nil {
 		return nil, "", fmt.Errorf("%w: reader is required", ErrInvalidClientHello)
 	}
@@ -64,14 +76,14 @@ func readClientHelloSNI(reader io.Reader, maxBytes int) ([]byte, string, error) 
 			}
 		}
 	}
-	serverName, err := parseClientHelloServerName(handshake[4:expectedHandshakeBytes])
+	serverName, err := parseClientHelloServerName(handshake[4:expectedHandshakeBytes], allowMissingSNI)
 	if err != nil {
 		return nil, "", err
 	}
 	return raw, serverName, nil
 }
 
-func parseClientHelloServerName(body []byte) (string, error) {
+func parseClientHelloServerName(body []byte, allowMissingSNI bool) (string, error) {
 	// legacy_version + random + session id length
 	if len(body) < 2+32+1 {
 		return "", fmt.Errorf("%w: truncated ClientHello", ErrInvalidClientHello)
@@ -97,7 +109,7 @@ func parseClientHelloServerName(body []byte) (string, error) {
 	position += compressionBytes
 	extensionBytes := int(binary.BigEndian.Uint16(body[position : position+2]))
 	position += 2
-	if extensionBytes == 0 || position+extensionBytes != len(body) {
+	if position+extensionBytes != len(body) || (extensionBytes == 0 && !allowMissingSNI) {
 		return "", fmt.Errorf("%w: invalid ClientHello extensions", ErrInvalidClientHello)
 	}
 	extensions := body[position:]
@@ -132,9 +144,24 @@ func parseClientHelloServerName(body []byte) (string, error) {
 		serverName = parsed
 	}
 	if serverName == "" {
+		if allowMissingSNI {
+			return "", nil
+		}
 		return "", fmt.Errorf("%w: ClientHello has no DNS SNI", ErrInvalidClientHello)
 	}
 	return serverName, nil
+}
+
+func clientHelloMatchesTarget(serverName, targetHost string) bool {
+	targetHost = strings.TrimSpace(targetHost)
+	if address, err := netip.ParseAddr(targetHost); err == nil {
+		if serverName == "" {
+			return true
+		}
+		serverAddress, parseErr := netip.ParseAddr(strings.TrimSpace(serverName))
+		return parseErr == nil && serverAddress == address
+	}
+	return serverName != "" && strings.EqualFold(strings.TrimSuffix(serverName, "."), strings.TrimSuffix(targetHost, "."))
 }
 
 func parseServerNameExtension(value []byte) (string, error) {

@@ -389,6 +389,8 @@ func compactGroupKey(item traffic.Transaction) string {
 		strings.TrimSpace(item.AttributionStatus),
 		strings.TrimSpace(item.DeclaredActivityKind),
 		strings.TrimSpace(item.UpstreamRouteID),
+		strings.TrimSpace(item.Outcome),
+		strings.TrimSpace(item.ErrorCode),
 	}, "|")
 }
 

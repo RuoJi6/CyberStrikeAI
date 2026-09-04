@@ -88,6 +88,7 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 		RuntimeMode: traffic.RuntimeModeContainer, CaptureCoverage: traffic.CaptureCoverageEnforced,
 		Scheme: "https", Host: "API.Example.Test", Port: 443, Method: "post", Path: "/v1/encrypted",
 		HTTPStatus: 200, StartedAt: started, CompletedAt: &completed, LatencyMS: 25, BytesUp: 4, BytesDown: 5,
+		Outcome: "response_interrupted", ErrorCode: "response_interrupted", ErrorSummary: "The upstream response ended before its body was complete",
 	}
 	detail, err := db.CreateTrafficTransaction(ctx, item, []traffic.Message{
 		testTrafficMessage(traffic.StageClientRequest, traffic.MessageKindRequest, "POST", "/v1/encrypted", 0, []byte{0, 1, 2, 3}),
@@ -96,13 +97,16 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 	if err != nil {
 		t.Fatalf("CreateTrafficTransaction: %v", err)
 	}
-	if detail.Transaction.EventID != "event-traffic-1" || detail.Transaction.Host != "api.example.test" || detail.Transaction.Method != "POST" || len(detail.Messages) != 2 {
+	if detail.Transaction.EventID != "event-traffic-1" || detail.Transaction.Host != "api.example.test" || detail.Transaction.Method != "POST" || detail.Transaction.ErrorCode != "response_interrupted" || len(detail.Messages) != 2 {
 		t.Fatalf("created detail = %#v", detail)
 	}
 
 	loaded, err := db.GetTrafficTransaction(ctx, item.ID)
 	if err != nil {
 		t.Fatalf("GetTrafficTransaction: %v", err)
+	}
+	if loaded.Transaction.Outcome != "response_interrupted" || loaded.Transaction.ErrorSummary == "" {
+		t.Fatalf("loaded failure metadata = %#v", loaded.Transaction)
 	}
 	requestBody, err := traffic.DecodeBody(loaded.Messages[0])
 	if err != nil || len(requestBody) != 4 || requestBody[2] != 2 || !loaded.Messages[0].Complete {

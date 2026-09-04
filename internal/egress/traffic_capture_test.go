@@ -3,9 +3,13 @@ package egress
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -179,6 +183,7 @@ func TestConnectTrafficEvidenceStoresTunnelMetadataWithoutClaimingDecodedHTTP(t 
 	item, messages := proxy.connectTrafficEvidence(
 		request, trafficAttribution{provenance: networkprovenance.NetworkProvenanceV1{AgentID: "agent-1"}.Normalized()}, "example.org:443", "example.org", 443,
 		ActivityEvent{LatencyMS: 1000, BytesUp: 2048, BytesDown: 4096, RuleID: "allow"},
+		http.StatusOK, nil, "", "", "",
 		startedAt, completedAt,
 	)
 	if item.Method != http.MethodConnect || item.Scheme != "https" || item.Host != "example.org" ||
@@ -189,5 +194,100 @@ func TestConnectTrafficEvidenceStoresTunnelMetadataWithoutClaimingDecodedHTTP(t 
 		messages[1].Stage != traffic.StageClientResponse || messages[0].BodyLength != 0 ||
 		messages[1].BodyLength != 0 || !messages[0].Complete || !messages[1].Complete {
 		t.Fatalf("CONNECT messages = %#v", messages)
+	}
+}
+
+func TestProxyCapturesRequestWhenUpstreamResponseIsNotEstablished(t *testing.T) {
+	var captured traffic.Transaction
+	var messages []traffic.Message
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
+		ID: "allow-failure", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: "failure.example", Schemes: []string{"http"}, Methods: []string{"GET"}},
+	}), ProxyOptions{
+		ConversationID: "conversation-failure", RuntimeMode: traffic.RuntimeModeContainer,
+		CaptureCoverage: traffic.CaptureCoverageEnforced,
+		TrafficSink: func(_ context.Context, item traffic.Transaction, capturedMessages []traffic.Message) error {
+			captured, messages = item, append([]traffic.Message(nil), capturedMessages...)
+			return nil
+		},
+		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &net.DNSError{Err: "no such host", Name: "failure.example"}
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://failure.example/path?q=1", nil))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+	if captured.ErrorCode != "dns_failed" || captured.Outcome != "dns_failed" || captured.HTTPStatus != http.StatusBadGateway || captured.ErrorSummary == "" {
+		t.Fatalf("failed transaction = %#v", captured)
+	}
+	if len(messages) != 1 || messages[0].Stage != traffic.StageUpstreamRequest || messages[0].Path != "/path?q=1" {
+		t.Fatalf("failed messages = %#v", messages)
+	}
+}
+
+type interruptedBody struct {
+	read bool
+}
+
+func (body *interruptedBody) Read(content []byte) (int, error) {
+	if body.read {
+		return 0, errors.New("connection reset")
+	}
+	body.read = true
+	return copy(content, []byte("partial")), nil
+}
+
+func (*interruptedBody) Close() error { return nil }
+
+func TestProxyMarksInterruptedUpstreamResponseIncomplete(t *testing.T) {
+	var captured traffic.Transaction
+	var messages []traffic.Message
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
+		ID: "allow-interrupted", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: "interrupted.example", Schemes: []string{"http"}, Methods: []string{"GET"}},
+	}), ProxyOptions{
+		ConversationID: "conversation-interrupted", RuntimeMode: traffic.RuntimeModeHost,
+		CaptureCoverage: traffic.CaptureCoverageBestEffort,
+		TrafficSink: func(_ context.Context, item traffic.Transaction, capturedMessages []traffic.Message) error {
+			captured, messages = item, append([]traffic.Message(nil), capturedMessages...)
+			return nil
+		},
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1", Header: make(http.Header), Body: &interruptedBody{}, Request: request}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://interrupted.example/", nil))
+	if captured.ErrorCode != "response_interrupted" || captured.Outcome != "response_interrupted" {
+		t.Fatalf("interrupted transaction = %#v", captured)
+	}
+	if len(messages) != 2 || messages[1].Stage != traffic.StageUpstreamResponse || messages[1].Complete {
+		t.Fatalf("interrupted messages = %#v", messages)
+	}
+}
+
+func TestTrafficFailureClassificationIsStableAndSafe(t *testing.T) {
+	deadline := fmt.Errorf("wrapped: %w", context.DeadlineExceeded)
+	for _, test := range []struct {
+		err  error
+		code string
+	}{
+		{deadline, "upstream_timeout"},
+		{&net.DNSError{Err: "server misbehaving", Name: "example.test"}, "dns_failed"},
+		{&net.OpError{Op: "dial", Net: "tcp", Err: errors.New("refused")}, "upstream_connect_failed"},
+		{errors.New("tls: handshake failure"), "tls_handshake_failed"},
+	} {
+		code, summary := classifyTrafficFailure(test.err)
+		if code != test.code || summary == "" || strings.Contains(summary, test.err.Error()) {
+			t.Fatalf("classify %T = %q / %q", test.err, code, summary)
+		}
 	}
 }

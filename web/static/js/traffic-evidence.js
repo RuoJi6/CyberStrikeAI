@@ -110,7 +110,8 @@
 
             const statusCell = create('td');
             const status = Number(item.http_status || 0);
-            statusCell.appendChild(create('span', `traffic-evidence-status-code${status >= 400 ? ' is-error' : ''}`, status || '-'));
+			const failed = Boolean(item.error_code);
+			statusCell.appendChild(create('span', `traffic-evidence-status-code${status >= 400 || failed ? ' is-error' : ''}`, status || '-'));
             row.appendChild(statusCell);
 
 			const transformCell = create('td');
@@ -140,7 +141,11 @@
 
             const storageCell = create('td');
             const aggregateCount = Number(item.aggregate_count || 0);
-            if (aggregateCount > 1) {
+			if (item.error_code) {
+				const failure = create('span', 'traffic-evidence-failure', item.error_code);
+				failure.title = item.error_summary || item.outcome || '上游响应未建立';
+				storageCell.appendChild(failure);
+			} else if (aggregateCount > 1) {
 				const aggregateLabels = { 'web-fuzz': 'Fuzz（已声明）', 'path-sweep': '疑似路径扫描', 'unattributed-path-sweep': '未归因路径扫描', 'request-burst': '高频请求' };
 				const aggregateKind = aggregateLabels[item.aggregate_kind] || '高频请求';
                 const aggregate = create('span', 'traffic-evidence-aggregate', `${aggregateKind} × ${aggregateCount}`);
@@ -271,6 +276,14 @@
         const aggregateMeta = aggregateCount > 1 ? ` · ${transaction.aggregate_kind || 'aggregate'} × ${aggregateCount}（当前为完整代表包）` : '';
 		setText(byId('traffic-evidence-detail-meta'), `${transaction.id || '-'} · event ${transaction.event_id || '—'} · ${transaction.scheme || ''}://${transaction.host || ''}${transaction.path || ''}${aggregateMeta}`);
 		const transformed = Boolean(transaction.transform_result || transaction.transform_binding_id || transaction.transform_revision_id);
+		const messages = Array.isArray(payload.messages) ? payload.messages : [];
+		if (transaction.error_code) {
+			const failureCard = create('section', 'traffic-evidence-failure-summary');
+			failureCard.appendChild(create('strong', '', messages.some((message) => message.stage === 'upstream_response') ? '上游响应未完整结束' : '上游响应未建立'));
+			failureCard.appendChild(create('span', '', transaction.error_code));
+			if (transaction.error_summary) failureCard.appendChild(create('p', '', transaction.error_summary));
+			stages.appendChild(failureCard);
+		}
 		if (transformed) {
 			const transformCard = create('section', 'traffic-evidence-transform-summary');
 			const heading = create('div', 'traffic-evidence-transform-summary-head');
@@ -293,7 +306,7 @@
             if (paths.length) summaryCard.appendChild(create('code', '', paths.join('\n')));
             stages.appendChild(summaryCard);
         }
-        (Array.isArray(payload.messages) ? payload.messages : []).forEach((message) => {
+		messages.forEach((message) => {
 			const decodedStage = message.stage === 'decoded_request' || message.stage === 'decoded_response';
             const card = create('section', `traffic-evidence-packet${decodedStage ? ' is-transform-output' : ''}`);
             const head = create('div', 'traffic-evidence-packet-head');

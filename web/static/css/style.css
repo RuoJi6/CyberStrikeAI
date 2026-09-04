@@ -3859,6 +3859,10 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .traffic-evidence-packet pre { min-height: 260px; max-height: 58vh; margin: 0; padding: 14px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; -webkit-overflow-scrolling: touch; background: #111827; color: #d1fae5; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
 .traffic-evidence-packet-truncation { display: flex; flex: 0 0 auto; justify-content: space-between; gap: 12px; padding: 9px 13px; border-top: 1px solid #f0b4ae; background: #fff1f0; color: #912018; font-size: 12px; }
 .traffic-evidence-packet-truncation strong { font-weight: 800; }
+.traffic-evidence-failure { display: inline-flex; max-width: 190px; padding: 4px 8px; overflow: hidden; border-radius: 999px; background: #fee4e2; color: #b42318; font-size: 11px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+.traffic-evidence-failure-summary { grid-column: 1 / -1; display: grid; grid-template-columns: auto auto 1fr; gap: 8px 12px; align-items: center; padding: 13px 15px; border: 1px solid #f2aaa4; border-radius: 10px; background: #fff1f0; color: #912018; }
+.traffic-evidence-failure-summary span { font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.traffic-evidence-failure-summary p { grid-column: 1 / -1; margin: 0; font-size: 12px; }
 .vulnerability-traffic-evidence { position: relative; width: fit-content; max-width: 100%; margin-top: 14px; }
 .vulnerability-traffic-evidence-trigger { display: inline-flex; align-items: center; gap: 7px; min-height: 36px; padding: 7px 11px; border: 1px solid #b8d9d4; border-radius: 9px; background: #f4fbfa; color: #17645b; font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; transition: border-color .16s ease, background .16s ease, box-shadow .16s ease; }
 .vulnerability-traffic-evidence-trigger:hover:not(:disabled) { border-color: #5bb5aa; background: #eaf8f5; box-shadow: 0 2px 8px rgba(15, 118, 110, .1); }
@@ -3895,6 +3899,9 @@ html[data-theme="dark"] .sidebar-content:hover::-webkit-scrollbar-thumb:hover {
 .vulnerability-packet-message-copy.is-copied { border-color: #82cbbf; background: #e8f7f3; color: #126358; }
 .vulnerability-packet-message pre { min-height: 260px; max-height: 62vh; margin: 0; padding: 13px; overflow: auto; overscroll-behavior: contain; scrollbar-gutter: stable both-edges; background: #111827; color: #d1fae5; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
 .vulnerability-packet-truncation { display: flex; flex: 0 0 auto; justify-content: space-between; gap: 10px; padding: 8px 12px; border-top: 1px solid #f0b4ae; background: #fff1f0; color: #912018; font-size: 11px; }
+.vulnerability-packet-failure { grid-column: 1 / -1; display: grid; grid-template-columns: auto auto 1fr; gap: 8px 12px; align-items: center; padding: 12px 14px; border: 1px solid #f2aaa4; border-radius: 10px; background: #fff1f0; color: #912018; }
+.vulnerability-packet-failure span { font: 700 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.vulnerability-packet-failure p { grid-column: 1 / -1; margin: 0; font-size: 11px; }
 .vulnerability-packet-empty { grid-column: 1 / -1; display: grid; min-height: 180px; place-items: center; color: #667085; font-size: 13px; text-align: center; }
 
 html[data-theme="dark"] .traffic-evidence-page { --traffic-ink: #e6edf7; --traffic-muted: #9ba8bb; --traffic-line: #334155; --traffic-panel: #182231; background: #111827; }
@@ -3910,6 +3917,7 @@ html[data-theme="dark"] .traffic-evidence-transform-summary { border-color: #267
 html[data-theme="dark"] .traffic-evidence-detail-dialog { border-color: #334155; background: #111827; }
 html[data-theme="dark"] .traffic-evidence-detail-head, html[data-theme="dark"] .traffic-evidence-packet { background: #182231; }
 html[data-theme="dark"] .traffic-evidence-packet-truncation { border-color: #7f3631; background: #3a1d1d; color: #ffb4ac; }
+html[data-theme="dark"] .traffic-evidence-failure, html[data-theme="dark"] .traffic-evidence-failure-summary { border-color: #7f3631; background: #3a1d1d; color: #ffb4ac; }
 html[data-theme="dark"] .traffic-evidence-aggregate-summary { border-color: #725b2d; background: #312814; color: #f4d89a; }
 html[data-theme="dark"] .vulnerability-traffic-evidence-trigger { border-color: #315a55; background: #132d2a; color: #99e3d9; }
 html[data-theme="dark"] .vulnerability-traffic-evidence-count { background: #214943; color: #b8eee6; }
@@ -3925,6 +3933,7 @@ html[data-theme="dark"] .vulnerability-packet-message-head { border-color: #3341
 html[data-theme="dark"] .vulnerability-packet-message-copy { border-color: #475569; background: #111827; color: #cbd5e1; }
 html[data-theme="dark"] .vulnerability-packet-message-copy:hover:not(:disabled), html[data-theme="dark"] .vulnerability-packet-message-copy.is-copied { border-color: #376e68; background: #173936; color: #a7eee5; }
 html[data-theme="dark"] .vulnerability-packet-truncation { border-color: #7f3631; background: #3a1d1d; color: #ffb4ac; }
+html[data-theme="dark"] .vulnerability-packet-failure { border-color: #7f3631; background: #3a1d1d; color: #ffb4ac; }
 
 @media (max-width: 900px) {
     .traffic-evidence-controls { grid-template-columns: 1fr 1fr; }

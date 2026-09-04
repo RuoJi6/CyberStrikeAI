@@ -81,6 +81,9 @@ type Transaction struct {
 	Method               string     `json:"method"`
 	Path                 string     `json:"path"`
 	HTTPStatus           int        `json:"http_status,omitempty"`
+	Outcome              string     `json:"outcome,omitempty"`
+	ErrorCode            string     `json:"error_code,omitempty"`
+	ErrorSummary         string     `json:"error_summary,omitempty"`
 	StartedAt            time.Time  `json:"started_at"`
 	CompletedAt          *time.Time `json:"completed_at,omitempty"`
 	LatencyMS            int64      `json:"latency_ms"`
@@ -260,7 +263,11 @@ func ValidateMessage(message Message) error {
 		}
 	}
 	if message.Kind == MessageKindRequest {
-		if strings.TrimSpace(message.Method) == "" || !strings.HasPrefix(message.Path, "/") || message.Status != 0 {
+		validTarget := strings.HasPrefix(message.Path, "/")
+		if strings.EqualFold(message.Method, http.MethodConnect) {
+			validTarget = strings.TrimSpace(message.Path) == message.Path && message.Path != "" && !strings.ContainsAny(message.Path, " \t\r\n\x00")
+		}
+		if strings.TrimSpace(message.Method) == "" || !validTarget || message.Status != 0 {
 			return errors.New("invalid traffic request message")
 		}
 	} else if message.Status < 100 || message.Status > 999 {
@@ -287,6 +294,19 @@ func ValidateTransaction(transaction Transaction) error {
 	}
 	if transaction.HTTPStatus < 0 || transaction.HTTPStatus > 999 || transaction.LatencyMS < 0 || transaction.BytesUp < 0 || transaction.BytesDown < 0 || transaction.AggregateCount < 0 {
 		return errors.New("traffic transaction numeric values are invalid")
+	}
+	for _, value := range []struct {
+		name  string
+		text  string
+		limit int
+	}{
+		{name: "outcome", text: transaction.Outcome, limit: 128},
+		{name: "error code", text: transaction.ErrorCode, limit: 128},
+		{name: "error summary", text: transaction.ErrorSummary, limit: 1024},
+	} {
+		if len(value.text) > value.limit || strings.TrimSpace(value.text) != value.text || strings.ContainsAny(value.text, "\r\n\x00") {
+			return fmt.Errorf("traffic transaction %s is invalid", value.name)
+		}
 	}
 	if transaction.StartedAt.IsZero() {
 		return errors.New("traffic transaction start time is required")
