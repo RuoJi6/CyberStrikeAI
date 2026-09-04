@@ -1064,7 +1064,15 @@ func egressGatewaySpecFromAgentLabels(labels map[string]string) (*EgressGatewayS
 	snapshotID := strings.TrimSpace(labels[LabelEgressSnapshotID])
 	snapshotSHA256 := strings.TrimSpace(labels[LabelEgressSnapshotSHA256])
 	if snapshotID != "" || snapshotSHA256 != "" {
-		gateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{ID: snapshotID, SHA256: snapshotSHA256}
+		// Signed attribution and the immutable policy snapshot advance as one
+		// runtime generation. The generation is not stored in a separate Docker
+		// label, so reconstruct it from the already validated attribution label.
+		// Without this value a restart cannot safely adopt a rebuild that reached
+		// Docker but was interrupted before the database transaction committed.
+		gateway.BoundarySnapshot = &EgressBoundarySnapshotSpec{
+			ID: snapshotID, SHA256: snapshotSHA256,
+			RuntimeGeneration: gateway.AttributionRuntimeGeneration,
+		}
 	}
 	routeID := strings.TrimSpace(labels[LabelEgressUpstreamRouteID])
 	routeSHA256 := strings.TrimSpace(labels[LabelEgressUpstreamSHA256])

@@ -442,6 +442,14 @@ func TestEgressGatewayEnvironmentBindsAttributionGenerationAndInstance(t *testin
 		values["CYBERSTRIKE_ATTRIBUTION_INSTANCE_ID"] != spec.EgressGateway.AttributionInstanceID {
 		t.Fatalf("attribution environment = %#v", values)
 	}
+	reconstructed, err := egressGatewaySpecFromAgentLabels(runtimeLabels("instance-01", spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconstructed == nil || reconstructed.BoundarySnapshot == nil ||
+		reconstructed.AttributionRuntimeGeneration != 7 || reconstructed.BoundarySnapshot.RuntimeGeneration != 7 {
+		t.Fatalf("reconstructed attribution snapshot generation = %#v", reconstructed)
+	}
 }
 
 func TestEgressGatewayNetworkingConfigBindsSignedProxyDNSAlias(t *testing.T) {
