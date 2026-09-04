@@ -309,12 +309,13 @@ func TestProxyReportsRestrictedResolutionAsSystemBoundaryDenial(t *testing.T) {
 }
 
 func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t *testing.T) {
-	policy := testProxyPolicy(t,
-		boundary.Rule{ID: "allow-safe", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"GET"}, PathPrefixes: []string{"/safe"}}},
-		boundary.Rule{ID: "allow-upload", Effect: boundary.EffectAllowAttack, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"POST"}, PathPrefixes: []string{"/upload"}}},
+	policy, err := boundary.NewPolicyWithDefault([]boundary.Rule{
 		boundary.Rule{ID: "block-admin", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"/admin/*"}}},
 		boundary.Rule{ID: "block-admin-exact", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"=/admin/exact"}}},
-	)
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
 	authority, err := GenerateTLSAuthority("conversation-one", time.Now().UTC(), time.Hour)
 	if err != nil {
 		t.Fatal(err)

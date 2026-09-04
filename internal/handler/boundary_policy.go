@@ -31,6 +31,7 @@ type boundaryPolicySummary struct {
 	ID                   string    `json:"id"`
 	Name                 string    `json:"name"`
 	Description          string    `json:"description"`
+	DefaultAction        string    `json:"defaultAction"`
 	TLSInspectionEnabled bool      `json:"tlsInspectionEnabled"`
 	RuleCount            int       `json:"ruleCount"`
 	Protocols            []string  `json:"protocols"`
@@ -42,6 +43,7 @@ type boundaryPolicyDetail struct {
 	ID                   string                        `json:"id"`
 	Name                 string                        `json:"name"`
 	Description          string                        `json:"description"`
+	DefaultAction        string                        `json:"defaultAction"`
 	TLSInspectionEnabled bool                          `json:"tlsInspectionEnabled"`
 	TLSBypassDomains     []string                      `json:"tlsBypassDomains"`
 	UpdatedAt            time.Time                     `json:"updatedAt"`
@@ -51,6 +53,7 @@ type boundaryPolicyDetail struct {
 type boundaryPolicyWriteRequest struct {
 	Name             string   `json:"name" binding:"required"`
 	Description      string   `json:"description"`
+	DefaultAction    string   `json:"defaultAction"`
 	TLSBypassDomains []string `json:"tlsBypassDomains"`
 }
 
@@ -165,6 +168,7 @@ func (h *BoundaryPolicyHandler) List(c *gin.Context) {
 		}
 		items = append(items, boundaryPolicySummary{
 			ID: policy.ID, Name: policy.Name, Description: policy.Description,
+			DefaultAction:        policy.DefaultAction,
 			TLSInspectionEnabled: policy.TLSInspectionEnabled, RuleCount: len(rules),
 			Protocols: protocols, UsageCount: usageCount, UpdatedAt: policy.UpdatedAt,
 		})
@@ -224,6 +228,7 @@ func (h *BoundaryPolicyHandler) Get(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, boundaryPolicyDetail{
 		ID: policy.ID, Name: policy.Name, Description: policy.Description,
+		DefaultAction:        policy.DefaultAction,
 		TLSInspectionEnabled: policy.TLSInspectionEnabled, TLSBypassDomains: policy.TLSBypassDomains,
 		UpdatedAt: policy.UpdatedAt, Rules: rules,
 	})
@@ -242,6 +247,7 @@ func (h *BoundaryPolicyHandler) Create(c *gin.Context) {
 	}
 	created, err := h.db.CreateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
 		Name: request.Name, Description: request.Description, OwnerUserID: session.UserID,
+		DefaultAction:        request.DefaultAction,
 		TLSInspectionEnabled: true, TLSBypassDomains: request.TLSBypassDomains,
 	})
 	if err != nil {
@@ -250,6 +256,7 @@ func (h *BoundaryPolicyHandler) Create(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, boundaryPolicyDetail{
 		ID: created.ID, Name: created.Name, Description: created.Description,
+		DefaultAction:        created.DefaultAction,
 		TLSInspectionEnabled: created.TLSInspectionEnabled, TLSBypassDomains: created.TLSBypassDomains,
 		UpdatedAt: created.UpdatedAt, Rules: []database.BoundaryPolicyRule{},
 	})
@@ -263,6 +270,7 @@ func (h *BoundaryPolicyHandler) Update(c *gin.Context) {
 	}
 	updated, err := h.db.UpdateBoundaryPolicy(c.Request.Context(), database.BoundaryPolicy{
 		ID: strings.TrimSpace(c.Param("id")), Name: request.Name, Description: request.Description,
+		DefaultAction:        request.DefaultAction,
 		TLSInspectionEnabled: true, TLSBypassDomains: request.TLSBypassDomains,
 	})
 	if errors.Is(err, database.ErrBoundaryPolicyNotFound) {
@@ -280,6 +288,7 @@ func (h *BoundaryPolicyHandler) Update(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, boundaryPolicyDetail{
 		ID: updated.ID, Name: updated.Name, Description: updated.Description,
+		DefaultAction:        updated.DefaultAction,
 		TLSInspectionEnabled: updated.TLSInspectionEnabled, TLSBypassDomains: updated.TLSBypassDomains,
 		UpdatedAt: updated.UpdatedAt, Rules: rules,
 	})
@@ -440,7 +449,8 @@ func (h *BoundaryPolicyHandler) SimulatePolicy(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "boundary policy id is required"})
 		return
 	}
-	if _, err := h.db.GetBoundaryPolicy(c.Request.Context(), policyID); err != nil {
+	storedPolicy, err := h.db.GetBoundaryPolicy(c.Request.Context(), policyID)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "boundary policy not found"})
 			return
@@ -479,7 +489,7 @@ func (h *BoundaryPolicyHandler) SimulatePolicy(c *gin.Context) {
 			ExpiresAt: stored.ExpiresAt,
 		})
 	}
-	compiled, err := boundary.NewPolicy(rules)
+	compiled, err := boundary.NewPolicyWithDefault(rules, storedPolicy.DefaultAction == database.BoundaryDefaultActionAllow)
 	if err != nil {
 		h.logger.Error("编译边界策略失败", zap.String("policy_id", policyID), zap.Error(err))
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "boundary policy is invalid"})

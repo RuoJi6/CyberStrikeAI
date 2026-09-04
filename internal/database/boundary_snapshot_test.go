@@ -237,6 +237,34 @@ func TestConversationBoundarySnapshotDefaultAllowAndSelectionValidation(t *testi
 	}
 }
 
+func TestConversationBoundarySnapshotCapturesBlacklistDefaultAndPathOnlyRule(t *testing.T) {
+	db := newBoundarySnapshotTestDB(t)
+	policy, err := db.CreateBoundaryPolicy(context.Background(), BoundaryPolicy{
+		ID: "policy-blacklist", Name: "Path blacklist", DefaultAction: BoundaryDefaultActionAllow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule, err := db.CreateBoundaryPolicyRule(context.Background(), BoundaryPolicyRule{
+		ID: "block-private", PolicyID: policy.ID, Effect: boundary.EffectBlocked,
+		PathPrefixes: []string{"/private/*"}, Methods: []string{"get"},
+	})
+	if err != nil || rule.Host != "*" {
+		t.Fatalf("path-only rule = %#v, %v", rule, err)
+	}
+	conversation := createSnapshotTestConversation(t, db, policy.ID)
+	snapshot, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Document.SchemaVersion != boundaryPolicyDefaultActionSchemaVersion || snapshot.Document.DefaultAction != BoundaryDefaultActionAllow || snapshot.Document.PolicyID != policy.ID || len(snapshot.Document.Rules) != 1 || snapshot.Document.Rules[0].Host != "*" {
+		t.Fatalf("blacklist snapshot = %#v", snapshot.Document)
+	}
+	if !strings.Contains(snapshot.CanonicalJSON, `"defaultAction":"allow"`) {
+		t.Fatalf("blacklist canonical JSON = %s", snapshot.CanonicalJSON)
+	}
+}
+
 func TestConversationBoundarySnapshotCapturesInitialNetworkAccess(t *testing.T) {
 	db := newBoundarySnapshotTestDB(t)
 	conversation, err := db.CreateConversation("restricted targets", ConversationCreateMeta{

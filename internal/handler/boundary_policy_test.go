@@ -101,7 +101,7 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &policy); err != nil {
 		t.Fatal(err)
 	}
-	if policy.ID == "" || policy.Name != "UI editable" || policy.Rules == nil ||
+	if policy.ID == "" || policy.Name != "UI editable" || policy.DefaultAction != database.BoundaryDefaultActionDeny || policy.Rules == nil ||
 		!policy.TLSInspectionEnabled || len(policy.TLSBypassDomains) != 2 || policy.TLSBypassDomains[0] != "pinned.example" {
 		t.Fatalf("created policy = %#v", policy)
 	}
@@ -131,9 +131,9 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 	}
 
 	blacklistCreated := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies/"+policy.ID+"/rules", map[string]interface{}{
-		"effect": "blocked", "host": "*", "pathPrefixes": []string{"/api/*", "=/desasdasdasd/sdadsd"}, "position": 3,
+		"effect": "blocked", "host": "", "pathPrefixes": []string{"/api/*", "=/desasdasdasd/sdadsd"}, "position": 3,
 	})
-	if blacklistCreated.Code != http.StatusCreated || !strings.Contains(blacklistCreated.Body.String(), `"pathPrefixes":["/api","=/desasdasdasd/sdadsd"]`) {
+	if blacklistCreated.Code != http.StatusCreated || !strings.Contains(blacklistCreated.Body.String(), `"host":"*"`) || !strings.Contains(blacklistCreated.Body.String(), `"pathPrefixes":["/api","=/desasdasdasd/sdadsd"]`) {
 		t.Fatalf("create blacklist status = %d: %s", blacklistCreated.Code, blacklistCreated.Body.String())
 	}
 	wildcardAllow := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies/"+policy.ID+"/rules", map[string]interface{}{
@@ -145,10 +145,11 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 
 	policyUpdated := performBoundaryJSON(router, http.MethodPut, "/api/boundary-policies/"+policy.ID, map[string]interface{}{
 		"name": "UI edited", "description": "updated draft", "tlsInspectionEnabled": false,
+		"defaultAction":    "allow",
 		"tlsBypassDomains": []string{},
 	})
 	if policyUpdated.Code != http.StatusOK || !strings.Contains(policyUpdated.Body.String(), "blocked.example") ||
-		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":true`) {
+		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":true`) || !strings.Contains(policyUpdated.Body.String(), `"defaultAction":"allow"`) {
 		t.Fatalf("update policy status = %d: %s", policyUpdated.Code, policyUpdated.Body.String())
 	}
 
@@ -322,6 +323,47 @@ func TestBoundaryPolicySimulationFailsClosedWithReasons(t *testing.T) {
 	}
 }
 
+func TestBoundaryPolicySimulationSupportsPathOnlyBlacklist(t *testing.T) {
+	db, _ := newBoundaryPolicyHandlerTestDB(t)
+	policy, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{
+		Name: "path blacklist", OwnerUserID: "owner-1", DefaultAction: database.BoundaryDefaultActionAllow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateBoundaryPolicyRule(context.Background(), database.BoundaryPolicyRule{
+		ID: "blocked-path-only", PolicyID: policy.ID, Effect: boundary.EffectBlocked,
+		PathPrefixes: []string{"/blocked/*"}, Methods: []string{"GET"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	router := boundarySimulationRouter(db, security.Session{
+		UserID: "admin", Scope: database.RBACScopeAll,
+		Permissions: map[string]bool{"boundary:read": true},
+	})
+	for _, tc := range []struct {
+		path, reason string
+		allowed      bool
+	}{
+		{path: "/", reason: boundary.ReasonAllowVisit, allowed: true},
+		{path: "/blocked/child", reason: boundary.ReasonBlockedPath, allowed: false},
+	} {
+		recorder := performBoundarySimulation(router, policy.ID, map[string]interface{}{
+			"url": "https://example.com" + tc.path, "method": "GET", "resolvedIps": []string{"93.184.216.34"},
+		})
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("simulate %s status = %d: %s", tc.path, recorder.Code, recorder.Body.String())
+		}
+		var response simulateBoundaryPolicyResponse
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+			t.Fatal(err)
+		}
+		if response.Allowed != tc.allowed || response.Reason != tc.reason {
+			t.Fatalf("simulate %s = %#v", tc.path, response)
+		}
+	}
+}
+
 func TestBoundaryPolicySimulationRejectsInvalidInputAndMissingPolicy(t *testing.T) {
 	db, policy := newBoundaryPolicyHandlerTestDB(t)
 	router := boundarySimulationRouter(db, security.Session{
@@ -433,7 +475,7 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	documentSchema := snapshotProperties["document"].(map[string]interface{})
 	documentProperties := documentSchema["properties"].(map[string]interface{})
 	schemaVersions, ok := documentProperties["schemaVersion"].(map[string]interface{})["enum"].([]interface{})
-	if !ok || len(schemaVersions) != 5 || schemaVersions[4] != float64(5) {
+	if !ok || len(schemaVersions) != 6 || schemaVersions[5] != float64(6) {
 		t.Fatalf("ConversationBoundarySnapshot schema versions = %#v", schemaVersions)
 	}
 	if _, ok := documentProperties["tlsInspection"]; !ok {

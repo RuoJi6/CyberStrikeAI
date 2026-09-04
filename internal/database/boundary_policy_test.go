@@ -153,6 +153,67 @@ func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
 	}
 }
 
+func TestBoundaryPolicyDefaultActionPersistsAndValidates(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-default-action.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	denyPolicy, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "deny by default"})
+	if err != nil || denyPolicy.DefaultAction != BoundaryDefaultActionDeny {
+		t.Fatalf("default deny policy = %#v, %v", denyPolicy, err)
+	}
+	allowPolicy, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "blacklist", DefaultAction: " ALLOW "})
+	if err != nil || allowPolicy.DefaultAction != BoundaryDefaultActionAllow {
+		t.Fatalf("default allow policy = %#v, %v", allowPolicy, err)
+	}
+	loaded, err := db.GetBoundaryPolicy(ctx, allowPolicy.ID)
+	if err != nil || loaded.DefaultAction != BoundaryDefaultActionAllow {
+		t.Fatalf("loaded default action = %#v, %v", loaded, err)
+	}
+	updated, err := db.UpdateBoundaryPolicy(ctx, BoundaryPolicy{ID: allowPolicy.ID, Name: "renamed"})
+	if err != nil || updated.DefaultAction != BoundaryDefaultActionAllow {
+		t.Fatalf("omitted update changed default action = %#v, %v", updated, err)
+	}
+	if _, err := db.UpdateBoundaryPolicy(ctx, BoundaryPolicy{ID: allowPolicy.ID, Name: "invalid", DefaultAction: "open"}); err == nil {
+		t.Fatal("invalid default action was accepted")
+	}
+}
+
+func TestBoundaryPolicyDefaultActionMigrationKeepsLegacyPoliciesFailClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-boundary-policy.db")
+	raw, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`
+		CREATE TABLE boundary_policies (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+			tls_inspection_enabled INTEGER NOT NULL DEFAULT 1,
+			tls_bypass_domains_json TEXT NOT NULL DEFAULT '[]', owner_user_id TEXT,
+			created_at DATETIME NOT NULL, updated_at DATETIME NOT NULL
+		);
+		INSERT INTO boundary_policies (id, name, description, tls_inspection_enabled, tls_bypass_domains_json, created_at, updated_at)
+		VALUES ('legacy-policy', 'Legacy', '', 1, '[]', '2026-09-05 00:00:00', '2026-09-05 00:00:00');
+	`); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	policy, err := db.GetBoundaryPolicy(context.Background(), "legacy-policy")
+	if err != nil || policy.DefaultAction != BoundaryDefaultActionDeny {
+		t.Fatalf("migrated legacy policy = %#v, %v", policy, err)
+	}
+}
+
 func TestBoundaryPolicyRuleEffectsFailClosedInAPIAndSQLite(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-checks.db"), zap.NewNop())
 	if err != nil {
@@ -240,6 +301,22 @@ func TestBoundaryPolicyBlacklistWildcardsAndPathFormsRoundTrip(t *testing.T) {
 	}
 	if wildcardRule.Host != "*.example.com" || !reflect.DeepEqual(wildcardRule.PathPrefixes, []string{"/api", "=/desasdasdasd/sdadsd"}) {
 		t.Fatalf("normalized wildcard rule = %#v", wildcardRule)
+	}
+	pathOnlyRule, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectBlocked, PathPrefixes: []string{"/private/*"},
+	})
+	if err != nil || pathOnlyRule.Host != "*" || !reflect.DeepEqual(pathOnlyRule.PathPrefixes, []string{"/private"}) {
+		t.Fatalf("normalized path-only rule = %#v, %v", pathOnlyRule, err)
+	}
+	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectBlocked,
+	}); err == nil {
+		t.Fatal("hostless block without a path was accepted")
+	}
+	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, PathPrefixes: []string{"/private/*"},
+	}); err == nil {
+		t.Fatal("hostless allow rule was accepted")
 	}
 	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
 		PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "*",

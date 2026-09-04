@@ -127,6 +127,19 @@
         })[String(effect || '')] || String(effect || '—');
     }
 
+    function defaultActionLabel(action) {
+        return String(action || 'deny').toLowerCase() === 'allow'
+            ? '放行（黑名单模式）'
+            : '阻断（白名单模式）';
+    }
+
+    function ruleEffectLabel(rule) {
+        if (rule && rule.effect === 'blocked' && Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length) {
+            return '路径阻断';
+        }
+        return effectLabel(rule && rule.effect);
+    }
+
     function ruleMethodsLabel(rule) {
         if (Array.isArray(rule.methods) && rule.methods.length) return rule.methods.join(', ');
         return t('boundaryAnyMethod', '任意方法');
@@ -158,7 +171,7 @@
         const heading = element('div', 'container-policy-rule-heading');
         heading.append(
             element('span', 'container-policy-position', String(Number(rule.position || index + 1))),
-            element('strong', '', effectLabel(rule.effect)),
+            element('strong', '', ruleEffectLabel(rule)),
             element('code', '', String(rule.id || '—')),
         );
         if (editable) {
@@ -171,7 +184,7 @@
         }
         const grid = element('dl', 'container-policy-rule-grid');
         grid.append(
-            detailField(t('host', '主机'), rule.host || '*'),
+            detailField(t('host', '主机'), rule.host === '*' ? '所有主机' : (rule.host || '—')),
             detailField(t('protocol', '协议'), Array.isArray(rule.schemes) && rule.schemes.length ? rule.schemes.join(', ') : '任意协议'),
             detailField(t('port', '端口'), Array.isArray(rule.ports) && rule.ports.length ? rule.ports.join(', ') : '*'),
             detailField(t('boundaryMethods', '方法'), ruleMethodsLabel(rule)),
@@ -304,11 +317,11 @@
         root.append(summary);
         const ruleSection = element('section', 'boundary-policy-detail-section');
         const ruleHeading = element('div', 'boundary-policy-detail-section-heading');
-        ruleHeading.append(element('h4', '', '策略规则'), element('span', '', '未命中默认阻断'));
+        ruleHeading.append(element('h4', '', '策略规则'), element('span', '', '未命中默认' + defaultActionLabel(policy.defaultAction)));
         ruleSection.append(ruleHeading);
         const rules = element('div', 'container-policy-rule-list');
         if (Array.isArray(policy.rules) && policy.rules.length) policy.rules.forEach(function (rule, index) { rules.append(renderRule(rule, index, false)); });
-        else renderEmpty(rules, '当前为空策略', '所有网络目标默认拒绝。');
+        else renderEmpty(rules, '当前为空策略', String(policy.defaultAction || 'deny') === 'allow' ? '没有显式阻断规则，其他目标默认放行。' : '所有网络目标默认拒绝。');
         ruleSection.append(rules);
         root.append(ruleSection);
         const usageSection = element('section', 'boundary-policy-detail-section');
@@ -368,6 +381,8 @@
         document.getElementById('boundary-policy-id').value = policy ? policy.id : '';
         document.getElementById('boundary-policy-name').value = policy ? policy.name || '' : '';
         document.getElementById('boundary-policy-description').value = policy ? policy.description || '' : '';
+        document.getElementById('boundary-policy-default-action').value = policy ? policy.defaultAction || 'deny' : 'deny';
+        refreshUnified(document.getElementById('boundary-policy-default-action'));
         document.getElementById('boundary-policy-tls-bypass').value = policy && Array.isArray(policy.tlsBypassDomains) ? policy.tlsBypassDomains.join(', ') : '';
         document.getElementById('boundary-policy-editor').hidden = !policy;
         document.getElementById('boundary-policy-editor-title').textContent = policy ? '修改边界策略' : '新建边界策略';
@@ -439,9 +454,11 @@
             if (!value) throw new Error('精确接口不能为空');
             return '=' + value;
         });
+        let host = document.getElementById('boundary-rule-host').value.trim();
+        if (!host && effect === 'blocked' && subtreePaths.concat(exactPaths).length) host = '*';
         return {
             effect: effect,
-            host: document.getElementById('boundary-rule-host').value.trim(),
+            host: host,
             schemes: splitValues(document.getElementById('boundary-rule-schemes').value),
             ports: ports,
             pathPrefixes: subtreePaths.concat(exactPaths),
@@ -485,7 +502,7 @@
         document.getElementById('boundary-rule-form-title').textContent = '修改边界规则';
         document.getElementById('boundary-rule-id').value = state.editingRuleId;
         document.getElementById('boundary-rule-effect').value = rule.effect || 'allow-visit';
-        document.getElementById('boundary-rule-host').value = rule.host || '';
+        document.getElementById('boundary-rule-host').value = rule.host === '*' && Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length ? '' : (rule.host || '');
         document.getElementById('boundary-rule-schemes').value = Array.isArray(rule.schemes) ? rule.schemes.join(', ') : '';
         document.getElementById('boundary-rule-ports').value = Array.isArray(rule.ports) ? rule.ports.join(', ') : '';
         const pathPatterns = Array.isArray(rule.pathPrefixes) ? rule.pathPrefixes : [];
@@ -527,6 +544,7 @@
         const payload = {
             name: document.getElementById('boundary-policy-name').value.trim(),
             description: document.getElementById('boundary-policy-description').value.trim(),
+            defaultAction: document.getElementById('boundary-policy-default-action').value || 'deny',
             tlsBypassDomains: splitValues(document.getElementById('boundary-policy-tls-bypass').value),
         };
         if (!payload.name) { notify('请输入策略名称', 'error'); return; }

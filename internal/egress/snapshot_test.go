@@ -214,6 +214,42 @@ func TestLoadNetworkAccessSnapshotControlsRestrictedTargets(t *testing.T) {
 	}
 }
 
+func TestLoadPolicyDefaultAllowSnapshotDefersHTTPSPathBlockUntilDecryption(t *testing.T) {
+	content := `{"schemaVersion":6,"policyId":"path-blacklist","rules":[{"id":"block-private","effect":"blocked","host":"*","schemes":["https"],"ports":[443],"pathPrefixes":["/private"],"methods":["GET"],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow","networkAccess":{"allowRestrictedTargets":false}}`
+	path := filepath.Join(t.TempDir(), "path-blacklist.json")
+	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	_, policy, tlsInspection, err := LoadGatewaySnapshot(path, testSnapshot(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	preflight, err := policy.EvaluateDNS("example.com", nil, time.Now().UTC())
+	if err != nil || !preflight.Allowed {
+		t.Fatalf("HTTPS CONNECT preflight = %#v, %v", preflight, err)
+	}
+	allowed, err := policy.Evaluate("https://example.com/", http.MethodGet, nil, time.Now().UTC())
+	if err != nil || !allowed.Allowed {
+		t.Fatalf("unmatched path = %#v, %v", allowed, err)
+	}
+	blocked, err := policy.Evaluate("https://example.com/private/child", http.MethodGet, nil, time.Now().UTC())
+	if err != nil || blocked.Allowed || blocked.Reason != boundary.ReasonBlockedPath || blocked.RuleID != "block-private" {
+		t.Fatalf("blocked path = %#v, %v", blocked, err)
+	}
+	if tlsInspection == nil || !tlsInspection.Enabled {
+		t.Fatalf("TLS inspection = %#v", tlsInspection)
+	}
+
+	invalid := strings.Replace(content, `"defaultAction":"allow"`, `"defaultAction":"deny"`, 1)
+	invalidPath := filepath.Join(t.TempDir(), "invalid-path-blacklist.json")
+	if err := os.WriteFile(invalidPath, []byte(invalid), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := LoadGatewaySnapshot(invalidPath, testSnapshot(t, invalid)); !errors.Is(err, ErrSnapshotIntegrity) {
+		t.Fatalf("invalid v6 default action error = %v", err)
+	}
+}
+
 func TestConfiguredGatewayReportsSnapshotAndStopsOnCancellation(t *testing.T) {
 	content := `{"schemaVersion":1,"policyId":"","rules":[]}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")

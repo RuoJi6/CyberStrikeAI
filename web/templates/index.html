@@ -5592,8 +5592,9 @@ def decode_request(ctx, wire: Message) -> Message:
                                 <form id="boundary-policy-form" class="boundary-policy-form">
                                     <input id="boundary-policy-id" type="hidden">
                                     <div class="boundary-form-grid">
-                                        <label><span>策略名称</span><input id="boundary-policy-name" type="text" maxlength="128" required autocomplete="off" placeholder="例如：仅允许目标站点"></label>
-                                        <label class="is-wide"><span>说明</span><input id="boundary-policy-description" type="text" maxlength="2048" autocomplete="off" placeholder="说明适用范围和授权依据"></label>
+										<label><span>策略名称</span><input id="boundary-policy-name" type="text" maxlength="128" required autocomplete="off" placeholder="例如：仅允许目标站点"></label>
+										<label><span>未命中规则时</span><select id="boundary-policy-default-action" data-unified-select="single" data-unified-search="false"><option value="deny">阻断（白名单模式）</option><option value="allow">放行（黑名单模式）</option></select><small>旧策略保持默认阻断；如只想禁止指定域名、端口或路径，请选择“放行”。</small></label>
+										<label class="is-wide"><span>说明</span><input id="boundary-policy-description" type="text" maxlength="2048" autocomplete="off" placeholder="说明适用范围和授权依据"></label>
 										<label id="boundary-policy-tls-bypass-field" class="is-wide"><span data-i18n="containerManagement.boundaryTLSBypassDomains">不解密域名（证书固定兼容，逗号分隔）</span><input id="boundary-policy-tls-bypass" type="text" autocomplete="off" placeholder="pinned.example.com, updates.example.org"><small data-i18n="containerManagement.boundaryTLSBypassHint">HTTPS 完整审计默认开启；命中这些域名及其子域时仅校验 SNI/端口，不解密正文。</small></label>
                                     </div>
                                     <div class="boundary-form-actions"><button id="boundary-policy-reset" class="btn-secondary" type="button">取消</button><button class="btn-primary" type="submit">保存策略</button></div>
@@ -5606,7 +5607,7 @@ def decode_request(ctx, wire: Message) -> Message:
                                         <input id="boundary-rule-id" type="hidden">
                                         <div class="boundary-form-grid">
                                             <label><span>效果</span><select id="boundary-rule-effect" data-unified-select="single" data-unified-search="false"><option value="allow-visit">允许访问</option><option value="allow-attack">允许测试</option><option value="blocked">显式阻断</option><option value="auth-only">仅凭据访问</option></select></label>
-                                            <label class="is-wide"><span>目标主机 / IP / CIDR / 完整 URL</span><input id="boundary-rule-host" type="text" maxlength="2048" autocomplete="off" placeholder="example.com、*.example.com、* 或 https://example.com/api/*"><small><code>*</code> 和 <code>*.example.com</code> 仅用于显式阻断；完整 URL 会自动拆分协议、端口和路径，不能再填写这三个字段；不带 <code>/*</code> 的完整 URL 只匹配精确接口。</small></label>
+											<label class="is-wide"><span>目标主机 / IP / CIDR / 完整 URL</span><input id="boundary-rule-host" type="text" maxlength="2048" autocomplete="off" placeholder="路径阻断可留空；或填写 example.com、*.example.com、CIDR、完整 URL"><small>显式阻断且填写了路径时可留空，表示所有主机；<code>*</code> 和 <code>*.example.com</code> 仅用于显式阻断。完整 URL 会自动拆分协议、端口和路径。</small></label>
                                             <label><span>协议</span><input id="boundary-rule-schemes" type="text" autocomplete="off" placeholder="http, https, tcp, udp, icmp"><small>留空表示不限协议</small></label>
                                             <label><span>端口</span><input id="boundary-rule-ports" type="text" inputmode="numeric" autocomplete="off" placeholder="80, 443"></label>
                                             <label><span>路径子树</span><input id="boundary-rule-paths" type="text" autocomplete="off" placeholder="/api/*, /admin/*"><small>末尾 <code>/*</code> 表示该路径及其下所有接口；兼容原有前缀写法。</small></label>
@@ -7564,7 +7565,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260904-1"></script>
     <script src="/static/js/egress-audit.js?v=20260904-3"></script>
-    <script src="/static/js/boundary-rules.js?v=20260904-2"></script>
+    <script src="/static/js/boundary-rules.js?v=20260905-1"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
     <script src="/static/js/container-management.js?v=20260903-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>

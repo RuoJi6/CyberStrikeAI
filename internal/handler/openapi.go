@@ -129,11 +129,12 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 	boundaryPolicySummarySchema := map[string]interface{}{
 		"type":        "object",
 		"description": "边界策略列表的安全摘要；不包含规则正文或所有者标识。",
-		"required":    []string{"id", "name", "description", "tlsInspectionEnabled", "ruleCount", "protocols", "usageCount", "updatedAt"},
+		"required":    []string{"id", "name", "description", "defaultAction", "tlsInspectionEnabled", "ruleCount", "protocols", "usageCount", "updatedAt"},
 		"properties": map[string]interface{}{
 			"id":                   map[string]interface{}{"type": "string", "format": "uuid"},
 			"name":                 map[string]interface{}{"type": "string", "maxLength": 128},
 			"description":          map[string]interface{}{"type": "string", "maxLength": 2048},
+			"defaultAction":        map[string]interface{}{"type": "string", "enum": []string{"deny", "allow"}, "description": "规则未命中时的动作：deny 为白名单模式，allow 为黑名单模式。"},
 			"tlsInspectionEnabled": map[string]interface{}{"type": "boolean", "default": true, "readOnly": true, "description": "边界策略始终启用 HTTPS 完整审计。"},
 			"ruleCount":            map[string]interface{}{"type": "integer", "minimum": 0},
 			"protocols":            map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string", "enum": []string{"any", "http", "https", "tcp", "udp", "icmp"}}},
@@ -153,7 +154,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type": "object", "additionalProperties": false, "required": []string{"effect"},
 		"properties": map[string]interface{}{
 			"effect":        map[string]interface{}{"type": "string", "enum": []string{"allow-visit", "allow-attack", "blocked", "auth-only"}},
-			"host":          map[string]interface{}{"type": "string", "maxLength": 2048, "description": "精确主机/IP、阻断 CIDR、仅限 blocked 的 * 或 *.example.com；也可为 http(s) 完整 URL 简写。"},
+			"host":          map[string]interface{}{"type": "string", "maxLength": 2048, "description": "精确主机/IP、阻断 CIDR、仅限 blocked 的 * 或 *.example.com；blocked 且声明路径时可留空并规范化为 *；也可为 http(s) 完整 URL 简写。"},
 			"schemes":       map[string]interface{}{"type": "array", "description": "留空表示不限协议", "items": map[string]interface{}{"type": "string", "enum": []string{"http", "https", "tcp", "udp", "icmp"}}},
 			"ports":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}},
 			"pathPrefixes":  map[string]interface{}{"type": "array", "description": "HTTP 路径规则：/api/* 表示路径子树，=/health 表示精确接口；不支持中间通配符或正则。", "items": map[string]interface{}{"type": "string"}},
@@ -176,6 +177,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type": "object", "additionalProperties": false, "required": []string{"name"},
 		"properties": map[string]interface{}{
 			"name": map[string]interface{}{"type": "string", "maxLength": 128}, "description": map[string]interface{}{"type": "string", "maxLength": 2048},
+			"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"deny", "allow"}, "default": "deny"},
 			"tlsBypassDomains": map[string]interface{}{"type": "array", "maxItems": 128, "items": map[string]interface{}{"type": "string", "maxLength": 253},
 				"description": "证书固定兼容域名；HTTPS 完整审计始终开启，命中域名时仅校验 SNI/端口。",
 			},
@@ -757,7 +759,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 							"type":     "object",
 							"required": []string{"schemaVersion", "policyId", "rules"},
 							"properties": map[string]interface{}{
-								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3, 4, 5}, "description": "v5 将会话级受限目标开关写入不可变快照；v1-v4 读取时按关闭处理"},
+								"schemaVersion": map[string]interface{}{"type": "integer", "enum": []int{1, 2, 3, 4, 5, 6}, "description": "v5 将会话级受限目标开关写入不可变快照；v6 允许自定义策略声明未命中默认放行；v1-v4 读取时按关闭处理"},
 								"policyId":      map[string]interface{}{"type": "string"},
 								"rules":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "object"}},
 								"tlsInspection": map[string]interface{}{
@@ -767,7 +769,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 										"bypassDomains": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 									},
 								},
-								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3/4 的无边界快照为 allow"},
+								"defaultAction": map[string]interface{}{"type": "string", "enum": []string{"allow"}, "description": "schemaVersion=3/4/5 的无边界快照以及 schemaVersion=6 的黑名单策略为 allow"},
 								"networkAccess": conversationNetworkAccessSchema,
 							},
 						},

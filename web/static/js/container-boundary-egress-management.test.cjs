@@ -26,6 +26,7 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
         'boundary-policy-form',
         'boundary-policy-name',
         'boundary-policy-description',
+		'boundary-policy-default-action',
 		'boundary-policy-tls-bypass',
         'boundary-policy-rule-list',
         'boundary-rule-form',
@@ -59,8 +60,12 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
     assert.match(boundary, /function rulePathsLabel/);
     assert.match(boundary, /subtreePaths\.concat\(exactPaths\)/);
-    assert.match(template, /placeholder="example\.com、\*\.example\.com、\* 或 https:\/\/example\.com\/api\/\*"/);
-    assert.match(template, /boundary-rules\.js\?v=20260904-2/);
+	assert.match(template, /路径阻断可留空/);
+	assert.match(template, /boundary-rules\.js\?v=20260905-1/);
+	assert.match(boundary, /defaultAction:/);
+	assert.match(boundary, /未命中默认/);
+	assert.match(boundary, /host = '\*'/);
+	assert.match(boundary, /路径阻断/);
 });
 
 test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () => {

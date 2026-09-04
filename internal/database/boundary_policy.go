@@ -18,6 +18,8 @@ const (
 	maxBoundaryPolicyNameBytes        = 128
 	maxBoundaryPolicyDescriptionBytes = 2048
 	maxTLSBypassDomains               = 128
+	BoundaryDefaultActionDeny         = "deny"
+	BoundaryDefaultActionAllow        = "allow"
 )
 
 var (
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS boundary_policies (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
+	default_action TEXT NOT NULL DEFAULT 'deny' CHECK (default_action IN ('deny', 'allow')),
 	tls_inspection_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tls_inspection_enabled IN (0, 1)),
 	tls_bypass_domains_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tls_bypass_domains_json)),
 	owner_user_id TEXT,
@@ -125,6 +128,7 @@ type BoundaryPolicy struct {
 	ID                   string    `json:"id"`
 	Name                 string    `json:"name"`
 	Description          string    `json:"description"`
+	DefaultAction        string    `json:"defaultAction"`
 	TLSInspectionEnabled bool      `json:"tlsInspectionEnabled"`
 	TLSBypassDomains     []string  `json:"tlsBypassDomains"`
 	OwnerUserID          string    `json:"owner_user_id,omitempty"`
@@ -173,6 +177,7 @@ func (db *DB) initBoundaryPolicyTables() error {
 		return err
 	}
 	for _, column := range []struct{ name, statement string }{
+		{"default_action", "ALTER TABLE boundary_policies ADD COLUMN default_action TEXT NOT NULL DEFAULT 'deny' CHECK (default_action IN ('deny', 'allow'))"},
 		{"tls_inspection_enabled", "ALTER TABLE boundary_policies ADD COLUMN tls_inspection_enabled INTEGER NOT NULL DEFAULT 1 CHECK (tls_inspection_enabled IN (0, 1))"},
 		{"tls_bypass_domains_json", "ALTER TABLE boundary_policies ADD COLUMN tls_bypass_domains_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(tls_bypass_domains_json))"},
 	} {
@@ -268,6 +273,11 @@ func (db *DB) initBoundaryPolicyTables() error {
 
 func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (BoundaryPolicy, error) {
 	policy.TLSInspectionEnabled = true
+	var err error
+	policy.DefaultAction, err = normalizeBoundaryDefaultAction(policy.DefaultAction)
+	if err != nil {
+		return BoundaryPolicy{}, err
+	}
 	policy.ID = strings.TrimSpace(policy.ID)
 	if policy.ID == "" {
 		policy.ID = uuid.New().String()
@@ -281,7 +291,6 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 		return BoundaryPolicy{}, fmt.Errorf("boundary policy name or description is too long")
 	}
 	policy.OwnerUserID = strings.TrimSpace(policy.OwnerUserID)
-	var err error
 	policy.TLSBypassDomains, err = normalizeTLSBypassDomains(policy.TLSBypassDomains)
 	if err != nil {
 		return BoundaryPolicy{}, err
@@ -301,10 +310,10 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	}
 	_, err = db.ExecContext(ctx, `
 		INSERT INTO boundary_policies (
-			id, name, description, tls_inspection_enabled, tls_bypass_domains_json,
+			id, name, description, default_action, tls_inspection_enabled, tls_bypass_domains_json,
 			owner_user_id, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, policy.ID, policy.Name, policy.Description, policy.TLSInspectionEnabled, string(bypassJSON),
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, policy.ID, policy.Name, policy.Description, policy.DefaultAction, policy.TLSInspectionEnabled, string(bypassJSON),
 		owner, formatSQLiteUTC(policy.CreatedAt), formatSQLiteUTC(policy.UpdatedAt))
 	if err != nil {
 		return BoundaryPolicy{}, fmt.Errorf("create boundary policy: %w", err)
@@ -338,13 +347,20 @@ func (db *DB) UpdateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	if err != nil {
 		return BoundaryPolicy{}, fmt.Errorf("load boundary policy for update: %w", err)
 	}
+	if strings.TrimSpace(policy.DefaultAction) == "" {
+		policy.DefaultAction = existing.DefaultAction
+	}
+	policy.DefaultAction, err = normalizeBoundaryDefaultAction(policy.DefaultAction)
+	if err != nil {
+		return BoundaryPolicy{}, err
+	}
 	policy.OwnerUserID = existing.OwnerUserID
 	policy.CreatedAt = existing.CreatedAt
 	policy.UpdatedAt = time.Now().UTC()
 	result, err := db.ExecContext(ctx, `
-		UPDATE boundary_policies SET name = ?, description = ?, tls_inspection_enabled = ?,
+		UPDATE boundary_policies SET name = ?, description = ?, default_action = ?, tls_inspection_enabled = ?,
 			tls_bypass_domains_json = ?, updated_at = ? WHERE id = ?
-	`, policy.Name, policy.Description, policy.TLSInspectionEnabled, string(bypassJSON),
+	`, policy.Name, policy.Description, policy.DefaultAction, policy.TLSInspectionEnabled, string(bypassJSON),
 		formatSQLiteUTC(policy.UpdatedAt), policy.ID)
 	if err != nil {
 		return BoundaryPolicy{}, fmt.Errorf("update boundary policy: %w", err)
@@ -474,12 +490,12 @@ func (db *DB) GetBoundaryPolicy(ctx context.Context, policyID string) (BoundaryP
 	var owner sql.NullString
 	var bypassJSON, createdAt, updatedAt string
 	err := db.QueryRowContext(ctx, `
-		SELECT id, name, description, tls_inspection_enabled, tls_bypass_domains_json,
+		SELECT id, name, description, default_action, tls_inspection_enabled, tls_bypass_domains_json,
 			owner_user_id, created_at, updated_at
 		FROM boundary_policies
 		WHERE id = ?
 	`, strings.TrimSpace(policyID)).Scan(
-		&policy.ID, &policy.Name, &policy.Description, &policy.TLSInspectionEnabled,
+		&policy.ID, &policy.Name, &policy.Description, &policy.DefaultAction, &policy.TLSInspectionEnabled,
 		&bypassJSON, &owner, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -498,7 +514,7 @@ func (db *DB) GetBoundaryPolicy(ctx context.Context, policyID string) (BoundaryP
 // resource scope. The handler exposes a smaller summary projection to clients.
 func (db *DB) ListBoundaryPolicies(ctx context.Context, userID, scope string) ([]BoundaryPolicy, error) {
 	query := `
-		SELECT id, name, description, tls_inspection_enabled, tls_bypass_domains_json,
+		SELECT id, name, description, default_action, tls_inspection_enabled, tls_bypass_domains_json,
 			owner_user_id, created_at, updated_at
 		FROM boundary_policies`
 	args := make([]interface{}, 0, 2)
@@ -522,7 +538,7 @@ func (db *DB) ListBoundaryPolicies(ctx context.Context, userID, scope string) ([
 		var owner sql.NullString
 		var bypassJSON, createdAt, updatedAt string
 		if err := rows.Scan(
-			&policy.ID, &policy.Name, &policy.Description, &policy.TLSInspectionEnabled,
+			&policy.ID, &policy.Name, &policy.Description, &policy.DefaultAction, &policy.TLSInspectionEnabled,
 			&bypassJSON, &owner, &createdAt, &updatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan boundary policy: %w", err)
@@ -561,6 +577,37 @@ func normalizeTLSBypassDomains(domains []string) ([]string, error) {
 	return result, nil
 }
 
+func normalizeBoundaryDefaultAction(raw string) (string, error) {
+	action := strings.ToLower(strings.TrimSpace(raw))
+	if action == "" {
+		action = BoundaryDefaultActionDeny
+	}
+	if action != BoundaryDefaultActionDeny && action != BoundaryDefaultActionAllow {
+		return "", fmt.Errorf("boundary policy default action must be deny or allow")
+	}
+	return action, nil
+}
+
+func normalizeBoundaryRuleTarget(rule *BoundaryPolicyRule) (boundary.RuleTarget, error) {
+	if rule == nil {
+		return boundary.RuleTarget{}, fmt.Errorf("boundary rule is required")
+	}
+	// A path-scoped deny may intentionally cover every HTTP(S) host. Expand
+	// that shorthand to the explicit blocked-only wildcard before canonical
+	// validation. Other hostless rules remain invalid, so an omitted host can
+	// never create a global allow rule.
+	if strings.TrimSpace(rule.Host) == "" && rule.Effect == boundary.EffectBlocked && len(rule.PathPrefixes) != 0 {
+		rule.Host = "*"
+	}
+	return boundary.NormalizeRuleTarget(boundary.RuleTarget{
+		Host:         rule.Host,
+		Schemes:      rule.Schemes,
+		Ports:        rule.Ports,
+		PathPrefixes: rule.PathPrefixes,
+		Methods:      rule.Methods,
+	})
+}
+
 func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyRule) (BoundaryPolicyRule, error) {
 	rule.PolicyID = strings.TrimSpace(rule.PolicyID)
 	if rule.PolicyID == "" {
@@ -588,13 +635,7 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 			return BoundaryPolicyRule{}, fmt.Errorf("load auth profile for boundary rule: %w", err)
 		}
 	}
-	normalizedTarget, err := boundary.NormalizeRuleTarget(boundary.RuleTarget{
-		Host:         rule.Host,
-		Schemes:      rule.Schemes,
-		Ports:        rule.Ports,
-		PathPrefixes: rule.PathPrefixes,
-		Methods:      rule.Methods,
-	})
+	normalizedTarget, err := normalizeBoundaryRuleTarget(&rule)
 	if err != nil {
 		return BoundaryPolicyRule{}, err
 	}
@@ -764,10 +805,7 @@ func (db *DB) UpdateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 			return BoundaryPolicyRule{}, fmt.Errorf("load auth profile for boundary rule: %w", err)
 		}
 	}
-	normalizedTarget, err := boundary.NormalizeRuleTarget(boundary.RuleTarget{
-		Host: rule.Host, Schemes: rule.Schemes, Ports: rule.Ports,
-		PathPrefixes: rule.PathPrefixes, Methods: rule.Methods,
-	})
+	normalizedTarget, err := normalizeBoundaryRuleTarget(&rule)
 	if err != nil {
 		return BoundaryPolicyRule{}, err
 	}
