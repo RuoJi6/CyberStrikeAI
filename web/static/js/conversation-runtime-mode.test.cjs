@@ -21,7 +21,8 @@ test('新对话使用自定义 host/container 选择器', () => {
 
 test('新对话由首条消息创建执行位置', () => {
     assert.match(chat, /const creatingNewConversation = !requestConversationId;[\s\S]{0,520}body\.runtimeMode = normalizeConversationRuntimeModeForUI/);
-    assert.match(chat, /body\.workspacePersistent = body\.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER/);
+    assert.match(chat, /if \(body\.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER\) \{[\s\S]{0,320}body\.workspacePersistent = !!\(workspacePersistence && workspacePersistence\.checked\);[\s\S]{0,320}readNewConversationContainerControls/);
+    assert.doesNotMatch(chat, /body\.workspacePersistent = body\.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER/);
     assert.match(chat, /workspacePersistenceEnabledFromConversation\(conversation\)/);
     assert.match(chat, /applyConversationRuntimeMode\(conversationId, conversation\)/);
     assert.match(chat, /taskLocked = !!locked \|\| chatRuntimeModeSwitchPending/);

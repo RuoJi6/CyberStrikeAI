@@ -2617,10 +2617,12 @@ async function sendMessage() {
     if (creatingNewConversation) {
         const runtimeModeSelect = document.getElementById('runtime-mode-select');
         body.runtimeMode = normalizeConversationRuntimeModeForUI(runtimeModeSelect && runtimeModeSelect.value);
-        const workspacePersistence = document.getElementById('workspace-persistence-toggle');
-        body.workspacePersistent = body.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER && !!(workspacePersistence && workspacePersistence.checked);
-        if (typeof window.readNewConversationContainerControls === 'function') {
-            Object.assign(body, window.readNewConversationContainerControls(body.runtimeMode));
+        if (body.runtimeMode === CHAT_RUNTIME_MODE_CONTAINER) {
+            const workspacePersistence = document.getElementById('workspace-persistence-toggle');
+            body.workspacePersistent = !!(workspacePersistence && workspacePersistence.checked);
+            if (typeof window.readNewConversationContainerControls === 'function') {
+                Object.assign(body, window.readNewConversationContainerControls(body.runtimeMode));
+            }
         }
         setChatRuntimeModeLocked(true);
     }

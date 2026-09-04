@@ -357,6 +357,70 @@ func TestPrepareMultiAgentSessionPersistsRuntimeModeOnlyWhenCreating(t *testing.
 	}
 }
 
+func TestPrepareMultiAgentSessionScopesWorkspaceCompatibilityToContainer(t *testing.T) {
+	db, user := setupConversationRBACTest(t)
+	h := &AgentHandler{db: db, logger: zap.NewNop()}
+	newContext := func() *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/eino-agent/stream", nil)
+		c.Set(security.ContextSessionKey, security.Session{
+			UserID:      user.ID,
+			Scope:       database.RBACScopeAssigned,
+			Permissions: map[string]bool{"chat:write": true},
+		})
+		return c
+	}
+
+	legacyFalse := false
+	host, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:             "create host conversation",
+		RuntimeMode:         database.ConversationRuntimeModeHost,
+		WorkspacePersistent: &legacyFalse,
+	}, newContext(), "test")
+	if err != nil {
+		t.Fatalf("legacy host request with workspacePersistent=false: %v", err)
+	}
+	hostConversation, err := db.GetConversationLite(host.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversationLite host: %v", err)
+	}
+	if hostConversation.RuntimeMode != database.ConversationRuntimeModeHost || hostConversation.WorkspaceMode != "" || hostConversation.WorkspacePersistent {
+		t.Fatalf("host conversation retained container workspace settings: %#v", hostConversation)
+	}
+
+	container, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:             "create ephemeral container conversation",
+		RuntimeMode:         database.ConversationRuntimeModeContainer,
+		WorkspacePersistent: &legacyFalse,
+	}, newContext(), "test")
+	if err != nil {
+		t.Fatalf("legacy container request with workspacePersistent=false: %v", err)
+	}
+	containerConversation, err := db.GetConversationLite(container.ConversationID)
+	if err != nil {
+		t.Fatalf("GetConversationLite container: %v", err)
+	}
+	if containerConversation.WorkspaceMode != database.ConversationWorkspaceModeEphemeral || containerConversation.WorkspacePersistent {
+		t.Fatalf("container compatibility conversion = %#v", containerConversation)
+	}
+
+	legacyTrue := true
+	if _, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:             "invalid host persistence",
+		RuntimeMode:         database.ConversationRuntimeModeHost,
+		WorkspacePersistent: &legacyTrue,
+	}, newContext(), "test"); err == nil || !strings.Contains(err.Error(), "workspacePersistent 只能用于 container") {
+		t.Fatalf("host workspacePersistent=true error = %v", err)
+	}
+	if _, err := h.prepareMultiAgentSession(&ChatRequest{
+		Message:       "invalid host workspace mode",
+		RuntimeMode:   database.ConversationRuntimeModeHost,
+		WorkspaceMode: database.ConversationWorkspaceModeEphemeral,
+	}, newContext(), "test"); err == nil || !strings.Contains(err.Error(), "workspaceMode 只能用于 container") {
+		t.Fatalf("host workspaceMode error = %v", err)
+	}
+}
+
 func TestPrepareMultiAgentSessionSelectsBoundaryPolicyForNewContainerConversation(t *testing.T) {
 	db, user := setupConversationRBACTest(t)
 	policy, err := db.CreateBoundaryPolicy(context.Background(), database.BoundaryPolicy{

@@ -69,7 +69,10 @@ func (h *AgentHandler) prepareMultiAgentSession(req *ChatRequest, c *gin.Context
 			return nil, fmt.Errorf("新对话 workspacePersistent 只能用于 container")
 		}
 		workspaceMode := strings.ToLower(strings.TrimSpace(req.WorkspaceMode))
-		if workspaceMode == "" && req.WorkspacePersistent != nil {
+		// Older clients sent workspacePersistent=false for every new conversation.
+		// Treat that value as absent for host execution; workspace compatibility
+		// conversion is meaningful only for container conversations.
+		if runtimeMode == database.ConversationRuntimeModeContainer && workspaceMode == "" && req.WorkspacePersistent != nil {
 			if *req.WorkspacePersistent {
 				workspaceMode = database.ConversationWorkspaceModeDedicated
 			} else {
