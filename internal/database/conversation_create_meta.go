@@ -2,27 +2,28 @@ package database
 
 // ConversationCreateMeta describes how a conversation was created (for audit hooks).
 type ConversationCreateMeta struct {
-	Source                string
-	WebShellConnectionID  string
-	ProjectID             string
-	RoleName              string
-	AgentMode             string
-	RuntimeMode           string
-	WorkspaceMode         string
-	WorkspacePersistent   bool
-	WorkspaceID           string
-	IdlePolicy            *ConversationIdlePolicy
-	BoundaryPolicyID      string
-	EgressMode            string
-	EgressProxyID         string
-	EgressProxyGroupID    string
-	EgressAuditEnabled    *bool
-	EgressAuditMode       string
-	EgressAggregationMode string
-	RuntimeControls       ConversationRuntimeControls
-	NetworkAccess         ConversationNetworkAccess
-	ClientIP              string
-	SessionHint           string
+	Source                 string
+	WebShellConnectionID   string
+	ProjectID              string
+	RoleName               string
+	AgentMode              string
+	RuntimeMode            string
+	WorkspaceMode          string
+	WorkspacePersistent    bool
+	WorkspaceID            string
+	IdlePolicy             *ConversationIdlePolicy
+	BoundaryPolicyID       string
+	EgressMode             string
+	EgressProxyID          string
+	EgressProxyGroupID     string
+	EgressAuditEnabled     *bool
+	EgressAuditMode        string
+	EgressAggregationMode  string
+	RecordUpstreamFailures bool
+	RuntimeControls        ConversationRuntimeControls
+	NetworkAccess          ConversationNetworkAccess
+	ClientIP               string
+	SessionHint            string
 }
 
 // ConversationCreateHook is invoked after a conversation row is inserted.

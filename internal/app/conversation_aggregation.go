@@ -17,7 +17,7 @@ type conversationAggregationController struct {
 	collector *egressaudit.Collector
 }
 
-func (controller *conversationAggregationController) ApplyConversationAggregationSetting(ctx context.Context, conversationID string, enabled bool, mode string) error {
+func (controller *conversationAggregationController) ApplyConversationAggregationSetting(ctx context.Context, conversationID string, enabled bool, mode string, recordUpstreamFailures bool) error {
 	if controller == nil {
 		return nil
 	}
@@ -28,11 +28,11 @@ func (controller *conversationAggregationController) ApplyConversationAggregatio
 			return err
 		}
 		if runtimeMode == database.ConversationRuntimeModeContainer {
-			result = errors.Join(result, controller.spool.WriteAggregationPolicy(strings.TrimSpace(conversationID), mode))
+			result = errors.Join(result, controller.spool.WriteAggregationPolicy(strings.TrimSpace(conversationID), mode, recordUpstreamFailures))
 		}
 	}
 	if result == nil && controller.host != nil {
-		result = errors.Join(result, controller.host.ApplyConversationAggregationSetting(ctx, conversationID, enabled, mode))
+		result = errors.Join(result, controller.host.ApplyConversationAggregationSetting(ctx, conversationID, enabled, mode, recordUpstreamFailures))
 	}
 	return result
 }

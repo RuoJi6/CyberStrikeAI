@@ -208,6 +208,21 @@ func emitActivity(sink ActivitySink, event ActivityEvent) {
 	sink(event)
 }
 
+// IsUpstreamConnectionFailure identifies an allowed request that failed before
+// an upstream application response or TCP tunnel was established. Policy
+// denials and TLS/security validation failures intentionally remain visible.
+func IsUpstreamConnectionFailure(event ActivityEvent) bool {
+	if event.Decision != ActivityDecisionAllowed {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(event.Outcome)) {
+	case "dial_failed", "upstream_connect_failed", "upstream_timeout", "upstream_failed":
+		return true
+	default:
+		return false
+	}
+}
+
 func activityLatencyMS(start, end time.Time) int64 {
 	duration := end.Sub(start)
 	if duration < 0 {

@@ -229,9 +229,9 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 			}
 		}
 		if _, err = tx.Exec(`
-			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, updated_at)
-			VALUES (?, ?, ?, ?, ?)
-		`, id, auditEnabled, auditMode, aggregationMode, formatSQLiteUTC(now)); err != nil {
+			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, record_upstream_failures, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+		`, id, auditEnabled, auditMode, aggregationMode, meta.RecordUpstreamFailures, formatSQLiteUTC(now)); err != nil {
 			return nil, fmt.Errorf("保存对话出站审计设置失败: %w", err)
 		}
 	}

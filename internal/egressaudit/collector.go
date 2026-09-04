@@ -64,7 +64,8 @@ func NewCollector(store Store, streamer ActivityStreamer, logger *zap.Logger, in
 
 func auditStreamKey(target database.EgressAuditRuntimeTarget) string {
 	record := target.Record
-	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID + ":" + targetAggregationMode(target)
+	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID + ":" +
+		targetAggregationMode(target) + ":" + strconv.FormatBool(target.RecordUpstreamFailures)
 }
 
 func targetAggregationMode(target database.EgressAuditRuntimeTarget) string {
@@ -174,6 +175,16 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 				c.ingestor.Publish(egressactivity.IngestedActivity{ConversationID: record.ConversationID, ConversationTitle: target.ConversationTitle, Event: event})
 			}
 			return appendErr
+		}
+		if egress.IsUpstreamConnectionFailure(event) {
+			if !target.RecordUpstreamFailures {
+				return nil
+			}
+			// Streams replay the gateway's bounded log after a policy change. Do not
+			// resurrect failures that occurred while failure recording was disabled.
+			if !target.RecordUpstreamFailuresSince.IsZero() && event.Timestamp.Before(target.RecordUpstreamFailuresSince) {
+				return nil
+			}
 		}
 		if !egressactivity.ShouldAggregate(mode, event) {
 			return appendEvents(appendCtx, []egress.ActivityEvent{event})

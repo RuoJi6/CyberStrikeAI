@@ -17,9 +17,10 @@ const (
 )
 
 type AggregationPolicy struct {
-	Version   string    `json:"version"`
-	Mode      string    `json:"mode"`
-	UpdatedAt time.Time `json:"updatedAt"`
+	Version                string    `json:"version"`
+	Mode                   string    `json:"mode"`
+	RecordUpstreamFailures bool      `json:"recordUpstreamFailures"`
+	UpdatedAt              time.Time `json:"updatedAt"`
 }
 
 func validAggregationMode(mode string) bool {
@@ -31,7 +32,7 @@ func validAggregationMode(mode string) bool {
 	}
 }
 
-func (d *Directory) WriteAggregationPolicy(conversationID, mode string) error {
+func (d *Directory) WriteAggregationPolicy(conversationID, mode string, recordUpstreamFailures bool) error {
 	if !validAggregationMode(mode) {
 		return errors.New("traffic aggregation policy mode is invalid")
 	}
@@ -40,7 +41,8 @@ func (d *Directory) WriteAggregationPolicy(conversationID, mode string) error {
 		return err
 	}
 	content, err := json.Marshal(AggregationPolicy{
-		Version: AggregationPolicyVersion, Mode: strings.ToLower(strings.TrimSpace(mode)), UpdatedAt: time.Now().UTC(),
+		Version: AggregationPolicyVersion, Mode: strings.ToLower(strings.TrimSpace(mode)),
+		RecordUpstreamFailures: recordUpstreamFailures, UpdatedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		return err
@@ -84,16 +86,17 @@ func (d *Directory) WriteAggregationPolicy(conversationID, mode string) error {
 	return nil
 }
 
-func loadAggregationPolicy(root string) string {
+func loadAggregationPolicy(root string) AggregationPolicy {
 	content, err := os.ReadFile(filepath.Join(root, AggregationPolicyFilename))
 	if err != nil {
-		return AggregationModeNone
+		return AggregationPolicy{Version: AggregationPolicyVersion, Mode: AggregationModeNone}
 	}
 	var policy AggregationPolicy
 	if json.Unmarshal(content, &policy) != nil || policy.Version != AggregationPolicyVersion || !validAggregationMode(policy.Mode) {
-		return AggregationModeNone
+		return AggregationPolicy{Version: AggregationPolicyVersion, Mode: AggregationModeNone}
 	}
-	return strings.ToLower(strings.TrimSpace(policy.Mode))
+	policy.Mode = strings.ToLower(strings.TrimSpace(policy.Mode))
+	return policy
 }
 
 // WatchAggregationPolicy hot-applies an atomically published policy. Missing,
@@ -102,7 +105,10 @@ func WatchAggregationPolicy(ctx context.Context, root string, sink *CompactingSi
 	if ctx == nil || sink == nil {
 		return errors.New("aggregation policy watcher is not configured")
 	}
-	apply := func() error { return sink.SetAggregationMode(context.Background(), loadAggregationPolicy(root)) }
+	apply := func() error {
+		policy := loadAggregationPolicy(root)
+		return sink.SetPolicy(context.Background(), policy.Mode, policy.RecordUpstreamFailures)
+	}
 	if err := apply(); err != nil {
 		return err
 	}

@@ -732,7 +732,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		return nil, fmt.Errorf("load traffic aggregation policies: %w", settingsErr)
 	} else {
 		for conversationID, setting := range settings {
-			if applyErr := aggregationController.ApplyConversationAggregationSetting(context.Background(), conversationID, setting.Enabled, setting.AggregationMode); applyErr != nil {
+			if applyErr := aggregationController.ApplyConversationAggregationSetting(context.Background(), conversationID, setting.Enabled, setting.AggregationMode, setting.RecordUpstreamFailures); applyErr != nil {
 				return nil, fmt.Errorf("publish traffic aggregation policy for %s: %w", conversationID, applyErr)
 			}
 		}

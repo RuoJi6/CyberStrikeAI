@@ -270,6 +270,54 @@ func TestCollectorCompactsBehaviouralBurstButFullModeRetainsEveryEvent(t *testin
 	}
 }
 
+func TestCollectorFailureRecordingDefaultsOffAndDoesNotReplayEarlierFailures(t *testing.T) {
+	now := time.Now().UTC()
+	events := []egress.ActivityEvent{
+		{Event: egress.ActivityEventName, Timestamp: now.Add(-time.Minute), RequestType: egress.ActivityRequestTCP, Domain: "old.example", Port: 1, Decision: egress.ActivityDecisionAllowed, Outcome: "dial_failed"},
+		{Event: egress.ActivityEventName, Timestamp: now.Add(time.Second), RequestType: egress.ActivityRequestTCP, Domain: "new.example", Port: 2, Decision: egress.ActivityDecisionAllowed, Outcome: "dial_failed"},
+		{Event: egress.ActivityEventName, Timestamp: now.Add(2 * time.Second), RequestType: egress.ActivityRequestTCP, Domain: "blocked.example", Port: 3, Decision: egress.ActivityDecisionBlocked, Outcome: "policy_denied"},
+		{Event: egress.ActivityEventName, Timestamp: now.Add(3 * time.Second), RequestType: egress.ActivityRequestTCP, Domain: "ok.example", Port: 4, Decision: egress.ActivityDecisionAllowed, Outcome: "forwarded"},
+	}
+	for _, test := range []struct {
+		name    string
+		record  bool
+		cutoff  time.Time
+		domains []string
+	}{
+		{name: "default off", domains: []string{"blocked.example", "ok.example"}},
+		{name: "enabled with replay cutoff", record: true, cutoff: now, domains: []string{"new.example", "blocked.example", "ok.example"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			target := collectorTargetFixture()
+			target.AggregationMode = database.EgressAggregationModeNone
+			target.RecordUpstreamFailures = test.record
+			target.RecordUpstreamFailuresSince = test.cutoff
+			store := &collectorTestStore{targets: []database.EgressAuditRuntimeTarget{target}}
+			collector, err := NewCollector(store, &collectorBurstStreamer{events: events, finite: true}, zap.NewNop())
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if err := collector.Reconcile(ctx); err != nil {
+				t.Fatal(err)
+			}
+			waitCollectorCondition(t, func() bool { return collector.ActiveStreams() == 0 }, "finite failure stream completion")
+			store.mu.Lock()
+			stored := append([]egress.ActivityEvent(nil), store.events...)
+			store.mu.Unlock()
+			if len(stored) != len(test.domains) {
+				t.Fatalf("stored events = %#v", stored)
+			}
+			for index, domain := range test.domains {
+				if stored[index].Domain != domain {
+					t.Fatalf("stored[%d] = %#v, want %q", index, stored[index], domain)
+				}
+			}
+		})
+	}
+}
+
 func collectorTargetFixture() database.EgressAuditRuntimeTarget {
 	return database.EgressAuditRuntimeTarget{
 		ConversationTitle: "collector target",

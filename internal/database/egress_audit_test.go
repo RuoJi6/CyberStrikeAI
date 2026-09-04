@@ -336,6 +336,9 @@ func TestConversationEgressAuditSettingControlsCollectorTargets(t *testing.T) {
 	if err != nil || len(targets) != 1 {
 		t.Fatalf("default collector targets = %#v, %v", targets, err)
 	}
+	if targets[0].RecordUpstreamFailures || !targets[0].RecordUpstreamFailuresSince.IsZero() {
+		t.Fatalf("upstream failure recording must default off: %#v", targets[0])
+	}
 	disabledEvent := egress.ActivityEvent{
 		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestHTTP,
 		Domain: "fuzz.example", Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "allow-fuzz", Reason: "allow-visit",
@@ -369,6 +372,17 @@ func TestConversationEgressAuditSettingControlsCollectorTargets(t *testing.T) {
 	if targets, err := db.ListRunningEgressAuditRuntimeTargets(ctx); err != nil || len(targets) != 1 || targets[0].Record.ConversationID != conversation.ID {
 		t.Fatalf("re-enabled collector targets = %#v, %v", targets, err)
 	}
+	setting, err := db.GetConversationEgressAuditSetting(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetConversationEgressAuditSetting(ctx, conversation.ID, setting.Enabled, setting.AggregationMode, true); err != nil {
+		t.Fatal(err)
+	}
+	targets, err = db.ListRunningEgressAuditRuntimeTargets(ctx)
+	if err != nil || len(targets) != 1 || !targets[0].RecordUpstreamFailures || targets[0].RecordUpstreamFailuresSince.IsZero() {
+		t.Fatalf("enabled failure recording target = %#v, %v", targets, err)
+	}
 }
 
 func TestCreateContainerConversationPersistsInitialEgressAuditSetting(t *testing.T) {
@@ -401,7 +415,7 @@ func TestConversationAggregationDefaultsAndLegacyMigration(t *testing.T) {
 	}
 	for _, id := range []string{host.ID, container.ID} {
 		setting, err := db.GetConversationEgressAuditSetting(context.Background(), id)
-		if err != nil || setting.AggregationMode != EgressAggregationModeTools {
+		if err != nil || setting.AggregationMode != EgressAggregationModeTools || setting.RecordUpstreamFailures {
 			t.Fatalf("new conversation setting %s = %#v, %v", id, setting, err)
 		}
 	}
@@ -430,11 +444,11 @@ func TestConversationAggregationDefaultsAndLegacyMigration(t *testing.T) {
 	}
 	defer reopened.Close()
 	hostSetting, err := reopened.GetConversationEgressAuditSetting(context.Background(), host.ID)
-	if err != nil || hostSetting.AggregationMode != EgressAggregationModeAll {
+	if err != nil || hostSetting.AggregationMode != EgressAggregationModeAll || hostSetting.RecordUpstreamFailures {
 		t.Fatalf("legacy host setting = %#v, %v", hostSetting, err)
 	}
 	containerSetting, err := reopened.GetConversationEgressAuditSetting(context.Background(), container.ID)
-	if err != nil || containerSetting.AggregationMode != EgressAggregationModeNone {
+	if err != nil || containerSetting.AggregationMode != EgressAggregationModeNone || containerSetting.RecordUpstreamFailures {
 		t.Fatalf("legacy container setting = %#v, %v", containerSetting, err)
 	}
 }

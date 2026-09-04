@@ -15,21 +15,21 @@ func TestAggregationPolicyAtomicWriteAndSafeFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := directory.WriteAggregationPolicy("conversation-01", AggregationModeTools); err != nil {
+	if err := directory.WriteAggregationPolicy("conversation-01", AggregationModeTools, true); err != nil {
 		t.Fatal(err)
 	}
 	path, err := directory.ConversationPath("conversation-01")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loadAggregationPolicy(path); got != AggregationModeTools {
-		t.Fatalf("policy mode = %q", got)
+	if got := loadAggregationPolicy(path); got.Mode != AggregationModeTools || !got.RecordUpstreamFailures {
+		t.Fatalf("policy = %#v", got)
 	}
 	if err := os.WriteFile(filepath.Join(path, AggregationPolicyFilename), []byte(`{"version":"broken","mode":"all"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := loadAggregationPolicy(path); got != AggregationModeNone {
-		t.Fatalf("invalid policy fallback = %q", got)
+	if got := loadAggregationPolicy(path); got.Mode != AggregationModeNone || got.RecordUpstreamFailures {
+		t.Fatalf("invalid policy fallback = %#v", got)
 	}
 	if matches, _ := filepath.Glob(filepath.Join(path, ".aggregation-policy-*.tmp")); len(matches) != 0 {
 		t.Fatalf("temporary policies remain: %#v", matches)
@@ -65,7 +65,7 @@ func TestWatchAggregationPolicyHotSwitchesFutureTraffic(t *testing.T) {
 	if len(captured) != 1 {
 		t.Fatalf("missing policy must preserve a complete record: %#v", captured)
 	}
-	if err := directory.WriteAggregationPolicy("conversation-01", AggregationModeAll); err != nil {
+	if err := directory.WriteAggregationPolicy("conversation-01", AggregationModeAll, false); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(300 * time.Millisecond)

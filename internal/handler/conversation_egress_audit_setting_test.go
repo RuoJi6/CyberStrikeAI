@@ -20,7 +20,7 @@ type failingAggregationController struct {
 	calls int
 }
 
-func (controller *failingAggregationController) ApplyConversationAggregationSetting(context.Context, string, bool, string) error {
+func (controller *failingAggregationController) ApplyConversationAggregationSetting(context.Context, string, bool, string, bool) error {
 	controller.calls++
 	if controller.calls == 1 {
 		return errors.New("injected apply failure")
@@ -51,7 +51,7 @@ func TestConversationEgressAuditSettingHandlerGetsAndUpdatesContainerConversatio
 	getContext.Params = gin.Params{{Key: "id", Value: conversation.ID}}
 	getContext.Set(security.ContextSessionKey, security.Session{UserID: "admin", Username: "admin", Scope: database.RBACScopeAll})
 	handler.GetConversationEgressAuditSetting(getContext)
-	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), `"enabled":true`) || !strings.Contains(getRecorder.Body.String(), `"aggregationMode":"tools"`) {
+	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), `"enabled":true`) || !strings.Contains(getRecorder.Body.String(), `"aggregationMode":"tools"`) || !strings.Contains(getRecorder.Body.String(), `"recordUpstreamFailures":false`) {
 		t.Fatalf("get setting = %d %s", getRecorder.Code, getRecorder.Body.String())
 	}
 
@@ -67,6 +67,17 @@ func TestConversationEgressAuditSettingHandlerGetsAndUpdatesContainerConversatio
 	}
 	if enabled, err := db.GetConversationEgressAuditEnabled(t.Context(), conversation.ID); err != nil || enabled {
 		t.Fatalf("stored setting = %v, %v", enabled, err)
+	}
+
+	failureRecorder := httptest.NewRecorder()
+	failureContext, _ := gin.CreateTestContext(failureRecorder)
+	failureContext.Request = httptest.NewRequest(http.MethodPut, "/api/conversations/"+conversation.ID+"/egress-audit", strings.NewReader(`{"recordUpstreamFailures":true}`))
+	failureContext.Request.Header.Set("Content-Type", "application/json")
+	failureContext.Params = gin.Params{{Key: "id", Value: conversation.ID}}
+	failureContext.Set(security.ContextSessionKey, security.Session{UserID: "admin", Username: "admin", Scope: database.RBACScopeAll})
+	handler.UpdateConversationEgressAuditSetting(failureContext)
+	if failureRecorder.Code != http.StatusOK || !strings.Contains(failureRecorder.Body.String(), `"recordUpstreamFailures":true`) {
+		t.Fatalf("put failure setting = %d %s", failureRecorder.Code, failureRecorder.Body.String())
 	}
 
 	fullRecorder := httptest.NewRecorder()

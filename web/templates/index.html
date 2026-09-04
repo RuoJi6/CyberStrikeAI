@@ -1354,6 +1354,16 @@
                                                         <span class="workspace-persistence-switch" aria-hidden="true"></span>
                                                     </label>
                                                 </div>
+												<div class="container-conversation-field is-runtime-editable">
+													<label class="workspace-persistence-toggle" for="conversation-egress-record-failures-toggle">
+														<span class="workspace-persistence-toggle-copy">
+															<span class="workspace-persistence-toggle-title" data-i18n="chat.recordUpstreamFailuresLabel">记录上游连接失败</span>
+															<span id="conversation-egress-record-failures-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.recordUpstreamFailuresHint">默认关闭。开启后，Host MITM 与容器会记录端口拒绝、连接失败和上游超时；策略阻断和安全异常始终保留。</span>
+														</span>
+														<input type="checkbox" id="conversation-egress-record-failures-toggle" onchange="syncConversationRecordUpstreamFailures(this.checked)" aria-describedby="conversation-egress-record-failures-hint">
+														<span class="workspace-persistence-switch" aria-hidden="true"></span>
+													</label>
+												</div>
                                             </section>
                                         </div>
                                     </div>
@@ -7538,7 +7548,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260904-2"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260904-3"></script>
     <script src="/static/js/vulnerability.js?v=21"></script>
     <script src="/static/js/traffic-evidence.js?v=8"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>

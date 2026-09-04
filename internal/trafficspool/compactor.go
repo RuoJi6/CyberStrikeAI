@@ -73,15 +73,16 @@ type compactBatch struct {
 // front of the spool Writer so discarded high-volume bodies never enter the
 // control-plane database or Docker logs.
 type CompactingSink struct {
-	mu          sync.Mutex
-	destination func(context.Context, traffic.Transaction, []traffic.Message) error
-	config      CompactConfig
-	batches     map[string]*compactBatch
-	stop        chan struct{}
-	done        chan struct{}
-	closeOnce   sync.Once
-	closeErr    error
-	mode        string
+	mu                     sync.Mutex
+	destination            func(context.Context, traffic.Transaction, []traffic.Message) error
+	config                 CompactConfig
+	batches                map[string]*compactBatch
+	stop                   chan struct{}
+	done                   chan struct{}
+	closeOnce              sync.Once
+	closeErr               error
+	mode                   string
+	recordUpstreamFailures bool
 }
 
 func NewCompactingSink(destination func(context.Context, traffic.Transaction, []traffic.Message) error, config CompactConfig) (*CompactingSink, error) {
@@ -127,13 +128,27 @@ func normalizeAggregationMode(value string) string {
 // SetAggregationMode flushes the complete batch accumulated under the old
 // policy before later traffic can be evaluated with the new one.
 func (s *CompactingSink) SetAggregationMode(ctx context.Context, mode string) error {
+	return s.setPolicy(ctx, mode, nil)
+}
+
+// SetPolicy flushes data accumulated under the previous policy before the
+// aggregation or failure-recording setting changes.
+func (s *CompactingSink) SetPolicy(ctx context.Context, mode string, recordUpstreamFailures bool) error {
+	return s.setPolicy(ctx, mode, &recordUpstreamFailures)
+}
+
+func (s *CompactingSink) setPolicy(ctx context.Context, mode string, recordUpstreamFailures *bool) error {
 	if s == nil {
 		return errors.New("traffic compacting sink is unavailable")
 	}
 	mode = normalizeAggregationMode(mode)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if mode == s.mode {
+	nextRecordUpstreamFailures := s.recordUpstreamFailures
+	if recordUpstreamFailures != nil {
+		nextRecordUpstreamFailures = *recordUpstreamFailures
+	}
+	if mode == s.mode && nextRecordUpstreamFailures == s.recordUpstreamFailures {
 		return nil
 	}
 	outputs := s.flushAllLocked()
@@ -141,7 +156,17 @@ func (s *CompactingSink) SetAggregationMode(ctx context.Context, mode string) er
 		return err
 	}
 	s.mode = mode
+	s.recordUpstreamFailures = nextRecordUpstreamFailures
 	return nil
+}
+
+func suppressibleUpstreamFailure(item traffic.Transaction) bool {
+	switch strings.ToLower(strings.TrimSpace(item.ErrorCode)) {
+	case "upstream_connect_failed", "upstream_timeout", "upstream_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func shouldAggregateTransaction(mode string, item traffic.Transaction) bool {
@@ -176,6 +201,10 @@ func (s *CompactingSink) Write(ctx context.Context, item traffic.Transaction, me
 
 	s.mu.Lock()
 	outputs := s.flushExpiredLocked(now)
+	if !s.recordUpstreamFailures && suppressibleUpstreamFailure(item) {
+		s.mu.Unlock()
+		return s.writeRecords(ctx, outputs)
+	}
 	if !shouldAggregateTransaction(s.mode, item) {
 		s.mu.Unlock()
 		if err := s.writeRecords(ctx, outputs); err != nil {

@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/egress"
 	"cyberstrike-ai/internal/mcp"
 	"cyberstrike-ai/internal/networkprovenance"
+	containerruntime "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/security"
 	"cyberstrike-ai/internal/traffic"
 
@@ -243,5 +245,69 @@ func TestBuildHostTrafficCABundlePreservesSystemTrust(t *testing.T) {
 	})
 	if !bytes.Equal(bundle, []byte("SYSTEM-CA\nCONVERSATION-CA\n")) {
 		t.Fatalf("combined CA bundle = %q", bundle)
+	}
+}
+
+func TestHostAuditQueueFailureRecordingIsOffByDefaultAndHotSwitchable(t *testing.T) {
+	db, err := database.NewDB(filepath.Join(t.TempDir(), "host-failure-toggle.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	conversation, err := db.CreateConversation("host failure toggle", database.ConversationCreateMeta{RuntimeMode: database.ConversationRuntimeModeHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtimeInstanceID := "11111111-1111-4111-8111-111111111111"
+	snapshotSHA256 := "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	target := database.EgressAuditRuntimeTarget{
+		ConversationTitle: conversation.Title, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
+		Record: containerruntime.InitializationRecord{
+			ConversationID: conversation.ID, ProviderID: runtimeInstanceID, RuntimeGeneration: 1,
+			Spec: containerruntime.RuntimeSpec{ConversationID: conversation.ID, EgressGateway: &containerruntime.EgressGatewaySpec{
+				BoundarySnapshot:      &containerruntime.EgressBoundarySnapshotSpec{ID: runtimeInstanceID, SHA256: snapshotSHA256},
+				AttributionInstanceID: runtimeInstanceID,
+			}},
+		},
+	}
+	event := func(id, outcome string) egress.ActivityEvent {
+		return egress.ActivityEvent{
+			EventID: id, Event: egress.ActivityEventName, Timestamp: time.Now().UTC(), RequestType: egress.ActivityRequestTCP,
+			Domain: "127.0.0.1", ConnectedIP: "127.0.0.1", Port: 1, Decision: egress.ActivityDecisionAllowed, Outcome: outcome,
+			SnapshotID: runtimeInstanceID, SnapshotSHA256: snapshotSHA256,
+			Provenance: networkprovenance.NetworkProvenanceV1{
+				ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
+				RuntimeGeneration: 1, RuntimeInstanceID: runtimeInstanceID,
+				AttributionStatus: networkprovenance.AttributionUnattributed,
+			}.Normalized(),
+		}
+	}
+	queue := newHostAuditQueue(db, target, zap.NewNop(), nil, true, database.EgressAggregationModeNone, false)
+	queue.append(event("failure-off", "dial_failed"))
+	queue.append(event("success", "forwarded"))
+	if err := queue.setSetting(context.Background(), true, database.EgressAggregationModeNone, true); err != nil {
+		t.Fatal(err)
+	}
+	queue.append(event("failure-on", "dial_failed"))
+	closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := queue.close(closeCtx); err != nil {
+		t.Fatal(err)
+	}
+	items, err := db.ListEgressAuditEvents(context.Background(), database.EgressAuditFilter{
+		ConversationID: conversation.ID, RuntimeMode: networkprovenance.RuntimeModeHostMITM, Scope: database.RBACScopeAll, Limit: 10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("host failure events = %#v", items)
+	}
+	seen := map[string]bool{}
+	for _, item := range items {
+		seen[item.SourceEventID] = true
+	}
+	if seen["failure-off"] || !seen["success"] || !seen["failure-on"] {
+		t.Fatalf("host failure switch persisted IDs = %#v", seen)
 	}
 }

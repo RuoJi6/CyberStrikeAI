@@ -97,7 +97,7 @@ type ConversationSharedWorkspaceController interface {
 }
 
 type ConversationEgressAggregationController interface {
-	ApplyConversationAggregationSetting(context.Context, string, bool, string) error
+	ApplyConversationAggregationSetting(context.Context, string, bool, string, bool) error
 	RefreshConversationAggregation(context.Context) error
 }
 
@@ -217,22 +217,23 @@ func NewConversationHandler(db *database.DB, logger *zap.Logger) *ConversationHa
 
 // CreateConversationRequest 创建对话请求
 type CreateConversationRequest struct {
-	Title                 string                                `json:"title"`
-	ProjectID             string                                `json:"projectId,omitempty"`
-	RuntimeMode           string                                `json:"runtimeMode,omitempty"`
-	WorkspaceMode         string                                `json:"workspaceMode,omitempty"`
-	WorkspacePersistent   *bool                                 `json:"workspacePersistent,omitempty"`
-	WorkspaceID           string                                `json:"workspaceId,omitempty"`
-	IdlePolicy            *database.ConversationIdlePolicy      `json:"idlePolicy,omitempty"`
-	BoundaryPolicyID      string                                `json:"boundaryPolicyId,omitempty"`
-	EgressMode            string                                `json:"egressMode,omitempty"`
-	EgressProxyID         string                                `json:"egressProxyId,omitempty"`
-	EgressProxyGroupID    string                                `json:"egressProxyGroupId,omitempty"`
-	EgressAuditEnabled    *bool                                 `json:"egressAuditEnabled,omitempty"`
-	EgressAuditMode       string                                `json:"egressAuditMode,omitempty"`
-	EgressAggregationMode string                                `json:"egressAggregationMode,omitempty"`
-	RuntimeControls       *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
-	NetworkAccess         *database.ConversationNetworkAccess   `json:"networkAccess,omitempty"`
+	Title                  string                                `json:"title"`
+	ProjectID              string                                `json:"projectId,omitempty"`
+	RuntimeMode            string                                `json:"runtimeMode,omitempty"`
+	WorkspaceMode          string                                `json:"workspaceMode,omitempty"`
+	WorkspacePersistent    *bool                                 `json:"workspacePersistent,omitempty"`
+	WorkspaceID            string                                `json:"workspaceId,omitempty"`
+	IdlePolicy             *database.ConversationIdlePolicy      `json:"idlePolicy,omitempty"`
+	BoundaryPolicyID       string                                `json:"boundaryPolicyId,omitempty"`
+	EgressMode             string                                `json:"egressMode,omitempty"`
+	EgressProxyID          string                                `json:"egressProxyId,omitempty"`
+	EgressProxyGroupID     string                                `json:"egressProxyGroupId,omitempty"`
+	EgressAuditEnabled     *bool                                 `json:"egressAuditEnabled,omitempty"`
+	EgressAuditMode        string                                `json:"egressAuditMode,omitempty"`
+	EgressAggregationMode  string                                `json:"egressAggregationMode,omitempty"`
+	RecordUpstreamFailures bool                                  `json:"recordUpstreamFailures,omitempty"`
+	RuntimeControls        *database.ConversationRuntimeControls `json:"runtimeControls,omitempty"`
+	NetworkAccess          *database.ConversationNetworkAccess   `json:"networkAccess,omitempty"`
 }
 
 // SetConversationProjectRequest 设置对话所属项目
@@ -322,6 +323,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 		meta.NetworkAccess = *req.NetworkAccess
 	}
 	meta.EgressAuditEnabled = req.EgressAuditEnabled
+	meta.RecordUpstreamFailures = req.RecordUpstreamFailures
 	if strings.TrimSpace(req.EgressAuditMode) != "" {
 		auditMode, modeErr := database.NormalizeConversationEgressAuditMode(req.EgressAuditMode)
 		if modeErr != nil {
@@ -402,7 +404,7 @@ func (h *ConversationHandler) CreateConversation(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "初始化对话流量聚合策略失败"})
 			return
 		}
-		if applyErr := h.egressAggregation.ApplyConversationAggregationSetting(c.Request.Context(), conv.ID, setting.Enabled, setting.AggregationMode); applyErr != nil {
+		if applyErr := h.egressAggregation.ApplyConversationAggregationSetting(c.Request.Context(), conv.ID, setting.Enabled, setting.AggregationMode, setting.RecordUpstreamFailures); applyErr != nil {
 			h.logger.Error("初始化对话流量聚合策略失败", zap.String("conversationId", conv.ID), zap.Error(applyErr))
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "初始化对话流量聚合策略失败"})
 			return

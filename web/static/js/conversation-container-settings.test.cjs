@@ -34,6 +34,8 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
 	assert.match(template, /id="conversation-cpu-limit"[^>]*value="1"/);
     assert.match(template, /id="conversation-egress-audit-toggle"[^>]*checked/);
     assert.match(template, /id="conversation-egress-audit-mode"[^>]*data-unified-select="single"/);
+    assert.match(template, /id="conversation-egress-record-failures-toggle"/);
+    assert.doesNotMatch(template.match(/<input[^>]+id="conversation-egress-record-failures-toggle"[^>]*>/)[0], /\schecked(?:\s|>)/);
     assert.doesNotMatch(template, /conversation-network-settings-apply|applyConversationContainerNetworkSettings/);
     assert.match(template, /class="container-conversation-field is-runtime-editable"[\s\S]{0,1400}id="conversation-egress-audit-toggle"/);
     assert.match(template, /id="conversation-egress-preview"[^>]*aria-live|id="container-conversation-options-status"[^>]*aria-live/);
@@ -73,6 +75,7 @@ test('shared workspace selection is included in container conversation creation'
         'conversation-egress-mode-select': { value: '' },
         'conversation-egress-audit-toggle': { checked: true },
         'conversation-egress-audit-mode': { value: 'tools' },
+        'conversation-egress-record-failures-toggle': { checked: false },
         'conversation-scan-rate-toggle': { checked: false },
         'conversation-resource-limit-toggle': { checked: false },
 		'conversation-restricted-targets-toggle': { checked: false },
@@ -94,6 +97,7 @@ test('shared workspace selection is included in container conversation creation'
             idlePolicy: { action: 'delete', timeoutSeconds: 1800 },
             egressAuditEnabled: true,
             egressAggregationMode: 'tools',
+            recordUpstreamFailures: false,
             runtimeControls: {
                 scanRateEnabled: false,
                 httpRequestsPerSecond: 0,
@@ -116,6 +120,7 @@ test('new conversation request sends exact immutable selection fields only for c
         'conversation-egress-target-select': { value: 'proxy-1' },
         'conversation-egress-audit-toggle': { checked: true },
         'conversation-egress-audit-mode': { value: 'none' },
+        'conversation-egress-record-failures-toggle': { checked: true },
 		'conversation-scan-rate-toggle': { checked: false },
 		'conversation-resource-limit-toggle': { checked: false },
 		'conversation-restricted-targets-toggle': { checked: true },
@@ -130,7 +135,7 @@ test('new conversation request sends exact immutable selection fields only for c
 
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ egressAuditEnabled: true, egressAggregationMode: 'none', workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
+		{ egressAuditEnabled: true, egressAggregationMode: 'none', recordUpstreamFailures: true, workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', egressMode: 'proxy', egressProxyId: 'proxy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		}, networkAccess: { allowRestrictedTargets: true } },
@@ -139,7 +144,7 @@ test('new conversation request sends exact immutable selection fields only for c
     elements['conversation-egress-target-select'].value = 'group-1';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ egressAuditEnabled: true, egressAggregationMode: 'none', workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
+		{ egressAuditEnabled: true, egressAggregationMode: 'none', recordUpstreamFailures: true, workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', egressMode: 'group', egressProxyGroupId: 'group-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		}, networkAccess: { allowRestrictedTargets: true } },
@@ -147,12 +152,12 @@ test('new conversation request sends exact immutable selection fields only for c
     elements['conversation-egress-mode-select'].value = '';
     assert.deepEqual(
         JSON.parse(JSON.stringify(window.readNewConversationContainerControls('container'))),
-		{ egressAuditEnabled: true, egressAggregationMode: 'none', workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', runtimeControls: {
+		{ egressAuditEnabled: true, egressAggregationMode: 'none', recordUpstreamFailures: true, workspaceMode: 'dedicated', workspacePersistent: true, idlePolicy: { action: 'delete', timeoutSeconds: 1800 }, boundaryPolicyId: 'policy-1', runtimeControls: {
 			scanRateEnabled: false, httpRequestsPerSecond: 0, tcpConnectionsPerSecond: 0, udpDatagramsPerSecond: 0,
 			customResourcesEnabled: false, nanoCpus: 0, memoryBytes: 0,
 		}, networkAccess: { allowRestrictedTargets: true } },
     );
-    assert.deepEqual(JSON.parse(JSON.stringify(window.readNewConversationContainerControls('host'))), { egressAuditEnabled: true, egressAggregationMode: 'none' });
+    assert.deepEqual(JSON.parse(JSON.stringify(window.readNewConversationContainerControls('host'))), { egressAuditEnabled: true, egressAggregationMode: 'none', recordUpstreamFailures: true });
     assert.match(chat, /Object\.assign\(body, window\.readNewConversationContainerControls\(body\.runtimeMode\)\)/);
 });
 
@@ -164,6 +169,7 @@ test('container creation copy is bilingual and cache-busted', () => {
             'egressInheritedPreview', 'egressExplicitPreview', 'egressTargetHint',
             'egressAuditLabel', 'egressAuditHint', 'egressAuditDisabledHint', 'egressAuditFullHint',
             'trafficAggregationTitle', 'trafficAggregationCommonHint', 'egressAuditModeLabel', 'egressAggregationAll', 'egressAggregationTools', 'egressAggregationNone', 'egressAuditModeHint',
+            'recordUpstreamFailuresLabel', 'recordUpstreamFailuresHint', 'recordUpstreamFailuresEnabled', 'recordUpstreamFailuresDisabled', 'recordUpstreamFailuresSaveFailed',
             'containerNetworkAutoApplying', 'containerNetworkAutoApplied', 'containerNetworkAutoApplyFailed',
 			'scanRateLimitLabel', 'scanRateLimitHint', 'httpRateLabel', 'tcpRateLabel', 'udpRateLabel',
 			'customResourcesLabel', 'customResourcesHint', 'cpuLimitLabel', 'memoryLimitLabel',
@@ -184,7 +190,7 @@ test('container creation copy is bilingual and cache-busted', () => {
 	assert.match(template, /style\.css\?v=20260904-2/);
 	assert.match(template, /chat\.js\?v=20260902-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-	assert.match(template, /conversation-container-settings\.js\?v=20260904-2/);
+	assert.match(template, /conversation-container-settings\.js\?v=20260904-3/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {

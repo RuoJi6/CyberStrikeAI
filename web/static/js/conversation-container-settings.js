@@ -621,10 +621,12 @@
     function updateAuditHint(enabled, saving, mode) {
         const hint = selectElement('conversation-egress-audit-hint');
         const modeSelect = selectElement('conversation-egress-audit-mode');
+		const failureToggle = selectElement('conversation-egress-record-failures-toggle');
         if (modeSelect) {
             modeSelect.disabled = !!saving;
             refreshEnhancedSelect(modeSelect);
         }
+		if (failureToggle) failureToggle.disabled = !!saving;
         if (!hint) return;
         if (saving) {
             hint.textContent = translate('chat.egressAuditSaving', '正在保存出站网络审计设置…');
@@ -638,6 +640,7 @@
     async function loadConversationEgressAuditSetting() {
         const toggle = selectElement('conversation-egress-audit-toggle');
         const modeSelect = selectElement('conversation-egress-audit-mode');
+		const failureToggle = selectElement('conversation-egress-record-failures-toggle');
         const conversationId = String(window.currentConversationId || '').trim();
         if (!toggle || !conversationId) return;
         const requestId = ++state.auditSettingRequestId;
@@ -647,6 +650,7 @@
             const payload = await fetchJSON('/api/conversations/' + encodeURIComponent(conversationId) + '/egress-audit');
             if (requestId !== state.auditSettingRequestId || conversationId !== String(window.currentConversationId || '').trim()) return;
             toggle.checked = payload.enabled !== false;
+			if (failureToggle) failureToggle.checked = payload.recordUpstreamFailures === true;
             if (modeSelect) {
                 modeSelect.value = ['all', 'tools', 'none'].includes(payload.aggregationMode) ? payload.aggregationMode : (payload.mode === 'full' ? 'none' : 'all');
                 modeSelect.dataset.appliedValue = modeSelect.value;
@@ -659,7 +663,10 @@
                 notify(translate('chat.egressAuditLoadFailed', '读取出站网络审计设置失败。'), 'error');
             }
         } finally {
-            if (requestId === state.auditSettingRequestId) toggle.disabled = false;
+			if (requestId === state.auditSettingRequestId) {
+				toggle.disabled = false;
+				if (failureToggle) failureToggle.disabled = false;
+			}
         }
     }
 
@@ -741,6 +748,41 @@
             updateAuditHint(toggle.checked, false, select.value);
         }
     }
+
+	async function syncConversationRecordUpstreamFailures(enabled) {
+		const failureToggle = selectElement('conversation-egress-record-failures-toggle');
+		const auditToggle = selectElement('conversation-egress-audit-toggle');
+		const modeSelect = selectElement('conversation-egress-audit-mode');
+		if (!failureToggle) return;
+		failureToggle.checked = !!enabled;
+		const conversationId = String(window.currentConversationId || '').trim();
+		if (!conversationId) return;
+		const previousEnabled = !failureToggle.checked;
+		const requestId = ++state.auditSettingRequestId;
+		updateAuditHint(!auditToggle || auditToggle.checked, true, modeSelect ? modeSelect.value : 'tools');
+		try {
+			const response = await window.apiFetch('/api/conversations/' + encodeURIComponent(conversationId) + '/egress-audit', {
+				method: 'PUT', headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ recordUpstreamFailures: failureToggle.checked }),
+			});
+			if (!response.ok) throw new Error('HTTP ' + response.status);
+			const payload = await response.json();
+			if (requestId !== state.auditSettingRequestId) return;
+			failureToggle.checked = payload.recordUpstreamFailures === true;
+			notify(failureToggle.checked
+				? translate('chat.recordUpstreamFailuresEnabled', '已开始记录后续上游连接失败。')
+				: translate('chat.recordUpstreamFailuresDisabled', '已停止记录后续上游连接失败。'), 'success');
+		} catch (error) {
+			if (requestId === state.auditSettingRequestId) {
+				failureToggle.checked = previousEnabled;
+				notify(translate('chat.recordUpstreamFailuresSaveFailed', '保存上游连接失败记录设置失败，已恢复原选择。'), 'error');
+			}
+		} finally {
+			if (requestId === state.auditSettingRequestId) {
+				updateAuditHint(!auditToggle || auditToggle.checked, false, modeSelect ? modeSelect.value : 'tools');
+			}
+		}
+	}
 
     function idlePolicyFromControls() {
         const actionSelect = selectElement('conversation-idle-action');
@@ -927,9 +969,11 @@
         const mode = selectElement('conversation-egress-mode-select');
         const auditToggle = selectElement('conversation-egress-audit-toggle');
         const auditMode = selectElement('conversation-egress-audit-mode');
+		const failureToggle = selectElement('conversation-egress-record-failures-toggle');
         if (boundary) boundary.value = '';
         if (mode) mode.value = '';
         if (auditToggle) auditToggle.checked = true;
+		if (failureToggle) failureToggle.checked = false;
         if (auditMode) {
             auditMode.value = 'tools';
             auditMode.dataset.appliedValue = 'tools';
@@ -955,8 +999,10 @@
         const result = {};
         const auditToggle = selectElement('conversation-egress-audit-toggle');
         const auditMode = selectElement('conversation-egress-audit-mode');
+		const failureToggle = selectElement('conversation-egress-record-failures-toggle');
         result.egressAuditEnabled = !auditToggle || auditToggle.checked;
         result.egressAggregationMode = auditMode && ['all', 'tools', 'none'].includes(auditMode.value) ? auditMode.value : 'tools';
+		result.recordUpstreamFailures = !!(failureToggle && failureToggle.checked);
         if (String(runtimeMode || '').trim().toLowerCase() !== 'container') return result;
         const workspace = selectedWorkspaceBinding();
         result.workspaceMode = workspace.mode;
@@ -992,6 +1038,7 @@
     window.syncConversationEgressTarget = syncConversationEgressTarget;
     window.syncConversationEgressAudit = syncConversationEgressAudit;
     window.syncConversationEgressAuditMode = syncConversationEgressAuditMode;
+	window.syncConversationRecordUpstreamFailures = syncConversationRecordUpstreamFailures;
     window.syncConversationRuntimeControls = syncConversationRuntimeControls;
     window.syncConversationIdlePolicy = syncConversationIdlePolicy;
     window.syncConversationWorkspaceMode = syncConversationWorkspaceMode;

@@ -309,3 +309,54 @@ func TestCompactingSinkModeSwitchFailureKeepsOldMode(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestCompactingSinkUpstreamFailureRecordingIsOffByDefaultAndHotSwitchable(t *testing.T) {
+	var captured []traffic.Transaction
+	sink, err := NewCompactingSink(func(_ context.Context, item traffic.Transaction, _ []traffic.Message) error {
+		captured = append(captured, item)
+		return nil
+	}, CompactConfig{IdleWindow: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeFailure := func(index int, code string) (traffic.Transaction, []traffic.Message) {
+		item, messages := compactTestTransaction(index, time.Now().UTC())
+		item.HTTPStatus = 0
+		item.Outcome = code
+		item.ErrorCode = code
+		return item, messages
+	}
+	for index, code := range []string{"upstream_connect_failed", "upstream_timeout", "upstream_failed"} {
+		item, messages := makeFailure(index, code)
+		if err := sink.Write(context.Background(), item, messages); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(captured) != 0 {
+		t.Fatalf("default-off failures = %#v", captured)
+	}
+	if err := sink.SetPolicy(context.Background(), AggregationModeNone, true); err != nil {
+		t.Fatal(err)
+	}
+	item, messages := makeFailure(10, "upstream_timeout")
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	item, messages = makeFailure(11, "tls_handshake_failed")
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.SetPolicy(context.Background(), AggregationModeNone, false); err != nil {
+		t.Fatal(err)
+	}
+	item, messages = makeFailure(12, "upstream_connect_failed")
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 2 || captured[0].ErrorCode != "upstream_timeout" || captured[1].ErrorCode != "tls_handshake_failed" {
+		t.Fatalf("hot-switched failures = %#v", captured)
+	}
+}

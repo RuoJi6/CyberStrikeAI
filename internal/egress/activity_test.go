@@ -118,3 +118,19 @@ func TestValidateHTTPPacketAcceptsNewHexAndDecodedProjection(t *testing.T) {
 		t.Fatal("accepted decoded packet without wire content encoding")
 	}
 }
+
+func TestIsUpstreamConnectionFailureOnlyMatchesAllowedPreConnectionFailures(t *testing.T) {
+	for _, outcome := range []string{"dial_failed", "upstream_connect_failed", "upstream_timeout", "upstream_failed"} {
+		if !IsUpstreamConnectionFailure(ActivityEvent{Decision: ActivityDecisionAllowed, Outcome: outcome}) {
+			t.Fatalf("allowed outcome %q was not classified", outcome)
+		}
+		if IsUpstreamConnectionFailure(ActivityEvent{Decision: ActivityDecisionBlocked, Outcome: outcome}) {
+			t.Fatalf("blocked outcome %q was suppressible", outcome)
+		}
+	}
+	for _, outcome := range []string{"dns_failed", "tls_handshake_failed", "sni_mismatch", "response_interrupted", "policy_denied"} {
+		if IsUpstreamConnectionFailure(ActivityEvent{Decision: ActivityDecisionAllowed, Outcome: outcome}) {
+			t.Fatalf("security or post-response outcome %q was suppressible", outcome)
+		}
+	}
+}

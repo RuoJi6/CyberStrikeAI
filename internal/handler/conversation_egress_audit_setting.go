@@ -12,9 +12,10 @@ import (
 )
 
 type conversationEgressAuditSettingRequest struct {
-	Enabled         *bool  `json:"enabled,omitempty"`
-	Mode            string `json:"mode,omitempty"`
-	AggregationMode string `json:"aggregationMode,omitempty"`
+	Enabled                *bool  `json:"enabled,omitempty"`
+	Mode                   string `json:"mode,omitempty"`
+	AggregationMode        string `json:"aggregationMode,omitempty"`
+	RecordUpstreamFailures *bool  `json:"recordUpstreamFailures,omitempty"`
 }
 
 func (h *ConversationHandler) lockConversationAggregation(conversationID string) func() {
@@ -41,7 +42,7 @@ func (h *ConversationHandler) GetConversationEgressAuditSetting(c *gin.Context) 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "读取对话出站审计设置失败"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"conversationId": id, "enabled": setting.Enabled, "mode": setting.Mode, "aggregationMode": setting.AggregationMode})
+	c.JSON(http.StatusOK, gin.H{"conversationId": id, "enabled": setting.Enabled, "mode": setting.Mode, "aggregationMode": setting.AggregationMode, "recordUpstreamFailures": setting.RecordUpstreamFailures})
 }
 
 func (h *ConversationHandler) UpdateConversationEgressAuditSetting(c *gin.Context) {
@@ -56,8 +57,8 @@ func (h *ConversationHandler) UpdateConversationEgressAuditSetting(c *gin.Contex
 		c.JSON(http.StatusBadRequest, gin.H{"error": "出站审计设置格式无效"})
 		return
 	}
-	if request.Enabled == nil && strings.TrimSpace(request.Mode) == "" && strings.TrimSpace(request.AggregationMode) == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要 enabled、mode 或 aggregationMode"})
+	if request.Enabled == nil && strings.TrimSpace(request.Mode) == "" && strings.TrimSpace(request.AggregationMode) == "" && request.RecordUpstreamFailures == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "至少需要 enabled、mode、aggregationMode 或 recordUpstreamFailures"})
 		return
 	}
 	current, err := h.db.GetConversationEgressAuditSetting(c.Request.Context(), id)
@@ -67,8 +68,12 @@ func (h *ConversationHandler) UpdateConversationEgressAuditSetting(c *gin.Contex
 	}
 	enabled := current.Enabled
 	aggregationMode := current.AggregationMode
+	recordUpstreamFailures := current.RecordUpstreamFailures
 	if request.Enabled != nil {
 		enabled = *request.Enabled
+	}
+	if request.RecordUpstreamFailures != nil {
+		recordUpstreamFailures = *request.RecordUpstreamFailures
 	}
 	if strings.TrimSpace(request.AggregationMode) != "" {
 		aggregationMode, err = database.NormalizeConversationEgressAggregationMode(request.AggregationMode)
@@ -107,23 +112,23 @@ func (h *ConversationHandler) UpdateConversationEgressAuditSetting(c *gin.Contex
 		}
 	}
 	if h.egressAggregation != nil {
-		if err := h.egressAggregation.ApplyConversationAggregationSetting(c.Request.Context(), id, enabled, aggregationMode); err != nil {
-			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode)
+		if err := h.egressAggregation.ApplyConversationAggregationSetting(c.Request.Context(), id, enabled, aggregationMode, recordUpstreamFailures); err != nil {
+			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode, current.RecordUpstreamFailures)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "应用流量聚合策略失败，设置未变更"})
 			return
 		}
 	}
-	if err := h.db.SetConversationEgressAuditSetting(c.Request.Context(), id, enabled, aggregationMode); err != nil {
+	if err := h.db.SetConversationEgressAuditSetting(c.Request.Context(), id, enabled, aggregationMode, recordUpstreamFailures); err != nil {
 		if h.egressAggregation != nil {
-			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode)
+			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode, current.RecordUpstreamFailures)
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新对话出站审计设置失败"})
 		return
 	}
 	if h.egressAggregation != nil {
 		if err := h.egressAggregation.RefreshConversationAggregation(c.Request.Context()); err != nil {
-			_ = h.db.SetConversationEgressAuditSetting(context.Background(), id, current.Enabled, current.AggregationMode)
-			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode)
+			_ = h.db.SetConversationEgressAuditSetting(context.Background(), id, current.Enabled, current.AggregationMode, current.RecordUpstreamFailures)
+			_ = h.egressAggregation.ApplyConversationAggregationSetting(context.Background(), id, current.Enabled, current.AggregationMode, current.RecordUpstreamFailures)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "刷新流量聚合策略失败，已恢复原设置"})
 			return
 		}
@@ -135,10 +140,11 @@ func (h *ConversationHandler) UpdateConversationEgressAuditSetting(c *gin.Contex
 	}
 	if h.audit != nil {
 		h.audit.RecordOK(c, "conversation", "update-egress-audit", "更新对话出站审计设置", "conversation", id, map[string]interface{}{
-			"enabled":          updated.Enabled,
-			"mode":             updated.Mode,
-			"aggregation_mode": updated.AggregationMode,
+			"enabled":                  updated.Enabled,
+			"mode":                     updated.Mode,
+			"aggregation_mode":         updated.AggregationMode,
+			"record_upstream_failures": updated.RecordUpstreamFailures,
 		})
 	}
-	c.JSON(http.StatusOK, gin.H{"conversationId": id, "enabled": updated.Enabled, "mode": updated.Mode, "aggregationMode": updated.AggregationMode})
+	c.JSON(http.StatusOK, gin.H{"conversationId": id, "enabled": updated.Enabled, "mode": updated.Mode, "aggregationMode": updated.AggregationMode, "recordUpstreamFailures": updated.RecordUpstreamFailures})
 }

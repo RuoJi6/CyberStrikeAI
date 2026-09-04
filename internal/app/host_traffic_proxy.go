@@ -85,7 +85,7 @@ type hostAuditQueue struct {
 	db         *database.DB
 	target     database.EgressAuditRuntimeTarget
 	logger     *zap.Logger
-	events     chan egress.ActivityEvent
+	items      chan hostAuditQueueItem
 	stop       chan struct{}
 	done       chan struct{}
 	closeOnce  sync.Once
@@ -96,23 +96,29 @@ type hostAuditQueue struct {
 	aggregator *egressactivity.Aggregator
 	mode       string
 	enabled    bool
-	settings   chan hostAuditSettingChange
 }
 
 type hostAuditSettingChange struct {
-	enabled bool
-	mode    string
-	result  chan error
+	enabled                bool
+	mode                   string
+	recordUpstreamFailures bool
+	result                 chan error
 }
 
-func newHostAuditQueue(db *database.DB, target database.EgressAuditRuntimeTarget, logger *zap.Logger, ingestor *egressactivity.Ingestor, enabled bool, mode string) *hostAuditQueue {
+type hostAuditQueueItem struct {
+	event   *egress.ActivityEvent
+	setting *hostAuditSettingChange
+}
+
+func newHostAuditQueue(db *database.DB, target database.EgressAuditRuntimeTarget, logger *zap.Logger, ingestor *egressactivity.Ingestor, enabled bool, mode string, recordUpstreamFailures bool) *hostAuditQueue {
 	queue := &hostAuditQueue{
 		db: db, target: target, logger: logger,
-		events: make(chan egress.ActivityEvent, 4096), stop: make(chan struct{}), done: make(chan struct{}),
+		items: make(chan hostAuditQueueItem, 4096), stop: make(chan struct{}), done: make(chan struct{}),
 		ingestor: ingestor, aggregator: egressactivity.New(egressactivity.DefaultConfig()),
 		mode: egressactivity.NormalizeAggregationMode(mode), enabled: enabled,
-		settings: make(chan hostAuditSettingChange),
 	}
+	queue.target = target
+	queue.target.RecordUpstreamFailures = recordUpstreamFailures
 	go queue.run()
 	return queue
 }
@@ -165,12 +171,27 @@ func (queue *hostAuditQueue) run() {
 	}
 	for {
 		select {
-		case event, open := <-queue.events:
+		case item, open := <-queue.items:
 			if !open {
 				persistWithRetry(queue.aggregator.FlushAll())
 				return
 			}
+			if item.setting != nil {
+				persistWithRetry(queue.aggregator.FlushAll())
+				queue.enabled = item.setting.enabled
+				queue.mode = egressactivity.NormalizeAggregationMode(item.setting.mode)
+				queue.target.RecordUpstreamFailures = item.setting.recordUpstreamFailures
+				item.setting.result <- nil
+				continue
+			}
+			if item.event == nil {
+				continue
+			}
+			event := *item.event
 			if !queue.enabled {
+				continue
+			}
+			if !queue.target.RecordUpstreamFailures && egress.IsUpstreamConnectionFailure(event) {
 				continue
 			}
 			if egressactivity.ShouldAggregate(queue.mode, event) {
@@ -180,11 +201,6 @@ func (queue *hostAuditQueue) run() {
 			}
 		case now := <-ticker.C:
 			persistWithRetry(queue.aggregator.FlushExpired(now.UTC()))
-		case change := <-queue.settings:
-			persistWithRetry(queue.aggregator.FlushAll())
-			queue.enabled = change.enabled
-			queue.mode = egressactivity.NormalizeAggregationMode(change.mode)
-			change.result <- nil
 		}
 	}
 }
@@ -204,17 +220,24 @@ func (queue *hostAuditQueue) append(event egress.ActivityEvent) {
 	if queue.closed {
 		return
 	}
-	queue.events <- event
+	queue.items <- hostAuditQueueItem{event: &event}
 }
 
-func (queue *hostAuditQueue) setSetting(ctx context.Context, enabled bool, mode string) error {
+func (queue *hostAuditQueue) setSetting(ctx context.Context, enabled bool, mode string, recordUpstreamFailures bool) error {
 	if queue == nil {
 		return nil
 	}
-	change := hostAuditSettingChange{enabled: enabled, mode: mode, result: make(chan error, 1)}
+	change := hostAuditSettingChange{enabled: enabled, mode: mode, recordUpstreamFailures: recordUpstreamFailures, result: make(chan error, 1)}
+	queue.mu.Lock()
+	if queue.closed {
+		queue.mu.Unlock()
+		return errors.New("Host MITM audit queue is closed")
+	}
 	select {
-	case queue.settings <- change:
+	case queue.items <- hostAuditQueueItem{setting: &change}:
+		queue.mu.Unlock()
 	case <-ctx.Done():
+		queue.mu.Unlock()
 		return ctx.Err()
 	}
 	select {
@@ -232,7 +255,7 @@ func (queue *hostAuditQueue) close(ctx context.Context) error {
 	queue.closeOnce.Do(func() {
 		queue.mu.Lock()
 		queue.closed = true
-		close(queue.events)
+		close(queue.items)
 		queue.mu.Unlock()
 	})
 	select {
@@ -383,10 +406,10 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 	if stored, settingErr := manager.db.GetConversationEgressAuditSetting(context.Background(), conversationID); settingErr == nil {
 		setting = stored
 	}
-	if err := compactor.SetAggregationMode(context.Background(), setting.AggregationMode); err != nil {
+	if err := compactor.SetPolicy(context.Background(), setting.AggregationMode, setting.RecordUpstreamFailures); err != nil {
 		return nil, fmt.Errorf("apply host traffic aggregation mode: %w", err)
 	}
-	auditQueue := newHostAuditQueue(manager.db, auditTarget, manager.logger, manager.ingestor, setting.Enabled, setting.AggregationMode)
+	auditQueue := newHostAuditQueue(manager.db, auditTarget, manager.logger, manager.ingestor, setting.Enabled, setting.AggregationMode, setting.RecordUpstreamFailures)
 	cleanupAuditQueue := true
 	defer func() {
 		if cleanupAuditQueue {
@@ -458,7 +481,7 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 	return result, nil
 }
 
-func (manager *hostTrafficProxyManager) ApplyConversationAggregationSetting(ctx context.Context, conversationID string, enabled bool, mode string) error {
+func (manager *hostTrafficProxyManager) ApplyConversationAggregationSetting(ctx context.Context, conversationID string, enabled bool, mode string, recordUpstreamFailures bool) error {
 	if manager == nil {
 		return nil
 	}
@@ -471,10 +494,10 @@ func (manager *hostTrafficProxyManager) ApplyConversationAggregationSetting(ctx 
 	if proxy == nil {
 		return nil
 	}
-	if err := proxy.sink.SetAggregationMode(ctx, mode); err != nil {
+	if err := proxy.sink.SetPolicy(ctx, mode, recordUpstreamFailures); err != nil {
 		return err
 	}
-	return proxy.audit.setSetting(ctx, enabled, mode)
+	return proxy.audit.setSetting(ctx, enabled, mode, recordUpstreamFailures)
 }
 
 func buildHostTrafficCABundle(conversationCA []byte, candidates []string) []byte {

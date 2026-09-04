@@ -45,6 +45,7 @@ func RegisterConversationCreateHook(s *Service) {
 		if meta.EgressAggregationMode != "" {
 			detail["egress_aggregation_mode"] = meta.EgressAggregationMode
 		}
+		detail["record_upstream_failures"] = meta.RecordUpstreamFailures
 		s.Record(nil, Entry{
 			Category:     "conversation",
 			Action:       "create",

@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS conversation_egress_audit_settings (
 	enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
 	mode TEXT NOT NULL DEFAULT 'compact' CHECK (mode IN ('compact', 'full')),
 	aggregation_mode TEXT NOT NULL DEFAULT 'tools' CHECK (aggregation_mode IN ('all', 'tools', 'none')),
+	record_upstream_failures INTEGER NOT NULL DEFAULT 0 CHECK (record_upstream_failures IN (0, 1)),
 	updated_at DATETIME NOT NULL,
 	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );`
@@ -418,18 +419,21 @@ type EgressAuditIntegrity struct {
 }
 
 type EgressAuditRuntimeTarget struct {
-	Record            containerruntime.InitializationRecord
-	ConversationTitle string
-	AuditMode         string
-	AggregationMode   string
-	AuditDisabled     bool
-	RuntimeMode       string
+	Record                      containerruntime.InitializationRecord
+	ConversationTitle           string
+	AuditMode                   string
+	AggregationMode             string
+	RecordUpstreamFailures      bool
+	RecordUpstreamFailuresSince time.Time
+	AuditDisabled               bool
+	RuntimeMode                 string
 }
 
 type ConversationEgressAuditSetting struct {
-	Enabled         bool   `json:"enabled"`
-	Mode            string `json:"mode"`
-	AggregationMode string `json:"aggregationMode"`
+	Enabled                bool   `json:"enabled"`
+	Mode                   string `json:"mode"`
+	AggregationMode        string `json:"aggregationMode"`
+	RecordUpstreamFailures bool   `json:"recordUpstreamFailures"`
 }
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
@@ -601,6 +605,9 @@ func (db *DB) initEgressAuditTables() error {
 		`); err != nil {
 			return fmt.Errorf("backfill host egress aggregation settings: %w", err)
 		}
+	}
+	if err := db.addColumnIfMissing("conversation_egress_audit_settings", "record_upstream_failures", "ALTER TABLE conversation_egress_audit_settings ADD COLUMN record_upstream_failures INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("initialize upstream failure recording setting: %w", err)
 	}
 	if err := db.initializeEgressAuditChains(context.Background()); err != nil {
 		return fmt.Errorf("initialize egress audit chains: %w", err)
@@ -1368,7 +1375,8 @@ func (db *DB) VerifyEgressAuditIntegrity(ctx context.Context, filter EgressAudit
 
 func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]EgressAuditRuntimeTarget, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT r.conversation_id, COALESCE(c.title, ''), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'all'), COALESCE(s.enabled, 1)
+		SELECT r.conversation_id, COALESCE(c.title, ''), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'all'),
+			COALESCE(s.record_upstream_failures, 0), COALESCE(s.updated_at, ''), COALESCE(s.enabled, 1)
 		FROM conversation_container_runtimes r
 		JOIN conversations c ON c.id = r.conversation_id
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = r.conversation_id
@@ -1383,16 +1391,28 @@ func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]Egres
 	defer rows.Close()
 	targets := make([]EgressAuditRuntimeTarget, 0)
 	for rows.Next() {
-		var conversationID, title, mode, aggregationMode string
-		var enabled bool
-		if err := rows.Scan(&conversationID, &title, &mode, &aggregationMode, &enabled); err != nil {
+		var conversationID, title, mode, aggregationMode, settingUpdatedAt string
+		var enabled, recordUpstreamFailures bool
+		if err := rows.Scan(&conversationID, &title, &mode, &aggregationMode, &recordUpstreamFailures, &settingUpdatedAt, &enabled); err != nil {
 			return nil, err
 		}
 		record, err := db.GetContainerInitialization(ctx, conversationID)
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, EgressAuditRuntimeTarget{Record: record, ConversationTitle: title, AuditMode: normalizeConversationEgressAuditMode(mode), AggregationMode: normalizeConversationEgressAggregationMode(aggregationMode), AuditDisabled: !enabled})
+		var recordUpstreamFailuresSince time.Time
+		if recordUpstreamFailures && strings.TrimSpace(settingUpdatedAt) != "" {
+			recordUpstreamFailuresSince, err = ParseRFC3339Time(settingUpdatedAt)
+			if err != nil {
+				return nil, fmt.Errorf("parse egress audit setting update time for %s: %w", conversationID, err)
+			}
+		}
+		targets = append(targets, EgressAuditRuntimeTarget{
+			Record: record, ConversationTitle: title, AuditMode: normalizeConversationEgressAuditMode(mode),
+			AggregationMode:        normalizeConversationEgressAggregationMode(aggregationMode),
+			RecordUpstreamFailures: recordUpstreamFailures, RecordUpstreamFailuresSince: recordUpstreamFailuresSince,
+			AuditDisabled: !enabled,
+		})
 	}
 	return targets, rows.Err()
 }
@@ -1447,14 +1467,14 @@ func NormalizeConversationEgressAggregationMode(value string) (string, error) {
 func (db *DB) GetConversationEgressAuditSetting(ctx context.Context, conversationID string) (ConversationEgressAuditSetting, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	var runtimeMode string
-	var enabled sql.NullBool
+	var enabled, recordUpstreamFailures sql.NullBool
 	var mode, aggregationMode sql.NullString
 	err := db.QueryRowContext(ctx, `
-		SELECT c.runtime_mode, s.enabled, s.mode, s.aggregation_mode
+		SELECT c.runtime_mode, s.enabled, s.mode, s.aggregation_mode, s.record_upstream_failures
 		FROM conversations c
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = c.id
 		WHERE c.id = ?
-	`, conversationID).Scan(&runtimeMode, &enabled, &mode, &aggregationMode)
+	`, conversationID).Scan(&runtimeMode, &enabled, &mode, &aggregationMode, &recordUpstreamFailures)
 	if err != nil {
 		return ConversationEgressAuditSetting{}, err
 	}
@@ -1468,6 +1488,9 @@ func (db *DB) GetConversationEgressAuditSetting(ctx context.Context, conversatio
 	if aggregationMode.Valid {
 		setting.AggregationMode = normalizeConversationEgressAggregationMode(aggregationMode.String)
 	}
+	if recordUpstreamFailures.Valid {
+		setting.RecordUpstreamFailures = recordUpstreamFailures.Bool
+	}
 	if !setting.Enabled {
 		setting.Mode = EgressAuditModeOff
 	}
@@ -1479,7 +1502,7 @@ func (db *DB) SetConversationEgressAuditEnabled(ctx context.Context, conversatio
 	if err != nil {
 		return err
 	}
-	return db.SetConversationEgressAuditSetting(ctx, conversationID, enabled, setting.AggregationMode)
+	return db.SetConversationEgressAuditSetting(ctx, conversationID, enabled, setting.AggregationMode, setting.RecordUpstreamFailures)
 }
 
 func (db *DB) SetConversationEgressAuditMode(ctx context.Context, conversationID, requestedMode string) error {
@@ -1493,16 +1516,16 @@ func (db *DB) SetConversationEgressAuditMode(ctx context.Context, conversationID
 		return err
 	}
 	if mode == EgressAuditModeOff {
-		return db.SetConversationEgressAuditSetting(ctx, conversationID, false, current.AggregationMode)
+		return db.SetConversationEgressAuditSetting(ctx, conversationID, false, current.AggregationMode, current.RecordUpstreamFailures)
 	}
 	aggregationMode := EgressAggregationModeAll
 	if mode == EgressAuditModeFull {
 		aggregationMode = EgressAggregationModeNone
 	}
-	return db.SetConversationEgressAuditSetting(ctx, conversationID, true, aggregationMode)
+	return db.SetConversationEgressAuditSetting(ctx, conversationID, true, aggregationMode, current.RecordUpstreamFailures)
 }
 
-func (db *DB) SetConversationEgressAuditSetting(ctx context.Context, conversationID string, enabled bool, aggregationMode string) error {
+func (db *DB) SetConversationEgressAuditSetting(ctx context.Context, conversationID string, enabled bool, aggregationMode string, recordUpstreamFailures bool) error {
 	conversationID = strings.TrimSpace(conversationID)
 	aggregationMode, err := NormalizeConversationEgressAggregationMode(aggregationMode)
 	if err != nil {
@@ -1517,17 +1540,19 @@ func (db *DB) SetConversationEgressAuditSetting(ctx context.Context, conversatio
 		legacyMode = EgressAuditModeFull
 	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, record_upstream_failures, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(conversation_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode,
-			aggregation_mode = excluded.aggregation_mode, updated_at = excluded.updated_at
-	`, conversationID, enabled, legacyMode, aggregationMode, formatSQLiteUTC(time.Now().UTC()))
+			aggregation_mode = excluded.aggregation_mode, record_upstream_failures = excluded.record_upstream_failures,
+			updated_at = excluded.updated_at
+	`, conversationID, enabled, legacyMode, aggregationMode, recordUpstreamFailures, formatSQLiteUTC(time.Now().UTC()))
 	return err
 }
 
 func (db *DB) ListConversationEgressAuditSettings(ctx context.Context) (map[string]ConversationEgressAuditSetting, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT c.id, COALESCE(s.enabled, 1), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'tools')
+		SELECT c.id, COALESCE(s.enabled, 1), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'tools'),
+			COALESCE(s.record_upstream_failures, 0)
 		FROM conversations c
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = c.id
 		ORDER BY c.id
@@ -1539,11 +1564,11 @@ func (db *DB) ListConversationEgressAuditSettings(ctx context.Context) (map[stri
 	result := make(map[string]ConversationEgressAuditSetting)
 	for rows.Next() {
 		var id, mode, aggregationMode string
-		var enabled bool
-		if err := rows.Scan(&id, &enabled, &mode, &aggregationMode); err != nil {
+		var enabled, recordUpstreamFailures bool
+		if err := rows.Scan(&id, &enabled, &mode, &aggregationMode, &recordUpstreamFailures); err != nil {
 			return nil, err
 		}
-		setting := ConversationEgressAuditSetting{Enabled: enabled, Mode: normalizeConversationEgressAuditMode(mode), AggregationMode: normalizeConversationEgressAggregationMode(aggregationMode)}
+		setting := ConversationEgressAuditSetting{Enabled: enabled, Mode: normalizeConversationEgressAuditMode(mode), AggregationMode: normalizeConversationEgressAggregationMode(aggregationMode), RecordUpstreamFailures: recordUpstreamFailures}
 		if !enabled {
 			setting.Mode = EgressAuditModeOff
 		}
