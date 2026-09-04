@@ -137,6 +137,9 @@ func NewPolicyWithNetworkAccess(rules []Rule, defaultAllow bool, access NetworkA
 			}
 			prefix = &parsed
 		}
+		if strings.Contains(target.Host, "*") && rule.Effect != EffectBlocked {
+			return nil, fmt.Errorf("%w: boundary rule %q: only blocked rules may use host wildcards", ErrInvalidTarget, rule.ID)
+		}
 		if rule.ExpiresAt != nil {
 			value := rule.ExpiresAt.UTC()
 			rule.ExpiresAt = &value
@@ -351,6 +354,7 @@ func (p *Policy) EvaluateDNS(rawHost string, resolvedIPs []netip.Addr, now time.
 			return blocks[i].ID < blocks[j].ID
 		})
 		decision.Effect = EffectBlocked
+		decision.Allowed = false
 		decision.RuleID = blocks[0].ID
 		decision.Reason = ReasonBlockedTarget
 		return decision, nil
@@ -389,7 +393,7 @@ func dnsRuleUnconditionallyBlocks(rule compiledRule, host string, resolvedIPs []
 		return false
 	}
 	if rule.prefix == nil {
-		return rule.Target.Host == host
+		return ruleHostMatches(rule, host)
 	}
 	for _, address := range resolvedIPs {
 		if address.IsValid() && rule.prefix.Contains(address.Unmap()) {
@@ -405,7 +409,7 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 		if err != nil || !rule.prefix.Contains(address) {
 			return false
 		}
-	} else if rule.Target.Host != target.Host {
+	} else if !ruleHostMatches(rule, target.Host) {
 		return false
 	}
 	if !containsStringOrAny(rule.Target.Schemes, target.Scheme) || !containsIntOrAny(rule.Target.Ports, target.Port) {
@@ -413,7 +417,12 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	}
 	if target.Scheme == "tcp" || target.Scheme == "udp" || target.Scheme == "icmp" {
 		// Transport connections have no HTTP path or method. Explicitly selected
-		// TCP/UDP/ICMP schemes therefore ignore those HTTP-only dimensions.
+		// TCP/UDP/ICMP schemes therefore ignore those HTTP-only dimensions. A
+		// path/method-only rule with no scheme is HTTP-only and must not become a
+		// global transport rule merely because its host is a wildcard.
+		if len(rule.Target.Schemes) == 0 && (len(rule.Target.PathPrefixes) != 0 || len(rule.Target.Methods) != 0) {
+			return false
+		}
 		return rule.Effect != EffectAuthOnly
 	}
 	if !ruleMethodMatches(rule, target.Method) {
@@ -422,8 +431,8 @@ func ruleMatches(rule compiledRule, target RequestTarget) bool {
 	if len(rule.Target.PathPrefixes) == 0 {
 		return true
 	}
-	for _, prefix := range rule.Target.PathPrefixes {
-		if pathPrefixMatches(prefix, target.Path) {
+	for _, pattern := range rule.Target.PathPrefixes {
+		if pathPatternMatches(pattern, target.Path) {
 			return true
 		}
 	}
@@ -452,19 +461,28 @@ func ruleRank(rule compiledRule) int {
 
 func ruleSpecificity(rule compiledRule) int {
 	score := constrainedSetSpecificity(rule.Target.Schemes) + constrainedIntSetSpecificity(rule.Target.Ports) + constrainedSetSpecificity(rule.Target.Methods)
-	longestPath := 0
-	for _, prefix := range rule.Target.PathPrefixes {
-		if len(prefix) > longestPath {
-			longestPath = len(prefix)
+	pathScore := 0
+	for _, pattern := range rule.Target.PathPrefixes {
+		candidate := 1000 + len(pattern)*4
+		if strings.HasPrefix(pattern, "=") {
+			candidate += 1000
+		}
+		if candidate > pathScore {
+			pathScore = candidate
 		}
 	}
-	if longestPath > 0 {
-		score += 1000 + longestPath*4 - len(rule.Target.PathPrefixes)
+	if pathScore > 0 {
+		score += pathScore - len(rule.Target.PathPrefixes)
 	}
-	if rule.prefix == nil {
-		score += 100000
-	} else {
+	switch {
+	case rule.prefix != nil:
 		score += rule.prefix.Bits() * 100
+	case rule.Target.Host == "*":
+		// A catch-all host is intentionally the least specific host matcher.
+	case strings.HasPrefix(rule.Target.Host, "*."):
+		score += 50000 + len(rule.Target.Host)
+	default:
+		score += 100000
 	}
 	return score
 }
@@ -491,6 +509,29 @@ func pathPrefixMatches(prefix, target string) bool {
 		return strings.HasPrefix(target, prefix)
 	}
 	return target == prefix || strings.HasPrefix(target, prefix+"/")
+}
+
+func pathPatternMatches(pattern, target string) bool {
+	if strings.HasPrefix(pattern, "=") {
+		return target == strings.TrimPrefix(pattern, "=")
+	}
+	return pathPrefixMatches(pattern, target)
+}
+
+func ruleHostMatches(rule compiledRule, host string) bool {
+	if rule.prefix != nil {
+		address, err := netip.ParseAddr(host)
+		return err == nil && rule.prefix.Contains(address)
+	}
+	switch {
+	case rule.Target.Host == "*":
+		return true
+	case strings.HasPrefix(rule.Target.Host, "*."):
+		base := strings.TrimPrefix(rule.Target.Host, "*.")
+		return host == base || strings.HasSuffix(host, "."+base)
+	default:
+		return rule.Target.Host == host
+	}
 }
 
 func containsStringOrAny(values []string, target string) bool {

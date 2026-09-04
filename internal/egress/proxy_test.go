@@ -312,7 +312,8 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 	policy := testProxyPolicy(t,
 		boundary.Rule{ID: "allow-safe", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"GET"}, PathPrefixes: []string{"/safe"}}},
 		boundary.Rule{ID: "allow-upload", Effect: boundary.EffectAllowAttack, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, Methods: []string{"POST"}, PathPrefixes: []string{"/upload"}}},
-		boundary.Rule{ID: "block-admin", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"/admin"}}},
+		boundary.Rule{ID: "block-admin", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"/admin/*"}}},
+		boundary.Rule{ID: "block-admin-exact", Effect: boundary.EffectBlocked, Target: boundary.RuleTarget{Host: "inspect.example", Schemes: []string{"https"}, PathPrefixes: []string{"=/admin/exact"}}},
 	)
 	authority, err := GenerateTLSAuthority("conversation-one", time.Now().UTC(), time.Hour)
 	if err != nil {
@@ -389,6 +390,12 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 	_ = denied.Body.Close()
 	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(string(deniedBody), "block-admin") {
 		t.Fatalf("denied inspected HTTPS response = %d %q", denied.StatusCode, deniedBody)
+	}
+	exactDenied := performInspectedTLSRequest(t, proxy, roots, token, "GET /admin/exact HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")
+	exactDeniedBody, _ := io.ReadAll(exactDenied.Body)
+	_ = exactDenied.Body.Close()
+	if exactDenied.StatusCode != http.StatusForbidden || !strings.Contains(string(exactDeniedBody), "block-admin-exact") {
+		t.Fatalf("exact denied inspected HTTPS response = %d %q", exactDenied.StatusCode, exactDeniedBody)
 	}
 	foundPathDecision := false
 	foundCompleteGet := false

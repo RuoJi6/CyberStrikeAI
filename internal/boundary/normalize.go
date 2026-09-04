@@ -89,6 +89,11 @@ func NormalizeRequestTarget(rawURL, rawMethod string) (RequestTarget, error) {
 // NormalizeRuleTarget canonicalizes every target dimension independently. It
 // deliberately does not add policy defaults or make an allow/deny decision.
 func NormalizeRuleTarget(input RuleTarget) (RuleTarget, error) {
+	var err error
+	input, err = expandRuleURLTarget(input)
+	if err != nil {
+		return RuleTarget{}, err
+	}
 	host, err := NormalizeRuleHost(input.Host)
 	if err != nil {
 		return RuleTarget{}, err
@@ -111,9 +116,9 @@ func NormalizeRuleTarget(input RuleTarget) (RuleTarget, error) {
 	paths := make([]string, 0, len(input.PathPrefixes))
 	for _, raw := range input.PathPrefixes {
 		if strings.TrimSpace(raw) == "" {
-			return RuleTarget{}, fmt.Errorf("%w: rule path prefix must not be empty", ErrInvalidTarget)
+			return RuleTarget{}, fmt.Errorf("%w: rule path pattern must not be empty", ErrInvalidTarget)
 		}
-		value, err := NormalizePath(raw)
+		value, err := NormalizeRulePathPattern(raw)
 		if err != nil {
 			return RuleTarget{}, err
 		}
@@ -139,10 +144,27 @@ func NormalizeRuleTarget(input RuleTarget) (RuleTarget, error) {
 	}, nil
 }
 
-// NormalizeRuleHost accepts an exact host or a canonical IP prefix. Prefixes
-// are used only by blocked rules; the policy compiler enforces that semantic.
+// NormalizeRuleHost accepts an exact host, a blocked-rule wildcard host, or a
+// canonical IP prefix. Wildcards and prefixes are restricted to blocked rules
+// by the policy compiler and database write path.
 func NormalizeRuleHost(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
+	if raw == "*" {
+		return raw, nil
+	}
+	if strings.HasPrefix(raw, "*.") {
+		base, err := NormalizeHost(strings.TrimPrefix(raw, "*."))
+		if err != nil {
+			return "", err
+		}
+		if _, err := netip.ParseAddr(base); err == nil {
+			return "", fmt.Errorf("%w: wildcard hosts require a DNS name", ErrInvalidTarget)
+		}
+		return "*." + base, nil
+	}
+	if strings.Contains(raw, "*") {
+		return "", fmt.Errorf("%w: host wildcard is only allowed as * or *.example.com", ErrInvalidTarget)
+	}
 	if !strings.Contains(raw, "/") {
 		return NormalizeHost(raw)
 	}
@@ -151,6 +173,82 @@ func NormalizeRuleHost(raw string) (string, error) {
 		return "", fmt.Errorf("%w: invalid IP prefix %q", ErrInvalidTarget, raw)
 	}
 	return prefix.Masked().String(), nil
+}
+
+// NormalizeRulePathPattern keeps legacy path-prefix semantics while adding two
+// closed forms: a trailing /* is canonicalized to a subtree prefix and a
+// leading = marks an exact HTTP path. Arbitrary globbing is deliberately not
+// supported because it is difficult to normalize safely across HTTP parsers.
+func NormalizeRulePathPattern(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	exact := strings.HasPrefix(raw, "=")
+	if exact {
+		raw = strings.TrimSpace(strings.TrimPrefix(raw, "="))
+		if raw == "" {
+			return "", fmt.Errorf("%w: exact rule path must not be empty", ErrInvalidTarget)
+		}
+	}
+	if strings.HasSuffix(raw, "/*") && !exact {
+		raw = strings.TrimSuffix(raw, "/*")
+		if raw == "" {
+			raw = "/"
+		}
+	}
+	if strings.Contains(raw, "*") {
+		return "", fmt.Errorf("%w: path wildcard is only allowed as a trailing /*", ErrInvalidTarget)
+	}
+	value, err := NormalizePath(raw)
+	if err != nil {
+		return "", err
+	}
+	if exact {
+		return "=" + value, nil
+	}
+	return value, nil
+}
+
+func expandRuleURLTarget(input RuleTarget) (RuleTarget, error) {
+	raw := strings.TrimSpace(input.Host)
+	if !strings.Contains(raw, "://") {
+		return input, nil
+	}
+	if len(input.Schemes) != 0 || len(input.Ports) != 0 || len(input.PathPrefixes) != 0 {
+		return RuleTarget{}, fmt.Errorf("%w: a full URL target cannot be combined with separate schemes, ports, or paths", ErrInvalidTarget)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Opaque != "" {
+		return RuleTarget{}, fmt.Errorf("%w: invalid full URL target", ErrInvalidTarget)
+	}
+	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return RuleTarget{}, fmt.Errorf("%w: full URL targets must not contain userinfo, query, or fragment", ErrInvalidTarget)
+	}
+	scheme, err := NormalizeScheme(parsed.Scheme)
+	if err != nil || (scheme != "http" && scheme != "https") {
+		return RuleTarget{}, fmt.Errorf("%w: full URL targets require http or https", ErrInvalidTarget)
+	}
+	port := 0
+	if rawPort := parsed.Port(); rawPort != "" {
+		port, err = strconv.Atoi(rawPort)
+		if err != nil {
+			return RuleTarget{}, fmt.Errorf("%w: invalid URL port", ErrInvalidTarget)
+		}
+	}
+	port, err = NormalizePort(scheme, port)
+	if err != nil {
+		return RuleTarget{}, err
+	}
+	pathPattern := parsed.EscapedPath()
+	if pathPattern == "" {
+		pathPattern = "/"
+	}
+	if !strings.HasSuffix(pathPattern, "/*") {
+		pathPattern = "=" + pathPattern
+	}
+	input.Host = parsed.Hostname()
+	input.Schemes = []string{scheme}
+	input.Ports = []int{port}
+	input.PathPrefixes = []string{pathPattern}
+	return input, nil
 }
 
 func NormalizeHost(raw string) (string, error) {

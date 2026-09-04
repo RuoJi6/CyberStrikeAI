@@ -5606,10 +5606,11 @@ def decode_request(ctx, wire: Message) -> Message:
                                         <input id="boundary-rule-id" type="hidden">
                                         <div class="boundary-form-grid">
                                             <label><span>效果</span><select id="boundary-rule-effect" data-unified-select="single" data-unified-search="false"><option value="allow-visit">允许访问</option><option value="allow-attack">允许测试</option><option value="blocked">显式阻断</option><option value="auth-only">仅凭据访问</option></select></label>
-                                            <label><span>主机 / IP / 阻断 CIDR</span><input id="boundary-rule-host" type="text" maxlength="253" autocomplete="off" placeholder="example.com"></label>
+                                            <label class="is-wide"><span>目标主机 / IP / CIDR / 完整 URL</span><input id="boundary-rule-host" type="text" maxlength="2048" autocomplete="off" placeholder="example.com、*.example.com、* 或 https://example.com/api/*"><small><code>*</code> 和 <code>*.example.com</code> 仅用于显式阻断；完整 URL 会自动拆分协议、端口和路径，不能再填写这三个字段；不带 <code>/*</code> 的完整 URL 只匹配精确接口。</small></label>
                                             <label><span>协议</span><input id="boundary-rule-schemes" type="text" autocomplete="off" placeholder="http, https, tcp, udp, icmp"><small>留空表示不限协议</small></label>
                                             <label><span>端口</span><input id="boundary-rule-ports" type="text" inputmode="numeric" autocomplete="off" placeholder="80, 443"></label>
-                                            <label><span>路径前缀</span><input id="boundary-rule-paths" type="text" autocomplete="off" placeholder="/api, /health"></label>
+                                            <label><span>路径子树</span><input id="boundary-rule-paths" type="text" autocomplete="off" placeholder="/api/*, /admin/*"><small>末尾 <code>/*</code> 表示该路径及其下所有接口；兼容原有前缀写法。</small></label>
+                                            <label><span>精确接口</span><input id="boundary-rule-exact-paths" type="text" autocomplete="off" placeholder="/health, /desasdasdasd/sdadsd"><small>只匹配该接口本身，不匹配其子路径。</small></label>
                                             <label><span>HTTP 方法</span><input id="boundary-rule-methods" type="text" autocomplete="off" placeholder="留空 = 任意方法"><small>仅对 HTTP/HTTPS 生效；TCP/UDP/ICMP 忽略此项</small></label>
                                             <label><span>凭据档案（仅 auth-only）</span><select id="boundary-rule-auth-profile" data-unified-select="single" data-unified-search="true"><option value="">不注入凭据</option></select></label>
                                             <label><span>优先位置</span><input id="boundary-rule-position" type="number" min="0" max="100000" value="0"></label>
@@ -7563,7 +7564,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260904-1"></script>
     <script src="/static/js/egress-audit.js?v=20260904-3"></script>
-    <script src="/static/js/boundary-rules.js?v=20260827-1"></script>
+    <script src="/static/js/boundary-rules.js?v=20260904-2"></script>
     <script src="/static/js/egress-management.js?v=20260826-1"></script>
     <script src="/static/js/container-management.js?v=20260903-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>

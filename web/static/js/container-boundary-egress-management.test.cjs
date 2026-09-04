@@ -36,6 +36,7 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
         'boundary-rule-schemes',
         'boundary-rule-ports',
         'boundary-rule-paths',
+        'boundary-rule-exact-paths',
         'boundary-rule-methods',
         'boundary-rules-refresh',
         'boundary-rules-load-state',
@@ -56,6 +57,10 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
 	assert.doesNotMatch(template, /id="boundary-policy-tls-enabled"/);
     assert.match(boundary, /state\.selectedUsage/);
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
+    assert.match(boundary, /function rulePathsLabel/);
+    assert.match(boundary, /subtreePaths\.concat\(exactPaths\)/);
+    assert.match(template, /placeholder="example\.com、\*\.example\.com、\* 或 https:\/\/example\.com\/api\/\*"/);
+    assert.match(template, /boundary-rules\.js\?v=20260904-2/);
 });
 
 test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () => {

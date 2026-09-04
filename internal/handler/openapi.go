@@ -153,10 +153,10 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 		"type": "object", "additionalProperties": false, "required": []string{"effect"},
 		"properties": map[string]interface{}{
 			"effect":        map[string]interface{}{"type": "string", "enum": []string{"allow-visit", "allow-attack", "blocked", "auth-only"}},
-			"host":          map[string]interface{}{"type": "string", "maxLength": 253},
+			"host":          map[string]interface{}{"type": "string", "maxLength": 2048, "description": "精确主机/IP、阻断 CIDR、仅限 blocked 的 * 或 *.example.com；也可为 http(s) 完整 URL 简写。"},
 			"schemes":       map[string]interface{}{"type": "array", "description": "留空表示不限协议", "items": map[string]interface{}{"type": "string", "enum": []string{"http", "https", "tcp", "udp", "icmp"}}},
 			"ports":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}},
-			"pathPrefixes":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			"pathPrefixes":  map[string]interface{}{"type": "array", "description": "HTTP 路径规则：/api/* 表示路径子树，=/health 表示精确接口；不支持中间通配符或正则。", "items": map[string]interface{}{"type": "string"}},
 			"methods":       map[string]interface{}{"type": "array", "description": "仅用于 HTTP/HTTPS；留空表示任意 HTTP 方法", "items": map[string]interface{}{"type": "string"}},
 			"authProfileId": map[string]interface{}{"type": "string", "format": "uuid", "nullable": true},
 			"rateLimit":     boundaryRateLimitSchema,

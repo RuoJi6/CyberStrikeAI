@@ -603,8 +603,8 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	rule.Ports = normalizedTarget.Ports
 	rule.PathPrefixes = normalizedTarget.PathPrefixes
 	rule.Methods = normalizedTarget.Methods
-	if strings.Contains(rule.Host, "/") && rule.Effect != boundary.EffectBlocked {
-		return BoundaryPolicyRule{}, fmt.Errorf("only blocked boundary rules may use IP prefixes")
+	if (strings.Contains(rule.Host, "/") || strings.Contains(rule.Host, "*")) && rule.Effect != boundary.EffectBlocked {
+		return BoundaryPolicyRule{}, fmt.Errorf("only blocked boundary rules may use IP prefixes or host wildcards")
 	}
 	if rule.ID = strings.TrimSpace(rule.ID); rule.ID == "" {
 		rule.ID = uuid.New().String()
@@ -773,8 +773,8 @@ func (db *DB) UpdateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	}
 	rule.Host, rule.Schemes, rule.Ports = normalizedTarget.Host, normalizedTarget.Schemes, normalizedTarget.Ports
 	rule.PathPrefixes, rule.Methods = normalizedTarget.PathPrefixes, normalizedTarget.Methods
-	if strings.Contains(rule.Host, "/") && rule.Effect != boundary.EffectBlocked {
-		return BoundaryPolicyRule{}, fmt.Errorf("only blocked boundary rules may use IP prefixes")
+	if (strings.Contains(rule.Host, "/") || strings.Contains(rule.Host, "*")) && rule.Effect != boundary.EffectBlocked {
+		return BoundaryPolicyRule{}, fmt.Errorf("only blocked boundary rules may use IP prefixes or host wildcards")
 	}
 	schemes, err := marshalBoundaryList(rule.Schemes)
 	if err != nil {

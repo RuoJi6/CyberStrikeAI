@@ -413,6 +413,7 @@ func TestPolicySkipsExpiredRulesAndValidatesPolicyShape(t *testing.T) {
 		{{ID: "", Effect: EffectBlocked, Target: RuleTarget{Host: "example.com"}}},
 		{{ID: "duplicate", Effect: EffectBlocked, Target: RuleTarget{Host: "example.com"}}, {ID: "duplicate", Effect: EffectBlocked, Target: RuleTarget{Host: "other.example"}}},
 		{{ID: "cidr-allow", Effect: EffectAllowVisit, Target: RuleTarget{Host: "8.8.8.0/24"}}},
+		{{ID: "wildcard-allow", Effect: EffectAllowVisit, Target: RuleTarget{Host: "*.example.com"}}},
 		{{ID: "auth-missing", Effect: EffectAuthOnly, Target: RuleTarget{Host: "example.com"}}},
 		{{ID: "auth-leak", Effect: EffectAllowVisit, AuthProfileID: "profile", Target: RuleTarget{Host: "example.com"}}},
 	}
@@ -420,5 +421,88 @@ func TestPolicySkipsExpiredRulesAndValidatesPolicyShape(t *testing.T) {
 		if _, err := NewPolicy(rules); err == nil {
 			t.Fatalf("invalid policy accepted: %#v", rules)
 		}
+	}
+}
+
+func TestPolicyBlockedHostWildcardsAndPorts(t *testing.T) {
+	now := time.Now().UTC()
+	policy, err := NewPolicyWithDefault([]Rule{
+		{ID: "global-ssh-block", Effect: EffectBlocked, Target: RuleTarget{Host: "*", Schemes: []string{"tcp"}, Ports: []int{22}}},
+		{ID: "example-family-block", Effect: EffectBlocked, Target: RuleTarget{Host: "*.example.com", Schemes: []string{"https"}}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, host := range []string{"example.com", "api.example.com", "deep.api.example.com"} {
+		decision, evalErr := policy.Evaluate("https://"+host+"/", "GET", nil, now)
+		if evalErr != nil || decision.Allowed || decision.RuleID != "example-family-block" {
+			t.Fatalf("wildcard host %q = %#v, %v", host, decision, evalErr)
+		}
+	}
+	nonMatch, err := policy.Evaluate("https://badexample.com/", "GET", nil, now)
+	if err != nil || !nonMatch.Allowed {
+		t.Fatalf("wildcard boundary false positive = %#v, %v", nonMatch, err)
+	}
+	blockedPort, err := policy.EvaluateNetwork("service.example.net", 22, "tcp", nil, now)
+	if err != nil || blockedPort.Allowed || blockedPort.RuleID != "global-ssh-block" {
+		t.Fatalf("global blocked port = %#v, %v", blockedPort, err)
+	}
+	allowedPort, err := policy.EvaluateNetwork("service.example.net", 443, "tcp", nil, now)
+	if err != nil || !allowedPort.Allowed {
+		t.Fatalf("unmatched global port = %#v, %v", allowedPort, err)
+	}
+}
+
+func TestPolicyBlockedPathSubtreesExactInterfacesAndURLShorthand(t *testing.T) {
+	now := time.Now().UTC()
+	policy, err := NewPolicyWithDefault([]Rule{
+		{ID: "all-api", Effect: EffectBlocked, Target: RuleTarget{Host: "*", PathPrefixes: []string{"/api/*"}}},
+		{ID: "exact-interface", Effect: EffectBlocked, Target: RuleTarget{Host: "*", PathPrefixes: []string{"=/desasdasdasd/sdadsd"}}},
+		{ID: "url-subtree", Effect: EffectBlocked, Target: RuleTarget{Host: "http://ssss.com/sdasdad/*"}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, rawURL := range []string{"https://one.example/api", "https://two.example/api/users", "http://ssss.com/sdasdad", "http://ssss.com/sdasdad/child", "https://any.example/desasdasdasd/sdadsd"} {
+		decision, evalErr := policy.Evaluate(rawURL, "GET", nil, now)
+		if evalErr != nil || decision.Allowed || decision.Reason != ReasonBlockedPath {
+			t.Fatalf("blocked path %q = %#v, %v", rawURL, decision, evalErr)
+		}
+	}
+	for _, rawURL := range []string{
+		"https://one.example/apix",
+		"https://any.example/desasdasdasd/sdadsd/child",
+		"https://ssss.com/sdasdad/child",
+		"http://other.example/sdasdad/child",
+	} {
+		decision, evalErr := policy.Evaluate(rawURL, "GET", nil, now)
+		if evalErr != nil || !decision.Allowed || decision.RuleID != "" {
+			t.Fatalf("allowed path %q = %#v, %v", rawURL, decision, evalErr)
+		}
+	}
+	transport, err := policy.EvaluateNetwork("one.example", 22, "tcp", nil, now)
+	if err != nil || !transport.Allowed || transport.RuleID != "" {
+		t.Fatalf("HTTP-only global path rule leaked into TCP = %#v, %v", transport, err)
+	}
+}
+
+func TestPolicyDNSAppliesOnlyUnconditionalWildcardBlocks(t *testing.T) {
+	now := time.Now().UTC()
+	policy, err := NewPolicyWithDefault([]Rule{
+		{ID: "blocked-domain-family", Effect: EffectBlocked, Target: RuleTarget{Host: "*.blocked.example"}},
+		{ID: "http-path-only", Effect: EffectBlocked, Target: RuleTarget{Host: "*", PathPrefixes: []string{"/api/*"}}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked, err := policy.EvaluateDNS("api.blocked.example", []netip.Addr{netip.MustParseAddr("8.8.8.8")}, now)
+	if err != nil || blocked.Allowed || blocked.RuleID != "blocked-domain-family" {
+		t.Fatalf("wildcard DNS block = %#v, %v", blocked, err)
+	}
+	allowed, err := policy.EvaluateDNS("allowed.example", []netip.Addr{netip.MustParseAddr("8.8.8.8")}, now)
+	if err != nil || !allowed.Allowed || allowed.RuleID != "" {
+		t.Fatalf("path-scoped wildcard must not block DNS = %#v, %v", allowed, err)
 	}
 }

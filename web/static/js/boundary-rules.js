@@ -132,6 +132,18 @@
         return t('boundaryAnyMethod', '任意方法');
     }
 
+    function rulePathsLabel(rule) {
+        const patterns = Array.isArray(rule.pathPrefixes) ? rule.pathPrefixes : [];
+        if (!patterns.length) return '*';
+        return patterns.map(function (pattern) {
+            const value = String(pattern || '');
+            if (value.startsWith('=')) return '精确 ' + value.slice(1);
+            if (value === '/') return '子树 /*';
+            if (value.endsWith('/')) return '前缀 ' + value + '…';
+            return '子树 ' + value + '/*';
+        }).join(', ');
+    }
+
     function detailField(label, value, full) {
         const field = element('div', 'container-policy-field');
         field.append(element('dt', '', label));
@@ -163,7 +175,7 @@
             detailField(t('protocol', '协议'), Array.isArray(rule.schemes) && rule.schemes.length ? rule.schemes.join(', ') : '任意协议'),
             detailField(t('port', '端口'), Array.isArray(rule.ports) && rule.ports.length ? rule.ports.join(', ') : '*'),
             detailField(t('boundaryMethods', '方法'), ruleMethodsLabel(rule)),
-            detailField(t('boundaryPaths', '路径前缀'), Array.isArray(rule.pathPrefixes) && rule.pathPrefixes.length ? rule.pathPrefixes.join(', ') : '*'),
+            detailField(t('boundaryPaths', '路径规则'), rulePathsLabel(rule)),
             detailField(t('boundaryExpires', '过期时间'), rule.expiresAt ? formatDate(rule.expiresAt) : t('boundaryNeverExpires', '永不过期')),
         );
         const rate = rule.rateLimit || {};
@@ -421,12 +433,18 @@
         const authProfileId = document.getElementById('boundary-rule-auth-profile').value || null;
         if (effect === 'auth-only' && !authProfileId) throw new Error('仅凭据访问规则必须选择凭据档案');
         const expires = document.getElementById('boundary-rule-expires').value;
+        const subtreePaths = splitValues(document.getElementById('boundary-rule-paths').value);
+        const exactPaths = splitValues(document.getElementById('boundary-rule-exact-paths').value, function (raw) {
+            const value = raw.replace(/^=+/, '').trim();
+            if (!value) throw new Error('精确接口不能为空');
+            return '=' + value;
+        });
         return {
             effect: effect,
             host: document.getElementById('boundary-rule-host').value.trim(),
             schemes: splitValues(document.getElementById('boundary-rule-schemes').value),
             ports: ports,
-            pathPrefixes: splitValues(document.getElementById('boundary-rule-paths').value),
+            pathPrefixes: subtreePaths.concat(exactPaths),
             methods: splitValues(document.getElementById('boundary-rule-methods').value),
             authProfileId: effect === 'auth-only' ? authProfileId : null,
             rateLimit: { requestsPerSecond: rate, burst: burst, maxConcurrent: concurrent },
@@ -470,7 +488,9 @@
         document.getElementById('boundary-rule-host').value = rule.host || '';
         document.getElementById('boundary-rule-schemes').value = Array.isArray(rule.schemes) ? rule.schemes.join(', ') : '';
         document.getElementById('boundary-rule-ports').value = Array.isArray(rule.ports) ? rule.ports.join(', ') : '';
-        document.getElementById('boundary-rule-paths').value = Array.isArray(rule.pathPrefixes) ? rule.pathPrefixes.join(', ') : '';
+        const pathPatterns = Array.isArray(rule.pathPrefixes) ? rule.pathPrefixes : [];
+        document.getElementById('boundary-rule-paths').value = pathPatterns.filter(function (pattern) { return !String(pattern).startsWith('='); }).join(', ');
+        document.getElementById('boundary-rule-exact-paths').value = pathPatterns.filter(function (pattern) { return String(pattern).startsWith('='); }).map(function (pattern) { return String(pattern).slice(1); }).join(', ');
         document.getElementById('boundary-rule-methods').value = Array.isArray(rule.methods) ? rule.methods.join(', ') : '';
         document.getElementById('boundary-rule-auth-profile').value = rule.authProfileId || '';
         const rate = rule.rateLimit || {};

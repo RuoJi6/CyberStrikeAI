@@ -167,3 +167,77 @@ func TestNormalizeRuleTargetSortsAndDeduplicatesCanonicalValues(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRuleHostSupportsClosedBlacklistWildcards(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: " * ", want: "*"},
+		{input: "*.BÜCHER.example.", want: "*.xn--bcher-kva.example"},
+	} {
+		got, err := NormalizeRuleHost(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("NormalizeRuleHost(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+	for _, input := range []string{"foo.*.example", "*example.com", "*.127.0.0.1"} {
+		if got, err := NormalizeRuleHost(input); !errors.Is(err, ErrInvalidTarget) || got != "" {
+			t.Fatalf("NormalizeRuleHost(%q) = %q, %v", input, got, err)
+		}
+	}
+}
+
+func TestNormalizeRulePathPatternDistinguishesSubtreesAndExactPaths(t *testing.T) {
+	for _, test := range []struct {
+		input string
+		want  string
+	}{
+		{input: "/api/*", want: "/api"},
+		{input: "/*", want: "/"},
+		{input: "=/desasdasdasd/sdadsd", want: "=/desasdasdasd/sdadsd"},
+		{input: "=/safe/%2e/admin", want: "=/safe/admin"},
+	} {
+		got, err := NormalizeRulePathPattern(test.input)
+		if err != nil || got != test.want {
+			t.Fatalf("NormalizeRulePathPattern(%q) = %q, %v; want %q", test.input, got, err, test.want)
+		}
+	}
+	for _, input := range []string{"/api/*/admin", "/api*", "=/api/*", "="} {
+		if got, err := NormalizeRulePathPattern(input); !errors.Is(err, ErrInvalidTarget) || got != "" {
+			t.Fatalf("NormalizeRulePathPattern(%q) = %q, %v", input, got, err)
+		}
+	}
+}
+
+func TestNormalizeRuleTargetExpandsFullURLShorthand(t *testing.T) {
+	for _, test := range []struct {
+		input RuleTarget
+		want  RuleTarget
+	}{
+		{
+			input: RuleTarget{Host: "http://ssss.com/sdasdad/*"},
+			want:  RuleTarget{Host: "ssss.com", Schemes: []string{"http"}, Ports: []int{80}, PathPrefixes: []string{"/sdasdad"}, Methods: []string{}},
+		},
+		{
+			input: RuleTarget{Host: "https://EXAMPLE.com:8443/desasdasdasd/sdadsd"},
+			want:  RuleTarget{Host: "example.com", Schemes: []string{"https"}, Ports: []int{8443}, PathPrefixes: []string{"=/desasdasdasd/sdadsd"}, Methods: []string{}},
+		},
+	} {
+		got, err := NormalizeRuleTarget(test.input)
+		if err != nil || !reflect.DeepEqual(got, test.want) {
+			t.Fatalf("NormalizeRuleTarget(%#v) = %#v, %v; want %#v", test.input, got, err, test.want)
+		}
+	}
+
+	for _, input := range []RuleTarget{
+		{Host: "https://user@example.com/private"},
+		{Host: "https://example.com/api?q=secret"},
+		{Host: "https://example.com/api#fragment"},
+		{Host: "https://example.com/api", Schemes: []string{"https"}},
+	} {
+		if _, err := NormalizeRuleTarget(input); !errors.Is(err, ErrInvalidTarget) {
+			t.Fatalf("NormalizeRuleTarget(%#v) error = %v", input, err)
+		}
+	}
+}

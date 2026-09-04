@@ -369,6 +369,28 @@ func TestLoadPolicySnapshotCompilesCanonicalRulesAndRejectsNonCanonicalTargets(t
 	}
 }
 
+func TestLoadPolicySnapshotPreservesWildcardAndExactPathBlacklist(t *testing.T) {
+	content := `{"schemaVersion":1,"policyId":"policy-blacklist","rules":[{"id":"rule-blacklist","effect":"blocked","host":"*","schemes":["http","https"],"ports":[],"pathPrefixes":["/api","=/health"],"methods":[],"authProfileId":null,"rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}]}`
+	path := filepath.Join(t.TempDir(), "snapshot.json")
+	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	_, policy, err := LoadPolicySnapshot(path, testSnapshot(t, content))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rawURL := range []string{"https://one.example/api/items", "http://two.example/health"} {
+		decision, evalErr := policy.Evaluate(rawURL, http.MethodGet, nil, time.Now().UTC())
+		if evalErr != nil || decision.RuleID != "rule-blacklist" || decision.Reason != boundary.ReasonBlockedPath {
+			t.Fatalf("snapshot blacklist %q = %#v, %v", rawURL, decision, evalErr)
+		}
+	}
+	child, err := policy.Evaluate("https://one.example/health/check", http.MethodGet, nil, time.Now().UTC())
+	if err != nil || child.RuleID != "" || child.Reason != boundary.ReasonDefaultDeny {
+		t.Fatalf("exact snapshot path matched child = %#v, %v", child, err)
+	}
+}
+
 func TestLoadPolicySnapshotPreservesBoundedConcurrencyAndLegacyCanonicalJSON(t *testing.T) {
 	legacy := `{"schemaVersion":1,"policyId":"policy-1","rules":[{"id":"rule-1","effect":"allow-attack","host":"allowed.example","schemes":["http"],"ports":[80],"pathPrefixes":["/"],"methods":["POST"],"authProfileId":null,"rateLimit":{"requestsPerSecond":2,"burst":5},"expiresAt":null,"position":1}]}`
 	configured := strings.Replace(legacy, `"burst":5`, `"burst":5,"maxConcurrent":3`, 1)

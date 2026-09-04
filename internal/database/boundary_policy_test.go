@@ -210,6 +210,44 @@ func TestBoundaryPolicyRuleEffectsFailClosedInAPIAndSQLite(t *testing.T) {
 	}
 }
 
+func TestBoundaryPolicyBlacklistWildcardsAndPathFormsRoundTrip(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-blacklist.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	policy, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{Name: "blacklist forms"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	urlRule, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectBlocked, Host: "http://ssss.com/sdasdad/*",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if urlRule.Host != "ssss.com" || !reflect.DeepEqual(urlRule.Schemes, []string{"http"}) ||
+		!reflect.DeepEqual(urlRule.Ports, []int{80}) || !reflect.DeepEqual(urlRule.PathPrefixes, []string{"/sdasdad"}) {
+		t.Fatalf("normalized URL rule = %#v", urlRule)
+	}
+	wildcardRule, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectBlocked, Host: "*.Example.com.",
+		PathPrefixes: []string{"/api/*", "=/desasdasdasd/sdadsd"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if wildcardRule.Host != "*.example.com" || !reflect.DeepEqual(wildcardRule.PathPrefixes, []string{"/api", "=/desasdasdasd/sdadsd"}) {
+		t.Fatalf("normalized wildcard rule = %#v", wildcardRule)
+	}
+	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
+		PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "*",
+	}); err == nil {
+		t.Fatal("wildcard allow rule was accepted")
+	}
+}
+
 func TestBoundaryPolicyRuleCascadeDelete(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "boundary-policy-cascade.db"), zap.NewNop())
 	if err != nil {

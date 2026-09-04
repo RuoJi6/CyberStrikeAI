@@ -130,6 +130,19 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 		t.Fatalf("update rule status = %d: %s", ruleUpdated.Code, ruleUpdated.Body.String())
 	}
 
+	blacklistCreated := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies/"+policy.ID+"/rules", map[string]interface{}{
+		"effect": "blocked", "host": "*", "pathPrefixes": []string{"/api/*", "=/desasdasdasd/sdadsd"}, "position": 3,
+	})
+	if blacklistCreated.Code != http.StatusCreated || !strings.Contains(blacklistCreated.Body.String(), `"pathPrefixes":["/api","=/desasdasdasd/sdadsd"]`) {
+		t.Fatalf("create blacklist status = %d: %s", blacklistCreated.Code, blacklistCreated.Body.String())
+	}
+	wildcardAllow := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies/"+policy.ID+"/rules", map[string]interface{}{
+		"effect": "allow-visit", "host": "*.example.com",
+	})
+	if wildcardAllow.Code != http.StatusBadRequest {
+		t.Fatalf("wildcard allow status = %d: %s", wildcardAllow.Code, wildcardAllow.Body.String())
+	}
+
 	policyUpdated := performBoundaryJSON(router, http.MethodPut, "/api/boundary-policies/"+policy.ID, map[string]interface{}{
 		"name": "UI edited", "description": "updated draft", "tlsInspectionEnabled": false,
 		"tlsBypassDomains": []string{},
