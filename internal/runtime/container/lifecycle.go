@@ -284,6 +284,10 @@ func (c *LifecycleController) ApplyIdle(ctx context.Context, candidate IdleRunti
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: StatusFailed, Drift: lifecycleDriftForError(err)})
 		return record, errors.Join(err, failErr)
 	}
+	if err = c.stopRuntimeBeforeDelete(operationCtx, record); err != nil && !errors.Is(err, ErrNotFound) {
+		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
+		return record, errors.Join(err, failErr)
+	}
 	err = c.manager.Delete(operationCtx, record.RuntimeID, DeleteOptions{RemoveWorkspace: false})
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
@@ -411,6 +415,10 @@ func (c *LifecycleController) Delete(ctx context.Context, conversationID string,
 		writeCtx, cancel := lifecycleWriteContext()
 		defer cancel()
 		return c.store.DeleteLifecycle(writeCtx, record.ConversationID, LifecycleOperationDelete)
+	}
+	if err = c.stopRuntimeBeforeDelete(operationCtx, record); err != nil {
+		_, failErr := c.failAfterMutation(record, LifecycleOperationDelete, err, LifecycleFailure{RuntimeStatus: record.RuntimeStatus})
+		return errors.Join(err, failErr)
 	}
 	err = c.manager.Delete(operationCtx, record.RuntimeID, DeleteOptions{RemoveWorkspace: removeWorkspace})
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -761,6 +769,34 @@ func inspectLifecycleRuntime(manager RuntimeManager, ctx context.Context, id Run
 		return inspector.InspectLifecycle(ctx, id)
 	}
 	return manager.Inspect(ctx, id)
+}
+
+func (c *LifecycleController) stopRuntimeBeforeDelete(ctx context.Context, record InitializationRecord) error {
+	runtime, err := inspectLifecycleRuntime(c.manager, ctx, record.RuntimeID)
+	if err != nil {
+		return err
+	}
+	if err := validateObservedRuntime(record, runtime); err != nil {
+		return err
+	}
+	switch runtime.Status {
+	case StatusStopped, StatusFailed:
+		return nil
+	case StatusRunning, StatusStarting:
+		stopped, stopErr := c.manager.Stop(ctx, record.RuntimeID, StopOptions{})
+		if stopErr != nil {
+			return stopErr
+		}
+		if err := validateObservedRuntime(record, stopped); err != nil {
+			return err
+		}
+		if stopped.Status != StatusStopped {
+			return fmt.Errorf("%w: runtime %s did not stop before deletion", ErrRuntimeStateConflict, record.RuntimeID)
+		}
+		return nil
+	default:
+		return fmt.Errorf("%w: runtime %s cannot be deleted from %s", ErrRuntimeStateConflict, record.RuntimeID, runtime.Status)
+	}
 }
 
 func lifecycleDriftForError(err error) string {

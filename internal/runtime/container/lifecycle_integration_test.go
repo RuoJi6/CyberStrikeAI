@@ -83,6 +83,10 @@ func TestLifecycleControllerIdleDeleteRetainsDedicatedWorkspace(t *testing.T) {
 	if _, err := controller.ApplyIdle(context.Background(), candidates[0], time.Now().UTC()); err != nil {
 		t.Fatalf("idle delete: %v", err)
 	}
+	calls := manager.Calls()
+	if len(calls) < 2 || calls[len(calls)-2].Operation != containertest.OperationStop || calls[len(calls)-1].Operation != containertest.OperationDelete {
+		t.Fatalf("idle delete did not stop before delete: %#v", calls)
+	}
 	if _, err := db.GetContainerInitialization(context.Background(), conversationID); !errors.Is(err, container.ErrNotFound) {
 		t.Fatalf("runtime record survived idle delete: %v", err)
 	}
