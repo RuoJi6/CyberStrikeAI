@@ -835,6 +835,7 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 		}
 	}
 	updatedAt := latestRuntimeTimestamp(createdAt, actual.State.StartedAt, actual.State.FinishedAt)
+	observedSpec := securitySpec
 	return Runtime{
 		ID:             expectedID,
 		ConversationID: conversationID,
@@ -846,6 +847,7 @@ func (m *DockerManager) runtimeFromInspection(ctx context.Context, expectedID Ru
 		LastError:      strings.TrimSpace(actual.State.Error),
 		Warnings:       warnings,
 		SpecDigest:     labels[LabelSpecDigest],
+		Spec:           &observedSpec,
 	}, nil
 }
 

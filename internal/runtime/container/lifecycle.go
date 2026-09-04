@@ -469,10 +469,15 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		// configured topology transition; every other mismatch remains fail-closed.
 		target := record
 		target.Spec, err = c.upgradeRuntimeSpec(ctx, target.Spec, "")
+		incrementGeneration := false
+		if err == nil {
+			incrementGeneration = adoptObservedAttributionBinding(&target.Spec, runtime.Spec, record.RuntimeGeneration)
+		}
 		if err == nil && RuntimeSpecDigest(target.Spec) != RuntimeSpecDigest(record.Spec) && validateObservedRuntime(target, runtime) == nil {
 			replacement := target.Spec
 			return c.complete(record, LifecycleOperationReconcile, LifecycleCompletion{
 				Runtime: runtime, Drift: "topology_migration_recovered", ReplacementSpec: &replacement,
+				IncrementGeneration: incrementGeneration,
 			})
 		}
 		return c.failObserved(record, "specification_drift", "容器身份或镜像与不可变运行时规格不一致")
@@ -488,6 +493,34 @@ func (c *LifecycleController) Reconcile(ctx context.Context, conversationID stri
 		Runtime: runtime,
 		Drift:   strings.Join(drifts, ","),
 	})
+}
+
+// adoptObservedAttributionBinding recovers only the non-deterministic binding
+// produced by a rebuild that reached the engine before its database commit.
+// The remaining observed specification must still exactly match the trusted
+// upgrade candidate and pass the database's controlled-replacement checks.
+func adoptObservedAttributionBinding(target, observed *RuntimeSpec, currentGeneration int) bool {
+	if target == nil || observed == nil || target.EgressGateway == nil || observed.EgressGateway == nil {
+		return false
+	}
+	targetGateway, observedGateway := *target.EgressGateway, observed.EgressGateway
+	if strings.TrimSpace(targetGateway.AttributionPublicKey) == "" ||
+		targetGateway.AttributionPublicKey != observedGateway.AttributionPublicKey ||
+		observedGateway.AttributionRuntimeGeneration != currentGeneration+1 ||
+		strings.TrimSpace(observedGateway.AttributionInstanceID) == "" ||
+		targetGateway.BoundarySnapshot == nil || observedGateway.BoundarySnapshot == nil ||
+		targetGateway.BoundarySnapshot.ID != observedGateway.BoundarySnapshot.ID ||
+		targetGateway.BoundarySnapshot.SHA256 != observedGateway.BoundarySnapshot.SHA256 ||
+		observedGateway.BoundarySnapshot.RuntimeGeneration != observedGateway.AttributionRuntimeGeneration {
+		return false
+	}
+	targetGateway.AttributionRuntimeGeneration = observedGateway.AttributionRuntimeGeneration
+	targetGateway.AttributionInstanceID = observedGateway.AttributionInstanceID
+	snapshot := *targetGateway.BoundarySnapshot
+	snapshot.RuntimeGeneration = observedGateway.BoundarySnapshot.RuntimeGeneration
+	targetGateway.BoundarySnapshot = &snapshot
+	target.EgressGateway = &targetGateway
+	return true
 }
 
 // Recover resolves interrupted lifecycle operations and reconciles every

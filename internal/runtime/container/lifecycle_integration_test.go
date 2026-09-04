@@ -322,6 +322,78 @@ func TestLifecycleControllerReconcileRecoversCommittedGatewayUpgrade(t *testing.
 	}
 }
 
+func TestLifecycleControllerReconcileRecoversInterruptedAttributedGatewayAndTLSRotation(t *testing.T) {
+	db, manager, _, conversationID := lifecycleFixture(t)
+	active, err := db.EnsureConversationBoundarySnapshot(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := lifecycleGatewaySpec()
+	gateway.AttributionPublicKey = signer.PublicKeyEncoded()
+	provider := &recordingBoundarySnapshotProvider{snapshot: container.EgressBoundarySnapshotSpec{
+		ID: active.SnapshotID, SHA256: active.SHA256, RuntimeGeneration: 1,
+	}}
+	initialAuthority := &container.EgressTLSAuthoritySpec{
+		ID: "11111111-1111-4111-8111-111111111111", BoundarySnapshotID: active.SnapshotID,
+		CertificateSHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		PrivateKeySHA256:  "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+	}
+	tlsProvider := &recordingTLSAuthorityProvider{authority: initialAuthority}
+	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &gateway, BoundarySnapshots: provider, TLSAuthorities: tlsProvider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := controller.Rebuild(context.Background(), conversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.RuntimeGeneration != 2 || current.Spec.EgressGateway == nil || current.Spec.EgressGateway.AttributionRuntimeGeneration != 2 {
+		t.Fatalf("initial attributed gateway = %#v", current)
+	}
+
+	rotatedAuthority := &container.EgressTLSAuthoritySpec{
+		ID: "22222222-2222-4222-8222-222222222222", BoundarySnapshotID: active.SnapshotID,
+		CertificateSHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		PrivateKeySHA256:  "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	}
+	tlsProvider.authority = rotatedAuthority
+	upgradedGateway := gateway
+	upgradedGateway.Image.Digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+	replacement := current.Spec
+	replacementGateway := *replacement.EgressGateway
+	replacementGateway.Image = upgradedGateway.Image
+	replacementGateway.AttributionRuntimeGeneration = current.RuntimeGeneration + 1
+	replacementGateway.AttributionInstanceID = "33333333-3333-4333-8333-333333333333"
+	snapshot := *replacementGateway.BoundarySnapshot
+	snapshot.RuntimeGeneration = current.RuntimeGeneration + 1
+	replacementGateway.BoundarySnapshot = &snapshot
+	replacementGateway.TLSAuthority = rotatedAuthority
+	replacement.EgressGateway = &replacementGateway
+	runtime, err := manager.Rebuild(context.Background(), current.RuntimeID, container.RebuildOptions{Spec: replacement})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveryController, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
+		EgressGateway: &upgradedGateway, BoundarySnapshots: provider, TLSAuthorities: tlsProvider,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciled, err := recoveryController.Reconcile(context.Background(), conversationID)
+	if err != nil {
+		t.Fatalf("reconcile interrupted attributed rebuild: %v", err)
+	}
+	if reconciled.RuntimeGeneration != 3 || reconciled.ProviderID != runtime.ProviderID || reconciled.RuntimeDrift != "topology_migration_recovered" || reconciled.Spec.EgressGateway == nil || reconciled.Spec.EgressGateway.AttributionRuntimeGeneration != 3 || reconciled.Spec.EgressGateway.AttributionInstanceID != replacementGateway.AttributionInstanceID || reconciled.Spec.EgressGateway.TLSAuthority == nil || reconciled.Spec.EgressGateway.TLSAuthority.ID != rotatedAuthority.ID {
+		t.Fatalf("reconciled attributed rebuild = %#v", reconciled)
+	}
+}
+
 func TestLifecycleControllerReconcileRecoversCommittedDockerNetworkMigration(t *testing.T) {
 	db, manager, controller, conversationID := lifecycleFixture(t)
 	record, err := db.GetContainerInitialization(context.Background(), conversationID)
@@ -578,6 +650,24 @@ type recordingAuthProfilesProvider struct {
 	authProfiles *container.EgressAuthProfilesSpec
 	err          error
 	snapshotIDs  []string
+}
+
+type recordingTLSAuthorityProvider struct {
+	authority   *container.EgressTLSAuthoritySpec
+	err         error
+	snapshotIDs []string
+}
+
+func (p *recordingTLSAuthorityProvider) ResolveTLSAuthority(_ context.Context, _ string, snapshotID string) (*container.EgressTLSAuthoritySpec, error) {
+	p.snapshotIDs = append(p.snapshotIDs, snapshotID)
+	if p.err != nil {
+		return nil, p.err
+	}
+	if p.authority == nil {
+		return nil, nil
+	}
+	copy := *p.authority
+	return &copy, nil
 }
 
 func (p *recordingAuthProfilesProvider) ResolveAuthProfiles(_ context.Context, _ string, snapshotID string) (*container.EgressAuthProfilesSpec, error) {

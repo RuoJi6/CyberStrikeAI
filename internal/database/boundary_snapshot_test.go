@@ -559,6 +559,31 @@ func TestConversationBoundaryRebuildAllowsGatewayRolloutAndTLSAuthorityReplaceme
 		rebuilt.Spec.EgressGateway.TLSAuthority == nil || rebuilt.Spec.EgressGateway.TLSAuthority.BoundarySnapshotID != pending.SnapshotID {
 		t.Fatalf("gateway and boundary replacement = %#v", rebuilt)
 	}
+
+	if _, err := db.BeginLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild); err != nil {
+		t.Fatal(err)
+	}
+	rotatedSpec := rebuilt.Spec
+	rotatedGateway := *rotatedSpec.EgressGateway
+	rotatedGateway.TLSAuthority = &containerruntime.EgressTLSAuthoritySpec{
+		ID: "12345678-1234-4234-8234-123456789abc", BoundarySnapshotID: pending.SnapshotID,
+		CertificateSHA256: "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		PrivateKeySHA256:  "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+	}
+	rotatedSpec.EgressGateway = &rotatedGateway
+	rotatedRuntime := containerruntime.Runtime{
+		ID: spec.ID, ProviderID: "provider-generation-3", Status: containerruntime.StatusStopped,
+		Image: rotatedSpec.Image, SpecDigest: containerruntime.RuntimeSpecDigest(rotatedSpec),
+	}
+	rotated, err := db.CompleteLifecycle(ctx, conversation.ID, containerruntime.LifecycleOperationRebuild, containerruntime.LifecycleCompletion{
+		Runtime: rotatedRuntime, IncrementGeneration: true, ReplacementSpec: &rotatedSpec,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rotated.RuntimeGeneration != 3 || rotated.Spec.EgressGateway == nil || rotated.Spec.EgressGateway.TLSAuthority == nil || rotated.Spec.EgressGateway.TLSAuthority.ID != rotatedGateway.TLSAuthority.ID {
+		t.Fatalf("same-snapshot TLS authority rotation = %#v", rotated)
+	}
 }
 
 func TestConversationBoundaryRebuildCancellationAndStartupRecoveryKeepActiveSnapshot(t *testing.T) {

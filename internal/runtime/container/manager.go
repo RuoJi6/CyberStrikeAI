@@ -229,6 +229,10 @@ type Runtime struct {
 	LastError      string
 	Warnings       []string
 	SpecDigest     string
+	// Spec is reconstructed only by trusted runtime implementations from
+	// managed engine metadata. It is never serialized to API clients and lets
+	// lifecycle recovery validate a completed-but-uncommitted rebuild.
+	Spec *RuntimeSpec `json:"-"`
 }
 
 // ResourceUsage is a bounded, credential-free snapshot of live Docker

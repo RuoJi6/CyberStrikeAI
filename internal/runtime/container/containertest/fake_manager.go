@@ -131,6 +131,7 @@ func (f *FakeManager) Create(ctx context.Context, spec container.RuntimeSpec) (c
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		SpecDigest:     container.RuntimeSpecDigest(spec),
+		Spec:           &spec,
 	}
 	f.runtimes[spec.ID] = runtime
 	return runtime, nil
@@ -211,6 +212,7 @@ func (f *FakeManager) Rebuild(ctx context.Context, id container.RuntimeID, optio
 		CreatedAt:      now,
 		UpdatedAt:      now,
 		SpecDigest:     container.RuntimeSpecDigest(options.Spec),
+		Spec:           &options.Spec,
 	}
 	f.runtimes[id] = rebuilt
 	return rebuilt, nil

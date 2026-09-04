@@ -908,6 +908,30 @@ func validateLifecycleSpecReplacement(
 			changed = true
 		}
 	}
+	if replacement.EgressGateway != nil && replacement.EgressGateway.BoundarySnapshot != nil {
+		var currentTLSAuthority *containerruntime.EgressTLSAuthoritySpec
+		if current.EgressGateway != nil {
+			currentTLSAuthority = current.EgressGateway.TLSAuthority
+		}
+		requestedTLSAuthority := replacement.EgressGateway.TLSAuthority
+		if !sameEgressTLSAuthority(currentTLSAuthority, requestedTLSAuthority) {
+			if expected.EgressGateway == nil || expected.EgressGateway.BoundarySnapshot == nil {
+				return 0, "", fmt.Errorf("%w: TLS authority requires an authorized boundary snapshot", containerruntime.ErrRuntimeStateConflict)
+			}
+			if requestedTLSAuthority != nil && requestedTLSAuthority.BoundarySnapshotID != expected.EgressGateway.BoundarySnapshot.ID {
+				return 0, "", fmt.Errorf("%w: TLS authority must be bound to the authorized boundary snapshot", containerruntime.ErrRuntimeStateConflict)
+			}
+			gateway := *expected.EgressGateway
+			if requestedTLSAuthority == nil {
+				gateway.TLSAuthority = nil
+			} else {
+				authority := *requestedTLSAuthority
+				gateway.TLSAuthority = &authority
+			}
+			expected.EgressGateway = &gateway
+			changed = true
+		}
+	}
 	if replacement.EgressGateway != nil && current.EgressGateway != nil && current.EgressGateway.BoundarySnapshot != nil {
 		var currentRoute *containerruntime.EgressUpstreamRouteSpec
 		if current.EgressGateway != nil {
@@ -957,7 +981,7 @@ func validateLifecycleSpecReplacement(
 		return 0, "", fmt.Errorf("%w: runtime specification replacement is not a controlled topology upgrade", containerruntime.ErrRuntimeStateConflict)
 	}
 	if containerruntime.RuntimeSpecDigest(expected) != containerruntime.RuntimeSpecDigest(*replacement) {
-		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, refresh the pinned egress gateway, bind authorized boundary/upstream material, and update gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
+		return 0, "", fmt.Errorf("%w: lifecycle replacement may only enable the internal network, refresh the pinned egress gateway, bind authorized boundary/upstream material, rotate a snapshot-bound TLS authority, and update gateway-only auth profiles", containerruntime.ErrRuntimeStateConflict)
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {
@@ -971,6 +995,13 @@ func sameEgressBoundarySnapshot(left, right *containerruntime.EgressBoundarySnap
 		return left == nil && right == nil
 	}
 	return left.ID == right.ID && left.SHA256 == right.SHA256
+}
+
+func sameEgressTLSAuthority(left, right *containerruntime.EgressTLSAuthoritySpec) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func sameEgressUpstreamRoute(left, right *containerruntime.EgressUpstreamRouteSpec) bool {
