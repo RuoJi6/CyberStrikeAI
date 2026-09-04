@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cyberstrike-ai/internal/database"
+	"cyberstrike-ai/internal/networkprovenance"
 	container "cyberstrike-ai/internal/runtime/container"
 	"cyberstrike-ai/internal/runtime/container/containertest"
 	"go.uber.org/zap"
@@ -196,12 +197,14 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 		t.Fatalf("activated snapshot = %#v, %v", activated, err)
 	}
 
-	upgradedGateway := gateway
+	upgradedGateway := lifecycleGatewaySpec()
 	upgradedGateway.Image.Digest = "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	upgradedGateway.Resources.MemoryBytes = 192 << 20
-	upgradedGateway.UpstreamRoute = &container.EgressUpstreamRouteSpec{
-		ID: "route-config-drift", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+	signer, err := networkprovenance.GenerateSigner()
+	if err != nil {
+		t.Fatal(err)
 	}
+	upgradedGateway.AttributionPublicKey = signer.PublicKeyEncoded()
 	controller, err = container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
 		EgressGateway: &upgradedGateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
 	})
@@ -212,8 +215,11 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	if err != nil {
 		t.Fatalf("maintenance rebuild: %v", err)
 	}
-	if len(provider.snapshotIDs) != 1 || len(authProvider.snapshotIDs) != 2 || authProvider.snapshotIDs[1] != "" || maintained.Spec.EgressGateway.BoundarySnapshot == nil || *maintained.Spec.EgressGateway.BoundarySnapshot != *rebuilt.Spec.EgressGateway.BoundarySnapshot || maintained.Spec.EgressGateway.AuthProfiles == nil || maintained.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID || maintained.Spec.EgressGateway.UpstreamRoute == nil || maintained.Spec.EgressGateway.UpstreamRoute.ID != conversationID || maintained.Spec.EgressGateway.Image.Digest != upgradedGateway.Image.Digest || maintained.Spec.EgressGateway.Resources.MemoryBytes != upgradedGateway.Resources.MemoryBytes {
+	if len(provider.snapshotIDs) != 1 || len(authProvider.snapshotIDs) != 2 || authProvider.snapshotIDs[1] != "" || maintained.Spec.EgressGateway.BoundarySnapshot == nil || maintained.Spec.EgressGateway.BoundarySnapshot.ID != rebuilt.Spec.EgressGateway.BoundarySnapshot.ID || maintained.Spec.EgressGateway.BoundarySnapshot.SHA256 != rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 || maintained.Spec.EgressGateway.AuthProfiles == nil || maintained.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID || maintained.Spec.EgressGateway.UpstreamRoute == nil || maintained.Spec.EgressGateway.UpstreamRoute.ID != conversationID || maintained.Spec.EgressGateway.Image.Digest != upgradedGateway.Image.Digest || maintained.Spec.EgressGateway.Resources.MemoryBytes != upgradedGateway.Resources.MemoryBytes {
 		t.Fatalf("maintenance rebuild replaced immutable snapshot: snapshot calls %#v, auth calls %#v, record %#v", provider.snapshotIDs, authProvider.snapshotIDs, maintained)
+	}
+	if maintained.Spec.EgressGateway.AttributionPublicKey != signer.PublicKeyEncoded() || maintained.Spec.EgressGateway.AttributionRuntimeGeneration != maintained.RuntimeGeneration || maintained.Spec.EgressGateway.AttributionInstanceID == "" || maintained.Spec.EgressGateway.BoundarySnapshot.RuntimeGeneration != maintained.RuntimeGeneration {
+		t.Fatalf("maintenance rebuild attribution binding = %#v", maintained.Spec.EgressGateway)
 	}
 
 	nextPending, err := db.PrepareConversationBoundaryRebuild(context.Background(), conversationID, "")

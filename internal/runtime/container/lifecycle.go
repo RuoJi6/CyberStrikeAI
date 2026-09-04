@@ -596,6 +596,12 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway.UpstreamRoute = current.UpstreamRoute
 			gateway.AuthProfiles = current.AuthProfiles
 			gateway.TLSAuthority = current.TLSAuthority
+			// The configured gateway is a template and therefore has no runtime
+			// attribution binding. Preserve the current binding long enough for
+			// this intermediate specification to validate. Rebuild rotates it to
+			// the next generation and a fresh instance ID before engine mutation.
+			gateway.AttributionRuntimeGeneration = current.AttributionRuntimeGeneration
+			gateway.AttributionInstanceID = current.AttributionInstanceID
 			spec.EgressGateway = &gateway
 		}
 		if c.authProfiles != nil {
@@ -621,6 +627,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway.UpstreamRoute = requestedRoute
 			spec.EgressGateway = &gateway
 		}
+		ensureBoundGatewayAttribution(&spec)
 		applyRuntimeControlsFromContext(ctx, &spec)
 		if err := ValidateSpec(spec); err != nil {
 			return RuntimeSpec{}, err
@@ -658,11 +665,37 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 		gateway.TLSAuthority = authority
 	}
 	spec.EgressGateway = &gateway
+	ensureBoundGatewayAttribution(&spec)
 	applyRuntimeControlsFromContext(ctx, &spec)
 	if err := ValidateSpec(spec); err != nil {
 		return RuntimeSpec{}, err
 	}
 	return spec, nil
+}
+
+// ensureBoundGatewayAttribution makes an intermediate, snapshot-bound upgrade
+// specification valid before Rebuild assigns the authoritative next runtime
+// generation and rotates the instance ID. It also permits an explicit rebuild
+// to migrate a legacy gateway to signed attribution without weakening the
+// validator for specifications that reach the container engine.
+func ensureBoundGatewayAttribution(spec *RuntimeSpec) {
+	if spec == nil || spec.EgressGateway == nil {
+		return
+	}
+	gateway := *spec.EgressGateway
+	if strings.TrimSpace(gateway.AttributionPublicKey) == "" || gateway.BoundarySnapshot == nil {
+		return
+	}
+	if gateway.AttributionRuntimeGeneration < 1 {
+		gateway.AttributionRuntimeGeneration = gateway.BoundarySnapshot.RuntimeGeneration
+		if gateway.AttributionRuntimeGeneration < 1 {
+			gateway.AttributionRuntimeGeneration = 1
+		}
+	}
+	if strings.TrimSpace(gateway.AttributionInstanceID) == "" {
+		gateway.AttributionInstanceID = uuid.NewString()
+	}
+	spec.EgressGateway = &gateway
 }
 
 func (c *LifecycleController) verifyBeforeMutation(ctx context.Context, record InitializationRecord, allowMissing bool) (bool, error) {
