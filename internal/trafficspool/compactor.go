@@ -23,6 +23,9 @@ const (
 	AggregateKindRequestBurst          = "request-burst"
 	maximumSummaryPaths                = 32
 	maximumDistinctPaths               = 4096
+	AggregationModeAll                 = "all"
+	AggregationModeTools               = "tools"
+	AggregationModeNone                = "none"
 )
 
 // CompactConfig bounds how long complete HTTP transactions may be held in
@@ -78,6 +81,7 @@ type CompactingSink struct {
 	done        chan struct{}
 	closeOnce   sync.Once
 	closeErr    error
+	mode        string
 }
 
 func NewCompactingSink(destination func(context.Context, traffic.Transaction, []traffic.Message) error, config CompactConfig) (*CompactingSink, error) {
@@ -105,10 +109,57 @@ func NewCompactingSink(destination func(context.Context, traffic.Transaction, []
 	}
 	sink := &CompactingSink{
 		destination: destination, config: config, batches: make(map[string]*compactBatch),
-		stop: make(chan struct{}), done: make(chan struct{}),
+		stop: make(chan struct{}), done: make(chan struct{}), mode: AggregationModeAll,
 	}
 	go sink.run()
 	return sink, nil
+}
+
+func normalizeAggregationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case AggregationModeAll, AggregationModeTools:
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		return AggregationModeNone
+	}
+}
+
+// SetAggregationMode flushes the complete batch accumulated under the old
+// policy before later traffic can be evaluated with the new one.
+func (s *CompactingSink) SetAggregationMode(ctx context.Context, mode string) error {
+	if s == nil {
+		return errors.New("traffic compacting sink is unavailable")
+	}
+	mode = normalizeAggregationMode(mode)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if mode == s.mode {
+		return nil
+	}
+	outputs := s.flushAllLocked()
+	if err := s.writeRecords(ctx, outputs); err != nil {
+		return err
+	}
+	s.mode = mode
+	return nil
+}
+
+func shouldAggregateTransaction(mode string, item traffic.Transaction) bool {
+	mode = normalizeAggregationMode(mode)
+	if mode == AggregationModeAll {
+		return true
+	}
+	if mode != AggregationModeTools {
+		return false
+	}
+	p := networkprovenance.NetworkProvenanceV1{
+		ConversationID: item.ConversationID, RuntimeMode: item.RuntimeMode,
+		RuntimeGeneration: item.RuntimeGeneration, RuntimeInstanceID: item.RuntimeInstanceID,
+		AgentID: item.AgentID, ToolName: item.ToolName, ExecutionID: item.ExecutionID,
+		ToolCallID: item.ToolCallID, ActivityScopeID: item.ActivityScopeID,
+		AttributionStatus: item.AttributionStatus, DeclaredActivityKind: item.DeclaredActivityKind,
+	}
+	return p.ValidVerified() && p.Normalized().DeclaredActivityKind == networkprovenance.ActivityKindFuzz
 }
 
 func (s *CompactingSink) Write(ctx context.Context, item traffic.Transaction, messages []traffic.Message) error {
@@ -125,6 +176,13 @@ func (s *CompactingSink) Write(ctx context.Context, item traffic.Transaction, me
 
 	s.mu.Lock()
 	outputs := s.flushExpiredLocked(now)
+	if !shouldAggregateTransaction(s.mode, item) {
+		s.mu.Unlock()
+		if err := s.writeRecords(ctx, outputs); err != nil {
+			return err
+		}
+		return s.destination(ctx, record.transaction, record.messages)
+	}
 	key := compactGroupKey(item)
 	current := s.batches[key]
 	if current != nil && (occurrenceGap(current.lastAt, item.StartedAt) > s.config.IdleWindow ||

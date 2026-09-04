@@ -28,6 +28,10 @@ const (
 	EgressAuditModeCompact = "compact"
 	EgressAuditModeFull    = "full"
 	EgressAuditModeOff     = "off"
+
+	EgressAggregationModeAll   = "all"
+	EgressAggregationModeTools = "tools"
+	EgressAggregationModeNone  = "none"
 )
 
 const egressAuditGenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
@@ -104,6 +108,7 @@ CREATE TABLE IF NOT EXISTS conversation_egress_audit_settings (
 	conversation_id TEXT PRIMARY KEY,
 	enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
 	mode TEXT NOT NULL DEFAULT 'compact' CHECK (mode IN ('compact', 'full')),
+	aggregation_mode TEXT NOT NULL DEFAULT 'tools' CHECK (aggregation_mode IN ('all', 'tools', 'none')),
 	updated_at DATETIME NOT NULL,
 	FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
 );`
@@ -416,12 +421,15 @@ type EgressAuditRuntimeTarget struct {
 	Record            containerruntime.InitializationRecord
 	ConversationTitle string
 	AuditMode         string
+	AggregationMode   string
+	AuditDisabled     bool
 	RuntimeMode       string
 }
 
 type ConversationEgressAuditSetting struct {
-	Enabled bool   `json:"enabled"`
-	Mode    string `json:"mode"`
+	Enabled         bool   `json:"enabled"`
+	Mode            string `json:"mode"`
+	AggregationMode string `json:"aggregationMode"`
 }
 
 var egressAuditCategories = map[string]struct{}{"all": {}, "network": {}, "lifecycle": {}}
@@ -573,6 +581,26 @@ func (db *DB) initEgressAuditTables() error {
 	}
 	if err := db.addColumnIfMissing("conversation_egress_audit_settings", "mode", "ALTER TABLE conversation_egress_audit_settings ADD COLUMN mode TEXT NOT NULL DEFAULT 'compact'"); err != nil {
 		return fmt.Errorf("initialize egress audit recording mode: %w", err)
+	}
+	var aggregationColumnCount int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('conversation_egress_audit_settings') WHERE name='aggregation_mode'").Scan(&aggregationColumnCount); err != nil {
+		return fmt.Errorf("inspect egress aggregation mode: %w", err)
+	}
+	if aggregationColumnCount == 0 {
+		if _, err := db.Exec("ALTER TABLE conversation_egress_audit_settings ADD COLUMN aggregation_mode TEXT NOT NULL DEFAULT 'all'"); err != nil {
+			return fmt.Errorf("initialize egress aggregation mode: %w", err)
+		}
+		// Existing conversations retain their historical compact/full behaviour.
+		if _, err := db.Exec(`UPDATE conversation_egress_audit_settings SET aggregation_mode = CASE WHEN mode = 'full' THEN 'none' ELSE 'all' END`); err != nil {
+			return fmt.Errorf("backfill egress aggregation mode: %w", err)
+		}
+		if _, err := db.Exec(`
+			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, updated_at)
+			SELECT id, 1, 'compact', 'all', CURRENT_TIMESTAMP FROM conversations
+			WHERE id NOT IN (SELECT conversation_id FROM conversation_egress_audit_settings)
+		`); err != nil {
+			return fmt.Errorf("backfill host egress aggregation settings: %w", err)
+		}
 	}
 	if err := db.initializeEgressAuditChains(context.Background()); err != nil {
 		return fmt.Errorf("initialize egress audit chains: %w", err)
@@ -1340,7 +1368,7 @@ func (db *DB) VerifyEgressAuditIntegrity(ctx context.Context, filter EgressAudit
 
 func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]EgressAuditRuntimeTarget, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT r.conversation_id, COALESCE(c.title, ''), COALESCE(s.mode, 'compact')
+		SELECT r.conversation_id, COALESCE(c.title, ''), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'all'), COALESCE(s.enabled, 1)
 		FROM conversation_container_runtimes r
 		JOIN conversations c ON c.id = r.conversation_id
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = r.conversation_id
@@ -1355,15 +1383,16 @@ func (db *DB) ListRunningEgressAuditRuntimeTargets(ctx context.Context) ([]Egres
 	defer rows.Close()
 	targets := make([]EgressAuditRuntimeTarget, 0)
 	for rows.Next() {
-		var conversationID, title, mode string
-		if err := rows.Scan(&conversationID, &title, &mode); err != nil {
+		var conversationID, title, mode, aggregationMode string
+		var enabled bool
+		if err := rows.Scan(&conversationID, &title, &mode, &aggregationMode, &enabled); err != nil {
 			return nil, err
 		}
 		record, err := db.GetContainerInitialization(ctx, conversationID)
 		if err != nil {
 			return nil, err
 		}
-		targets = append(targets, EgressAuditRuntimeTarget{Record: record, ConversationTitle: title, AuditMode: normalizeConversationEgressAuditMode(mode)})
+		targets = append(targets, EgressAuditRuntimeTarget{Record: record, ConversationTitle: title, AuditMode: normalizeConversationEgressAuditMode(mode), AggregationMode: normalizeConversationEgressAggregationMode(aggregationMode), AuditDisabled: !enabled})
 	}
 	return targets, rows.Err()
 }
@@ -1392,29 +1421,52 @@ func NormalizeConversationEgressAuditMode(value string) (string, error) {
 	}
 }
 
+func normalizeConversationEgressAggregationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case EgressAggregationModeAll:
+		return EgressAggregationModeAll
+	case EgressAggregationModeNone:
+		return EgressAggregationModeNone
+	case EgressAggregationModeTools:
+		return EgressAggregationModeTools
+	default:
+		return EgressAggregationModeNone
+	}
+}
+
+func NormalizeConversationEgressAggregationMode(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case EgressAggregationModeAll, EgressAggregationModeTools, EgressAggregationModeNone:
+		return value, nil
+	default:
+		return "", errors.New("invalid egress aggregation mode")
+	}
+}
+
 func (db *DB) GetConversationEgressAuditSetting(ctx context.Context, conversationID string) (ConversationEgressAuditSetting, error) {
 	conversationID = strings.TrimSpace(conversationID)
 	var runtimeMode string
 	var enabled sql.NullBool
-	var mode sql.NullString
+	var mode, aggregationMode sql.NullString
 	err := db.QueryRowContext(ctx, `
-		SELECT c.runtime_mode, s.enabled, s.mode
+		SELECT c.runtime_mode, s.enabled, s.mode, s.aggregation_mode
 		FROM conversations c
 		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = c.id
 		WHERE c.id = ?
-	`, conversationID).Scan(&runtimeMode, &enabled, &mode)
+	`, conversationID).Scan(&runtimeMode, &enabled, &mode, &aggregationMode)
 	if err != nil {
 		return ConversationEgressAuditSetting{}, err
 	}
-	if runtimeMode != ConversationRuntimeModeContainer {
-		return ConversationEgressAuditSetting{}, fmt.Errorf("egress audit settings require a container conversation")
-	}
-	setting := ConversationEgressAuditSetting{Enabled: true, Mode: EgressAuditModeCompact}
+	setting := ConversationEgressAuditSetting{Enabled: true, Mode: EgressAuditModeCompact, AggregationMode: EgressAggregationModeTools}
 	if enabled.Valid {
 		setting.Enabled = enabled.Bool
 	}
 	if mode.Valid {
 		setting.Mode = normalizeConversationEgressAuditMode(mode.String)
+	}
+	if aggregationMode.Valid {
+		setting.AggregationMode = normalizeConversationEgressAggregationMode(aggregationMode.String)
 	}
 	if !setting.Enabled {
 		setting.Mode = EgressAuditModeOff
@@ -1423,14 +1475,11 @@ func (db *DB) GetConversationEgressAuditSetting(ctx context.Context, conversatio
 }
 
 func (db *DB) SetConversationEgressAuditEnabled(ctx context.Context, conversationID string, enabled bool) error {
-	mode := EgressAuditModeOff
-	if enabled {
-		mode = EgressAuditModeCompact
-		if current, err := db.GetConversationEgressAuditSetting(ctx, conversationID); err == nil && current.Mode == EgressAuditModeFull {
-			mode = EgressAuditModeFull
-		}
+	setting, err := db.GetConversationEgressAuditSetting(ctx, conversationID)
+	if err != nil {
+		return err
 	}
-	return db.SetConversationEgressAuditMode(ctx, conversationID, mode)
+	return db.SetConversationEgressAuditSetting(ctx, conversationID, enabled, setting.AggregationMode)
 }
 
 func (db *DB) SetConversationEgressAuditMode(ctx context.Context, conversationID, requestedMode string) error {
@@ -1439,24 +1488,68 @@ func (db *DB) SetConversationEgressAuditMode(ctx context.Context, conversationID
 	if err != nil {
 		return err
 	}
-	var runtimeMode string
-	if err := db.QueryRowContext(ctx, `SELECT runtime_mode FROM conversations WHERE id = ?`, conversationID).Scan(&runtimeMode); err != nil {
+	current, err := db.GetConversationEgressAuditSetting(ctx, conversationID)
+	if err != nil {
 		return err
 	}
-	if runtimeMode != ConversationRuntimeModeContainer {
-		return fmt.Errorf("egress audit settings require a container conversation")
+	if mode == EgressAuditModeOff {
+		return db.SetConversationEgressAuditSetting(ctx, conversationID, false, current.AggregationMode)
 	}
-	enabled := mode != EgressAuditModeOff
-	storedMode := mode
-	if !enabled {
-		storedMode = EgressAuditModeCompact
+	aggregationMode := EgressAggregationModeAll
+	if mode == EgressAuditModeFull {
+		aggregationMode = EgressAggregationModeNone
+	}
+	return db.SetConversationEgressAuditSetting(ctx, conversationID, true, aggregationMode)
+}
+
+func (db *DB) SetConversationEgressAuditSetting(ctx context.Context, conversationID string, enabled bool, aggregationMode string) error {
+	conversationID = strings.TrimSpace(conversationID)
+	aggregationMode, err := NormalizeConversationEgressAggregationMode(aggregationMode)
+	if err != nil {
+		return err
+	}
+	var exists int
+	if err := db.QueryRowContext(ctx, `SELECT 1 FROM conversations WHERE id = ?`, conversationID).Scan(&exists); err != nil {
+		return err
+	}
+	legacyMode := EgressAuditModeCompact
+	if aggregationMode == EgressAggregationModeNone {
+		legacyMode = EgressAuditModeFull
 	}
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, updated_at)
-		VALUES (?, ?, ?, ?)
-		ON CONFLICT(conversation_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode, updated_at = excluded.updated_at
-	`, conversationID, enabled, storedMode, formatSQLiteUTC(time.Now().UTC()))
+		INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, updated_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(conversation_id) DO UPDATE SET enabled = excluded.enabled, mode = excluded.mode,
+			aggregation_mode = excluded.aggregation_mode, updated_at = excluded.updated_at
+	`, conversationID, enabled, legacyMode, aggregationMode, formatSQLiteUTC(time.Now().UTC()))
 	return err
+}
+
+func (db *DB) ListConversationEgressAuditSettings(ctx context.Context) (map[string]ConversationEgressAuditSetting, error) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT c.id, COALESCE(s.enabled, 1), COALESCE(s.mode, 'compact'), COALESCE(s.aggregation_mode, 'tools')
+		FROM conversations c
+		LEFT JOIN conversation_egress_audit_settings s ON s.conversation_id = c.id
+		ORDER BY c.id
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]ConversationEgressAuditSetting)
+	for rows.Next() {
+		var id, mode, aggregationMode string
+		var enabled bool
+		if err := rows.Scan(&id, &enabled, &mode, &aggregationMode); err != nil {
+			return nil, err
+		}
+		setting := ConversationEgressAuditSetting{Enabled: enabled, Mode: normalizeConversationEgressAuditMode(mode), AggregationMode: normalizeConversationEgressAggregationMode(aggregationMode)}
+		if !enabled {
+			setting.Mode = EgressAuditModeOff
+		}
+		result[id] = setting
+	}
+	return result, rows.Err()
 }
 
 func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, error) {

@@ -62,12 +62,12 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 		return
 	}
 	auditSetting, settingErr := h.db.GetConversationEgressAuditSetting(c.Request.Context(), id)
-	activityMode := egressactivity.ModeCompact
-	if settingErr == nil && auditSetting.Mode == egressactivity.ModeFull {
-		activityMode = egressactivity.ModeFull
+	activityMode := egressactivity.AggregationModeAll
+	if settingErr == nil {
+		activityMode = auditSetting.AggregationMode
 	}
 	if h.egressActivityIngestor != nil {
-		h.streamIngestedEgressActivity(c, id, conversation.Title, runtimeMode, activityMode, tail)
+		h.streamIngestedEgressActivity(c, id, conversation.Title, runtimeMode, tail)
 		return
 	}
 	if h.containerInitializations == nil || h.egressActivityStreamer == nil {
@@ -155,12 +155,12 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 			}
 			flusher.Flush()
 		case now := <-aggregateTicker.C:
-			if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushExpired(now.UTC())) != nil {
+			if activityMode != egressactivity.AggregationModeNone && writeActivities(aggregator.FlushExpired(now.UTC())) != nil {
 				return
 			}
 		case item, open := <-activity:
 			if !open {
-				if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushAll()) != nil {
+				if activityMode != egressactivity.AggregationModeNone && writeActivities(aggregator.FlushAll()) != nil {
 					return
 				}
 				streamErr := <-streamDone
@@ -170,7 +170,7 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 				return
 			}
 			if item.replayComplete {
-				if activityMode == egressactivity.ModeCompact && writeActivities(aggregator.FlushAll()) != nil {
+				if activityMode != egressactivity.AggregationModeNone && writeActivities(aggregator.FlushAll()) != nil {
 					return
 				}
 				continue
@@ -180,7 +180,7 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 			}
 			event := item.event
 			outgoing := []egress.ActivityEvent{event}
-			if activityMode == egressactivity.ModeCompact && event.RequestType != egress.ActivityRequestHealth {
+			if egressactivity.ShouldAggregate(activityMode, event) {
 				outgoing = aggregator.ObserveAt(event, time.Now().UTC())
 			}
 			if err := writeActivities(outgoing); err != nil {
@@ -190,7 +190,7 @@ func (h *ConversationHandler) StreamConversationEgressActivity(c *gin.Context) {
 	}
 }
 
-func (h *ConversationHandler) streamIngestedEgressActivity(c *gin.Context, conversationID, title, runtimeMode, activityMode string, tail int) {
+func (h *ConversationHandler) streamIngestedEgressActivity(c *gin.Context, conversationID, title, runtimeMode string, tail int) {
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "当前响应不支持实时流"})
@@ -209,21 +209,6 @@ func (h *ConversationHandler) streamIngestedEgressActivity(c *gin.Context, conve
 	stream := h.egressActivityIngestor.Subscribe(ctx, conversationID, runtimeMode, tail)
 	keepalive := time.NewTicker(egressActivityKeepaliveInterval)
 	defer keepalive.Stop()
-	flushTicker := time.NewTicker(100 * time.Millisecond)
-	defer flushTicker.Stop()
-	aggregator := egressactivity.New(egressactivity.DefaultConfig())
-	writeEvents := func(events []egress.ActivityEvent) bool {
-		for _, event := range events {
-			view := conversationEgressActivityView{
-				ActivityEvent: event, ConversationID: conversationID, ConversationTitle: title,
-				Agent: event.Provenance.AgentID, Tool: event.Provenance.ToolName,
-			}
-			if writeConversationActivitySSE(c.Writer, flusher, "activity", view) != nil {
-				return false
-			}
-		}
-		return true
-	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -233,23 +218,16 @@ func (h *ConversationHandler) streamIngestedEgressActivity(c *gin.Context, conve
 				return
 			}
 			flusher.Flush()
-		case now := <-flushTicker.C:
-			if activityMode == egressactivity.ModeCompact && !writeEvents(aggregator.FlushExpired(now.UTC())) {
-				return
-			}
 		case item, open := <-stream:
 			if !open {
-				if activityMode == egressactivity.ModeCompact {
-					_ = writeEvents(aggregator.FlushAll())
-				}
 				return
 			}
 			event := item.Event
-			outgoing := []egress.ActivityEvent{event}
-			if activityMode == egressactivity.ModeCompact && event.AggregateCount <= 1 && event.RequestType != egress.ActivityRequestHealth {
-				outgoing = aggregator.ObserveAt(event, time.Now().UTC())
+			view := conversationEgressActivityView{
+				ActivityEvent: event, ConversationID: conversationID, ConversationTitle: title,
+				Agent: event.Provenance.AgentID, Tool: event.Provenance.ToolName,
 			}
-			if !writeEvents(outgoing) {
+			if writeConversationActivitySSE(c.Writer, flusher, "activity", view) != nil {
 				return
 			}
 		}

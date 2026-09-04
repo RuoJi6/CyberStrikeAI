@@ -3,6 +3,7 @@ package trafficspool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -197,5 +198,114 @@ func TestCompactingSinkSeparatesConcurrentNormalAndDeclaredFuzzExecutions(t *tes
 	}
 	if fuzz := kinds["execution-fuzz"]; fuzz.AggregateKind != AggregateKindWebFuzz || fuzz.DeclaredActivityKind != networkprovenance.ActivityKindFuzz || fuzz.AggregateCount != 8 {
 		t.Fatalf("declared fuzz execution = %#v", fuzz)
+	}
+}
+
+func TestCompactingSinkAggregationModes(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, kind, attribution string
+		want                          int
+	}{
+		{name: "all normal", mode: AggregationModeAll, kind: networkprovenance.ActivityKindNormal, attribution: networkprovenance.AttributionVerified, want: 1},
+		{name: "tools normal", mode: AggregationModeTools, kind: networkprovenance.ActivityKindNormal, attribution: networkprovenance.AttributionVerified, want: 20},
+		{name: "tools verified fuzz", mode: AggregationModeTools, kind: networkprovenance.ActivityKindFuzz, attribution: networkprovenance.AttributionVerified, want: 1},
+		{name: "tools unattributed fuzz", mode: AggregationModeTools, kind: networkprovenance.ActivityKindFuzz, attribution: networkprovenance.AttributionUnattributed, want: 20},
+		{name: "none fuzz", mode: AggregationModeNone, kind: networkprovenance.ActivityKindFuzz, attribution: networkprovenance.AttributionVerified, want: 20},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var captured []traffic.Transaction
+			sink, err := NewCompactingSink(func(_ context.Context, item traffic.Transaction, _ []traffic.Message) error {
+				captured = append(captured, item)
+				return nil
+			}, CompactConfig{IdleWindow: time.Hour, CountThreshold: 8, DistinctThreshold: 6})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sink.SetAggregationMode(context.Background(), test.mode); err != nil {
+				t.Fatal(err)
+			}
+			startedAt := time.Now().UTC()
+			for index := 0; index < 20; index++ {
+				item, messages := compactTestTransaction(index, startedAt.Add(time.Duration(index)*time.Millisecond))
+				item.RuntimeInstanceID = "runtime-01"
+				item.AgentID = "agent-01"
+				item.ToolName = "scanner"
+				item.ToolCallID = "call-01"
+				item.ActivityScopeID = "scope-01"
+				item.AttributionStatus = test.attribution
+				item.DeclaredActivityKind = test.kind
+				if err := sink.Write(context.Background(), item, messages); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := sink.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if len(captured) != test.want {
+				t.Fatalf("captured %d records, want %d: %#v", len(captured), test.want, captured)
+			}
+		})
+	}
+}
+
+func TestCompactingSinkModeSwitchFlushesOldBatch(t *testing.T) {
+	var captured []traffic.Transaction
+	sink, err := NewCompactingSink(func(_ context.Context, item traffic.Transaction, _ []traffic.Message) error {
+		captured = append(captured, item)
+		return nil
+	}, CompactConfig{IdleWindow: time.Hour, CountThreshold: 4, DistinctThreshold: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	for index := 0; index < 4; index++ {
+		item, messages := compactTestTransaction(index, start.Add(time.Duration(index)*time.Millisecond))
+		if err := sink.Write(context.Background(), item, messages); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sink.SetAggregationMode(context.Background(), AggregationModeNone); err != nil {
+		t.Fatal(err)
+	}
+	item, messages := compactTestTransaction(9, start.Add(time.Second))
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(captured) != 2 || captured[0].AggregateCount != 4 || captured[1].AggregateCount != 0 {
+		t.Fatalf("mode switch records = %#v", captured)
+	}
+}
+
+func TestCompactingSinkModeSwitchFailureKeepsOldMode(t *testing.T) {
+	fail := true
+	sink, err := NewCompactingSink(func(_ context.Context, _ traffic.Transaction, _ []traffic.Message) error {
+		if fail {
+			return errors.New("synthetic persistence failure")
+		}
+		return nil
+	}, CompactConfig{IdleWindow: time.Hour, CountThreshold: 2, DistinctThreshold: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, messages := compactTestTransaction(1, time.Now().UTC())
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	item, messages = compactTestTransaction(2, time.Now().UTC().Add(time.Millisecond))
+	if err := sink.Write(context.Background(), item, messages); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.SetAggregationMode(context.Background(), AggregationModeNone); err == nil {
+		t.Fatal("mode switch unexpectedly succeeded")
+	}
+	if sink.mode != AggregationModeAll {
+		t.Fatalf("mode after failed switch = %q", sink.mode)
+	}
+	fail = false
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

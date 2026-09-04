@@ -329,7 +329,7 @@ func newEgressAuditHandlerFixture(t *testing.T) (*database.DB, string) {
 		},
 	}
 	event := egress.ActivityEvent{
-		Event: egress.ActivityEventName, Timestamp: time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC),
+		Event: egress.ActivityEventName, Timestamp: time.Now().UTC(),
 		RequestType: egress.ActivityRequestHTTP, Domain: "allowed.example", ResolvedIPs: []string{"93.184.216.34"}, ConnectedIP: "93.184.216.34",
 		Port: 80, Decision: egress.ActivityDecisionAllowed, RuleID: "=formula-rule", Reason: "allow-visit",
 		Method: "GET", Path: "/safe", HTTPStatus: 200, Outcome: "completed", LatencyMS: 8, BytesDown: 42,

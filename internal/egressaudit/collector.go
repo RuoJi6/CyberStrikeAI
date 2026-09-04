@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -63,7 +64,17 @@ func NewCollector(store Store, streamer ActivityStreamer, logger *zap.Logger, in
 
 func auditStreamKey(target database.EgressAuditRuntimeTarget) string {
 	record := target.Record
-	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID + ":" + egressactivity.NormalizeMode(target.AuditMode)
+	return record.ConversationID + ":" + strconv.Itoa(record.RuntimeGeneration) + ":" + record.ProviderID + ":" + targetAggregationMode(target)
+}
+
+func targetAggregationMode(target database.EgressAuditRuntimeTarget) string {
+	if strings.TrimSpace(target.AggregationMode) != "" {
+		return egressactivity.NormalizeAggregationMode(target.AggregationMode)
+	}
+	if egressactivity.NormalizeMode(target.AuditMode) == egressactivity.ModeFull {
+		return egressactivity.AggregationModeNone
+	}
+	return egressactivity.AggregationModeAll
 }
 
 func (c *Collector) Reconcile(ctx context.Context) error {
@@ -77,7 +88,7 @@ func (c *Collector) Reconcile(ctx context.Context) error {
 	desired := make(map[string]database.EgressAuditRuntimeTarget, len(targets))
 	for _, target := range targets {
 		record := target.Record
-		if record.Status != containerruntime.InitializationCreated || record.RuntimeStatus != containerruntime.StatusRunning ||
+		if target.AuditDisabled || record.Status != containerruntime.InitializationCreated || record.RuntimeStatus != containerruntime.StatusRunning ||
 			record.Spec.EgressGateway == nil || record.Spec.EgressGateway.BoundarySnapshot == nil {
 			continue
 		}
@@ -114,7 +125,7 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 		c.mu.Unlock()
 	}()
 	record := target.Record
-	mode := egressactivity.NormalizeMode(target.AuditMode)
+	mode := targetAggregationMode(target)
 	aggregator := egressactivity.New(egressactivity.DefaultConfig())
 	events := make(chan egress.ActivityEvent, 256)
 	streamDone := make(chan error, 1)
@@ -134,13 +145,14 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 	defer ticker.Stop()
 	appendEvents := func(appendCtx context.Context, outgoing []egress.ActivityEvent) error {
 		for _, event := range outgoing {
-			if c.ingestor != nil {
+			inserted, appendErr := c.store.AppendEgressNetworkAuditEvent(appendCtx, target, event)
+			if appendErr != nil {
+				return appendErr
+			}
+			if inserted && c.ingestor != nil {
 				c.ingestor.Publish(egressactivity.IngestedActivity{
 					ConversationID: record.ConversationID, ConversationTitle: target.ConversationTitle, Event: event,
 				})
-			}
-			if _, appendErr := c.store.AppendEgressNetworkAuditEvent(appendCtx, target, event); appendErr != nil {
-				return appendErr
 			}
 		}
 		return nil
@@ -157,10 +169,13 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 		}
 		event.Provenance = provenance.Normalized()
 		if event.RequestType == egress.ActivityRequestHealth {
-			_, appendErr := c.store.ApplyEgressHealthEvent(appendCtx, target, event)
+			inserted, appendErr := c.store.ApplyEgressHealthEvent(appendCtx, target, event)
+			if inserted && appendErr == nil && c.ingestor != nil {
+				c.ingestor.Publish(egressactivity.IngestedActivity{ConversationID: record.ConversationID, ConversationTitle: target.ConversationTitle, Event: event})
+			}
 			return appendErr
 		}
-		if mode == egressactivity.ModeFull {
+		if !egressactivity.ShouldAggregate(mode, event) {
 			return appendEvents(appendCtx, []egress.ActivityEvent{event})
 		}
 		return appendEvents(appendCtx, aggregator.ObserveAt(event, time.Now().UTC()))
@@ -213,7 +228,7 @@ func (c *Collector) follow(ctx context.Context, key string, token *struct{}, tar
 		case event := <-events:
 			err = appendEvent(ctx, event)
 		case now := <-ticker.C:
-			if mode == egressactivity.ModeCompact {
+			if mode != egressactivity.AggregationModeNone {
 				err = appendEvents(ctx, aggregator.FlushExpired(now.UTC()))
 			}
 		}

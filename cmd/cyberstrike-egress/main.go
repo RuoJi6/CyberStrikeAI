@@ -166,7 +166,20 @@ func trafficSinkFromEnvironment() (egress.TrafficSink, string, func() error, err
 	if err != nil {
 		return nil, "", nil, fmt.Errorf("configure traffic compactor: %w", err)
 	}
-	return compactor.Write, conversationID, compactor.Close, nil
+	policyContext, cancelPolicy := context.WithCancel(context.Background())
+	policyDone := make(chan struct{})
+	go func() {
+		defer close(policyDone)
+		if watchErr := trafficspool.WatchAggregationPolicy(policyContext, path, compactor); watchErr != nil {
+			log.Printf("traffic aggregation policy watcher stopped: %v", watchErr)
+		}
+	}()
+	closeSink := func() error {
+		cancelPolicy()
+		<-policyDone
+		return compactor.Close()
+	}
+	return compactor.Write, conversationID, closeSink, nil
 }
 
 func trafficLimitsFromEnvironment() (*egress.TrafficLimits, error) {

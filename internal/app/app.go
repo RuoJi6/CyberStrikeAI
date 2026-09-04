@@ -546,6 +546,7 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		c2Handler:          c2Handler,
 		auditSvc:           auditSvc,
 	}
+	var egressAuditCollector *egressaudit.Collector
 	containerInitializer, containerManager, containerLifecycle, containerOrphan, containerSnapshotStore, containerUpstreamStore, containerAuthProfilesStore, containerTLSAuthorityStore, containerErr := setupConversationContainerRuntime(cfg, db, credentialCipher, provenanceSigner, log.Logger)
 	if containerErr != nil {
 		log.Logger.Error("对话容器后台初始化器启动失败，容器模式保持不可用", zap.Error(containerErr))
@@ -638,7 +639,8 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 		})
 		conversationHandler.SetRetainedWorkspaceController(containerLifecycle)
 		conversationHandler.SetSharedWorkspaceController(containerManager)
-		egressAuditCollector, auditErr := egressaudit.NewCollector(db, containerManager, log.Logger, activityIngestor)
+		var auditErr error
+		egressAuditCollector, auditErr = egressaudit.NewCollector(db, containerManager, log.Logger, activityIngestor)
 		if auditErr != nil {
 			log.Logger.Error("对话出站持久审计采集器启动失败", zap.Error(auditErr))
 		} else {
@@ -716,6 +718,25 @@ func New(cfg *config.Config, log *logger.Logger, configPath string) (*App, error
 	}
 	hostTrafficProxy := newHostTrafficProxyManager(db, transformRunner, log.Logger, provenanceSigner, activityIngestor)
 	app.hostTrafficProxy = hostTrafficProxy
+	var aggregationSpool *trafficspool.Directory
+	if strings.TrimSpace(cfg.Container.TrafficSpoolDir) != "" {
+		if prepared, prepareErr := trafficspool.NewDirectory(cfg.Container.TrafficSpoolDir); prepareErr != nil {
+			return nil, fmt.Errorf("prepare traffic aggregation policy directory: %w", prepareErr)
+		} else {
+			aggregationSpool = prepared
+		}
+	}
+	aggregationController := &conversationAggregationController{db: db, spool: aggregationSpool, host: hostTrafficProxy, collector: egressAuditCollector}
+	conversationHandler.SetEgressAggregationController(aggregationController)
+	if settings, settingsErr := db.ListConversationEgressAuditSettings(context.Background()); settingsErr != nil {
+		return nil, fmt.Errorf("load traffic aggregation policies: %w", settingsErr)
+	} else {
+		for conversationID, setting := range settings {
+			if applyErr := aggregationController.ApplyConversationAggregationSetting(context.Background(), conversationID, setting.Enabled, setting.AggregationMode); applyErr != nil {
+				return nil, fmt.Errorf("publish traffic aggregation policy for %s: %w", conversationID, applyErr)
+			}
+		}
+	}
 	executionBackendResolver := newConversationExecutionBackendResolver(db, containerExecutor, containerLifecycle, hostTrafficProxy, provenanceSigner)
 	executor.SetExecutionBackendResolver(executionBackendResolver)
 	agent.SetExecutionBackendResolver(executionBackendResolver)

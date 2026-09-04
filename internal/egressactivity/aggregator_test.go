@@ -212,3 +212,36 @@ func activityFixture(at time.Time, requestType, domain string, port int, path st
 		SnapshotID: "11111111-1111-4111-8111-111111111111",
 	}
 }
+
+func TestShouldAggregateModeMatrix(t *testing.T) {
+	verifiedFuzz := activityFixture(time.Now().UTC(), egress.ActivityRequestHTTPS, "example.test", 443, "/FUZZ")
+	verifiedFuzz.Provenance = networkprovenance.NetworkProvenanceV1{
+		ConversationID: "conversation", RuntimeMode: networkprovenance.RuntimeModeContainer,
+		RuntimeInstanceID: "runtime", AgentID: "agent", ToolName: "scanner",
+		ExecutionID: "execution", ToolCallID: "call", ActivityScopeID: "scope",
+		AttributionStatus: networkprovenance.AttributionVerified, DeclaredActivityKind: networkprovenance.ActivityKindFuzz,
+	}.Normalized()
+	normal := verifiedFuzz
+	normal.Provenance.DeclaredActivityKind = networkprovenance.ActivityKindNormal
+	if !ShouldAggregate(AggregationModeAll, normal) {
+		t.Fatal("all must aggregate normal HTTP")
+	}
+	if ShouldAggregate(AggregationModeTools, normal) {
+		t.Fatal("tools must not aggregate normal HTTP")
+	}
+	if !ShouldAggregate(AggregationModeTools, verifiedFuzz) {
+		t.Fatal("tools must aggregate verified declared fuzz")
+	}
+	for _, requestType := range []string{
+		egress.ActivityRequestTCP, egress.ActivityRequestUDP, egress.ActivityRequestDNS, egress.ActivityRequestICMP,
+	} {
+		event := normal
+		event.RequestType = requestType
+		if !ShouldAggregate(AggregationModeTools, event) {
+			t.Fatalf("tools must keep behavioural aggregation for container %s", requestType)
+		}
+		if ShouldAggregate(AggregationModeNone, event) {
+			t.Fatalf("none must not aggregate %s", requestType)
+		}
+	}
+}

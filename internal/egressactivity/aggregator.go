@@ -14,6 +14,10 @@ const (
 	ModeCompact = "compact"
 	ModeFull    = "full"
 	ModeOff     = "off"
+
+	AggregationModeAll   = "all"
+	AggregationModeTools = "tools"
+	AggregationModeNone  = "none"
 )
 
 type Config struct {
@@ -101,6 +105,49 @@ func NormalizeMode(value string) string {
 		return ModeOff
 	default:
 		return ModeCompact
+	}
+}
+
+// NormalizeAggregationMode returns the safe evidence-preserving mode. Unknown
+// values deliberately become none so a corrupt policy can never discard
+// individual events.
+func NormalizeAggregationMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case AggregationModeAll:
+		return AggregationModeAll
+	case AggregationModeTools:
+		return AggregationModeTools
+	default:
+		return AggregationModeNone
+	}
+}
+
+func ValidAggregationMode(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case AggregationModeAll, AggregationModeTools, AggregationModeNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// ShouldAggregate applies the conversation policy to one normalized activity.
+// Container non-HTTP activity cannot carry process-level attribution today, so
+// tools retains the existing behavioural aggregation for those protocols.
+func ShouldAggregate(mode string, event egress.ActivityEvent) bool {
+	mode = NormalizeAggregationMode(mode)
+	if mode == AggregationModeNone || event.RequestType == egress.ActivityRequestHealth {
+		return false
+	}
+	if mode == AggregationModeAll {
+		return true
+	}
+	switch event.RequestType {
+	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS, egress.ActivityRequestCONNECT:
+		p := event.Provenance.Normalized()
+		return p.ValidVerified() && p.DeclaredActivityKind == networkprovenance.ActivityKindFuzz
+	default:
+		return true
 	}
 }
 

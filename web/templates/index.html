@@ -1327,19 +1327,28 @@
                                                         <label><span data-i18n="chat.memoryLimitLabel">内存 (MiB)</span><input id="conversation-memory-limit" type="number" min="256" max="16384" step="128" value="512" inputmode="numeric"></label>
                                                     </div>
                                                 </div>
+                                            </section>
+                                            <section id="conversation-traffic-aggregation-options" class="container-conversation-options conversation-traffic-aggregation-options" aria-labelledby="conversation-traffic-aggregation-title">
+                                                <div class="container-conversation-options-heading">
+                                                    <div>
+                                                        <h4 id="conversation-traffic-aggregation-title" data-i18n="chat.trafficAggregationTitle">流量记录与聚合</h4>
+                                                        <p data-i18n="chat.trafficAggregationCommonHint">本机与容器执行共用；切换会立即应用于后续流量，不改写历史记录。</p>
+                                                    </div>
+                                                </div>
                                                 <div class="container-conversation-field is-runtime-editable">
-                                                    <label class="container-conversation-field-label" for="conversation-egress-audit-mode" data-i18n="chat.egressAuditModeLabel">高流量记录方式</label>
+                                                    <label class="container-conversation-field-label" for="conversation-egress-audit-mode" data-i18n="chat.egressAuditModeLabel">流量聚合方式</label>
                                                     <select id="conversation-egress-audit-mode" data-unified-select="single" onchange="syncConversationEgressAuditMode(this.value)" aria-describedby="conversation-egress-audit-mode-hint">
-                                                        <option value="compact" selected data-i18n="chat.egressAuditModeCompact">智能聚合（首条完整记录 + 请求计数）</option>
-                                                        <option value="full" data-i18n="chat.egressAuditModeFull">全量记录（保存每条请求）</option>
+                                                        <option value="all" data-i18n="chat.egressAggregationAll">全部高频流量聚合</option>
+                                                        <option value="tools" selected data-i18n="chat.egressAggregationTools">仅扫描工具聚合（默认）</option>
+                                                        <option value="none" data-i18n="chat.egressAggregationNone">不聚合（逐条完整记录）</option>
                                                     </select>
-                                                    <span id="conversation-egress-audit-mode-hint" class="container-conversation-field-hint" data-i18n="chat.egressAuditModeHint">根据网络行为自动识别 Web、TCP、UDP、DNS 等高频测试，不依赖工具名称。</span>
+                                                    <span id="conversation-egress-audit-mode-hint" class="container-conversation-field-hint" data-i18n="chat.egressAuditModeHint">普通 exec 和普通 HTTP 工具逐条记录；只有可信声明为 fuzz 的 HTTP 流量会聚合。容器 TCP/UDP/DNS/ICMP 在此模式下仍按行为聚合。</span>
                                                 </div>
                                                 <div class="container-conversation-field is-runtime-editable">
                                                     <label class="workspace-persistence-toggle" for="conversation-egress-audit-toggle">
                                                         <span class="workspace-persistence-toggle-copy">
-                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.egressAuditLabel">记录出站网络审计</span>
-                                                            <span id="conversation-egress-audit-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.egressAuditHint">默认聚合高频流量；关闭后仍保留容器生命周期事件。</span>
+                                                            <span class="workspace-persistence-toggle-title" data-i18n="chat.egressAuditLabel">记录实时网络活动与持久审计</span>
+                                                            <span id="conversation-egress-audit-hint" class="workspace-persistence-toggle-hint" data-i18n="chat.egressAuditHint">关闭后停止实时网络活动和持久审计；流量证据仍会捕获，并继续使用上方聚合方式。</span>
                                                         </span>
                                                         <input type="checkbox" id="conversation-egress-audit-toggle" checked onchange="syncConversationEgressAudit(this.checked)" aria-describedby="conversation-egress-audit-hint">
                                                         <span class="workspace-persistence-switch" aria-hidden="true"></span>
@@ -7529,7 +7538,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/skills.js"></script>
     <script src="/static/js/fact-graph.js"></script>
     <script src="/static/js/projects.js?v=20260819-1"></script>
-    <script src="/static/js/conversation-container-settings.js?v=20260903-1"></script>
+    <script src="/static/js/conversation-container-settings.js?v=20260904-2"></script>
     <script src="/static/js/vulnerability.js?v=20"></script>
     <script src="/static/js/traffic-evidence.js?v=7"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>

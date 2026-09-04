@@ -82,21 +82,36 @@ type hostTrafficProxy struct {
 }
 
 type hostAuditQueue struct {
-	db        *database.DB
-	target    database.EgressAuditRuntimeTarget
-	logger    *zap.Logger
-	events    chan egress.ActivityEvent
-	stop      chan struct{}
-	done      chan struct{}
-	closeOnce sync.Once
-	mu        sync.Mutex
-	lastErr   error
+	db         *database.DB
+	target     database.EgressAuditRuntimeTarget
+	logger     *zap.Logger
+	events     chan egress.ActivityEvent
+	stop       chan struct{}
+	done       chan struct{}
+	closeOnce  sync.Once
+	mu         sync.Mutex
+	lastErr    error
+	closed     bool
+	ingestor   *egressactivity.Ingestor
+	aggregator *egressactivity.Aggregator
+	mode       string
+	enabled    bool
+	settings   chan hostAuditSettingChange
 }
 
-func newHostAuditQueue(db *database.DB, target database.EgressAuditRuntimeTarget, logger *zap.Logger) *hostAuditQueue {
+type hostAuditSettingChange struct {
+	enabled bool
+	mode    string
+	result  chan error
+}
+
+func newHostAuditQueue(db *database.DB, target database.EgressAuditRuntimeTarget, logger *zap.Logger, ingestor *egressactivity.Ingestor, enabled bool, mode string) *hostAuditQueue {
 	queue := &hostAuditQueue{
 		db: db, target: target, logger: logger,
 		events: make(chan egress.ActivityEvent, 4096), stop: make(chan struct{}), done: make(chan struct{}),
+		ingestor: ingestor, aggregator: egressactivity.New(egressactivity.DefaultConfig()),
+		mode: egressactivity.NormalizeAggregationMode(mode), enabled: enabled,
+		settings: make(chan hostAuditSettingChange),
 	}
 	go queue.run()
 	return queue
@@ -104,23 +119,38 @@ func newHostAuditQueue(db *database.DB, target database.EgressAuditRuntimeTarget
 
 func (queue *hostAuditQueue) run() {
 	defer close(queue.done)
-	for event := range queue.events {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	persist := func(events []egress.ActivityEvent) error {
+		for _, event := range events {
+			inserted, err := queue.db.AppendEgressNetworkAuditEvent(context.Background(), queue.target, event)
+			if err != nil {
+				return err
+			}
+			if inserted && queue.ingestor != nil {
+				queue.ingestor.Publish(egressactivity.IngestedActivity{ConversationID: queue.target.Record.ConversationID, ConversationTitle: queue.target.ConversationTitle, Event: event})
+			}
+		}
+		return nil
+	}
+	persistWithRetry := func(events []egress.ActivityEvent) {
+		if len(events) == 0 {
+			return
+		}
 		backoff := 25 * time.Millisecond
 		for {
-			_, err := queue.db.AppendEgressNetworkAuditEvent(context.Background(), queue.target, event)
+			err := persist(events)
 			if err == nil {
 				break
 			}
 			if !retryableHostAuditError(err) {
 				queue.mu.Lock()
-				queue.lastErr = errors.Join(queue.lastErr, fmt.Errorf("persist Host MITM audit event %s (%s %s:%d %s %s %s; runtime=%s/%d/%s status=%s): %w",
-					event.EventID, event.RequestType, event.Domain, event.Port, event.Decision, event.Method, event.Outcome,
-					event.Provenance.RuntimeMode, event.Provenance.RuntimeGeneration, event.Provenance.RuntimeInstanceID, event.Provenance.AttributionStatus, err))
+				queue.lastErr = errors.Join(queue.lastErr, fmt.Errorf("persist Host MITM audit batch for %s: %w", queue.target.Record.ConversationID, err))
 				queue.mu.Unlock()
 				break
 			}
 			queue.logger.Warn("Host MITM 出站活动持久化失败，准备重试",
-				zap.String("conversation_id", queue.target.Record.ConversationID), zap.String("event_id", event.EventID), zap.Error(err))
+				zap.String("conversation_id", queue.target.Record.ConversationID), zap.Int("event_count", len(events)), zap.Error(err))
 			timer := time.NewTimer(backoff)
 			select {
 			case <-timer.C:
@@ -131,6 +161,30 @@ func (queue *hostAuditQueue) run() {
 				timer.Stop()
 				return
 			}
+		}
+	}
+	for {
+		select {
+		case event, open := <-queue.events:
+			if !open {
+				persistWithRetry(queue.aggregator.FlushAll())
+				return
+			}
+			if !queue.enabled {
+				continue
+			}
+			if egressactivity.ShouldAggregate(queue.mode, event) {
+				persistWithRetry(queue.aggregator.ObserveAt(event, time.Now().UTC()))
+			} else {
+				persistWithRetry([]egress.ActivityEvent{event})
+			}
+		case now := <-ticker.C:
+			persistWithRetry(queue.aggregator.FlushExpired(now.UTC()))
+		case change := <-queue.settings:
+			persistWithRetry(queue.aggregator.FlushAll())
+			queue.enabled = change.enabled
+			queue.mode = egressactivity.NormalizeAggregationMode(change.mode)
+			change.result <- nil
 		}
 	}
 }
@@ -145,14 +199,42 @@ func (queue *hostAuditQueue) append(event egress.ActivityEvent) {
 	if queue == nil {
 		return
 	}
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if queue.closed {
+		return
+	}
 	queue.events <- event
+}
+
+func (queue *hostAuditQueue) setSetting(ctx context.Context, enabled bool, mode string) error {
+	if queue == nil {
+		return nil
+	}
+	change := hostAuditSettingChange{enabled: enabled, mode: mode, result: make(chan error, 1)}
+	select {
+	case queue.settings <- change:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	select {
+	case err := <-change.result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (queue *hostAuditQueue) close(ctx context.Context) error {
 	if queue == nil {
 		return nil
 	}
-	queue.closeOnce.Do(func() { close(queue.events) })
+	queue.closeOnce.Do(func() {
+		queue.mu.Lock()
+		queue.closed = true
+		close(queue.events)
+		queue.mu.Unlock()
+	})
 	select {
 	case <-queue.done:
 		queue.mu.Lock()
@@ -297,7 +379,14 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 			},
 		},
 	}
-	auditQueue := newHostAuditQueue(manager.db, auditTarget, manager.logger)
+	setting := database.ConversationEgressAuditSetting{Enabled: true, AggregationMode: database.EgressAggregationModeTools}
+	if stored, settingErr := manager.db.GetConversationEgressAuditSetting(context.Background(), conversationID); settingErr == nil {
+		setting = stored
+	}
+	if err := compactor.SetAggregationMode(context.Background(), setting.AggregationMode); err != nil {
+		return nil, fmt.Errorf("apply host traffic aggregation mode: %w", err)
+	}
+	auditQueue := newHostAuditQueue(manager.db, auditTarget, manager.logger, manager.ingestor, setting.Enabled, setting.AggregationMode)
 	cleanupAuditQueue := true
 	defer func() {
 		if cleanupAuditQueue {
@@ -330,9 +419,6 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 				ConversationID: conversationID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
 				RuntimeGeneration: 1, RuntimeInstanceID: runtimeInstanceID,
 			})
-			if manager.ingestor != nil {
-				manager.ingestor.Publish(egressactivity.IngestedActivity{ConversationID: conversationID, ConversationTitle: conversationTitle, Event: event})
-			}
 			auditQueue.append(event)
 		},
 	})
@@ -370,6 +456,25 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 		zap.String("capture_coverage", traffic.CaptureCoverageBestEffort),
 	)
 	return result, nil
+}
+
+func (manager *hostTrafficProxyManager) ApplyConversationAggregationSetting(ctx context.Context, conversationID string, enabled bool, mode string) error {
+	if manager == nil {
+		return nil
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if manager.closed {
+		return errors.New("host traffic proxy manager is closed")
+	}
+	proxy := manager.proxies[strings.TrimSpace(conversationID)]
+	if proxy == nil {
+		return nil
+	}
+	if err := proxy.sink.SetAggregationMode(ctx, mode); err != nil {
+		return err
+	}
+	return proxy.audit.setSetting(ctx, enabled, mode)
 }
 
 func buildHostTrafficCABundle(conversationCA []byte, candidates []string) []byte {

@@ -385,6 +385,60 @@ func TestCreateContainerConversationPersistsInitialEgressAuditSetting(t *testing
 	}
 }
 
+func TestConversationAggregationDefaultsAndLegacyMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "aggregation-migration.db")
+	db, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, err := db.CreateConversation("host", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	container, err := db.CreateConversation("container", ConversationCreateMeta{RuntimeMode: ConversationRuntimeModeContainer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{host.ID, container.ID} {
+		setting, err := db.GetConversationEgressAuditSetting(context.Background(), id)
+		if err != nil || setting.AggregationMode != EgressAggregationModeTools {
+			t.Fatalf("new conversation setting %s = %#v, %v", id, setting, err)
+		}
+	}
+	if _, err := db.Exec(`DROP TABLE conversation_egress_audit_settings`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE conversation_egress_audit_settings (
+			conversation_id TEXT PRIMARY KEY,
+			enabled INTEGER NOT NULL DEFAULT 1,
+			mode TEXT NOT NULL DEFAULT 'compact',
+			updated_at DATETIME NOT NULL
+		)
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, updated_at) VALUES (?, 1, 'full', CURRENT_TIMESTAMP)`, container.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := NewDB(path, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	hostSetting, err := reopened.GetConversationEgressAuditSetting(context.Background(), host.ID)
+	if err != nil || hostSetting.AggregationMode != EgressAggregationModeAll {
+		t.Fatalf("legacy host setting = %#v, %v", hostSetting, err)
+	}
+	containerSetting, err := reopened.GetConversationEgressAuditSetting(context.Background(), container.ID)
+	if err != nil || containerSetting.AggregationMode != EgressAggregationModeNone {
+		t.Fatalf("legacy container setting = %#v, %v", containerSetting, err)
+	}
+}
+
 func TestEgressAuditChainIsAppendOnlyAndDetectsTampering(t *testing.T) {
 	for _, test := range []struct {
 		name   string

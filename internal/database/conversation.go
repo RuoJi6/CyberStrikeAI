@@ -198,8 +198,11 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 			runtimeControls.MemoryBytes, meta.NetworkAccess.AllowRestrictedTargets, id); err != nil {
 			return nil, fmt.Errorf("保存对话容器运行控制失败: %w", err)
 		}
+	}
+	{
 		auditEnabled := true
 		auditMode := EgressAuditModeCompact
+		aggregationMode := EgressAggregationModeTools
 		if meta.EgressAuditEnabled != nil {
 			auditEnabled = *meta.EgressAuditEnabled
 		}
@@ -209,12 +212,26 @@ func (db *DB) CreateConversationWithWebshell(webshellConnectionID, title string,
 				if auditEnabled {
 					auditMode = normalized
 				}
+				if normalized == EgressAuditModeFull {
+					aggregationMode = EgressAggregationModeNone
+				} else if normalized == EgressAuditModeCompact {
+					aggregationMode = EgressAggregationModeAll
+				}
+			}
+		}
+		if meta.EgressAggregationMode != "" {
+			if normalized, normalizeErr := NormalizeConversationEgressAggregationMode(meta.EgressAggregationMode); normalizeErr == nil {
+				aggregationMode = normalized
+				auditMode = EgressAuditModeCompact
+				if normalized == EgressAggregationModeNone {
+					auditMode = EgressAuditModeFull
+				}
 			}
 		}
 		if _, err = tx.Exec(`
-			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, updated_at)
-			VALUES (?, ?, ?, ?)
-		`, id, auditEnabled, auditMode, formatSQLiteUTC(now)); err != nil {
+			INSERT INTO conversation_egress_audit_settings (conversation_id, enabled, mode, aggregation_mode, updated_at)
+			VALUES (?, ?, ?, ?, ?)
+		`, id, auditEnabled, auditMode, aggregationMode, formatSQLiteUTC(now)); err != nil {
 			return nil, fmt.Errorf("保存对话出站审计设置失败: %w", err)
 		}
 	}
