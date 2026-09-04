@@ -49,19 +49,15 @@ func TestParseSnapshotFlagsRequiresExactConfiguredInputs(t *testing.T) {
 func TestParseGatewayFlagsRequiresCompleteOptionalTrustedDocuments(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	routeDigest := "sha256:" + strings.Repeat("b", 64)
-	authDigest := "sha256:" + strings.Repeat("c", 64)
 	tlsCertDigest := "sha256:" + strings.Repeat("d", 64)
 	tlsKeyDigest := "sha256:" + strings.Repeat("e", 64)
-	path, reference, routePath, routeReference, authPath, authReference, tlsCertPath, tlsKeyPath, tlsReference, err := parseGatewayFlags("run", []string{
+	path, reference, routePath, routeReference, tlsCertPath, tlsKeyPath, tlsReference, err := parseGatewayFlags("run", []string{
 		"--snapshot-path", "/etc/cyberstrike/boundary.json",
 		"--snapshot-id", "12345678-1234-1234-1234-123456789abc",
 		"--snapshot-sha256", digest,
 		"--upstream-route-path", "/etc/cyberstrike/upstream.json",
 		"--upstream-route-id", "conversation-1",
 		"--upstream-route-sha256", routeDigest,
-		"--auth-profiles-path", "/etc/cyberstrike/auth-profiles.json",
-		"--auth-profiles-id", "auth-snapshot-1",
-		"--auth-profiles-sha256", authDigest,
 		"--tls-ca-cert-path", "/etc/cyberstrike/tls/ca.crt",
 		"--tls-ca-key-path", "/etc/cyberstrike/tls/ca.key",
 		"--tls-ca-id", "12345678-1234-1234-1234-123456789abc",
@@ -71,22 +67,22 @@ func TestParseGatewayFlagsRequiresCompleteOptionalTrustedDocuments(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if path != "/etc/cyberstrike/boundary.json" || reference.SHA256 != digest || routePath != "/etc/cyberstrike/upstream.json" || routeReference == nil || routeReference.ID != "conversation-1" || routeReference.SHA256 != routeDigest || authPath != "/etc/cyberstrike/auth-profiles.json" || authReference == nil || authReference.ID != "auth-snapshot-1" || authReference.SHA256 != authDigest || tlsCertPath != "/etc/cyberstrike/tls/ca.crt" || tlsKeyPath != "/etc/cyberstrike/tls/ca.key" || tlsReference == nil || tlsReference.CertificateSHA256 != tlsCertDigest || tlsReference.PrivateKeySHA256 != tlsKeyDigest {
-		t.Fatalf("gateway flags = %q %#v %q %#v %q %#v %q %q %#v", path, reference, routePath, routeReference, authPath, authReference, tlsCertPath, tlsKeyPath, tlsReference)
+	if path != "/etc/cyberstrike/boundary.json" || reference.SHA256 != digest || routePath != "/etc/cyberstrike/upstream.json" || routeReference == nil || routeReference.ID != "conversation-1" || routeReference.SHA256 != routeDigest || tlsCertPath != "/etc/cyberstrike/tls/ca.crt" || tlsKeyPath != "/etc/cyberstrike/tls/ca.key" || tlsReference == nil || tlsReference.CertificateSHA256 != tlsCertDigest || tlsReference.PrivateKeySHA256 != tlsKeyDigest {
+		t.Fatalf("gateway flags = %q %#v %q %#v %q %q %#v", path, reference, routePath, routeReference, tlsCertPath, tlsKeyPath, tlsReference)
 	}
-	if _, _, _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
+	if _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
 		"--snapshot-path", path, "--snapshot-id", reference.ID, "--snapshot-sha256", digest,
 		"--upstream-route-path", routePath,
 	}); err == nil {
 		t.Fatal("gateway flags accepted a partial upstream route")
 	}
-	if _, _, _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
+	if _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
 		"--snapshot-path", path, "--snapshot-id", reference.ID, "--snapshot-sha256", digest,
-		"--auth-profiles-id", authReference.ID,
+		"--auth-profiles-id", "retired-profile",
 	}); err == nil {
-		t.Fatal("gateway flags accepted partial auth profiles")
+		t.Fatal("gateway flags accepted retired auth profiles option")
 	}
-	if _, _, _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
+	if _, _, _, _, _, _, _, err := parseGatewayFlags("run", []string{
 		"--snapshot-path", path, "--snapshot-id", reference.ID, "--snapshot-sha256", digest,
 		"--tls-ca-id", reference.ID,
 	}); err == nil {

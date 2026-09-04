@@ -147,6 +147,44 @@ func TestDockerManagerExecAppendsAggregatedBoundaryDenialAfterSuccessfulTool(t *
 	}
 }
 
+func TestBoundaryFeedbackKeepsHTTPMethodAndPathInSeparateGroups(t *testing.T) {
+	base := egress.ActivityEvent{
+		RequestType: egress.ActivityRequestHTTPS,
+		Domain:      "example.com",
+		Port:        443,
+		Method:      "GET",
+		Path:        "/blocked",
+		RuleID:      "path-rule",
+		Reason:      "blocked-path",
+	}
+	child := base
+	child.Path = "/blocked/child"
+	post := base
+	post.Method = "POST"
+
+	groups := groupBoundaryFeedbackEvents([]egress.ActivityEvent{base, base, child, post})
+	if len(groups) != 3 || groups[0].count != 2 || groups[1].count != 1 || groups[2].count != 1 {
+		t.Fatalf("HTTP boundary feedback groups = %#v", groups)
+	}
+	if got := boundaryFeedbackRequest(groups[0].event); got != "HTTPS GET https://example.com:443/blocked" {
+		t.Fatalf("base HTTP boundary feedback = %q", got)
+	}
+	if got := boundaryFeedbackRequest(groups[1].event); got != "HTTPS GET https://example.com:443/blocked/child" {
+		t.Fatalf("child HTTP boundary feedback = %q", got)
+	}
+	if got := boundaryFeedbackRequest(groups[2].event); got != "HTTPS POST https://example.com:443/blocked" {
+		t.Fatalf("method-specific HTTP boundary feedback = %q", got)
+	}
+	if got := boundaryFeedbackReasonLabel(base.Reason); got != "路径阻断" {
+		t.Fatalf("path-block reason label = %q", got)
+	}
+	if got := boundaryFeedbackRequest(egress.ActivityEvent{
+		RequestType: egress.ActivityRequestTCP, Domain: "203.0.113.10", Port: 22,
+	}); got != "TCP 203.0.113.10:22" {
+		t.Fatalf("TCP boundary feedback changed = %q", got)
+	}
+}
+
 func TestDockerManagerExecUsesOwnedRunningRuntime(t *testing.T) {
 	spec := creationSpec()
 	api := newSuccessfulCreationAPI(spec, "instance-01", "provider-container-1", "")

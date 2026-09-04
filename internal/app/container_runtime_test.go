@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/config"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
@@ -167,7 +165,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 	snapshot := containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 	}
-	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot, nil, nil, nil)
+	spec, err := conversationContainerSpec(cfg, "conversation-01", false, snapshot, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +189,7 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot.RuntimeGeneration = 4
-	attributed, err := conversationContainerSpec(cfg, "conversation-attributed", false, snapshot, nil, nil, nil, signer.PublicKeyEncoded())
+	attributed, err := conversationContainerSpec(cfg, "conversation-attributed", false, snapshot, nil, nil, signer.PublicKeyEncoded())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,70 +197,6 @@ func TestConversationContainerSpecUsesTrustedPolicy(t *testing.T) {
 		attributed.EgressGateway.AttributionRuntimeGeneration != 4 || attributed.EgressGateway.AttributionInstanceID == "" ||
 		attributed.EgressGateway.AttributionInstanceID == snapshot.ID {
 		t.Fatalf("attributed gateway binding = %#v", attributed.EgressGateway)
-	}
-}
-
-func TestMaterializeConversationAuthProfilesIsGatewayOnlyAndFailsClosed(t *testing.T) {
-	db, err := database.NewDB(filepath.Join(t.TempDir(), "auth-materialization.db"), zap.NewNop())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	cipher, err := egress.NewCredentialCipher(bytes.Repeat([]byte{0x77}, 32))
-	if err != nil {
-		t.Fatal(err)
-	}
-	secret := "Bearer materialized-secret"
-	ciphertext, err := cipher.EncryptAuthProfile("profile-1", []byte(secret))
-	if err != nil {
-		t.Fatal(err)
-	}
-	profile, err := db.CreateEgressAuthProfile(t.Context(), database.EgressAuthProfile{
-		ID: "profile-1", Name: "Target credential", HeaderName: "Authorization", Enabled: true,
-		CredentialCiphertext: ciphertext, OwnerUserID: "owner-1",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	profileID := profile.ID
-	snapshot := database.ConversationBoundarySnapshot{
-		SnapshotID: "11111111-1111-4111-8111-111111111111",
-		Document: database.BoundaryPolicySnapshotDocument{SchemaVersion: 1, PolicyID: "policy-1", Rules: []database.BoundaryPolicySnapshotRule{{
-			ID: "rule-1", Effect: boundary.EffectAuthOnly, Host: "api.example",
-			Schemes: []string{"http"}, Ports: []int{}, PathPrefixes: []string{}, Methods: []string{},
-			AuthProfileID: &profileID,
-		}}},
-	}
-	store, err := egress.NewAuthProfilesStore(filepath.Join(t.TempDir(), "auth-profiles"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec, err := materializeConversationAuthProfiles(t.Context(), db, cipher, store, snapshot)
-	if err != nil || spec == nil {
-		t.Fatalf("auth profiles spec = %#v, %v", spec, err)
-	}
-	if strings.Contains(spec.ID+spec.SHA256, secret) {
-		t.Fatal("safe runtime auth profiles reference exposed credential")
-	}
-	wantPrefix := "auth-" + snapshot.SnapshotID + "-"
-	if !strings.HasPrefix(spec.ID, wantPrefix) || len(strings.TrimPrefix(spec.ID, wantPrefix)) != 16 {
-		t.Fatalf("auth profiles reference %q is not bound to snapshot %q", spec.ID, snapshot.SnapshotID)
-	}
-	loaded, err := egress.LoadAuthProfiles(filepath.Join(store.Root(), spec.ID+".json"), egress.AuthProfilesReference{ID: spec.ID, SHA256: spec.SHA256})
-	if err != nil || len(loaded.Profiles) != 1 || loaded.Profiles[0].HeaderValue != secret {
-		t.Fatalf("loaded gateway auth profiles = %#v, %v", loaded, err)
-	}
-	profile.Enabled = false
-	if _, err := db.UpdateEgressAuthProfile(t.Context(), profile); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := materializeConversationAuthProfiles(t.Context(), db, cipher, store, snapshot); err == nil {
-		t.Fatal("disabled auth profile was materialized")
-	}
-	noAuth := snapshot
-	noAuth.Document.Rules = nil
-	if spec, err := materializeConversationAuthProfiles(t.Context(), db, cipher, store, noAuth); err != nil || spec != nil {
-		t.Fatalf("no-auth snapshot materialization = %#v, %v", spec, err)
 	}
 }
 
@@ -374,7 +308,7 @@ func TestConversationContainerSpecUsesConversationNamedVolume(t *testing.T) {
 	}
 	spec, err := conversationContainerSpec(cfg, "conversation-01", true, containerruntime.EgressBoundarySnapshotSpec{
 		ID: "12345678-1234-1234-1234-123456789abc", SHA256: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
-	}, nil, nil, nil)
+	}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

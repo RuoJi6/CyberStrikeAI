@@ -155,17 +155,17 @@ func TestProxyKeepsCompressedWireEvidenceAndDisplaysDecodedPacket(t *testing.T) 
 	}
 }
 
-func TestTrafficHeadersRedactOnlyInjectedAuthProfileValue(t *testing.T) {
+func TestTrafficHeadersExcludeProxyAndInternalHeaders(t *testing.T) {
 	headers := trafficHeaders(http.Header{
-		"Authorization":       {"Bearer hidden"},
 		"X-Custom":            {"visible"},
 		"Proxy-Authorization": {"never-store"},
-	}, "example.test", "Authorization")
+		"X-CyberStrike-Trace": {"never-store"},
+	}, "example.test")
 	values := map[string][]string{}
 	for _, header := range headers {
 		values[header.Name] = append(values[header.Name], header.Value)
 	}
-	if values["Authorization"][0] != "[REDACTED:AUTH_PROFILE]" || values["X-Custom"][0] != "visible" || len(values["Proxy-Authorization"]) != 0 || values["Host"][0] != "example.test" {
+	if values["X-Custom"][0] != "visible" || len(values["Proxy-Authorization"]) != 0 || len(values["X-Cyberstrike-Trace"]) != 0 || values["Host"][0] != "example.test" {
 		t.Fatalf("traffic headers = %#v", values)
 	}
 }

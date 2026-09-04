@@ -243,9 +243,6 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if _, _, err := m.loadUpstreamRoute(spec); err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 		}
-		if _, _, err := m.loadAuthProfiles(spec); err != nil {
-			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
-		}
 		if _, _, _, err := m.loadTLSAuthority(spec); err != nil {
 			return fmt.Errorf("%w: %v", ErrRuntimeNotReady, err)
 		}
@@ -263,7 +260,7 @@ func (m *DockerManager) waitForEgressGatewaySnapshot(ctx context.Context, spec R
 		if state == nil {
 			return fmt.Errorf("%w: egress gateway state is missing", ErrRuntimeNotReady)
 		}
-		if state.Running && healthySnapshotReport(state.Health, reference, upstreamRouteReference(spec), authProfilesReference(spec), tlsAuthorityReference(spec)) {
+		if state.Running && healthySnapshotReport(state.Health, reference, upstreamRouteReference(spec), tlsAuthorityReference(spec)) {
 			return nil
 		}
 		if !state.Running || state.Status == mobycontainer.StateExited || state.Status == mobycontainer.StateDead || (state.Health != nil && state.Health.Status == mobycontainer.Unhealthy) {

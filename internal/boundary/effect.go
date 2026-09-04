@@ -42,11 +42,5 @@ func (e Effect) Valid() bool {
 // AllowsRequest reports whether this marker represents an allow decision. The
 // matching engine still has to apply precedence and all target constraints.
 func (e Effect) AllowsRequest() bool {
-	return e.Valid() && e != EffectBlocked
-}
-
-// RequiresAuthProfile reports whether the gateway must inject a configured
-// credential profile instead of exposing credentials to the Agent.
-func (e Effect) RequiresAuthProfile() bool {
-	return e == EffectAuthOnly
+	return e == EffectAllowVisit || e == EffectAllowAttack
 }

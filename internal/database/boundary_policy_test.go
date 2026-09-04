@@ -31,13 +31,6 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	expiresAt := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	authProfileID := "credential-profile-1"
-	if _, err := db.CreateEgressAuthProfile(ctx, EgressAuthProfile{
-		ID: authProfileID, Name: "Credential profile", HeaderName: "Authorization", Enabled: true, OwnerUserID: "owner-1",
-	}); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
 	tests := []BoundaryPolicyRule{
 		{
 			PolicyID: policy.ID, Effect: boundary.EffectAllowVisit, Host: "VISIT.example.",
@@ -50,10 +43,6 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 			ExpiresAt: &expiresAt, Position: 2,
 		},
 		{PolicyID: policy.ID, Effect: boundary.EffectBlocked, Host: "blocked.example", Position: 3},
-		{
-			PolicyID: policy.ID, Effect: boundary.EffectAuthOnly, Host: "auth.example",
-			AuthProfileID: &authProfileID, Position: 4,
-		},
 	}
 	for _, rule := range tests {
 		created, err := db.CreateBoundaryPolicyRule(ctx, rule)
@@ -102,10 +91,6 @@ func TestBoundaryPolicyRuleEffectsPersistAndRoundTrip(t *testing.T) {
 	if attack.ExpiresAt == nil || !attack.ExpiresAt.Equal(expiresAt) || attack.RateLimit.RequestsPerSecond != 2 || attack.RateLimit.Burst != 5 || attack.RateLimit.MaxConcurrent != 3 {
 		t.Fatalf("attack rule = %#v", attack)
 	}
-	authOnly := rules[3]
-	if authOnly.AuthProfileID == nil || *authOnly.AuthProfileID != authProfileID {
-		t.Fatalf("auth-only rule = %#v", authOnly)
-	}
 }
 
 func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
@@ -117,12 +102,16 @@ func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
 	ctx := context.Background()
 	created, err := db.CreateBoundaryPolicy(ctx, BoundaryPolicy{
 		Name: "HTTPS audit default", TLSInspectionEnabled: false,
+		TLSBypassDomains: []string{"Pinned.Example.", "updates.example"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !created.TLSInspectionEnabled {
 		t.Fatal("new boundary policy disabled mandatory HTTPS inspection")
+	}
+	if len(created.TLSBypassDomains) != 0 {
+		t.Fatalf("new boundary policy retained legacy TLS bypass domains: %#v", created.TLSBypassDomains)
 	}
 	updated, err := db.UpdateBoundaryPolicy(ctx, BoundaryPolicy{
 		ID: created.ID, Name: created.Name, TLSInspectionEnabled: false,
@@ -132,6 +121,9 @@ func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
 	}
 	if !updated.TLSInspectionEnabled {
 		t.Fatal("updated boundary policy disabled mandatory HTTPS inspection")
+	}
+	if len(updated.TLSBypassDomains) != 0 {
+		t.Fatalf("updated boundary policy retained legacy TLS bypass domains: %#v", updated.TLSBypassDomains)
 	}
 	if _, err := db.ExecContext(ctx, `UPDATE boundary_policies SET tls_inspection_enabled = 0 WHERE id = ?`, created.ID); err != nil {
 		t.Fatal(err)
@@ -150,6 +142,9 @@ func TestBoundaryPolicyHTTPSInspectionIsAlwaysEnabled(t *testing.T) {
 	}
 	if !migrated.TLSInspectionEnabled {
 		t.Fatal("legacy boundary policy was not migrated to mandatory HTTPS inspection")
+	}
+	if len(migrated.TLSBypassDomains) != 0 {
+		t.Fatalf("legacy TLS bypass domains remained effective: %#v", migrated.TLSBypassDomains)
 	}
 }
 
@@ -236,9 +231,9 @@ func TestBoundaryPolicyRuleEffectsFailClosedInAPIAndSQLite(t *testing.T) {
 		PolicyID: policy.ID,
 		Effect:   boundary.EffectAuthOnly,
 	}); err == nil {
-		t.Fatal("auth-only rule without credential profile was accepted")
+		t.Fatal("retired auth-only rule was accepted")
 	}
-	authProfileID := "must-use-auth-only"
+	authProfileID := "retired-profile"
 	if _, err := db.CreateBoundaryPolicyRule(ctx, BoundaryPolicyRule{
 		PolicyID:      policy.ID,
 		Effect:        boundary.EffectAllowVisit,

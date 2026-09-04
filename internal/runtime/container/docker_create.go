@@ -55,27 +55,29 @@ const (
 	LabelEgressSnapshotSHA256  = "com.cyberstrike.egress.snapshot-sha256"
 	LabelEgressUpstreamRouteID = "com.cyberstrike.egress.upstream-route-id"
 	LabelEgressUpstreamSHA256  = "com.cyberstrike.egress.upstream-route-sha256"
-	LabelEgressAuthProfilesID  = "com.cyberstrike.egress.auth-profiles-id"
-	LabelEgressAuthSHA256      = "com.cyberstrike.egress.auth-profiles-sha256"
-	LabelEgressTLSAuthorityID  = "com.cyberstrike.egress.tls-authority-id"
-	LabelEgressTLSCertSHA256   = "com.cyberstrike.egress.tls-certificate-sha256"
-	LabelEgressTLSKeySHA256    = "com.cyberstrike.egress.tls-private-key-sha256"
-	LabelEgressNanoCPUs        = "com.cyberstrike.egress.limit.nano-cpus"
-	LabelEgressMemoryBytes     = "com.cyberstrike.egress.limit.memory-bytes"
-	LabelEgressPIDs            = "com.cyberstrike.egress.limit.pids"
-	LabelEgressNoFileSoft      = "com.cyberstrike.egress.limit.nofile-soft"
-	LabelEgressNoFileHard      = "com.cyberstrike.egress.limit.nofile-hard"
-	LabelEgressTmpfsBytes      = "com.cyberstrike.egress.limit.tmpfs-bytes"
-	LabelEgressLogMaxBytes     = "com.cyberstrike.egress.limit.log-max-bytes"
-	LabelEgressLogMaxFiles     = "com.cyberstrike.egress.limit.log-max-files"
-	LabelEgressHTTPRPS         = "com.cyberstrike.egress.traffic.http-rps"
-	LabelEgressTCPCPS          = "com.cyberstrike.egress.traffic.tcp-cps"
-	LabelEgressUDPDPS          = "com.cyberstrike.egress.traffic.udp-dps"
-	LabelEgressTrafficCapture  = "com.cyberstrike.egress.traffic-capture"
-	LabelEgressAttributionKey  = "com.cyberstrike.egress.attribution-public-key"
-	LabelEgressAttributionGen  = "com.cyberstrike.egress.attribution-runtime-generation"
-	LabelEgressAttributionID   = "com.cyberstrike.egress.attribution-instance-id"
-	ResourceKindAgent          = "agent-runtime"
+	// Legacy labels are read only to recognize runtimes created before target
+	// credential injection was removed. New gateways never emit them.
+	LabelEgressAuthProfilesID = "com.cyberstrike.egress.auth-profiles-id"
+	LabelEgressAuthSHA256     = "com.cyberstrike.egress.auth-profiles-sha256"
+	LabelEgressTLSAuthorityID = "com.cyberstrike.egress.tls-authority-id"
+	LabelEgressTLSCertSHA256  = "com.cyberstrike.egress.tls-certificate-sha256"
+	LabelEgressTLSKeySHA256   = "com.cyberstrike.egress.tls-private-key-sha256"
+	LabelEgressNanoCPUs       = "com.cyberstrike.egress.limit.nano-cpus"
+	LabelEgressMemoryBytes    = "com.cyberstrike.egress.limit.memory-bytes"
+	LabelEgressPIDs           = "com.cyberstrike.egress.limit.pids"
+	LabelEgressNoFileSoft     = "com.cyberstrike.egress.limit.nofile-soft"
+	LabelEgressNoFileHard     = "com.cyberstrike.egress.limit.nofile-hard"
+	LabelEgressTmpfsBytes     = "com.cyberstrike.egress.limit.tmpfs-bytes"
+	LabelEgressLogMaxBytes    = "com.cyberstrike.egress.limit.log-max-bytes"
+	LabelEgressLogMaxFiles    = "com.cyberstrike.egress.limit.log-max-files"
+	LabelEgressHTTPRPS        = "com.cyberstrike.egress.traffic.http-rps"
+	LabelEgressTCPCPS         = "com.cyberstrike.egress.traffic.tcp-cps"
+	LabelEgressUDPDPS         = "com.cyberstrike.egress.traffic.udp-dps"
+	LabelEgressTrafficCapture = "com.cyberstrike.egress.traffic-capture"
+	LabelEgressAttributionKey = "com.cyberstrike.egress.attribution-public-key"
+	LabelEgressAttributionGen = "com.cyberstrike.egress.attribution-runtime-generation"
+	LabelEgressAttributionID  = "com.cyberstrike.egress.attribution-instance-id"
+	ResourceKindAgent         = "agent-runtime"
 
 	defaultDockerOperationTimeout       = 30 * time.Second
 	rollbackTimeout                     = 10 * time.Second
@@ -161,7 +163,6 @@ type DockerManagerOptions struct {
 	GlobalQueuedExec       int
 	EgressSnapshotRoot     string
 	EgressUpstreamRoot     string
-	EgressAuthProfilesRoot string
 	EgressTLSAuthorityRoot string
 	TrafficSpoolRoot       string
 }
@@ -179,7 +180,6 @@ type DockerManager struct {
 	volumeAPI         dockerVolumeAPI
 	snapshotStore     *egress.SnapshotStore
 	upstreamStore     *egress.UpstreamRouteStore
-	authProfilesStore *egress.AuthProfilesStore
 	tlsAuthorityStore *egress.TLSAuthorityStore
 	trafficSpool      *trafficspool.Directory
 	ownerID           string
@@ -233,14 +233,6 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 			return nil, fmt.Errorf("configure egress upstream route store: %w", err)
 		}
 	}
-	var authProfilesStore *egress.AuthProfilesStore
-	if strings.TrimSpace(options.EgressAuthProfilesRoot) != "" {
-		var err error
-		authProfilesStore, err = egress.NewAuthProfilesStore(options.EgressAuthProfilesRoot)
-		if err != nil {
-			return nil, fmt.Errorf("configure egress auth profiles store: %w", err)
-		}
-	}
 	var tlsAuthorityStore *egress.TLSAuthorityStore
 	if strings.TrimSpace(options.EgressTLSAuthorityRoot) != "" {
 		var err error
@@ -277,7 +269,7 @@ func newDockerManager(api dockerCreationAPI, options DockerManagerOptions) (*Doc
 	return &DockerManager{
 		DockerInspector: inspector, api: api, execAPI: execAPI, execLimiter: limiter,
 		resourceAPI: resourceAPI, networkAPI: networkAPI, volumeAPI: volumeAPI,
-		snapshotStore: snapshotStore, upstreamStore: upstreamStore, authProfilesStore: authProfilesStore,
+		snapshotStore: snapshotStore, upstreamStore: upstreamStore,
 		tlsAuthorityStore: tlsAuthorityStore, trafficSpool: trafficSpool,
 		ownerID: ownerID, operationTimeout: operationTimeout,
 	}, nil
@@ -1297,10 +1289,6 @@ func runtimeLabels(ownerID string, spec RuntimeSpec) map[string]string {
 	if gateway.UpstreamRoute != nil {
 		labels[LabelEgressUpstreamRouteID] = gateway.UpstreamRoute.ID
 		labels[LabelEgressUpstreamSHA256] = gateway.UpstreamRoute.SHA256
-	}
-	if gateway.AuthProfiles != nil {
-		labels[LabelEgressAuthProfilesID] = gateway.AuthProfiles.ID
-		labels[LabelEgressAuthSHA256] = gateway.AuthProfiles.SHA256
 	}
 	if gateway.TLSAuthority != nil {
 		labels[LabelEgressTLSAuthorityID] = gateway.TLSAuthority.ID

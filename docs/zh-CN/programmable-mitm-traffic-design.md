@@ -42,7 +42,7 @@
 
 - Egress Gateway 是唯一可信的网络执行点，边界策略判定永远早于脚本。
 - Agent 生成的脚本是不可信代码，不能载入网关 Go 进程。
-- 脚本不能修改边界快照、上游出口、目标 host/port、审计记录或 auth profile。
+- 脚本不能修改边界快照、上游出口、目标 host/port 或审计记录。
 - 容器模式使用独立 `transform-runner` sidecar；不把脚本 runner 放入 Agent 容器或网关容器。
 - 本机模式使用受管理的本地 worker 子进程；生产配置可以完全禁止本机 inline 脚本。
 - 已激活脚本使用不可变 revision，历史流量始终能追溯到准确源码 SHA-256。
@@ -198,7 +198,6 @@ def encode_response(ctx, logical_message, original_wire_message): ...
   → [inline] encode_request
   → 校验脚本输出与 Content-Length
   → 再次校验 method/path；禁止改变 scheme/host/port
-  → 注入受控 auth profile
   → 捕获 upstream_request
   → 发往目标
 ```
@@ -216,7 +215,7 @@ def encode_response(ctx, logical_message, original_wire_message): ...
   → 返回 Agent
 ```
 
-`Proxy-Authorization`、hop-by-hop Header、内部追踪 Header 和 auth profile 凭据不提供给脚本，也不转发到目标。
+`Proxy-Authorization`、hop-by-hop Header 和内部追踪 Header 不提供给脚本，也不转发到目标。
 
 ## 6. Agent 使用方式
 
@@ -250,7 +249,7 @@ def encode_response(ctx, logical_message, original_wire_message): ...
 
 ### 6.2 Secret 边界
 
-Agent-authored 脚本只能使用 Agent 已知的值和绑定配置，不能读取 auth profile 或控制面 Secret。因为脚本本身由 Agent 编写，把隐藏 Secret 交给脚本等价于交给 Agent。
+Agent-authored 脚本只能使用 Agent 已知的值和绑定配置，不能读取控制面 Secret。因为脚本本身由 Agent 编写，把隐藏 Secret 交给脚本等价于交给 Agent。
 
 如果以后需要使用对 Agent 隐藏的业务密钥，必须增加 `trusted-admin` transform：由管理员审核源码、运行在独立信任级别、禁止向 decoded view 输出 Secret，并与 Agent-authored transform 分开管理。
 

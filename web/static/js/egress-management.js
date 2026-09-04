@@ -1,17 +1,16 @@
 (function () {
     'use strict';
 
-    const views = ['proxies', 'groups', 'auth'];
+    const views = ['proxies', 'groups'];
     const PAGE_SIZES = new Set([10, 20, 50]);
     const VIEW_META = Object.freeze({
         proxies: { title: '上游代理', description: '凭据仅以已配置状态显示，不返回原文。', resource: '代理名称', config: '出口地址', status: '凭据 / 状态', newLabel: '+  新建代理', editorTitle: '新建代理', editorDescription: '凭据原文保存后不会通过管理 API 或页面回显。' },
         groups: { title: '代理组', description: '按优先级和权重选择；全部成员不可用时失败关闭。', resource: '代理组名称', config: '成员 / 路由', status: '熔断 / 状态', newLabel: '+  新建代理组', editorTitle: '新建代理组', editorDescription: '至少选择一个代理成员，并设置优先级与权重。' },
-        auth: { title: '凭据档案', description: '凭据只在网关构建时解密，Agent 与管理 API 均不可见。', resource: '档案名称', config: 'Header', status: '凭据 / 状态', newLabel: '+  新建凭据档案', editorTitle: '新建凭据档案', editorDescription: '凭据值创建时必填；编辑时留空表示保留原值。' },
     });
     const state = {
         bound: false, loading: false, loadRequestId: 0, detailRequestId: 0, searchTimer: null,
         view: 'proxies', page: 1, pageSize: 10, query: '', total: 0, totalPages: 0,
-        proxies: [], proxyChoices: [], groups: [], authProfiles: [],
+        proxies: [], proxyChoices: [], groups: [],
         selected: null, selectedView: '', error: '',
     };
 
@@ -123,7 +122,6 @@
 
     function currentSource() {
         if (state.view === 'groups') return state.groups;
-        if (state.view === 'auth') return state.authProfiles;
         return state.proxies;
     }
 
@@ -132,8 +130,7 @@
         if (!query) return true;
         let fields = [];
         if (state.view === 'proxies') fields = [item.name, item.protocol, item.host, item.port];
-        else if (state.view === 'groups') fields = [item.name, item.failureThreshold, item.cooldownSeconds].concat((item.members || []).flatMap(function (member) { return [member.proxyId, member.proxy && member.proxy.name, member.proxy && member.proxy.host]; }));
-        else fields = [item.name, item.headerName];
+        else fields = [item.name, item.failureThreshold, item.cooldownSeconds].concat((item.members || []).flatMap(function (member) { return [member.proxyId, member.proxy && member.proxy.name, member.proxy && member.proxy.host]; }));
         return fields.some(function (value) { return String(value || '').toLocaleLowerCase().includes(query); });
     }
 
@@ -168,7 +165,7 @@
     }
 
     function renderList() {
-        const roots = { proxies: byId('egress-proxy-list'), groups: byId('egress-group-list'), auth: byId('egress-auth-list') };
+        const roots = { proxies: byId('egress-proxy-list'), groups: byId('egress-group-list') };
         Object.values(roots).forEach(function (root) { if (root) root.replaceChildren(); });
         const root = roots[state.view];
         if (!root) return;
@@ -182,8 +179,6 @@
                 const members = Array.isArray(item.members) ? item.members : [];
                 const healthy = members.filter(function (member) { return member.enabled !== false && member.status !== 'cooldown' && selectable.has(member.proxyId); }).length;
                 root.append(rowShell(item, item.name || item.id, '全部成员不可用时失败关闭', members.length + ' 个成员 · ' + healthy + ' 个可选', '阈值 ' + item.failureThreshold + ' · 冷却 ' + item.cooldownSeconds + ' 秒', healthy ? '路由可用' : '无可选成员'));
-            } else {
-                root.append(rowShell(item, item.name || item.id, item.credentialsConfigured ? '凭据原文不可见' : '尚未配置凭据', item.headerName || '—', '仅在命中 auth-only 规则时注入', item.credentialsConfigured ? '凭据已配置' : '无凭据'));
             }
         });
     }
@@ -252,8 +247,6 @@
             grid.append(detailPair('协议', String(item.protocol || '').toUpperCase()), detailPair('地址', String(item.host || '') + ':' + String(item.port || '')), detailPair('状态', item.enabled === false ? '已停用' : '已启用'), detailPair('凭据', item.credentialsConfigured ? '已配置' : '无凭据'), detailPair('凭据更新时间', formatDate(item.credentialUpdatedAt)), detailPair('配置 ID', item.id));
         } else if (state.selectedView === 'groups') {
             grid.append(detailPair('状态', item.enabled === false ? '已停用' : '已启用'), detailPair('失败策略', item.failClosed === false ? '允许回退' : '失败关闭'), detailPair('失败阈值', item.failureThreshold), detailPair('冷却时间', item.cooldownSeconds + ' 秒'), detailPair('成员数量', Array.isArray(item.members) ? item.members.length : 0), detailPair('配置 ID', item.id));
-        } else {
-            grid.append(detailPair('Header', item.headerName), detailPair('状态', item.enabled === false ? '已停用' : '已启用'), detailPair('凭据', item.credentialsConfigured ? '已配置且不可回显' : '无凭据'), detailPair('凭据更新时间', formatDate(item.credentialUpdatedAt)), detailPair('配置 ID', item.id));
         }
         section.append(grid); body.append(section);
         if (state.selectedView === 'groups' && Array.isArray(item.members) && item.members.length) {
@@ -280,7 +273,7 @@
         if (byId('egress-resource-editor-modal')?.hidden !== false) document.body.classList.remove('boundary-policy-overlay-open');
     }
 
-    function endpointFor(view) { return view === 'groups' ? '/api/egress-proxy-groups' : view === 'auth' ? '/api/egress-auth-profiles' : '/api/egress-proxies'; }
+    function endpointFor(view) { return view === 'groups' ? '/api/egress-proxy-groups' : '/api/egress-proxies'; }
 
     async function openDetail(view, id) {
         state.selectedView = views.includes(view) ? view : 'proxies'; state.selected = null; showDrawer();
@@ -293,7 +286,7 @@
     function showEditor(view, editing) {
         state.selectedView = view;
         const modal = byId('egress-resource-editor-modal'); if (modal) modal.hidden = false;
-        ['proxies', 'groups', 'auth'].forEach(function (name) { const form = byId(name === 'proxies' ? 'egress-proxy-form' : name === 'groups' ? 'egress-group-form' : 'egress-auth-form'); if (form) form.hidden = name !== view; });
+        ['proxies', 'groups'].forEach(function (name) { const form = byId(name === 'proxies' ? 'egress-proxy-form' : 'egress-group-form'); if (form) form.hidden = name !== view; });
         const meta = VIEW_META[view];
         byId('egress-resource-editor-title').textContent = editing ? '修改' + meta.title.replace('上游', '') : meta.editorTitle;
         byId('egress-resource-editor-description').textContent = meta.editorDescription;
@@ -365,25 +358,8 @@
         catch (error) { notify(error.message, 'error'); }
     }
 
-    function resetAuthForm() { byId('egress-auth-form').reset(); byId('egress-auth-id').value = ''; byId('egress-auth-enabled').checked = true; byId('egress-auth-clear-field').hidden = true; byId('egress-auth-clear-credential').checked = false; }
-
-    function editAuth(profile) {
-        resetAuthForm(); byId('egress-auth-id').value = profile.id || ''; byId('egress-auth-name').value = profile.name || ''; byId('egress-auth-header').value = profile.headerName || ''; byId('egress-auth-enabled').checked = profile.enabled !== false;
-        byId('egress-auth-clear-field').hidden = !profile.credentialsConfigured; showEditor('auth', true); byId('egress-auth-name').focus();
-    }
-
-    async function saveAuth(event) {
-        event.preventDefault(); const id = String(byId('egress-auth-id').value || '').trim(); const credential = byId('egress-auth-credential').value; const clear = byId('egress-auth-clear-credential').checked;
-        if (!id && !credential) { notify(t('authCredentialRequired', '创建凭据档案时必须填写凭据值'), 'error'); return; }
-        const payload = { name: byId('egress-auth-name').value, headerName: byId('egress-auth-header').value, enabled: byId('egress-auth-enabled').checked };
-        if (clear) payload.credential = null; else if (credential) payload.credential = credential;
-        try { await requestJSON('/api/egress-auth-profiles' + (id ? '/' + encodeURIComponent(id) : ''), jsonOptions(id ? 'PUT' : 'POST', payload)); notify(id ? t('authUpdated', '凭据档案已更新') : t('authCreated', '凭据档案已创建'), 'success'); closeEditor(); closeDrawer(); await refresh(true); }
-        catch (error) { notify(error.message, 'error'); }
-    }
-
     function openEditor(view, item) {
         if (view === 'groups') { if (item) editGroup(item); else { resetGroupForm(); showEditor('groups', false); byId('egress-group-name').focus(); } return; }
-        if (view === 'auth') { if (item) editAuth(item); else { resetAuthForm(); showEditor('auth', false); byId('egress-auth-name').focus(); } return; }
         if (item) editProxy(item); else { resetProxyForm(); showEditor('proxies', false); byId('egress-proxy-name').focus(); }
     }
 
@@ -401,11 +377,11 @@
             if (state.view === 'proxies' && state.query) proxyParams.set('search', state.query);
             proxyParams.set('limit', String(state.view === 'proxies' ? state.pageSize : 100));
             proxyParams.set('offset', String(state.view === 'proxies' ? (state.page - 1) * state.pageSize : 0));
-            const results = await Promise.all([requestJSON('/api/egress-proxies?' + proxyParams.toString()), requestJSON('/api/egress-proxy-groups'), requestJSON('/api/egress-auth-profiles')]);
+            const results = await Promise.all([requestJSON('/api/egress-proxies?' + proxyParams.toString()), requestJSON('/api/egress-proxy-groups')]);
             if (requestId !== state.loadRequestId) return;
             const proxyItems = Array.isArray(results[0].items) ? results[0].items : [];
             if (state.view === 'proxies') { state.proxies = proxyItems; state.total = Math.max(0, Number(results[0].total || 0)); } else state.proxyChoices = proxyItems;
-            state.groups = Array.isArray(results[1].items) ? results[1].items : []; state.authProfiles = Array.isArray(results[2].items) ? results[2].items : [];
+            state.groups = Array.isArray(results[1].items) ? results[1].items : [];
             if (state.view !== 'proxies') state.total = localTotal();
             const pages = Math.max(1, Math.ceil(state.total / state.pageSize));
             if (state.total > 0 && state.page > pages) { state.page = pages; writeURL(); state.loading = false; return refresh(forceConversationChoices); }
@@ -433,7 +409,6 @@
         byId('egress-resource-editor-close').addEventListener('click', closeEditor);
         byId('egress-proxy-cancel').addEventListener('click', closeEditor); byId('egress-proxy-form').addEventListener('submit', saveProxy);
         byId('egress-group-cancel').addEventListener('click', closeEditor); byId('egress-group-form').addEventListener('submit', saveGroup);
-        byId('egress-auth-cancel').addEventListener('click', closeEditor); byId('egress-auth-form').addEventListener('submit', saveAuth);
         document.addEventListener('keydown', function (event) { if (event.key !== 'Escape') return; if (byId('egress-resource-editor-modal')?.hidden === false) closeEditor(); else if (byId('egress-resource-detail-drawer')?.hidden === false) closeDrawer(); });
         document.addEventListener('languagechange', function () { renderAll(); });
     }

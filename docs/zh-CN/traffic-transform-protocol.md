@@ -142,7 +142,7 @@ Gateway 调用 Runner 的 JSON 示例：
 }
 ```
 
-Runner 不接收 `execution_id`、`tool_call_id`、边界规则、上游代理、auth profile 或数据库主键集合。脚本完成编解码不需要这些信息。
+Runner 不接收 `execution_id`、`tool_call_id`、边界规则、上游代理、控制面 Secret 或数据库主键集合。脚本完成编解码不需要这些信息。
 
 ## 5. Message
 
@@ -415,4 +415,4 @@ Transform 当前通过 Agent MCP 的 `create_traffic_transform`、`validate_traf
 - revision 热切换不把同一事务分配给两个 revision。
 - Gateway/Runner 重启、熔断和半激活恢复。
 - fuzz 高并发下内存、磁盘、队列和正文保留符合上限。
-- auth profile、代理认证和追踪令牌不进入脚本或上游。
+- 代理认证和追踪令牌不进入脚本或上游。

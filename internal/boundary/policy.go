@@ -15,7 +15,6 @@ const (
 	ReasonBlockedTarget     = "blocked-target"
 	ReasonAllowAttack       = "allow-attack"
 	ReasonAllowVisit        = "allow-visit"
-	ReasonAuthOnly          = "auth-only"
 	ReasonForbiddenHostname = "forbidden-hostname"
 	ReasonForbiddenAddress  = "forbidden-address"
 	ReasonDNSRebinding      = "dns-rebinding"
@@ -48,13 +47,12 @@ type RateLimit struct {
 }
 
 type Decision struct {
-	Allowed       bool          `json:"allowed"`
-	Effect        Effect        `json:"effect,omitempty"`
-	RuleID        string        `json:"ruleId,omitempty"`
-	AuthProfileID string        `json:"authProfileId,omitempty"`
-	RateLimit     RateLimit     `json:"rateLimit"`
-	Reason        string        `json:"reason"`
-	Target        RequestTarget `json:"target"`
+	Allowed   bool          `json:"allowed"`
+	Effect    Effect        `json:"effect,omitempty"`
+	RuleID    string        `json:"ruleId,omitempty"`
+	RateLimit RateLimit     `json:"rateLimit"`
+	Reason    string        `json:"reason"`
+	Target    RequestTarget `json:"target"`
 }
 
 // DNSDecision is the policy result for resolving one canonical hostname. DNS
@@ -250,7 +248,6 @@ func (p *Policy) evaluateTarget(target RequestTarget, decision Decision, now tim
 	decision.Allowed = false
 	decision.Effect = winner.Effect
 	decision.RuleID = winner.ID
-	decision.AuthProfileID = winner.AuthProfileID
 	decision.RateLimit = winner.RateLimit
 	switch winner.Effect {
 	case EffectBlocked:
@@ -262,7 +259,9 @@ func (p *Policy) evaluateTarget(target RequestTarget, decision Decision, now tim
 	case EffectAllowAttack:
 		decision.Allowed, decision.Reason = true, ReasonAllowAttack
 	case EffectAuthOnly:
-		decision.Allowed, decision.Reason = true, ReasonAuthOnly
+		// Historical snapshots may still contain auth-only rules. Credential
+		// injection has been removed, so these rules now fail closed.
+		decision.Reason = ReasonBlockedTarget
 	case EffectAllowVisit:
 		decision.Allowed, decision.Reason = true, ReasonAllowVisit
 	}
@@ -280,26 +279,6 @@ func ValidateRateLimit(limit RateLimit) error {
 		return fmt.Errorf("boundary rate limit is invalid")
 	}
 	return nil
-}
-
-// AuthProfileIDs returns the canonical set of credential profiles referenced
-// by this immutable policy. Profile contents remain gateway-only material.
-func (p *Policy) AuthProfileIDs() []string {
-	if p == nil {
-		return nil
-	}
-	seen := make(map[string]struct{})
-	for _, rule := range p.rules {
-		if rule.Effect == EffectAuthOnly && rule.AuthProfileID != "" {
-			seen[rule.AuthProfileID] = struct{}{}
-		}
-	}
-	result := make([]string, 0, len(seen))
-	for id := range seen {
-		result = append(result, id)
-	}
-	sort.Strings(result)
-	return result
 }
 
 // EvaluateDNS decides whether the policy DNS service may resolve rawHost.
@@ -380,8 +359,6 @@ func (p *Policy) EvaluateDNS(rawHost string, resolvedIPs []netip.Addr, now time.
 	switch winner.Effect {
 	case EffectAllowAttack:
 		decision.Reason = ReasonAllowAttack
-	case EffectAuthOnly:
-		decision.Reason = ReasonAuthOnly
 	case EffectAllowVisit:
 		decision.Reason = ReasonAllowVisit
 	}

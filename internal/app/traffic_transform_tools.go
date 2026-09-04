@@ -707,7 +707,7 @@ func registerTestTrafficTransformTool(server *mcp.Server, db *database.DB, runne
 				"revision_id":    map[string]interface{}{"type": "string"},
 				"transaction_id": map[string]interface{}{"type": "string"},
 				"direction":      map[string]interface{}{"type": "string", "enum": []string{"request", "response"}},
-				"config":         map[string]interface{}{"type": "object", "description": "脚本配置。普通 Agent revision 只能使用 Agent 可见的测试值，不能引用隐藏 auth profile。"},
+				"config":         map[string]interface{}{"type": "object", "description": "脚本配置。普通 Agent revision 只能使用 Agent 可见的测试值，不能引用控制面 Secret。"},
 				"deadline_ms":    map[string]interface{}{"type": "integer", "description": "每个 Hook 超时，默认 250，最大 5000"},
 			}, "required": []string{"revision_id", "transaction_id", "direction"},
 		},

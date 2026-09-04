@@ -506,12 +506,11 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 		document.DefaultAction = "allow"
 		return document, nil
 	}
-	var tlsEnabled bool
-	var bypassJSON, defaultAction string
+	var defaultAction string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT tls_inspection_enabled, tls_bypass_domains_json, default_action
-		FROM boundary_policies WHERE id = ?
-	`, document.PolicyID).Scan(&tlsEnabled, &bypassJSON, &defaultAction); err != nil {
+			SELECT default_action
+			FROM boundary_policies WHERE id = ?
+		`, document.PolicyID).Scan(&defaultAction); err != nil {
 		return BoundaryPolicySnapshotDocument{}, fmt.Errorf("load selected boundary policy: %w", err)
 	}
 	defaultAction, err := normalizeBoundaryDefaultAction(defaultAction)
@@ -522,17 +521,7 @@ func boundarySnapshotDocumentFromPolicy(ctx context.Context, tx *sql.Tx, policyI
 		document.SchemaVersion = boundaryPolicyDefaultActionSchemaVersion
 		document.DefaultAction = BoundaryDefaultActionAllow
 	}
-	if tlsEnabled {
-		var bypassDomains []string
-		if err := json.Unmarshal([]byte(bypassJSON), &bypassDomains); err != nil {
-			return BoundaryPolicySnapshotDocument{}, fmt.Errorf("decode selected policy TLS bypass domains: %w", err)
-		}
-		normalized, err := normalizeTLSBypassDomains(bypassDomains)
-		if err != nil || !reflect.DeepEqual(normalized, bypassDomains) {
-			return BoundaryPolicySnapshotDocument{}, fmt.Errorf("selected policy TLS bypass domains are not canonical")
-		}
-		document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: normalized}
-	}
+	document.TLSInspection = &BoundaryPolicyTLSInspectionSnapshot{Enabled: true, BypassDomains: []string{}}
 	rules, err := listBoundaryPolicyRulesForSnapshot(ctx, tx, document.PolicyID)
 	if err != nil {
 		return BoundaryPolicySnapshotDocument{}, err

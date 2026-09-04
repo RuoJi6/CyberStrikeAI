@@ -166,8 +166,8 @@ func TestLoadNoBoundarySnapshotDefaultsExternalTrafficToAllow(t *testing.T) {
 	}
 }
 
-func TestLoadNoBoundaryTLSSnapshotDefaultsExternalTrafficToAllowAndDecryptsHTTPS(t *testing.T) {
-	content := `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":[]},"defaultAction":"allow"}`
+func TestLoadNoBoundaryTLSSnapshotIgnoresLegacyBypassDomainsAndDecryptsHTTPS(t *testing.T) {
+	content := `{"schemaVersion":4,"policyId":"","rules":[],"tlsInspection":{"enabled":true,"bypassDomains":["pinned.example"]},"defaultAction":"allow"}`
 	path := filepath.Join(t.TempDir(), "snapshot.json")
 	if err := os.WriteFile(path, []byte(content), 0o444); err != nil {
 		t.Fatal(err)

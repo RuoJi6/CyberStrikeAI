@@ -46,8 +46,6 @@ type SnapshotReport struct {
 	SHA256               string `json:"sha256"`
 	UpstreamRouteID      string `json:"upstreamRouteId,omitempty"`
 	UpstreamRouteSHA256  string `json:"upstreamRouteSha256,omitempty"`
-	AuthProfilesID       string `json:"authProfilesId,omitempty"`
-	AuthProfilesSHA256   string `json:"authProfilesSha256,omitempty"`
 	TLSAuthorityID       string `json:"tlsAuthorityId,omitempty"`
 	TLSCertificateSHA256 string `json:"tlsCertificateSha256,omitempty"`
 }
@@ -80,8 +78,6 @@ type GatewayOptions struct {
 	ManualRecovery        <-chan struct{}
 	UpstreamRoutePath     string
 	UpstreamRoute         *UpstreamRouteReference
-	AuthProfilesPath      string
-	AuthProfiles          *AuthProfilesReference
 	TLSCertificatePath    string
 	TLSPrivateKeyPath     string
 	TLSAuthority          *TLSAuthorityReference
@@ -306,7 +302,14 @@ func validateSnapshotPolicyBytes(reference SnapshotReference, content []byte) (S
 	if err != nil {
 		return SnapshotReport{}, nil, nil, err
 	}
-	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, policy, document.TLSInspection, nil
+	effectiveTLSInspection := document.TLSInspection
+	if effectiveTLSInspection != nil {
+		// BypassDomains remains part of the signed legacy snapshot schema so old
+		// runtimes can still be loaded, but certificate-pinning bypass is no
+		// longer an active policy dimension. Every HTTPS connection is inspected.
+		effectiveTLSInspection = &TLSInspectionPolicy{Enabled: true, BypassDomains: []string{}}
+	}
+	return SnapshotReport{SnapshotID: reference.ID, SHA256: reference.SHA256}, policy, effectiveTLSInspection, nil
 }
 
 func validateTLSInspectionPolicy(policy *TLSInspectionPolicy) error {
@@ -381,24 +384,6 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 		options.Proxy.UpstreamRoute = &route
 		report.UpstreamRouteID = options.UpstreamRoute.ID
 		report.UpstreamRouteSHA256 = options.UpstreamRoute.SHA256
-	}
-	if strings.TrimSpace(options.AuthProfilesPath) != "" || options.AuthProfiles != nil {
-		if strings.TrimSpace(options.AuthProfilesPath) == "" || options.AuthProfiles == nil {
-			return errors.New("egress auth profiles path and reference must be configured together")
-		}
-		if options.Proxy.AuthProfiles != nil {
-			return errors.New("egress auth profiles must have only one trusted source")
-		}
-		if authErr := validateAuthProfilesSnapshotBinding(reference, *options.AuthProfiles); authErr != nil {
-			return authErr
-		}
-		document, authErr := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
-		if authErr != nil {
-			return authErr
-		}
-		options.Proxy.AuthProfiles = &document
-		report.AuthProfilesID = options.AuthProfiles.ID
-		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
 	}
 	tlsConfigured := strings.TrimSpace(options.TLSCertificatePath) != "" || strings.TrimSpace(options.TLSPrivateKeyPath) != "" || options.TLSAuthority != nil
 	if tlsInspection != nil {
@@ -536,7 +521,6 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 			name: "snapshot integrity monitor",
 			err: monitorGatewayIntegrity(runCtx, path, reference,
 				options.UpstreamRoutePath, options.UpstreamRoute,
-				options.AuthProfilesPath, options.AuthProfiles,
 				options.TLSCertificatePath, options.TLSPrivateKeyPath, options.TLSAuthority,
 				options.SnapshotCheckInterval),
 		}
@@ -588,7 +572,7 @@ func RunWithSnapshot(ctx context.Context, path string, reference SnapshotReferen
 	return fmt.Errorf("serve %s: %w", first.name, first.err)
 }
 
-func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, authPath string, authReference *AuthProfilesReference, tlsCertificatePath, tlsPrivateKeyPath string, tlsReference *TLSAuthorityReference, interval time.Duration) error {
+func monitorGatewayIntegrity(ctx context.Context, path string, reference SnapshotReference, routePath string, routeReference *UpstreamRouteReference, tlsCertificatePath, tlsPrivateKeyPath string, tlsReference *TLSAuthorityReference, interval time.Duration) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -602,11 +586,6 @@ func monitorGatewayIntegrity(ctx context.Context, path string, reference Snapsho
 			if routeReference != nil {
 				if _, err := LoadUpstreamRoute(routePath, *routeReference); err != nil {
 					return fmt.Errorf("revalidate immutable upstream route: %w", err)
-				}
-			}
-			if authReference != nil {
-				if _, err := LoadAuthProfiles(authPath, *authReference); err != nil {
-					return fmt.Errorf("revalidate immutable auth profiles: %w", err)
 				}
 			}
 			if tlsReference != nil {
@@ -632,7 +611,7 @@ func CheckGatewayWithOptions(path string, reference SnapshotReference, options G
 	if err := ValidateTrafficLimits(options.TrafficLimits); err != nil {
 		return err
 	}
-	report, policy, tlsInspection, err := LoadGatewaySnapshot(path, reference)
+	report, _, tlsInspection, err := LoadGatewaySnapshot(path, reference)
 	if err != nil {
 		return err
 	}
@@ -645,25 +624,6 @@ func CheckGatewayWithOptions(path string, reference SnapshotReference, options G
 		}
 		report.UpstreamRouteID = options.UpstreamRoute.ID
 		report.UpstreamRouteSHA256 = options.UpstreamRoute.SHA256
-	}
-	var authDocument *AuthProfilesDocument
-	if strings.TrimSpace(options.AuthProfilesPath) != "" || options.AuthProfiles != nil {
-		if strings.TrimSpace(options.AuthProfilesPath) == "" || options.AuthProfiles == nil {
-			return errors.New("egress auth profiles path and reference must be configured together")
-		}
-		if err := validateAuthProfilesSnapshotBinding(reference, *options.AuthProfiles); err != nil {
-			return err
-		}
-		document, err := LoadAuthProfiles(options.AuthProfilesPath, *options.AuthProfiles)
-		if err != nil {
-			return err
-		}
-		authDocument = &document
-		report.AuthProfilesID = options.AuthProfiles.ID
-		report.AuthProfilesSHA256 = options.AuthProfiles.SHA256
-	}
-	if _, err := authProfilesForPolicy(policy, authDocument); err != nil {
-		return err
 	}
 	tlsConfigured := strings.TrimSpace(options.TLSCertificatePath) != "" || strings.TrimSpace(options.TLSPrivateKeyPath) != "" || options.TLSAuthority != nil
 	if tlsInspection != nil {

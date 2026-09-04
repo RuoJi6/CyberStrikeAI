@@ -94,9 +94,9 @@ var PermissionCatalog = map[string]string{
 	"boundary:read":                      "View and simulate boundary policies",
 	"boundary:write":                     "Create and update boundary policy drafts and rules",
 	"boundary:delete":                    "Delete boundary policy drafts and rules",
-	"egress:read":                        "View egress proxies, groups, auth profiles, and safe routing summaries",
-	"egress:write":                       "Create and update egress proxies, groups, auth profiles, and credentials",
-	"egress:delete":                      "Delete egress proxies, groups, and auth profiles",
+	"egress:read":                        "View egress proxies, groups, and safe routing summaries",
+	"egress:write":                       "Create and update egress proxies, groups, and proxy credentials",
+	"egress:delete":                      "Delete egress proxies and groups",
 }
 
 func HashPassword(password string) (string, error) {

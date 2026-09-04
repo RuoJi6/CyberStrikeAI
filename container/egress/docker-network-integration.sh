@@ -13,14 +13,9 @@ internal_network="cs-egress-int-$test_suffix"
 egress_network="cs-egress-out-$test_suffix"
 gateway_container="cs-egress-gateway-$test_suffix"
 agent_container="cs-egress-agent-$test_suffix"
-capture_container="cs-egress-auth-capture-$test_suffix"
 restricted_container="cs-egress-restricted-target-$test_suffix"
 snapshot_path="$test_root/boundary.json"
 route_path="$test_root/upstream.json"
-auth_route_path="$test_root/auth-upstream.json"
-auth_snapshot_path="$test_root/auth-boundary.json"
-auth_profiles_path="$test_root/auth-profiles.json"
-mismatch_profiles_path="$test_root/auth-profiles-mismatch.json"
 open_snapshot_path="$test_root/open-boundary.json"
 open_restricted_snapshot_path="$test_root/open-restricted-boundary.json"
 tls_certificate_path="$test_root/ca.crt"
@@ -110,7 +105,7 @@ assert_agent_security() {
 }
 
 cleanup() {
-  docker rm -f "$agent_container" "$gateway_container" "$capture_container" "$restricted_container" >/dev/null 2>&1 || true
+  docker rm -f "$agent_container" "$gateway_container" "$restricted_container" >/dev/null 2>&1 || true
   docker network rm "$internal_network" "$egress_network" >/dev/null 2>&1 || true
   rm -rf -- "$test_root"
 }
@@ -504,148 +499,6 @@ expect_status 502 docker run --rm --network "$internal_network" --dns "$gateway_
   "curl -sS --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' http://example.com/"
 expect_failure docker run --rm --network "$internal_network" --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c \
   'unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; curl -sS --connect-timeout 2 --max-time 4 --noproxy "*" -o /dev/null http://example.com/'
-
-# auth-only uses a gateway-only immutable profile. A local test upstream proxy
-# accepts CONNECT and returns 204 only when the tunneled HTTP request contains
-# the gateway value, proving an Agent-supplied duplicate was removed/replaced.
-docker rm -f "$gateway_container" >/dev/null
-auth_snapshot_id=12345678-1234-4234-8234-123456789ab7
-auth_snapshot_json='{"schemaVersion":1,"policyId":"stage5-item6-policy","rules":[{"id":"inject-api-key","effect":"auth-only","host":"example.com","schemes":["http"],"ports":[],"pathPrefixes":[],"methods":[],"authProfileId":"profile-integration","rateLimit":{"requestsPerSecond":0,"burst":0},"expiresAt":null,"position":1}]}'
-printf '%s' "$auth_snapshot_json" >"$auth_snapshot_path"
-chmod 0444 "$auth_snapshot_path"
-auth_snapshot_sha="sha256:$(sha256sum "$auth_snapshot_path" | awk '{print $1}')"
-
-auth_secret_probe=stage5-auth-secret-probe
-auth_profiles_id="auth-$auth_snapshot_id-aaaaaaaaaaaaaaaa"
-cross_snapshot_auth_profiles_id=auth-33333333-3333-4333-8333-333333333333-aaaaaaaaaaaaaaaa
-auth_profiles_json='{"schemaVersion":1,"bindingSalt":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","profiles":[{"id":"profile-integration","headerName":"X-Integration-Auth","headerValue":"stage5-auth-secret-probe"}]}'
-printf '%s' "$auth_profiles_json" >"$auth_profiles_path"
-chmod 0444 "$auth_profiles_path"
-auth_profiles_sha="sha256:$(sha256sum "$auth_profiles_path" | awk '{print $1}')"
-mismatch_profiles_json='{"schemaVersion":1,"bindingSalt":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","profiles":[{"id":"profile-other","headerName":"X-Integration-Auth","headerValue":"unrelated"}]}'
-printf '%s' "$mismatch_profiles_json" >"$mismatch_profiles_path"
-chmod 0444 "$mismatch_profiles_path"
-mismatch_profiles_sha="sha256:$(sha256sum "$mismatch_profiles_path" | awk '{print $1}')"
-
-capture_code=$'import json, socket\nwith open("/expected/auth.json", "r", encoding="utf-8") as source:\n    expected = json.load(source)["profiles"][0]\nserver = socket.socket()\nserver.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\nserver.bind(("0.0.0.0", 18080))\nserver.listen(1)\nconnection, _ = server.accept()\ndef headers():\n    data = b""\n    while b"\\r\\n\\r\\n" not in data and len(data) < 65536:\n        part = connection.recv(4096)\n        if not part:\n            break\n        data += part\n    return data\nconnect = headers()\nconnect_parts = connect.split(b"\\r\\n", 1)[0].split(b" ")\nconnect_ok = len(connect_parts) == 3 and connect_parts[0] == b"CONNECT" and connect_parts[1].endswith(b":80") and connect_parts[2] == b"HTTP/1.1"\nif not connect_ok:\n    print(json.dumps({"connectOk": False}), flush=True)\n    connection.sendall(b"HTTP/1.1 502 Bad Gateway\\r\\nContent-Length: 0\\r\\n\\r\\n")\nelse:\n    connection.sendall(b"HTTP/1.1 200 Connection Established\\r\\n\\r\\n")\n    request = headers()\n    header_prefix = expected["headerName"].lower().encode() + b":"\n    values = [line.split(b":", 1)[1].strip() for line in request.split(b"\\r\\n") if line.lower().startswith(header_prefix)]\n    auth_match = len(values) == 1 and values[0] == expected["headerValue"].encode()\n    request_line = request.split(b"\\r\\n", 1)[0].decode("ascii", "replace")\n    print(json.dumps({"connectOk": True, "requestLine": request_line, "authHeaderCount": len(values), "authMatch": auth_match}), flush=True)\n    status = b"204 No Content" if auth_match else b"403 Forbidden"\n    connection.sendall(b"HTTP/1.1 " + status + b"\\r\\nContent-Length: 0\\r\\nConnection: close\\r\\n\\r\\n")\nconnection.close()\nserver.close()'
-docker run -d --name "$capture_container" --network "$egress_network" --network-alias stage5-auth-capture \
-  --mount type=bind,source="$auth_profiles_path",target=/expected/auth.json,readonly \
-  --entrypoint python3 "$CYBERSTRIKE_AGENT_IMAGE" -c "$capture_code" >/dev/null
-[[ "$(docker inspect --format '{{.State.Running}}' "$capture_container")" == true ]] || fail "auth capture proxy did not start"
-
-auth_route_id=stage5-auth-route
-auth_route_json='{"schemaVersion":1,"mode":"proxy","proxy":{"id":"auth-capture","protocol":"http","host":"stage5-auth-capture","port":18080}}'
-printf '%s' "$auth_route_json" >"$auth_route_path"
-chmod 0444 "$auth_route_path"
-auth_route_sha="sha256:$(sha256sum "$auth_route_path" | awk '{print $1}')"
-
-docker run -d --name "$gateway_container" --network "$internal_network" \
-  "${gateway_security_args[@]}" \
-  --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
-  --mount type=bind,source="$auth_route_path",target=/etc/cyberstrike/upstream.json,readonly \
-  --mount type=bind,source="$auth_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
-  "$CYBERSTRIKE_EGRESS_IMAGE" run \
-  --snapshot-path /etc/cyberstrike/boundary.json \
-  --snapshot-id "$auth_snapshot_id" \
-  --snapshot-sha256 "$auth_snapshot_sha" \
-  --upstream-route-path /etc/cyberstrike/upstream.json \
-  --upstream-route-id "$auth_route_id" \
-  --upstream-route-sha256 "$auth_route_sha" \
-  --auth-profiles-path /etc/cyberstrike/auth-profiles.json \
-  --auth-profiles-id "$auth_profiles_id" \
-  --auth-profiles-sha256 "$auth_profiles_sha" >/dev/null
-docker network connect --gw-priority 1 "$egress_network" "$gateway_container"
-
-for _ in $(seq 1 60); do
-  docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded' && break
-  sleep 0.1
-done
-if ! docker logs "$gateway_container" 2>&1 | grep -q 'boundary_snapshot_loaded'; then
-  docker inspect --format 'auth_gateway_state={{json .State}}' "$gateway_container" >&2 || true
-  docker logs "$gateway_container" >&2 || true
-  fail "auth-only gateway did not report its loaded snapshot"
-fi
-auth_health=$(docker exec "$gateway_container" /cyberstrike-egress check \
-  --snapshot-path /etc/cyberstrike/boundary.json \
-  --snapshot-id "$auth_snapshot_id" \
-  --snapshot-sha256 "$auth_snapshot_sha" \
-  --upstream-route-path /etc/cyberstrike/upstream.json \
-  --upstream-route-id "$auth_route_id" \
-  --upstream-route-sha256 "$auth_route_sha" \
-  --auth-profiles-path /etc/cyberstrike/auth-profiles.json \
-  --auth-profiles-id "$auth_profiles_id" \
-  --auth-profiles-sha256 "$auth_profiles_sha")
-grep -q "\"authProfilesId\":\"$auth_profiles_id\"" <<<"$auth_health" || fail "gateway health omitted the exact auth profile id"
-grep -q "\"authProfilesSha256\":\"$auth_profiles_sha\"" <<<"$auth_health" || fail "gateway health omitted the exact auth profile digest"
-[[ "$(docker inspect --format '{{len .Mounts}}' "$gateway_container")" == 3 ]] || fail "auth-only gateway does not have exactly three trusted mounts"
-auth_gateway_inspect=$(docker inspect "$gateway_container")
-if grep -Fq "$auth_secret_probe" <<<"$auth_gateway_inspect"; then
-  fail "auth-only credential leaked into gateway inspect metadata"
-fi
-if docker logs "$gateway_container" 2>&1 | grep -Fq "$auth_secret_probe"; then
-  fail "auth-only credential leaked into gateway logs"
-fi
-
-gateway_ip=$(docker inspect --format "{{with index .NetworkSettings.Networks \"$internal_network\"}}{{.IPAddress}}{{end}}" "$gateway_container")
-[[ -n "$gateway_ip" ]] || fail "auth-only gateway internal address is empty"
-proxy="http://$gateway_ip:3128"
-socks_proxy="socks5h://$gateway_ip:1080"
-docker run -d --name "$agent_container" --network "$internal_network" --dns "$gateway_ip" \
-  "${agent_security_args[@]}" \
-  "${agent_workspace_env[@]}" \
-  --env "HTTP_PROXY=$proxy" --env "HTTPS_PROXY=$proxy" --env "ALL_PROXY=$socks_proxy" --env 'NO_PROXY=' \
-  --env "http_proxy=$proxy" --env "https_proxy=$proxy" --env "all_proxy=$socks_proxy" --env 'no_proxy=' \
-  --entrypoint /bin/sh "$CYBERSTRIKE_AGENT_IMAGE" -c "$agent_keepalive_script" >/dev/null
-configure_agent_route "$agent_container" "$gateway_ip"
-assert_gateway_security "$gateway_container"
-assert_agent_security "$agent_container"
-agent_inspect=$(docker inspect "$agent_container")
-if grep -Fq "$auth_secret_probe" <<<"$agent_inspect"; then
-  fail "auth-only credential leaked into Agent metadata"
-fi
-expect_failure docker exec "$agent_container" test -e /etc/cyberstrike/auth-profiles.json
-auth_status=$(docker exec "$agent_container" curl -sS --connect-timeout 8 --max-time 15 \
-  -H 'X-Integration-Auth: agent-spoof-must-be-replaced' -o /dev/null -w '%{http_code}' http://example.com/ || true)
-if [[ "$auth_status" != 204 ]]; then
-  docker inspect --format 'auth_capture_state={{json .State}}' "$capture_container" >&2 || true
-  docker logs "$capture_container" >&2 || true
-  docker inspect --format 'auth_gateway_state={{json .State}}' "$gateway_container" >&2 || true
-  docker logs "$gateway_container" >&2 || true
-  fail "auth-only request returned $auth_status, want 204"
-fi
-capture_result=$(docker logs "$capture_container" 2>&1)
-grep -q '"authHeaderCount": 1' <<<"$capture_result" || fail "auth capture did not receive exactly one injected header"
-grep -q '"authMatch": true' <<<"$capture_result" || fail "auth capture did not receive the gateway credential"
-if grep -Fq "$auth_secret_probe" <<<"$capture_result"; then
-  fail "auth-only credential leaked into capture diagnostics"
-fi
-
-expect_failure docker run --rm --network none --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
-  --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
-  "$CYBERSTRIKE_EGRESS_IMAGE" check \
-  --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha"
-expect_failure docker run --rm --network none --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
-  --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
-  --mount type=bind,source="$auth_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
-  "$CYBERSTRIKE_EGRESS_IMAGE" check \
-  --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha" \
-  --auth-profiles-path /etc/cyberstrike/auth-profiles.json --auth-profiles-id "$cross_snapshot_auth_profiles_id" --auth-profiles-sha256 "$auth_profiles_sha"
-expect_failure docker run --rm --network none --read-only --user 65532:65532 --cap-drop ALL --security-opt no-new-privileges \
-  --mount type=bind,source="$auth_snapshot_path",target=/etc/cyberstrike/boundary.json,readonly \
-  --mount type=bind,source="$mismatch_profiles_path",target=/etc/cyberstrike/auth-profiles.json,readonly \
-  "$CYBERSTRIKE_EGRESS_IMAGE" check \
-  --snapshot-path /etc/cyberstrike/boundary.json --snapshot-id "$auth_snapshot_id" --snapshot-sha256 "$auth_snapshot_sha" \
-  --auth-profiles-path /etc/cyberstrike/auth-profiles.json --auth-profiles-id "auth-$auth_snapshot_id-bbbbbbbbbbbbbbbb" --auth-profiles-sha256 "$mismatch_profiles_sha"
-
-chmod 0644 "$auth_profiles_path"
-for _ in $(seq 1 60); do
-  [[ "$(docker inspect --format '{{.State.Running}}' "$gateway_container")" == false ]] && break
-  sleep 0.1
-done
-[[ "$(docker inspect --format '{{.State.Running}}' "$gateway_container")" == false ]] || fail "auth-only gateway ignored credential file permission drift"
-docker logs "$gateway_container" 2>&1 | grep '"httpPacket"' | grep -Fq "$auth_secret_probe" || \
-  fail "full packet audit omitted the authentication header sent upstream"
-expect_failure docker exec "$agent_container" curl -sS --connect-timeout 2 --max-time 4 -o /dev/null http://example.com/
 
 printf 'docker_topology=isolated internal=2 egress=1\n'
 printf 'proxy_protocol=allowed_http_%s public_service_ports=ordinary default_post_and_blocked_dns_gateway_denied\n' "$allowed_status"

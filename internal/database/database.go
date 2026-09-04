@@ -849,8 +849,8 @@ func (db *DB) initTables() error {
 	if err := db.initContainerRuntimeTables(); err != nil {
 		return fmt.Errorf("创建对话容器运行时表失败: %w", err)
 	}
-	if err := db.initEgressAuthProfileTables(); err != nil {
-		return fmt.Errorf("创建出站认证档案表失败: %w", err)
+	if err := db.initLegacyEgressAuthProfileTable(); err != nil {
+		return fmt.Errorf("初始化历史边界兼容表失败: %w", err)
 	}
 	if err := db.initBoundaryPolicyTables(); err != nil {
 		return fmt.Errorf("创建边界策略表失败: %w", err)

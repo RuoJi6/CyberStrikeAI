@@ -113,29 +113,3 @@ func TestLoadCredentialCipherRejectsUnsafeFiles(t *testing.T) {
 		t.Fatalf("symlink key error = %v", err)
 	}
 }
-
-func TestCredentialCipherSeparatesProxyAndAuthProfileNamespaces(t *testing.T) {
-	cipher, err := NewCredentialCipher(bytes.Repeat([]byte{0x33}, credentialKeyBytes))
-	if err != nil {
-		t.Fatal(err)
-	}
-	credential := []byte("gateway-only-auth-secret")
-	envelope, err := cipher.EncryptAuthProfile("shared-id", credential)
-	if err != nil {
-		t.Fatal(err)
-	}
-	plaintext, err := cipher.DecryptAuthProfile("shared-id", envelope)
-	if err != nil || !bytes.Equal(plaintext, credential) {
-		t.Fatalf("auth profile decrypt = %q, %v", plaintext, err)
-	}
-	if _, err := cipher.Decrypt("shared-id", envelope); !errors.Is(err, ErrCredentialEnvelopeInvalid) {
-		t.Fatalf("auth profile ciphertext was accepted in proxy namespace: %v", err)
-	}
-	proxyEnvelope, err := cipher.Encrypt("shared-id", credential)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cipher.DecryptAuthProfile("shared-id", proxyEnvelope); !errors.Is(err, ErrCredentialEnvelopeInvalid) {
-		t.Fatalf("proxy ciphertext was accepted in auth profile namespace: %v", err)
-	}
-}

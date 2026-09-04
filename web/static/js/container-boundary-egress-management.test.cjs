@@ -27,7 +27,6 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
         'boundary-policy-name',
         'boundary-policy-description',
 		'boundary-policy-default-action',
-		'boundary-policy-tls-bypass',
         'boundary-policy-rule-list',
         'boundary-rule-form',
         'boundary-rule-form-title',
@@ -54,21 +53,22 @@ test('边界规则页提供可检索分页的策略列表、使用关系和完�
 	assert.match(boundary, /boundary_page_size/);
 	assert.match(boundary, /boundary_q/);
 	assert.doesNotMatch(boundary, /tlsInspectionEnabled/);
-	assert.match(boundary, /tlsBypassDomains/);
+	assert.doesNotMatch(boundary, /tlsBypassDomains/);
 	assert.doesNotMatch(template, /id="boundary-policy-tls-enabled"/);
+	assert.doesNotMatch(template, /id="boundary-policy-tls-bypass"/);
     assert.match(boundary, /state\.selectedUsage/);
     assert.match(boundary, /window\.initBoundaryRulesPage = init/);
     assert.match(boundary, /function rulePathsLabel/);
     assert.match(boundary, /subtreePaths\.concat\(exactPaths\)/);
 	assert.match(template, /路径阻断可留空/);
-	assert.match(template, /boundary-rules\.js\?v=20260905-1/);
+	assert.match(template, /boundary-rules\.js\?v=20260905-2/);
 	assert.match(boundary, /defaultAction:/);
 	assert.match(boundary, /未命中默认/);
 	assert.match(boundary, /host = '\*'/);
 	assert.match(boundary, /路径阻断/);
 });
 
-test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () => {
+test('出站管理页只提供代理和代理组 CRUD', () => {
     for (const id of [
         'egress-resource-new',
         'egress-resource-search',
@@ -84,21 +84,20 @@ test('出站管理页提供代理、代理组和凭据档案的完整 CRUD', () 
         'egress-view-groups',
         'egress-group-form',
         'egress-group-list',
-        'egress-group-members',
-        'egress-view-auth',
-        'egress-auth-form',
-        'egress-auth-list',
-    ]) assert.match(template, new RegExp(`id="${id}"`));
+		'egress-group-members',
+	]) assert.match(template, new RegExp(`id="${id}"`));
 	assert.doesNotMatch(template, /id="egress-proxies-focus-title"/);
+	assert.doesNotMatch(template, /egress-view-auth|egress-auth-form|egress-auth-list/);
+	assert.doesNotMatch(template, /auth-only/);
 
-    for (const endpoint of ['egress-proxies', 'egress-proxy-groups', 'egress-auth-profiles']) {
-        assert.match(egress, new RegExp(`/api/${endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-    }
-    assert.match(egress, /jsonOptions\(id \? 'PUT' : 'POST', payload\)/);
-    assert.match(egress, /\{ method: 'DELETE' \}/);
-    assert.match(egress, /payload\.credentials = null/);
-    assert.match(egress, /payload\.credential = null/);
-    assert.match(egress, /credentialsConfigured/);
+	for (const endpoint of ['egress-proxies', 'egress-proxy-groups']) {
+		assert.match(egress, new RegExp(`/api/${endpoint.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+	}
+	assert.doesNotMatch(egress, /egress-auth-profiles/);
+	assert.match(egress, /jsonOptions\(id \? 'PUT' : 'POST', payload\)/);
+	assert.match(egress, /\{ method: 'DELETE' \}/);
+	assert.match(egress, /payload\.credentials = null/);
+	assert.match(egress, /credentialsConfigured/);
     assert.match(egress, /selectable\.has\(member\.proxyId\)/);
     assert.match(egress, /egress_view/);
 	assert.match(egress, /egress_page/);
@@ -115,22 +114,20 @@ test('新管理页不注入非受信 HTML，也不把凭据写入浏览器存储
         assert.doesNotMatch(source, /\b(?:localStorage|sessionStorage)\b/);
         assert.doesNotMatch(source, /credentialCiphertext/);
         assert.match(source, /\.textContent\s*=/);
-    }
-    assert.match(template, /id="egress-proxy-password" type="password"/);
-    assert.match(template, /id="egress-auth-credential" type="password"/);
-    assert.match(template, /id="egress-proxy-password"[^>]+autocomplete="new-password"/);
-    assert.match(template, /id="egress-auth-credential"[^>]+autocomplete="new-password"/);
+	}
+	assert.match(template, /id="egress-proxy-password" type="password"/);
+	assert.match(template, /id="egress-proxy-password"[^>]+autocomplete="new-password"/);
+	assert.doesNotMatch(template, /egress-auth-credential/);
 });
 
 test('中英文文案与宽窄屏布局覆盖新管理功能', () => {
     const keys = [
         'boundaryConversation', 'boundaryLoading', 'boundaryReady', 'boundarySnapshotHash',
         'boundaryRulesTitle', 'boundaryRate', 'boundaryNoConversations',
-        'boundaryAnyMethod', 'boundaryDefaultAllow',
-        'boundaryTLSBypassDomains', 'boundaryTLSBypassHint', 'activityHTTPS',
-        'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab', 'egressAuthTab',
-        'createProxy', 'createGroup', 'createAuth', 'credentialsConfigured', 'clearCredentials',
-        'groupMembers', 'priority', 'weight', 'proxyDeleteConfirm', 'groupDeleteConfirm', 'authDeleteConfirm',
+        'boundaryAnyMethod', 'boundaryDefaultAllow', 'activityHTTPS',
+		'egressLoading', 'egressReady', 'egressProxiesTab', 'egressGroupsTab',
+		'createProxy', 'createGroup', 'credentialsConfigured', 'clearCredentials',
+		'groupMembers', 'priority', 'weight', 'proxyDeleteConfirm', 'groupDeleteConfirm',
     ];
     for (const locale of [zh, en]) {
         for (const key of keys) assert.equal(typeof locale.containerManagement[key], 'string', key);

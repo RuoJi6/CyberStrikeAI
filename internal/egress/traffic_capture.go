@@ -99,7 +99,7 @@ func boundedAttributionValue(value string) string {
 	return value
 }
 
-func trafficHeaders(headers http.Header, host, redactHeader string) []traffic.Header {
+func trafficHeaders(headers http.Header, host string) []traffic.Header {
 	result := make([]traffic.Header, 0, len(headers)+1)
 	names := make([]string, 0, len(headers))
 	for name := range headers {
@@ -113,9 +113,6 @@ func trafficHeaders(headers http.Header, host, redactHeader string) []traffic.He
 		}
 		values := headers.Values(rawName)
 		for _, value := range values {
-			if redactHeader != "" && strings.EqualFold(name, redactHeader) {
-				value = "[REDACTED:AUTH_PROFILE]"
-			}
 			result = append(result, traffic.Header{Name: name, Value: value})
 		}
 	}

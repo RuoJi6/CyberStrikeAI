@@ -197,7 +197,7 @@ func permissionForRequest(method, fullPath string) string {
 		return "boundary:read"
 	case strings.HasPrefix(path, "/boundary-policies"):
 		return crudPermission(method, "boundary")
-	case strings.HasPrefix(path, "/egress-proxies"), strings.HasPrefix(path, "/egress-proxy-groups"), strings.HasPrefix(path, "/egress-auth-profiles"):
+	case strings.HasPrefix(path, "/egress-proxies"), strings.HasPrefix(path, "/egress-proxy-groups"):
 		return crudPermission(method, "egress")
 	case strings.HasPrefix(path, "/egress-defaults"):
 		if method == http.MethodGet || method == http.MethodHead {
@@ -274,8 +274,6 @@ func resourceAllowed(c *gin.Context, db *database.DB) bool {
 		return db.UserCanAccessResource(session.UserID, session.Scope, "egress_proxy", c.Param("id"))
 	case strings.HasPrefix(path, "/egress-proxy-groups/:id"):
 		return db.UserCanAccessResource(session.UserID, session.Scope, "egress_proxy_group", c.Param("id"))
-	case strings.HasPrefix(path, "/egress-auth-profiles/:id"):
-		return db.UserCanAccessResource(session.UserID, session.Scope, "egress_auth_profile", c.Param("id"))
 	case strings.HasPrefix(path, "/conversations/:id"):
 		return db.UserCanAccessResource(session.UserID, session.Scope, "conversation", c.Param("id"))
 	case strings.HasPrefix(path, "/messages/:id/process-details"):

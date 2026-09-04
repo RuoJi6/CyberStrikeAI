@@ -63,10 +63,6 @@ func (c *CredentialCipher) Encrypt(proxyID string, plaintext []byte) (string, er
 	return c.encryptScoped("proxy", proxyID, plaintext)
 }
 
-func (c *CredentialCipher) EncryptAuthProfile(profileID string, plaintext []byte) (string, error) {
-	return c.encryptScoped("auth-profile", profileID, plaintext)
-}
-
 func (c *CredentialCipher) encryptScoped(scope, recordID string, plaintext []byte) (string, error) {
 	if c == nil || c.aead == nil {
 		return "", errors.New("egress credential cipher is not configured")
@@ -89,10 +85,6 @@ func (c *CredentialCipher) encryptScoped(scope, recordID string, plaintext []byt
 
 func (c *CredentialCipher) Decrypt(proxyID, envelope string) ([]byte, error) {
 	return c.decryptScoped("proxy", proxyID, envelope)
-}
-
-func (c *CredentialCipher) DecryptAuthProfile(profileID, envelope string) ([]byte, error) {
-	return c.decryptScoped("auth-profile", profileID, envelope)
 }
 
 func (c *CredentialCipher) decryptScoped(scope, recordID, envelope string) ([]byte, error) {

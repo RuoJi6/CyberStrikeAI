@@ -91,7 +91,7 @@ func TestConversationBoundarySnapshotCanonicalJSONAndSHA256(t *testing.T) {
 	}
 }
 
-func TestConversationBoundarySnapshotFreezesTLSInspectionAndCanonicalBypassDomains(t *testing.T) {
+func TestConversationBoundarySnapshotAlwaysEnablesTLSInspectionWithoutBypass(t *testing.T) {
 	db := newBoundarySnapshotTestDB(t)
 	policy, err := db.CreateBoundaryPolicy(context.Background(), BoundaryPolicy{
 		ID: "tls-policy", Name: "TLS inspection", TLSInspectionEnabled: true,
@@ -111,10 +111,10 @@ func TestConversationBoundarySnapshotFreezesTLSInspectionAndCanonicalBypassDomai
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Document.SchemaVersion != 5 || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 2 || snapshot.Document.TLSInspection.BypassDomains[0] != "pinned.example" || snapshot.Document.NetworkAccess == nil || snapshot.Document.NetworkAccess.AllowRestrictedTargets {
+	if snapshot.Document.SchemaVersion != 5 || snapshot.Document.TLSInspection == nil || !snapshot.Document.TLSInspection.Enabled || len(snapshot.Document.TLSInspection.BypassDomains) != 0 || snapshot.Document.NetworkAccess == nil || snapshot.Document.NetworkAccess.AllowRestrictedTargets {
 		t.Fatalf("TLS snapshot = %#v", snapshot.Document)
 	}
-	if !strings.Contains(snapshot.CanonicalJSON, `"tlsInspection":{"enabled":true,"bypassDomains":["pinned.example","updates.example"]}`) {
+	if !strings.Contains(snapshot.CanonicalJSON, `"tlsInspection":{"enabled":true,"bypassDomains":[]}`) {
 		t.Fatalf("TLS canonical JSON = %s", snapshot.CanonicalJSON)
 	}
 	if _, err := db.UpdateBoundaryPolicy(context.Background(), BoundaryPolicy{ID: policy.ID, Name: policy.Name}); err != nil {

@@ -42,7 +42,6 @@ type ProxyOptions struct {
 	LookupNetIP             LookupNetIPFunc
 	Transport               http.RoundTripper
 	UpstreamRoute           *UpstreamRoute
-	AuthProfiles            *AuthProfilesDocument
 	UpstreamTLSConfig       *tls.Config
 	Now                     func() time.Time
 	ClientHelloTimeout      time.Duration
@@ -71,7 +70,6 @@ type Proxy struct {
 	dialContext         DialContextFunc
 	lookupNetIP         LookupNetIPFunc
 	transport           http.RoundTripper
-	authProfiles        map[string]GatewayAuthProfile
 	now                 func() time.Time
 	clientHelloTimeout  time.Duration
 	maxClientHello      int
@@ -195,10 +193,6 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 	if options.UpstreamRoute != nil && options.Transport != nil {
 		return nil, errors.New("egress upstream route cannot be combined with a custom HTTP transport")
 	}
-	authProfiles, err := authProfilesForPolicy(policy, options.AuthProfiles)
-	if err != nil {
-		return nil, err
-	}
 	if options.TLSInspection != nil {
 		if err := validateTLSInspectionPolicy(options.TLSInspection); err != nil {
 			return nil, err
@@ -240,7 +234,7 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		maxHello = defaultMaxClientHello
 	}
 	proxy := &Proxy{
-		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, authProfiles: authProfiles, now: now,
+		policy: policy, dialContext: dialContext, lookupNetIP: lookupNetIP, transport: options.Transport, now: now,
 		clientHelloTimeout: helloTimeout, maxClientHello: maxHello, activitySink: options.ActivitySink, guard: newRequestGuard(),
 		tlsInspection: options.TLSInspection, tlsAuthority: options.TLSAuthority,
 		httpPacer:           newTrafficPacer(options.HTTPRequestsPerSecond),
@@ -263,38 +257,6 @@ func NewProxy(policy *boundary.Policy, options ProxyOptions) (*Proxy, error) {
 		}
 	}
 	return proxy, nil
-}
-
-func authProfilesForPolicy(policy *boundary.Policy, document *AuthProfilesDocument) (map[string]GatewayAuthProfile, error) {
-	if policy == nil {
-		return nil, errors.New("egress proxy policy is required")
-	}
-	requiredProfiles := policy.AuthProfileIDs()
-	profiles := make(map[string]GatewayAuthProfile, len(requiredProfiles))
-	if len(requiredProfiles) == 0 {
-		if document != nil {
-			return nil, errors.New("egress auth profiles are not referenced by the boundary policy")
-		}
-		return profiles, nil
-	}
-	if document == nil {
-		return nil, errors.New("egress auth profiles are required by the boundary policy")
-	}
-	copy := *document
-	copy.Profiles = append([]GatewayAuthProfile(nil), document.Profiles...)
-	if err := validateAuthProfilesDocument(&copy); err != nil {
-		return nil, fmt.Errorf("configure egress auth profiles: %w", err)
-	}
-	profiles = copy.profileMap()
-	if len(profiles) != len(requiredProfiles) {
-		return nil, errors.New("egress auth profiles do not exactly match the boundary policy")
-	}
-	for _, id := range requiredProfiles {
-		if _, ok := profiles[id]; !ok {
-			return nil, fmt.Errorf("egress auth profile %q is missing", id)
-		}
-	}
-	return profiles, nil
 }
 
 func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -386,18 +348,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
 		return
 	}
-	var authProfile *GatewayAuthProfile
-	if decision.Effect == boundary.EffectAuthOnly {
-		profile, ok := p.authProfiles[decision.AuthProfileID]
-		if !decision.Allowed || !ok {
-			event.Outcome = "auth_profile_unavailable"
-			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, "auth-profile-unavailable", decision.RuleID)
-			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
-			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
-			return
-		}
-		authProfile = &profile
-	} else if !proxyDecisionAllowed(decision) {
+	if !proxyDecisionAllowed(decision) {
 		event.Outcome = "policy_denied"
 		headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, decision.Reason, decision.RuleID)
 		captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
@@ -430,7 +381,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	outbound.Host = canonicalAuthority
 	outbound = outbound.WithContext(context.WithValue(outbound.Context(), proxyDialContextKey{}, proxyDialAuthorization{
 		rawURL: outbound.URL.String(), method: outbound.Method, target: decision.Target,
-		ruleID: decision.RuleID, effect: decision.Effect, authProfileID: decision.AuthProfileID, observation: dialObservation,
+		ruleID: decision.RuleID, effect: decision.Effect, observation: dialObservation,
 	}))
 	outbound.Header = request.Header.Clone()
 	removeHopByHopHeaders(outbound.Header)
@@ -438,11 +389,8 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	outbound.Header.Del("X-Forwarded-For")
 	outbound.Header.Del("X-Forwarded-Host")
 	outbound.Header.Del("X-Forwarded-Proto")
-	if authProfile != nil {
-		applyAuthProfile(outbound.Header, *authProfile)
-	}
 	// From this point the packet projection mirrors the actual request sent to
-	// the upstream, including any configured authentication profile and after
+	// the upstream after
 	// removing proxy-only/hop-by-hop headers.
 	packet = newHTTPPacket(outbound, event.Path)
 	fullRequestCapture := &fullBodyCapture{}
@@ -467,14 +415,14 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, denied.Reason, denied.RuleID)
 			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
 			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
-			p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, trafficFailureSummary(event.Outcome))
+			p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, trafficFailureSummary(event.Outcome))
 			return
 		}
 		event.Outcome, _ = classifyTrafficFailure(err)
 		event.HTTPStatus = http.StatusBadGateway
 		http.Error(writer, "upstream HTTP request failed", http.StatusBadGateway)
 		_, summary := classifyTrafficFailure(err)
-		p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, summary)
+		p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, summary)
 		return
 	}
 	defer response.Body.Close()
@@ -511,7 +459,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	if copyErr != nil {
 		errorCode, errorSummary = event.Outcome, trafficFailureSummary(event.Outcome)
 	}
-	p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, authProfile, fullRequestCapture, response, fullResponseCapture, startedAt, completedAt, copyErr == nil, errorCode, errorSummary)
+	p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, fullRequestCapture, response, fullResponseCapture, startedAt, completedAt, copyErr == nil, errorCode, errorSummary)
 }
 
 func (p *Proxy) emitForwardTrafficEvidence(
@@ -520,7 +468,6 @@ func (p *Proxy) emitForwardTrafficEvidence(
 	attribution trafficAttribution,
 	decision boundary.Decision,
 	event ActivityEvent,
-	authProfile *GatewayAuthProfile,
 	requestCapture *fullBodyCapture,
 	response *http.Response,
 	responseCapture *fullBodyCapture,
@@ -532,10 +479,6 @@ func (p *Proxy) emitForwardTrafficEvidence(
 		return
 	}
 	transactionID := uuid.NewString()
-	redactHeader := ""
-	if authProfile != nil {
-		redactHeader = authProfile.HeaderName
-	}
 	requestProtocol := strings.TrimSpace(request.Proto)
 	if requestProtocol == "" {
 		requestProtocol = "HTTP/1.1"
@@ -544,7 +487,7 @@ func (p *Proxy) emitForwardTrafficEvidence(
 	messages := []traffic.Message{requestCapture.message(
 		transactionID, traffic.StageUpstreamRequest, traffic.MessageKindRequest,
 		request.Method, path, 0, requestProtocol,
-		trafficHeaders(request.Header, request.Host, redactHeader), startedAt,
+		trafficHeaders(request.Header, request.Host), startedAt,
 	)}
 	if response != nil && responseCapture != nil {
 		responseProtocol := strings.TrimSpace(response.Proto)
@@ -554,7 +497,7 @@ func (p *Proxy) emitForwardTrafficEvidence(
 		message := responseCapture.message(
 			transactionID, traffic.StageUpstreamResponse, traffic.MessageKindResponse,
 			"", "", response.StatusCode, responseProtocol,
-			trafficHeaders(response.Header, "", ""), completedAt,
+			trafficHeaders(response.Header, ""), completedAt,
 		)
 		message.Complete = responseComplete && message.Complete
 		messages = append(messages, message)
@@ -629,7 +572,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		return
 	}
 	attribution := consumeTrafficAttribution(request.Context(), request.Header)
-	interceptTLS := p.shouldInterceptTLS(targetHost)
+	interceptTLS := p.shouldInterceptTLS()
 	decision := boundary.Decision{}
 	if interceptTLS {
 		target, normalizeErr := boundary.NormalizeRequestTarget(targetURL, http.MethodConnect)
@@ -832,7 +775,7 @@ func (p *Proxy) connectTrafficEvidence(
 		empty.message(
 			transactionID, traffic.StageClientRequest, traffic.MessageKindRequest,
 			http.MethodConnect, authority, 0, protocol,
-			trafficHeaders(request.Header, authority, ""), startedAt,
+			trafficHeaders(request.Header, authority), startedAt,
 		),
 	}
 	if clientResponseStatus > 0 {
@@ -840,7 +783,7 @@ func (p *Proxy) connectTrafficEvidence(
 		_, _ = responseCapture.Write([]byte(clientResponseBody))
 		messages = append(messages, responseCapture.message(
 			transactionID, traffic.StageClientResponse, traffic.MessageKindResponse,
-			"", "", clientResponseStatus, "HTTP/1.1", trafficHeaders(clientResponseHeaders, "", ""), completedAt,
+			"", "", clientResponseStatus, "HTTP/1.1", trafficHeaders(clientResponseHeaders, ""), completedAt,
 		))
 	}
 	return traffic.Transaction{
@@ -879,16 +822,8 @@ func (p *Proxy) connectTrafficEvidence(
 	}, messages
 }
 
-func (p *Proxy) shouldInterceptTLS(host string) bool {
-	if p == nil || p.tlsInspection == nil || !p.tlsInspection.Enabled || p.tlsAuthority == nil {
-		return false
-	}
-	for _, bypass := range p.tlsInspection.BypassDomains {
-		if host == bypass || strings.HasSuffix(host, "."+bypass) {
-			return false
-		}
-	}
-	return true
+func (p *Proxy) shouldInterceptTLS() bool {
+	return p != nil && p.tlsInspection != nil && p.tlsInspection.Enabled && p.tlsAuthority != nil
 }
 
 type replayConn struct {
@@ -967,13 +902,12 @@ func (p *Proxy) serveInterceptedTLS(client net.Conn, buffered *bufio.Reader, cli
 type proxyDialContextKey struct{}
 
 type proxyDialAuthorization struct {
-	rawURL        string
-	method        string
-	target        boundary.RequestTarget
-	ruleID        string
-	effect        boundary.Effect
-	authProfileID string
-	observation   *activityDialObservation
+	rawURL      string
+	method      string
+	target      boundary.RequestTarget
+	ruleID      string
+	effect      boundary.Effect
+	observation *activityDialObservation
 }
 
 type resolvedPolicyDenialError struct {
@@ -1078,9 +1012,7 @@ func (p *Proxy) dialAuthorized(ctx context.Context, authorization proxyDialAutho
 	if !decision.Allowed {
 		return nil, &resolvedPolicyDenialError{decision: decision}
 	}
-	if decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || decision.AuthProfileID != authorization.authProfileID ||
-		(decision.Effect == boundary.EffectAuthOnly && p.authProfiles[decision.AuthProfileID].ID == "") ||
-		(decision.Effect != boundary.EffectAuthOnly && !proxyDecisionAllowed(decision)) {
+	if decision.RuleID != authorization.ruleID || decision.Effect != authorization.effect || !proxyDecisionAllowed(decision) {
 		return nil, errors.New("resolved egress target failed policy re-evaluation")
 	}
 	var lastErr error

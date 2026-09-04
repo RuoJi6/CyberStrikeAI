@@ -46,11 +46,11 @@ func TestPolicyDefaultsToDenyAndUsesFixedPriority(t *testing.T) {
 			url: "https://example.com/admin/users", method: "GET", wantRuleID: "blocked-path", wantReason: ReasonBlockedPath,
 		},
 		{
-			name: "auth only is an explicit allow marker",
+			name: "legacy auth only fails closed after credential injection removal",
 			rules: []Rule{
 				{ID: "auth", Effect: EffectAuthOnly, AuthProfileID: "profile-1", Target: RuleTarget{Host: "auth.example"}},
 			},
-			url: "https://auth.example/", method: "GET", wantAllow: true, wantRuleID: "auth", wantReason: ReasonAuthOnly,
+			url: "https://auth.example/", method: "GET", wantRuleID: "auth", wantReason: ReasonBlockedTarget,
 		},
 	}
 	for _, test := range tests {

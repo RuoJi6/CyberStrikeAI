@@ -372,19 +372,7 @@ func (m *DockerManager) emitBoundaryBlockFeedback(ctx context.Context, spec Runt
 	if !ok {
 		return
 	}
-	groups := make([]execBoundaryFeedbackGroup, 0, len(events))
-	groupIndexes := make(map[string]int, len(events))
-	for _, event := range events {
-		target := boundaryFeedbackTarget(event)
-		rule, reason := boundaryFeedbackRuleReason(event)
-		key := strings.Join([]string{event.RequestType, target, rule, reason}, "\x00")
-		if index, exists := groupIndexes[key]; exists {
-			groups[index].count++
-			continue
-		}
-		groupIndexes[key] = len(groups)
-		groups = append(groups, execBoundaryFeedbackGroup{event: event, count: 1})
-	}
+	groups := groupBoundaryFeedbackEvents(events)
 
 	var message strings.Builder
 	fmt.Fprintf(&message, "\n[CyberStrikeAI 网络边界] 本次工具执行触发 %d 次网络阻断，以下请求未到达目标：\n", len(events))
@@ -393,16 +381,46 @@ func (m *DockerManager) emitBoundaryBlockFeedback(ctx context.Context, spec Runt
 		visible = maxExecBoundaryFeedbackTargets
 	}
 	for _, group := range groups[:visible] {
-		target := boundaryFeedbackTarget(group.event)
 		rule, reason := boundaryFeedbackRuleReason(group.event)
-		fmt.Fprintf(&message, "- %s %s（%d 次）：原因 %s，规则 %s\n",
-			strings.ToUpper(group.event.RequestType), target, group.count, reason, rule)
+		fmt.Fprintf(&message, "- %s（%d 次）：原因 %s，规则 %s\n",
+			boundaryFeedbackRequest(group.event), group.count, boundaryFeedbackReasonLabel(reason), rule)
 	}
 	if hidden := len(groups) - visible; hidden > 0 {
 		fmt.Fprintf(&message, "- 其他 %d 组被阻断目标请在出站审计中查看。\n", hidden)
 	}
 	message.WriteString("当前边界规则中网络策略已明确禁止上述访问，请停止测试上述访问。\n")
 	_ = sink(ExecStreamStderr, []byte(message.String()))
+}
+
+func groupBoundaryFeedbackEvents(events []egress.ActivityEvent) []execBoundaryFeedbackGroup {
+	groups := make([]execBoundaryFeedbackGroup, 0, len(events))
+	groupIndexes := make(map[string]int, len(events))
+	for _, event := range events {
+		rule, reason := boundaryFeedbackRuleReason(event)
+		key := strings.Join([]string{boundaryFeedbackRequest(event), rule, reason}, "\x00")
+		if index, exists := groupIndexes[key]; exists {
+			groups[index].count++
+			continue
+		}
+		groupIndexes[key] = len(groups)
+		groups = append(groups, execBoundaryFeedbackGroup{event: event, count: 1})
+	}
+	return groups
+}
+
+func boundaryFeedbackRequest(event egress.ActivityEvent) string {
+	requestType := strings.ToUpper(strings.TrimSpace(event.RequestType))
+	target := boundaryFeedbackTarget(event)
+	if event.RequestType != egress.ActivityRequestHTTP && event.RequestType != egress.ActivityRequestHTTPS {
+		return strings.TrimSpace(requestType + " " + target)
+	}
+	method := strings.ToUpper(strings.TrimSpace(event.Method))
+	path := strings.TrimSpace(event.Path)
+	if path == "" {
+		path = "/"
+	}
+	scheme := strings.ToLower(strings.TrimSpace(event.RequestType))
+	return strings.TrimSpace(requestType + " " + method + " " + scheme + "://" + target + path)
 }
 
 func boundaryFeedbackTarget(event egress.ActivityEvent) string {
@@ -436,6 +454,13 @@ func boundaryFeedbackRuleReason(event egress.ActivityEvent) (string, string) {
 		}
 	}
 	return rule, reason
+}
+
+func boundaryFeedbackReasonLabel(reason string) string {
+	if reason == boundary.ReasonBlockedPath {
+		return "路径阻断"
+	}
+	return reason
 }
 
 func (m *DockerManager) terminateExecProcess(spec RuntimeSpec, expected Runtime, controlFile string) error {

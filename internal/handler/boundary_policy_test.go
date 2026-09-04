@@ -92,7 +92,6 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 
 	created := performBoundaryJSON(router, http.MethodPost, "/api/boundary-policies", map[string]interface{}{
 		"name": "UI editable", "description": "draft", "tlsInspectionEnabled": true,
-		"tlsBypassDomains": []string{"Pinned.Example.", "updates.example"},
 	})
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
@@ -102,7 +101,7 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	if policy.ID == "" || policy.Name != "UI editable" || policy.DefaultAction != database.BoundaryDefaultActionDeny || policy.Rules == nil ||
-		!policy.TLSInspectionEnabled || len(policy.TLSBypassDomains) != 2 || policy.TLSBypassDomains[0] != "pinned.example" {
+		!policy.TLSInspectionEnabled || strings.Contains(created.Body.String(), `"tlsBypassDomains"`) {
 		t.Fatalf("created policy = %#v", policy)
 	}
 
@@ -145,8 +144,7 @@ func TestBoundaryPolicyDraftCRUDProvidesEditableRules(t *testing.T) {
 
 	policyUpdated := performBoundaryJSON(router, http.MethodPut, "/api/boundary-policies/"+policy.ID, map[string]interface{}{
 		"name": "UI edited", "description": "updated draft", "tlsInspectionEnabled": false,
-		"defaultAction":    "allow",
-		"tlsBypassDomains": []string{},
+		"defaultAction": "allow",
 	})
 	if policyUpdated.Code != http.StatusOK || !strings.Contains(policyUpdated.Body.String(), "blocked.example") ||
 		!strings.Contains(policyUpdated.Body.String(), `"tlsInspectionEnabled":true`) || !strings.Contains(policyUpdated.Body.String(), `"defaultAction":"allow"`) {
@@ -425,13 +423,19 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	paths := spec["paths"].(map[string]interface{})
+	if _, exists := paths["/api/egress-auth-profiles"]; exists {
+		t.Fatal("retired credential profile collection remains in OpenAPI")
+	}
+	if _, exists := paths["/api/egress-auth-profiles/{id}"]; exists {
+		t.Fatal("retired credential profile detail remains in OpenAPI")
+	}
 	listPath, ok := paths["/api/boundary-policies"].(map[string]interface{})
 	if !ok || listPath["get"] == nil || listPath["post"] == nil {
 		t.Fatalf("boundary list path = %#v", listPath)
 	}
 	createOperation := listPath["post"].(map[string]interface{})
 	createDescription, _ := createOperation["description"].(string)
-	if !strings.Contains(createDescription, "容器 HTTPS 完整审计默认开启，不依赖是否选择边界策略") || strings.Contains(createDescription, "默认关闭") {
+	if !strings.Contains(createDescription, "HTTPS 完整审计始终开启并尝试解密所有目标，不依赖是否选择边界策略") || strings.Contains(createDescription, "默认关闭") {
 		t.Fatalf("boundary create description still couples HTTPS inspection to policy selection: %q", createDescription)
 	}
 	detailPath, ok := paths["/api/boundary-policies/{id}"].(map[string]interface{})
@@ -463,6 +467,9 @@ func TestBoundaryPolicySimulationIsDocumentedInOpenAPI(t *testing.T) {
 	boundaryWriteProperties := boundaryWrite["properties"].(map[string]interface{})
 	if _, exposed := boundaryWriteProperties["tlsInspectionEnabled"]; exposed {
 		t.Fatal("BoundaryPolicyWrite must not expose a TLS inspection switch")
+	}
+	if _, exposed := boundaryWriteProperties["tlsBypassDomains"]; exposed {
+		t.Fatal("BoundaryPolicyWrite must not expose legacy TLS bypass domains")
 	}
 	snapshotSchema, ok := schemas["ConversationBoundarySnapshot"].(map[string]interface{})
 	if !ok {

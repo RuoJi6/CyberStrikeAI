@@ -28,6 +28,32 @@ var (
 	ErrBoundaryPolicyInUse    = errors.New("boundary policy is in use")
 )
 
+// The legacy credential table is retained only because historical boundary
+// rule rows and immutable snapshots may still reference it through SQLite
+// foreign keys. There is intentionally no CRUD API or runtime materializer for
+// these values anymore.
+const createLegacyEgressAuthProfilesTable = `
+CREATE TABLE IF NOT EXISTS egress_auth_profiles (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	header_name TEXT NOT NULL,
+	enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
+	credential_ciphertext TEXT NOT NULL DEFAULT '',
+	credential_updated_at DATETIME,
+	owner_user_id TEXT NOT NULL,
+	created_at DATETIME NOT NULL,
+	updated_at DATETIME NOT NULL,
+	CHECK (length(trim(name)) BETWEEN 1 AND 120),
+	CHECK (length(trim(header_name)) BETWEEN 1 AND 128),
+	CHECK (length(trim(owner_user_id)) > 0),
+	CHECK (credential_ciphertext = '' OR credential_ciphertext GLOB 'v1.*.*')
+);`
+
+func (db *DB) initLegacyEgressAuthProfileTable() error {
+	_, err := db.Exec(createLegacyEgressAuthProfilesTable)
+	return err
+}
+
 const createBoundaryPoliciesTable = `
 CREATE TABLE IF NOT EXISTS boundary_policies (
 	id TEXT PRIMARY KEY,
@@ -125,15 +151,18 @@ CREATE TABLE IF NOT EXISTS conversation_boundary_rebuilds (
 );`
 
 type BoundaryPolicy struct {
-	ID                   string    `json:"id"`
-	Name                 string    `json:"name"`
-	Description          string    `json:"description"`
-	DefaultAction        string    `json:"defaultAction"`
-	TLSInspectionEnabled bool      `json:"tlsInspectionEnabled"`
-	TLSBypassDomains     []string  `json:"tlsBypassDomains"`
-	OwnerUserID          string    `json:"owner_user_id,omitempty"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
+	ID                   string `json:"id"`
+	Name                 string `json:"name"`
+	Description          string `json:"description"`
+	DefaultAction        string `json:"defaultAction"`
+	TLSInspectionEnabled bool   `json:"tlsInspectionEnabled"`
+	// TLSBypassDomains is retained only so legacy database rows and callers can
+	// be upgraded without a schema-breaking migration. It is always cleared and
+	// is never serialized or applied to a runtime.
+	TLSBypassDomains []string  `json:"-"`
+	OwnerUserID      string    `json:"owner_user_id,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type BoundaryRateLimit struct {
@@ -143,15 +172,17 @@ type BoundaryRateLimit struct {
 }
 
 type BoundaryPolicyRule struct {
-	ID            string            `json:"id"`
-	PolicyID      string            `json:"policy_id"`
-	Effect        boundary.Effect   `json:"effect"`
-	Host          string            `json:"host"`
-	Schemes       []string          `json:"schemes"`
-	Ports         []int             `json:"ports"`
-	PathPrefixes  []string          `json:"pathPrefixes"`
-	Methods       []string          `json:"methods"`
-	AuthProfileID *string           `json:"authProfileId"`
+	ID           string          `json:"id"`
+	PolicyID     string          `json:"policy_id"`
+	Effect       boundary.Effect `json:"effect"`
+	Host         string          `json:"host"`
+	Schemes      []string        `json:"schemes"`
+	Ports        []int           `json:"ports"`
+	PathPrefixes []string        `json:"pathPrefixes"`
+	Methods      []string        `json:"methods"`
+	// AuthProfileID is read only for historical rows. New and updated rules
+	// cannot reference credential profiles, and the field is not exposed.
+	AuthProfileID *string           `json:"-"`
 	RateLimit     BoundaryRateLimit `json:"rateLimit"`
 	ExpiresAt     *time.Time        `json:"expiresAt"`
 	Position      int               `json:"position"`
@@ -273,6 +304,7 @@ func (db *DB) initBoundaryPolicyTables() error {
 
 func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (BoundaryPolicy, error) {
 	policy.TLSInspectionEnabled = true
+	policy.TLSBypassDomains = []string{}
 	var err error
 	policy.DefaultAction, err = normalizeBoundaryDefaultAction(policy.DefaultAction)
 	if err != nil {
@@ -291,10 +323,6 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 		return BoundaryPolicy{}, fmt.Errorf("boundary policy name or description is too long")
 	}
 	policy.OwnerUserID = strings.TrimSpace(policy.OwnerUserID)
-	policy.TLSBypassDomains, err = normalizeTLSBypassDomains(policy.TLSBypassDomains)
-	if err != nil {
-		return BoundaryPolicy{}, err
-	}
 	bypassJSON, _ := json.Marshal(policy.TLSBypassDomains)
 	now := time.Now().UTC()
 	if policy.CreatedAt.IsZero() {
@@ -325,6 +353,7 @@ func (db *DB) CreateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 // bound to conversations are intentionally unaffected until an explicit rebuild.
 func (db *DB) UpdateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (BoundaryPolicy, error) {
 	policy.TLSInspectionEnabled = true
+	policy.TLSBypassDomains = []string{}
 	var err error
 	policy.ID = strings.TrimSpace(policy.ID)
 	policy.Name = strings.TrimSpace(policy.Name)
@@ -334,10 +363,6 @@ func (db *DB) UpdateBoundaryPolicy(ctx context.Context, policy BoundaryPolicy) (
 	}
 	if len(policy.Name) > maxBoundaryPolicyNameBytes || len(policy.Description) > maxBoundaryPolicyDescriptionBytes {
 		return BoundaryPolicy{}, fmt.Errorf("boundary policy name or description is too long")
-	}
-	policy.TLSBypassDomains, err = normalizeTLSBypassDomains(policy.TLSBypassDomains)
-	if err != nil {
-		return BoundaryPolicy{}, err
 	}
 	bypassJSON, _ := json.Marshal(policy.TLSBypassDomains)
 	existing, err := db.GetBoundaryPolicy(ctx, policy.ID)
@@ -502,9 +527,7 @@ func (db *DB) GetBoundaryPolicy(ctx context.Context, policyID string) (BoundaryP
 		return BoundaryPolicy{}, err
 	}
 	policy.OwnerUserID = strings.TrimSpace(owner.String)
-	if err := json.Unmarshal([]byte(bypassJSON), &policy.TLSBypassDomains); err != nil {
-		return BoundaryPolicy{}, fmt.Errorf("decode TLS bypass domains: %w", err)
-	}
+	policy.TLSBypassDomains = []string{}
 	policy.CreatedAt = parseDBTime(createdAt)
 	policy.UpdatedAt = parseDBTime(updatedAt)
 	return policy, nil
@@ -544,9 +567,7 @@ func (db *DB) ListBoundaryPolicies(ctx context.Context, userID, scope string) ([
 			return nil, fmt.Errorf("scan boundary policy: %w", err)
 		}
 		policy.OwnerUserID = strings.TrimSpace(owner.String)
-		if err := json.Unmarshal([]byte(bypassJSON), &policy.TLSBypassDomains); err != nil {
-			return nil, fmt.Errorf("decode TLS bypass domains: %w", err)
-		}
+		policy.TLSBypassDomains = []string{}
 		policy.CreatedAt = parseDBTime(createdAt)
 		policy.UpdatedAt = parseDBTime(updatedAt)
 		policies = append(policies, policy)
@@ -627,14 +648,6 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	if err := validateBoundaryRuleAuthMarker(&rule); err != nil {
 		return BoundaryPolicyRule{}, err
 	}
-	if rule.AuthProfileID != nil {
-		if _, err := db.GetEgressAuthProfile(ctx, *rule.AuthProfileID); err != nil {
-			if errors.Is(err, ErrEgressAuthProfileNotFound) {
-				return BoundaryPolicyRule{}, fmt.Errorf("auth-only boundary rule references an unknown auth profile")
-			}
-			return BoundaryPolicyRule{}, fmt.Errorf("load auth profile for boundary rule: %w", err)
-		}
-	}
 	normalizedTarget, err := normalizeBoundaryRuleTarget(&rule)
 	if err != nil {
 		return BoundaryPolicyRule{}, err
@@ -679,10 +692,6 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 		rule.CreatedAt = rule.CreatedAt.UTC()
 	}
 	rule.UpdatedAt = now
-	var authProfile interface{}
-	if rule.AuthProfileID != nil {
-		authProfile = *rule.AuthProfileID
-	}
 	var expiresAt interface{}
 	if rule.ExpiresAt != nil {
 		value := rule.ExpiresAt.UTC()
@@ -695,7 +704,7 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 			methods_json, auth_profile_id, rate_limit_json, expires_at, position, created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, rule.ID, rule.PolicyID, rule.Effect, rule.Host, schemes, ports, paths, methods,
-		authProfile, string(rateLimit), expiresAt, rule.Position, formatSQLiteUTC(rule.CreatedAt), formatSQLiteUTC(rule.UpdatedAt))
+		nil, string(rateLimit), expiresAt, rule.Position, formatSQLiteUTC(rule.CreatedAt), formatSQLiteUTC(rule.UpdatedAt))
 	if err != nil {
 		return BoundaryPolicyRule{}, fmt.Errorf("create boundary policy rule: %w", err)
 	}
@@ -704,23 +713,13 @@ func (db *DB) CreateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 }
 
 func validateBoundaryRuleAuthMarker(rule *BoundaryPolicyRule) error {
-	if rule.AuthProfileID != nil {
-		value := strings.TrimSpace(*rule.AuthProfileID)
-		if value == "" {
-			rule.AuthProfileID = nil
-		} else {
-			rule.AuthProfileID = &value
-		}
+	if rule == nil {
+		return fmt.Errorf("boundary rule is required")
 	}
-	if rule.Effect.RequiresAuthProfile() {
-		if rule.AuthProfileID == nil {
-			return fmt.Errorf("auth-only boundary rule requires an auth profile")
-		}
-		return nil
+	if rule.Effect == boundary.EffectAuthOnly || rule.AuthProfileID != nil {
+		return fmt.Errorf("credential-profile boundary rules are no longer supported")
 	}
-	if rule.AuthProfileID != nil {
-		return fmt.Errorf("boundary auth profile requires auth-only effect")
-	}
+	rule.AuthProfileID = nil
 	return nil
 }
 
@@ -797,14 +796,6 @@ func (db *DB) UpdateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	if err := validateBoundaryRuleAuthMarker(&rule); err != nil {
 		return BoundaryPolicyRule{}, err
 	}
-	if rule.AuthProfileID != nil {
-		if _, err := db.GetEgressAuthProfile(ctx, *rule.AuthProfileID); err != nil {
-			if errors.Is(err, ErrEgressAuthProfileNotFound) {
-				return BoundaryPolicyRule{}, fmt.Errorf("auth-only boundary rule references an unknown auth profile")
-			}
-			return BoundaryPolicyRule{}, fmt.Errorf("load auth profile for boundary rule: %w", err)
-		}
-	}
 	normalizedTarget, err := normalizeBoundaryRuleTarget(&rule)
 	if err != nil {
 		return BoundaryPolicyRule{}, err
@@ -834,10 +825,6 @@ func (db *DB) UpdateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 	if err != nil {
 		return BoundaryPolicyRule{}, fmt.Errorf("encode boundary rate limit: %w", err)
 	}
-	var authProfile any
-	if rule.AuthProfileID != nil {
-		authProfile = *rule.AuthProfileID
-	}
 	var expiresAt any
 	if rule.ExpiresAt != nil {
 		value := rule.ExpiresAt.UTC()
@@ -849,7 +836,7 @@ func (db *DB) UpdateBoundaryPolicyRule(ctx context.Context, rule BoundaryPolicyR
 		UPDATE boundary_policy_rules SET effect = ?, host = ?, schemes_json = ?, ports_json = ?,
 			path_prefixes_json = ?, methods_json = ?, auth_profile_id = ?, rate_limit_json = ?,
 			expires_at = ?, position = ?, updated_at = ? WHERE policy_id = ? AND id = ?
-	`, rule.Effect, rule.Host, schemes, ports, paths, methods, authProfile, string(rateLimit),
+	`, rule.Effect, rule.Host, schemes, ports, paths, methods, nil, string(rateLimit),
 		expiresAt, rule.Position, formatSQLiteUTC(now), rule.PolicyID, rule.ID)
 	if err != nil {
 		return BoundaryPolicyRule{}, fmt.Errorf("update boundary policy rule: %w", err)

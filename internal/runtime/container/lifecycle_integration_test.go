@@ -171,10 +171,6 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	provider := &recordingBoundarySnapshotProvider{snapshot: container.EgressBoundarySnapshotSpec{
 		ID: pending.SnapshotID, SHA256: pending.SHA256,
 	}}
-	pendingAuthProfilesID := "auth-" + pending.SnapshotID + "-aaaaaaaaaaaaaaaa"
-	authProvider := &recordingAuthProfilesProvider{authProfiles: &container.EgressAuthProfilesSpec{
-		ID: pendingAuthProfilesID, SHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	}}
 	gateway := lifecycleGatewaySpec()
 	gateway.BoundarySnapshot = &container.EgressBoundarySnapshotSpec{
 		ID: "11111111-1111-4111-8111-111111111111", SHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -182,8 +178,14 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	gateway.UpstreamRoute = &container.EgressUpstreamRouteSpec{
 		ID: conversationID, SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
 	}
+	// Old durable runtime records may still carry this field. Any rebuild must
+	// strip it now that gateway credential injection has been retired.
+	gateway.AuthProfiles = &container.EgressAuthProfilesSpec{
+		ID:     "auth-" + gateway.BoundarySnapshot.ID + "-aaaaaaaaaaaaaaaa",
+		SHA256: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
 	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
-		EgressGateway: &gateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
+		EgressGateway: &gateway, BoundarySnapshots: provider,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -193,8 +195,8 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	if err != nil {
 		t.Fatalf("rebuild with pending boundary snapshot: %v", err)
 	}
-	if len(provider.snapshotIDs) != 1 || provider.snapshotIDs[0] != pending.SnapshotID || len(authProvider.snapshotIDs) != 1 || authProvider.snapshotIDs[0] != pending.SnapshotID || rebuilt.Spec.EgressGateway == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot.ID != pending.SnapshotID || rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 != pending.SHA256 || rebuilt.Spec.EgressGateway.AuthProfiles == nil || rebuilt.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID {
-		t.Fatalf("pending snapshot binding = snapshot calls %#v, auth calls %#v, record %#v", provider.snapshotIDs, authProvider.snapshotIDs, rebuilt)
+	if len(provider.snapshotIDs) != 1 || provider.snapshotIDs[0] != pending.SnapshotID || rebuilt.Spec.EgressGateway == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot == nil || rebuilt.Spec.EgressGateway.BoundarySnapshot.ID != pending.SnapshotID || rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 != pending.SHA256 || rebuilt.Spec.EgressGateway.AuthProfiles != nil {
+		t.Fatalf("pending snapshot binding = snapshot calls %#v, record %#v", provider.snapshotIDs, rebuilt)
 	}
 	activated, err := db.GetConversationBoundarySnapshot(context.Background(), conversationID)
 	if err != nil || activated.SnapshotID != pending.SnapshotID || activated.SnapshotID == active.SnapshotID {
@@ -210,7 +212,7 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	}
 	upgradedGateway.AttributionPublicKey = signer.PublicKeyEncoded()
 	controller, err = container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
-		EgressGateway: &upgradedGateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
+		EgressGateway: &upgradedGateway, BoundarySnapshots: provider,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -219,8 +221,8 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 	if err != nil {
 		t.Fatalf("maintenance rebuild: %v", err)
 	}
-	if len(provider.snapshotIDs) != 1 || len(authProvider.snapshotIDs) != 2 || authProvider.snapshotIDs[1] != "" || maintained.Spec.EgressGateway.BoundarySnapshot == nil || maintained.Spec.EgressGateway.BoundarySnapshot.ID != rebuilt.Spec.EgressGateway.BoundarySnapshot.ID || maintained.Spec.EgressGateway.BoundarySnapshot.SHA256 != rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 || maintained.Spec.EgressGateway.AuthProfiles == nil || maintained.Spec.EgressGateway.AuthProfiles.ID != pendingAuthProfilesID || maintained.Spec.EgressGateway.UpstreamRoute == nil || maintained.Spec.EgressGateway.UpstreamRoute.ID != conversationID || maintained.Spec.EgressGateway.Image.Digest != upgradedGateway.Image.Digest || maintained.Spec.EgressGateway.Resources.MemoryBytes != upgradedGateway.Resources.MemoryBytes {
-		t.Fatalf("maintenance rebuild replaced immutable snapshot: snapshot calls %#v, auth calls %#v, record %#v", provider.snapshotIDs, authProvider.snapshotIDs, maintained)
+	if len(provider.snapshotIDs) != 1 || maintained.Spec.EgressGateway.BoundarySnapshot == nil || maintained.Spec.EgressGateway.BoundarySnapshot.ID != rebuilt.Spec.EgressGateway.BoundarySnapshot.ID || maintained.Spec.EgressGateway.BoundarySnapshot.SHA256 != rebuilt.Spec.EgressGateway.BoundarySnapshot.SHA256 || maintained.Spec.EgressGateway.AuthProfiles != nil || maintained.Spec.EgressGateway.UpstreamRoute == nil || maintained.Spec.EgressGateway.UpstreamRoute.ID != conversationID || maintained.Spec.EgressGateway.Image.Digest != upgradedGateway.Image.Digest || maintained.Spec.EgressGateway.Resources.MemoryBytes != upgradedGateway.Resources.MemoryBytes {
+		t.Fatalf("maintenance rebuild replaced immutable snapshot: snapshot calls %#v, record %#v", provider.snapshotIDs, maintained)
 	}
 	if maintained.Spec.EgressGateway.AttributionPublicKey != signer.PublicKeyEncoded() || maintained.Spec.EgressGateway.AttributionRuntimeGeneration != maintained.RuntimeGeneration || maintained.Spec.EgressGateway.AttributionInstanceID == "" || maintained.Spec.EgressGateway.BoundarySnapshot.RuntimeGeneration != maintained.RuntimeGeneration {
 		t.Fatalf("maintenance rebuild attribution binding = %#v", maintained.Spec.EgressGateway)
@@ -231,17 +233,13 @@ func TestLifecycleControllerExplicitRebuildBindsOnlyAuthorizedPendingSnapshot(t 
 		t.Fatal(err)
 	}
 	provider.snapshot = container.EgressBoundarySnapshotSpec{ID: nextPending.SnapshotID, SHA256: nextPending.SHA256}
-	nextAuthProfilesID := "auth-" + nextPending.SnapshotID + "-bbbbbbbbbbbbbbbb"
-	authProvider.authProfiles = &container.EgressAuthProfilesSpec{
-		ID: nextAuthProfilesID, SHA256: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-	}
 	nextCtx := container.WithBoundaryRebuildSnapshot(context.Background(), nextPending.SnapshotID)
 	updated, err := controller.Rebuild(nextCtx, conversationID)
 	if err != nil {
 		t.Fatalf("replace active boundary snapshot with authorized pending snapshot: %v", err)
 	}
-	if len(provider.snapshotIDs) != 2 || provider.snapshotIDs[1] != nextPending.SnapshotID || len(authProvider.snapshotIDs) != 3 || authProvider.snapshotIDs[2] != nextPending.SnapshotID || updated.Spec.EgressGateway == nil || updated.Spec.EgressGateway.BoundarySnapshot == nil || updated.Spec.EgressGateway.BoundarySnapshot.ID != nextPending.SnapshotID || updated.Spec.EgressGateway.BoundarySnapshot.SHA256 != nextPending.SHA256 || updated.Spec.EgressGateway.AuthProfiles == nil || updated.Spec.EgressGateway.AuthProfiles.ID != nextAuthProfilesID {
-		t.Fatalf("updated pending snapshot binding = snapshot calls %#v, auth calls %#v, record %#v", provider.snapshotIDs, authProvider.snapshotIDs, updated)
+	if len(provider.snapshotIDs) != 2 || provider.snapshotIDs[1] != nextPending.SnapshotID || updated.Spec.EgressGateway == nil || updated.Spec.EgressGateway.BoundarySnapshot == nil || updated.Spec.EgressGateway.BoundarySnapshot.ID != nextPending.SnapshotID || updated.Spec.EgressGateway.BoundarySnapshot.SHA256 != nextPending.SHA256 || updated.Spec.EgressGateway.AuthProfiles != nil {
+		t.Fatalf("updated pending snapshot binding = snapshot calls %#v, record %#v", provider.snapshotIDs, updated)
 	}
 	nextActive, err := db.GetConversationBoundarySnapshot(context.Background(), conversationID)
 	if err != nil || nextActive.SnapshotID != nextPending.SnapshotID || nextActive.SnapshotID == activated.SnapshotID {
@@ -273,29 +271,6 @@ func TestLifecycleControllerBoundarySnapshotResolutionFailureStopsBeforeManagerR
 	}
 	if record.LifecycleState != container.LifecycleFailed || record.RuntimeDrift != "boundary_snapshot_unavailable" {
 		t.Fatalf("snapshot failure record = %#v", record)
-	}
-}
-
-func TestLifecycleControllerAuthProfileResolutionFailureStopsBeforeManagerRebuild(t *testing.T) {
-	db, manager, _, conversationID := lifecycleFixture(t)
-	provider := &recordingBoundarySnapshotProvider{snapshot: container.EgressBoundarySnapshotSpec{
-		ID: "snapshot-auth", SHA256: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	}}
-	authProvider := &recordingAuthProfilesProvider{err: errors.New("auth profiles unavailable")}
-	gateway := lifecycleGatewaySpec()
-	controller, err := container.NewLifecycleControllerWithOptions(manager, db, container.LifecycleControllerOptions{
-		EgressGateway: &gateway, BoundarySnapshots: provider, AuthProfiles: authProvider,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Rebuild(context.Background(), conversationID); err == nil || !strings.Contains(err.Error(), "auth profiles unavailable") {
-		t.Fatalf("auth profile resolution error = %v", err)
-	}
-	for _, call := range manager.Calls() {
-		if call.Operation == containertest.OperationRebuild {
-			t.Fatalf("manager rebuild ran without trusted auth profiles: %#v", manager.Calls())
-		}
 	}
 }
 
@@ -650,12 +625,6 @@ func (p *recordingBoundarySnapshotProvider) ResolveBoundarySnapshot(_ context.Co
 	return p.snapshot, nil
 }
 
-type recordingAuthProfilesProvider struct {
-	authProfiles *container.EgressAuthProfilesSpec
-	err          error
-	snapshotIDs  []string
-}
-
 type recordingTLSAuthorityProvider struct {
 	authority   *container.EgressTLSAuthoritySpec
 	err         error
@@ -671,17 +640,5 @@ func (p *recordingTLSAuthorityProvider) ResolveTLSAuthority(_ context.Context, _
 		return nil, nil
 	}
 	copy := *p.authority
-	return &copy, nil
-}
-
-func (p *recordingAuthProfilesProvider) ResolveAuthProfiles(_ context.Context, _ string, snapshotID string) (*container.EgressAuthProfilesSpec, error) {
-	p.snapshotIDs = append(p.snapshotIDs, snapshotID)
-	if p.err != nil {
-		return nil, p.err
-	}
-	if p.authProfiles == nil {
-		return nil, nil
-	}
-	copy := *p.authProfiles
 	return &copy, nil
 }

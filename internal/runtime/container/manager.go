@@ -161,8 +161,9 @@ type EgressUpstreamRouteSpec struct {
 	SHA256 string
 }
 
-// EgressAuthProfilesSpec identifies the immutable gateway-only credential
-// document. The runtime specification contains only this safe reference.
+// EgressAuthProfilesSpec is retained only to decode durable runtime records
+// created before credential-profile injection was removed. New runtimes never
+// populate it and the gateway ignores it.
 type EgressAuthProfilesSpec struct {
 	ID     string
 	SHA256 string
@@ -197,7 +198,7 @@ type EgressGatewaySpec struct {
 	AttributionInstanceID        string                      `json:",omitempty"`
 	BoundarySnapshot             *EgressBoundarySnapshotSpec `json:",omitempty"`
 	UpstreamRoute                *EgressUpstreamRouteSpec    `json:",omitempty"`
-	AuthProfiles                 *EgressAuthProfilesSpec     `json:",omitempty"`
+	AuthProfiles                 *EgressAuthProfilesSpec     `json:",omitempty"` // legacy, inactive
 	TLSAuthority                 *EgressTLSAuthoritySpec     `json:",omitempty"`
 	TrafficLimits                *EgressTrafficLimits        `json:",omitempty"`
 }

@@ -4,15 +4,14 @@ import "testing"
 
 func TestParseEffectAcceptsClosedVocabulary(t *testing.T) {
 	tests := []struct {
-		input               string
-		want                Effect
-		allows              bool
-		requiresAuthProfile bool
+		input  string
+		want   Effect
+		allows bool
 	}{
 		{input: "allow-visit", want: EffectAllowVisit, allows: true},
 		{input: "allow-attack", want: EffectAllowAttack, allows: true},
 		{input: "blocked", want: EffectBlocked},
-		{input: " auth-only ", want: EffectAuthOnly, allows: true, requiresAuthProfile: true},
+		{input: " auth-only ", want: EffectAuthOnly},
 	}
 	for _, test := range tests {
 		t.Run(test.input, func(t *testing.T) {
@@ -22,9 +21,6 @@ func TestParseEffectAcceptsClosedVocabulary(t *testing.T) {
 			}
 			if got.AllowsRequest() != test.allows {
 				t.Fatalf("AllowsRequest(%q) = %v", got, got.AllowsRequest())
-			}
-			if got.RequiresAuthProfile() != test.requiresAuthProfile {
-				t.Fatalf("RequiresAuthProfile(%q) = %v", got, got.RequiresAuthProfile())
 			}
 		})
 	}

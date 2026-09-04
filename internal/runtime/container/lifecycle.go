@@ -161,10 +161,6 @@ type BoundarySnapshotProvider interface {
 	ResolveBoundarySnapshot(ctx context.Context, conversationID, snapshotID string) (EgressBoundarySnapshotSpec, error)
 }
 
-type AuthProfilesProvider interface {
-	ResolveAuthProfiles(ctx context.Context, conversationID, snapshotID string) (*EgressAuthProfilesSpec, error)
-}
-
 type TLSAuthorityProvider interface {
 	ResolveTLSAuthority(ctx context.Context, conversationID, snapshotID string) (*EgressTLSAuthoritySpec, error)
 }
@@ -177,7 +173,6 @@ type LifecycleController struct {
 	store          LifecycleStore
 	egressGateway  *EgressGatewaySpec
 	snapshots      BoundarySnapshotProvider
-	authProfiles   AuthProfilesProvider
 	tlsAuthorities TLSAuthorityProvider
 }
 
@@ -190,7 +185,6 @@ type LifecycleControllerOptions struct {
 	// BoundarySnapshots is optional for legacy/unit-test controllers. Production
 	// supplies it so explicit rebuilds can bind the current immutable snapshot.
 	BoundarySnapshots BoundarySnapshotProvider
-	AuthProfiles      AuthProfilesProvider
 	TLSAuthorities    TLSAuthorityProvider
 }
 
@@ -213,7 +207,7 @@ func NewLifecycleControllerWithOptions(manager RuntimeManager, store LifecycleSt
 	checker, _ := manager.(RuntimeReadinessChecker)
 	return &LifecycleController{
 		manager: manager, checker: checker, store: store,
-		egressGateway: gateway, snapshots: options.BoundarySnapshots, authProfiles: options.AuthProfiles,
+		egressGateway: gateway, snapshots: options.BoundarySnapshots,
 		tlsAuthorities: options.TLSAuthorities,
 	}, nil
 }
@@ -645,7 +639,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			gateway := *c.egressGateway
 			gateway.BoundarySnapshot = current.BoundarySnapshot
 			gateway.UpstreamRoute = current.UpstreamRoute
-			gateway.AuthProfiles = current.AuthProfiles
+			gateway.AuthProfiles = nil
 			gateway.TLSAuthority = current.TLSAuthority
 			// The configured gateway is a template and therefore has no runtime
 			// attribution binding. Preserve the current binding long enough for
@@ -653,15 +647,6 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 			// the next generation and a fresh instance ID before engine mutation.
 			gateway.AttributionRuntimeGeneration = current.AttributionRuntimeGeneration
 			gateway.AttributionInstanceID = current.AttributionInstanceID
-			spec.EgressGateway = &gateway
-		}
-		if c.authProfiles != nil {
-			authProfiles, err := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, "")
-			if err != nil {
-				return RuntimeSpec{}, fmt.Errorf("resolve gateway auth profiles: %w", err)
-			}
-			gateway := *spec.EgressGateway
-			gateway.AuthProfiles = authProfiles
 			spec.EgressGateway = &gateway
 		}
 		if c.tlsAuthorities != nil {
@@ -701,13 +686,7 @@ func (c *LifecycleController) upgradeRuntimeSpec(ctx context.Context, spec Runti
 	if replaceRoute {
 		gateway.UpstreamRoute = requestedRoute
 	}
-	if c.authProfiles != nil {
-		authProfiles, authErr := c.authProfiles.ResolveAuthProfiles(ctx, spec.ConversationID, requestedSnapshotID)
-		if authErr != nil {
-			return RuntimeSpec{}, fmt.Errorf("resolve gateway auth profiles: %w", authErr)
-		}
-		gateway.AuthProfiles = authProfiles
-	}
+	gateway.AuthProfiles = nil
 	if c.tlsAuthorities != nil {
 		authority, authorityErr := c.tlsAuthorities.ResolveTLSAuthority(ctx, spec.ConversationID, requestedSnapshotID)
 		if authorityErr != nil {

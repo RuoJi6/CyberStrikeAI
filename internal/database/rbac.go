@@ -35,7 +35,6 @@ var rbacAssignableResourceTables = map[string]string{
 	"boundary_policy":     "boundary_policies",
 	"egress_proxy":        "egress_proxies",
 	"egress_proxy_group":  "egress_proxy_groups",
-	"egress_auth_profile": "egress_auth_profiles",
 }
 
 // RBACUser is a local platform account.

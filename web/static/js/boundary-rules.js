@@ -18,7 +18,6 @@
         selectedPolicyId: String(params && params.get('boundary_policy') || '').trim(),
         selectedPolicy: null,
         selectedUsage: [],
-        authProfiles: [],
         editingRuleId: '',
         searchTimer: null,
     };
@@ -123,7 +122,6 @@
             blocked: t('boundaryEffectBlocked', '显式阻断'),
             'allow-visit': t('boundaryEffectVisit', '允许访问'),
             'allow-attack': t('boundaryEffectAttack', '允许测试'),
-            'auth-only': t('boundaryEffectAuth', '仅凭据访问'),
         })[String(effect || '')] || String(effect || '—');
     }
 
@@ -197,7 +195,6 @@
             element('span', '', t('boundaryRate', '速率 {{rate}}/秒 · 突发 {{burst}} · 并发 {{concurrent}}', {
                 rate: Number(rate.requestsPerSecond || 0), burst: Number(rate.burst || 0), concurrent: Number(rate.maxConcurrent || 0),
             })),
-            element('span', '', rule.authProfileId ? '已绑定凭据档案' : '无凭据注入'),
         );
         card.append(heading, grid, footer);
         return card;
@@ -359,23 +356,6 @@
         }
     }
 
-    function renderAuthProfileOptions() {
-        const select = document.getElementById('boundary-rule-auth-profile');
-        if (!select) return;
-        const previous = select.value;
-        const placeholder = element('option', '', '不注入凭据');
-        placeholder.value = '';
-        const options = [placeholder];
-        state.authProfiles.filter(function (profile) { return profile.enabled !== false; }).forEach(function (profile) {
-            const option = element('option', '', String(profile.name || profile.id));
-            option.value = String(profile.id || '');
-            options.push(option);
-        });
-        select.replaceChildren.apply(select, options);
-        if (state.authProfiles.some(function (profile) { return profile.id === previous; })) select.value = previous;
-        refreshUnified(select);
-    }
-
     function populatePolicyForm() {
         const policy = state.selectedPolicy;
         document.getElementById('boundary-policy-id').value = policy ? policy.id : '';
@@ -383,7 +363,6 @@
         document.getElementById('boundary-policy-description').value = policy ? policy.description || '' : '';
         document.getElementById('boundary-policy-default-action').value = policy ? policy.defaultAction || 'deny' : 'deny';
         refreshUnified(document.getElementById('boundary-policy-default-action'));
-        document.getElementById('boundary-policy-tls-bypass').value = policy && Array.isArray(policy.tlsBypassDomains) ? policy.tlsBypassDomains.join(', ') : '';
         document.getElementById('boundary-policy-editor').hidden = !policy;
         document.getElementById('boundary-policy-editor-title').textContent = policy ? '修改边界策略' : '新建边界策略';
         resetRuleForm();
@@ -445,8 +424,6 @@
             if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('端口必须在 1 到 65535 之间');
             return port;
         });
-        const authProfileId = document.getElementById('boundary-rule-auth-profile').value || null;
-        if (effect === 'auth-only' && !authProfileId) throw new Error('仅凭据访问规则必须选择凭据档案');
         const expires = document.getElementById('boundary-rule-expires').value;
         const subtreePaths = splitValues(document.getElementById('boundary-rule-paths').value);
         const exactPaths = splitValues(document.getElementById('boundary-rule-exact-paths').value, function (raw) {
@@ -463,7 +440,6 @@
             ports: ports,
             pathPrefixes: subtreePaths.concat(exactPaths),
             methods: splitValues(document.getElementById('boundary-rule-methods').value),
-            authProfileId: effect === 'auth-only' ? authProfileId : null,
             rateLimit: { requestsPerSecond: rate, burst: burst, maxConcurrent: concurrent },
             expiresAt: expires ? new Date(expires).toISOString() : null,
             position: Number(document.getElementById('boundary-rule-position').value || 0),
@@ -482,7 +458,6 @@
         document.getElementById('boundary-rule-rate').value = '0';
         document.getElementById('boundary-rule-burst').value = '0';
         document.getElementById('boundary-rule-concurrent').value = '0';
-        syncRuleAuth();
     }
 
     function openNewRule() {
@@ -509,27 +484,14 @@
         document.getElementById('boundary-rule-paths').value = pathPatterns.filter(function (pattern) { return !String(pattern).startsWith('='); }).join(', ');
         document.getElementById('boundary-rule-exact-paths').value = pathPatterns.filter(function (pattern) { return String(pattern).startsWith('='); }).map(function (pattern) { return String(pattern).slice(1); }).join(', ');
         document.getElementById('boundary-rule-methods').value = Array.isArray(rule.methods) ? rule.methods.join(', ') : '';
-        document.getElementById('boundary-rule-auth-profile').value = rule.authProfileId || '';
         const rate = rule.rateLimit || {};
         document.getElementById('boundary-rule-rate').value = String(rate.requestsPerSecond || 0);
         document.getElementById('boundary-rule-burst').value = String(rate.burst || 0);
         document.getElementById('boundary-rule-concurrent').value = String(rate.maxConcurrent || 0);
         document.getElementById('boundary-rule-position').value = String(rule.position || 0);
         document.getElementById('boundary-rule-expires').value = dateTimeLocal(rule.expiresAt);
-        syncRuleAuth();
         renderDraftRules();
         document.getElementById('boundary-rule-host').focus();
-    }
-
-    function syncRuleAuth() {
-        const effect = document.getElementById('boundary-rule-effect');
-        const select = document.getElementById('boundary-rule-auth-profile');
-        if (!effect || !select) return;
-        const enabled = effect.value === 'auth-only';
-        select.disabled = !enabled;
-        select.required = enabled;
-        if (!enabled) select.value = '';
-        refreshUnified(select);
     }
 
     async function reloadSelectedPolicy() {
@@ -545,7 +507,6 @@
             name: document.getElementById('boundary-policy-name').value.trim(),
             description: document.getElementById('boundary-policy-description').value.trim(),
             defaultAction: document.getElementById('boundary-policy-default-action').value || 'deny',
-            tlsBypassDomains: splitValues(document.getElementById('boundary-policy-tls-bypass').value),
         };
         if (!payload.name) { notify('请输入策略名称', 'error'); return; }
         try {
@@ -607,19 +568,16 @@
             if (state.search) query.set('search', state.search);
             const results = await Promise.all([
                 requestJSON('/api/boundary-policies?' + query.toString()),
-                state.authProfiles.length ? Promise.resolve({ items: state.authProfiles }) : requestJSON('/api/egress-auth-profiles').catch(function () { return { items: [] }; }),
             ]);
             if (requestId !== state.requestId) return;
             const payload = results[0];
             state.policies = Array.isArray(payload.items) ? payload.items : [];
             state.total = Number(payload.total || 0);
             state.totalPages = Number(payload.totalPages || 0);
-            state.authProfiles = Array.isArray(results[1].items) ? results[1].items : [];
             if (state.totalPages > 0 && state.page > state.totalPages) { state.page = state.totalPages; state.loading = false; writeURL(); await refresh(resetSelection); return; }
             if (resetSelection !== false && state.selectedPolicyId && !state.policies.some(function (item) { return item.id === state.selectedPolicyId; })) state.selectedPolicyId = '';
             renderPolicyList();
             renderPagination();
-            renderAuthProfileOptions();
             writeURL();
             setStatus('当前显示 ' + state.policies.length + ' 个，共 ' + state.total + ' 个边界策略', 'ready');
         } catch (error) {
@@ -674,7 +632,6 @@
         document.getElementById('boundary-rule-close')?.addEventListener('click', resetRuleForm);
         document.getElementById('boundary-rule-cancel')?.addEventListener('click', resetRuleForm);
         document.getElementById('boundary-rule-form')?.addEventListener('submit', saveRule);
-        document.getElementById('boundary-rule-effect')?.addEventListener('change', syncRuleAuth);
         document.addEventListener('keydown', function (event) {
             if (event.key !== 'Escape') return;
             if (document.getElementById('boundary-rule-form')?.hidden === false) resetRuleForm();

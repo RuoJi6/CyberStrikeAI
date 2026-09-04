@@ -151,7 +151,7 @@ func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 		http.MethodPut:    "egress:write",
 		http.MethodDelete: "egress:delete",
 	}
-	for _, prefix := range []string{"/api/egress-proxies", "/api/egress-proxy-groups", "/api/egress-auth-profiles"} {
+	for _, prefix := range []string{"/api/egress-proxies", "/api/egress-proxy-groups"} {
 		for method, want := range tests {
 			path := prefix
 			if method == http.MethodPut || method == http.MethodDelete {
@@ -161,6 +161,9 @@ func TestEgressProxyRoutesUseCRUDPermissions(t *testing.T) {
 				t.Fatalf("%s %s permission = %q, want %q", method, prefix, got, want)
 			}
 		}
+	}
+	if got := permissionForRequest(http.MethodGet, "/api/egress-auth-profiles"); got != "" {
+		t.Fatalf("retired credential profile endpoint permission = %q", got)
 	}
 }
 
