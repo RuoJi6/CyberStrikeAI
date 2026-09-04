@@ -759,6 +759,7 @@
 		if (!conversationId) return;
 		const previousEnabled = !failureToggle.checked;
 		const requestId = ++state.auditSettingRequestId;
+		failureToggle.disabled = true;
 		updateAuditHint(!auditToggle || auditToggle.checked, true, modeSelect ? modeSelect.value : 'tools');
 		try {
 			const response = await window.apiFetch('/api/conversations/' + encodeURIComponent(conversationId) + '/egress-audit', {
@@ -779,6 +780,7 @@
 			}
 		} finally {
 			if (requestId === state.auditSettingRequestId) {
+				failureToggle.disabled = false;
 				updateAuditHint(!auditToggle || auditToggle.checked, false, modeSelect ? modeSelect.value : 'tools');
 			}
 		}

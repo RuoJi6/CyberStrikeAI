@@ -65,6 +65,13 @@ test('settings client loads only safe control-plane projections', () => {
     assert.doesNotMatch(settings, /credentials|credentialCiphertext|password|authorization/i);
     assert.match(settings, /option\.textContent = text/);
     assert.doesNotMatch(settings, /sessionStorage|localStorage/, 'selection code must not persist server resource payloads');
+	const failureSync = settings.slice(
+		settings.indexOf('async function syncConversationRecordUpstreamFailures'),
+		settings.indexOf('function idlePolicyFromControls'),
+	);
+	assert.match(failureSync, /failureToggle\.disabled = true/);
+	assert.match(failureSync, /failureToggle\.disabled = false/);
+	assert.match(failureSync, /failureToggle\.checked = previousEnabled/);
 });
 
 test('shared workspace selection is included in container conversation creation', () => {
@@ -190,7 +197,7 @@ test('container creation copy is bilingual and cache-busted', () => {
 	assert.match(template, /style\.css\?v=20260904-2/);
 	assert.match(template, /chat\.js\?v=20260902-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
-	assert.match(template, /conversation-container-settings\.js\?v=20260904-3/);
+	assert.match(template, /conversation-container-settings\.js\?v=20260904-4/);
 });
 
 test('completed container conversations apply changed boundary and upstream settings on the next send', () => {
