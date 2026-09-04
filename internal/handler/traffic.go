@@ -141,12 +141,26 @@ func redactTrafficDetail(detail *traffic.TransactionDetail) {
 	for index := range detail.Messages {
 		detail.Messages[index].Body = ""
 		detail.Messages[index].BodyEncoding = ""
+		detail.Messages[index].BodyView = nil
 		for headerIndex := range detail.Messages[index].Headers {
 			switch strings.ToLower(detail.Messages[index].Headers[headerIndex].Name) {
 			case "authorization", "proxy-authorization", "cookie", "set-cookie":
 				detail.Messages[index].Headers[headerIndex].Value = "[REDACTED]"
 			}
 		}
+	}
+}
+
+func attachTrafficBodyViews(detail *traffic.TransactionDetail) {
+	if detail == nil {
+		return
+	}
+	for index := range detail.Messages {
+		view, err := traffic.BuildMessageBodyView(detail.Messages[index])
+		if err != nil {
+			continue
+		}
+		detail.Messages[index].BodyView = &view
 	}
 }
 
@@ -162,7 +176,9 @@ func (h *TrafficHandler) Get(c *gin.Context) {
 		return
 	}
 	decorateReplayTransformTransaction(&detail.Transaction)
-	if !session.Permissions["traffic:read_sensitive"] {
+	if session.Permissions["traffic:read_sensitive"] {
+		attachTrafficBodyViews(detail)
+	} else {
 		redactTrafficDetail(detail)
 	}
 	c.Header("Cache-Control", "no-store")

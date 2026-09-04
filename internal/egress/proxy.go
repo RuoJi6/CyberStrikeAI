@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -120,7 +120,7 @@ func (capture *boundedPacketCapture) snapshot(contentType string) (body, encodin
 	if textual && utf8.Valid(content) {
 		return string(content), "utf8", truncated
 	}
-	return base64.StdEncoding.EncodeToString(content), "base64", truncated
+	return hex.EncodeToString(content), "hex", truncated
 }
 
 type packetCaptureReadCloser struct {
@@ -443,16 +443,18 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	// the upstream, including any configured authentication profile and after
 	// removing proxy-only/hop-by-hop headers.
 	packet = newHTTPPacket(outbound, event.Path)
-	requestCapture := &boundedPacketCapture{}
 	fullRequestCapture := &fullBodyCapture{}
 	if outbound.Body != nil {
-		outbound.Body = &packetCaptureReadCloser{Reader: io.TeeReader(outbound.Body, io.MultiWriter(requestCapture, fullRequestCapture)), Closer: outbound.Body}
+		outbound.Body = &packetCaptureReadCloser{Reader: io.TeeReader(outbound.Body, fullRequestCapture), Closer: outbound.Body}
 	}
 
 	response, err := p.transport.RoundTrip(outbound)
-	packet.RequestBody, packet.RequestBodyEncoding, packet.RequestBodyTruncated = requestCapture.snapshot(request.Header.Get("Content-Type"))
-	if requestCapture.total > event.BytesUp {
-		event.BytesUp = requestCapture.total
+	packet.RequestBody, packet.RequestBodyEncoding, packet.RequestBodyTruncated,
+		packet.RequestBodyDecoded, packet.RequestContentEncoding = fullRequestCapture.packetSnapshot(
+		outbound.Header.Get("Content-Type"), outbound.Header.Get("Content-Encoding"),
+	)
+	if fullRequestCapture.total > event.BytesUp {
+		event.BytesUp = fullRequestCapture.total
 	}
 	if err != nil {
 		if denied, ok := resolvedPolicyDenial(err); ok {
@@ -487,11 +489,13 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	removeHopByHopHeaders(responseHeaders)
 	copyHeaders(writer.Header(), responseHeaders)
 	writer.WriteHeader(response.StatusCode)
-	responseCapture := &boundedPacketCapture{}
 	fullResponseCapture := &fullBodyCapture{}
-	written, copyErr := io.Copy(writer, io.TeeReader(response.Body, io.MultiWriter(responseCapture, fullResponseCapture)))
+	written, copyErr := io.Copy(writer, io.TeeReader(response.Body, fullResponseCapture))
 	event.BytesDown = written
-	packet.ResponseBody, packet.ResponseBodyEncoding, packet.ResponseBodyTruncated = responseCapture.snapshot(response.Header.Get("Content-Type"))
+	packet.ResponseBody, packet.ResponseBodyEncoding, packet.ResponseBodyTruncated,
+		packet.ResponseBodyDecoded, packet.ResponseContentEncoding = fullResponseCapture.packetSnapshot(
+		response.Header.Get("Content-Type"), response.Header.Get("Content-Encoding"),
+	)
 	if copyErr != nil {
 		event.Outcome = "response_interrupted"
 	}

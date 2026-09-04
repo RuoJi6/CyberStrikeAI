@@ -6,6 +6,7 @@ module cyberstrike-ai
 go 1.25.0
 
 require (
+	github.com/andybalholm/brotli v1.2.3
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/bwmarrin/discordgo v0.29.0
 	github.com/bytedance/sonic v1.15.0
@@ -27,6 +28,7 @@ require (
 	github.com/gin-gonic/gin v1.9.1
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/klauspost/compress v1.20.0
 	github.com/larksuite/oapi-sdk-go/v3 v3.4.22
 	github.com/mattn/go-sqlite3 v1.14.18
 	github.com/mdlayher/netlink v1.9.0

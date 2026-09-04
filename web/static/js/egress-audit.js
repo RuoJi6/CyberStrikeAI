@@ -201,7 +201,7 @@
 
     function isSafeHTTPPacket(packet) {
         if (!packet || typeof packet !== 'object') return false;
-        const fields = new Set(['requestLine', 'requestHeaders', 'requestBody', 'requestBodyEncoding', 'requestBodyTruncated', 'responseLine', 'responseHeaders', 'responseBody', 'responseBodyEncoding', 'responseBodyTruncated', 'sensitiveDataRedacted']);
+        const fields = new Set(['requestLine', 'requestHeaders', 'requestBody', 'requestBodyEncoding', 'requestBodyTruncated', 'requestContentEncoding', 'requestBodyDecoded', 'responseLine', 'responseHeaders', 'responseBody', 'responseBodyEncoding', 'responseBodyTruncated', 'responseContentEncoding', 'responseBodyDecoded', 'sensitiveDataRedacted']);
         if (Object.keys(packet).some((key) => !fields.has(key))) return false;
         if (typeof packet.requestLine !== 'string' || packet.requestLine.length > 65536) return false;
         if (typeof packet.responseLine !== 'string' || packet.responseLine.length > 65536) return false;
@@ -215,7 +215,10 @@
         for (const direction of ['request', 'response']) {
             const body = packet[direction + 'Body'] || '';
             const encoding = packet[direction + 'BodyEncoding'] || '';
-            if (typeof body !== 'string' || body.length > 45000 || !['', 'utf8', 'base64'].includes(encoding)) return false;
+            const contentEncoding = packet[direction + 'ContentEncoding'] || '';
+            if (typeof body !== 'string' || body.length > 70000 || !['', 'utf8', 'base64', 'hex'].includes(encoding)) return false;
+            if (typeof contentEncoding !== 'string' || contentEncoding.length > 256 || /[\r\n\0]/.test(contentEncoding)) return false;
+            if (packet[direction + 'BodyDecoded'] !== undefined && typeof packet[direction + 'BodyDecoded'] !== 'boolean') return false;
         }
         return true;
     }
@@ -429,14 +432,52 @@
         }).join('\n');
     }
 
+    function formatPacketHex(value) {
+        const hex = String(value || '').replace(/\s+/g, '').toLowerCase();
+        if (!hex || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return '[二进制正文无法解析]';
+        const lines = [];
+        for (let offset = 0; offset < hex.length; offset += 32) {
+            const bytes = hex.slice(offset, offset + 32).match(/.{2}/g) || [];
+            const byteColumn = `${bytes.slice(0, 8).join(' ').padEnd(23, ' ')}  ${bytes.slice(8).join(' ').padEnd(23, ' ')}`;
+            const ascii = bytes.map(function (byte) {
+                const number = Number.parseInt(byte, 16);
+                return number >= 0x20 && number <= 0x7e ? String.fromCharCode(number) : '.';
+            }).join('');
+            lines.push(`${(offset / 2).toString(16).padStart(8, '0')}  ${byteColumn}  |${ascii}|`);
+        }
+        return lines.join('\n');
+    }
+
+    function packetBase64AsHex(value) {
+        try {
+            const binary = typeof root.atob === 'function' ? root.atob(String(value || '')) : '';
+            let hex = '';
+            for (let index = 0; index < binary.length; index += 1) hex += binary.charCodeAt(index).toString(16).padStart(2, '0');
+            return formatPacketHex(hex);
+        } catch (_) {
+            return '[二进制正文无法解析]';
+        }
+    }
+
     function packetDirectionText(packet, direction) {
         const line = packet[direction + 'Line'] || '';
         const headers = packetHeadersText(packet[direction + 'Headers']);
         const body = packet[direction + 'Body'] || '';
         const encoding = packet[direction + 'BodyEncoding'] || '';
         const truncated = packet[direction + 'BodyTruncated'] === true;
-        const bodyLabel = body ? (encoding === 'base64' ? '[base64]\n' : '') + body : '';
-        return [line, headers, bodyLabel, truncated ? '[正文已在 32 KiB 处截断]' : ''].filter(Boolean).join('\n\n');
+        const contentEncoding = packet[direction + 'ContentEncoding'] || '';
+        const decoded = packet[direction + 'BodyDecoded'] === true;
+        let bodyText = body;
+        if (encoding === 'hex') bodyText = formatPacketHex(body);
+        else if (encoding === 'base64') bodyText = packetBase64AsHex(body);
+        const notices = [];
+        if (decoded && contentEncoding) notices.push(`[正文已按 Content-Encoding 解压：${contentEncoding}；报文头保留原始捕获值]`);
+        else if (contentEncoding) notices.push(`[正文未能按 Content-Encoding 解压：${contentEncoding}；以下为原始捕获正文]`);
+        if (encoding === 'hex' || encoding === 'base64') notices.push('[二进制正文 · Hex]');
+        if (bodyText) notices.push(bodyText);
+        if (truncated) notices.push('[正文已在 32 KiB 显示上限处截断，完整原始证据请在流量证据中查看]');
+        const head = [line, headers].filter(Boolean).join('\n');
+        return [head, notices.join('\n')].filter(Boolean).join('\n\n');
     }
 
     async function openPacket(event) {
@@ -784,6 +825,7 @@
     return {
         init, stop, refresh, isSafeAuditEvent, isSafeIntegrity, isSafeAuditConversation,
         packetSummaryForTest: packetSummary,
+		packetDirectionTextForTest: packetDirectionText,
         readURLStateForTest: function (search) {
             readURLState(search || '');
             return { page: state.page, pageSize: state.pageSize, query: state.query, conversation: state.conversation, category: state.category, type: state.type, decision: state.decision };

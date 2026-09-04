@@ -12,6 +12,7 @@ import (
 	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
+	"github.com/andybalholm/brotli"
 )
 
 func TestProxyCapturesCompleteTrafficAndConsumesAttributionHeaders(t *testing.T) {
@@ -91,6 +92,62 @@ func TestFullBodyCaptureTruncatesWithExplicitLengths(t *testing.T) {
 	}
 	if err := traffic.ValidateMessage(message); err != nil {
 		t.Fatalf("ValidateMessage: %v", err)
+	}
+}
+
+func TestProxyKeepsCompressedWireEvidenceAndDisplaysDecodedPacket(t *testing.T) {
+	var compressed bytes.Buffer
+	compressor := brotli.NewWriter(&compressed)
+	want := []byte("<html><body>readable complete response</body></html>")
+	if _, err := compressor.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wire := append([]byte(nil), compressed.Bytes()...)
+	var messages []traffic.Message
+	var events []ActivityEvent
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
+		ID: "capture-br", Effect: boundary.EffectAllowVisit,
+		Target: boundary.RuleTarget{Host: "capture-br.example", Schemes: []string{"http"}, Methods: []string{"GET"}},
+	}), ProxyOptions{
+		ConversationID: "conversation-br", RuntimeMode: traffic.RuntimeModeContainer,
+		CaptureCoverage: traffic.CaptureCoverageEnforced,
+		ActivitySink:    func(event ActivityEvent) { events = append(events, event) },
+		TrafficSink: func(_ context.Context, _ traffic.Transaction, captured []traffic.Message) error {
+			messages = append([]traffic.Message(nil), captured...)
+			return nil
+		},
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK, Status: "200 OK", Proto: "HTTP/1.1",
+				Header: http.Header{"Content-Type": {"text/html; charset=utf-8"}, "Content-Encoding": {"br"}},
+				Body:   io.NopCloser(bytes.NewReader(wire)), Request: request,
+			}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	proxy.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "http://capture-br.example/", nil))
+	if recorder.Code != http.StatusOK || !bytes.Equal(recorder.Body.Bytes(), wire) || recorder.Header().Get("Content-Encoding") != "br" {
+		t.Fatalf("forwarded response = %d / %q / %#v", recorder.Code, recorder.Body.Bytes(), recorder.Header())
+	}
+	if len(events) != 1 || events[0].HTTPPacket == nil {
+		t.Fatalf("events = %#v", events)
+	}
+	packet := events[0].HTTPPacket
+	if packet.ResponseBody != string(want) || packet.ResponseBodyEncoding != "utf8" || !packet.ResponseBodyDecoded || packet.ResponseContentEncoding != "br" || packet.ResponseBodyTruncated {
+		t.Fatalf("decoded packet = %#v", packet)
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	stored, decodeErr := traffic.DecodeBody(messages[1])
+	if decodeErr != nil || !bytes.Equal(stored, wire) || messages[1].BodyEncoding != traffic.BodyEncodingBase64 {
+		t.Fatalf("wire evidence = %v / %v / %s", stored, decodeErr, messages[1].BodyEncoding)
 	}
 }
 

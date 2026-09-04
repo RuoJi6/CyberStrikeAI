@@ -118,6 +118,7 @@ type Message struct {
 	BodyLength      int64     `json:"body_length"`
 	BodyStoredBytes int64     `json:"body_stored_bytes"`
 	Complete        bool      `json:"complete"`
+	BodyView        *BodyView `json:"body_view,omitempty"`
 	CreatedAt       time.Time `json:"created_at"`
 }
 

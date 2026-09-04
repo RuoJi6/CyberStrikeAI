@@ -2,6 +2,7 @@ package egress
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"net/netip"
 	"strings"
@@ -35,17 +36,21 @@ const MaxHTTPPacketBodyBytes = 32 << 10
 // MaxHTTPPacketBodyBytes per direction and carry an explicit
 // encoding/truncation marker.
 type HTTPPacket struct {
-	RequestLine           string              `json:"requestLine"`
-	RequestHeaders        map[string][]string `json:"requestHeaders"`
-	RequestBody           string              `json:"requestBody,omitempty"`
-	RequestBodyEncoding   string              `json:"requestBodyEncoding,omitempty"`
-	RequestBodyTruncated  bool                `json:"requestBodyTruncated,omitempty"`
-	ResponseLine          string              `json:"responseLine,omitempty"`
-	ResponseHeaders       map[string][]string `json:"responseHeaders,omitempty"`
-	ResponseBody          string              `json:"responseBody,omitempty"`
-	ResponseBodyEncoding  string              `json:"responseBodyEncoding,omitempty"`
-	ResponseBodyTruncated bool                `json:"responseBodyTruncated,omitempty"`
-	SensitiveDataRedacted bool                `json:"sensitiveDataRedacted"`
+	RequestLine             string              `json:"requestLine"`
+	RequestHeaders          map[string][]string `json:"requestHeaders"`
+	RequestBody             string              `json:"requestBody,omitempty"`
+	RequestBodyEncoding     string              `json:"requestBodyEncoding,omitempty"`
+	RequestBodyTruncated    bool                `json:"requestBodyTruncated,omitempty"`
+	RequestContentEncoding  string              `json:"requestContentEncoding,omitempty"`
+	RequestBodyDecoded      bool                `json:"requestBodyDecoded,omitempty"`
+	ResponseLine            string              `json:"responseLine,omitempty"`
+	ResponseHeaders         map[string][]string `json:"responseHeaders,omitempty"`
+	ResponseBody            string              `json:"responseBody,omitempty"`
+	ResponseBodyEncoding    string              `json:"responseBodyEncoding,omitempty"`
+	ResponseBodyTruncated   bool                `json:"responseBodyTruncated,omitempty"`
+	ResponseContentEncoding string              `json:"responseContentEncoding,omitempty"`
+	ResponseBodyDecoded     bool                `json:"responseBodyDecoded,omitempty"`
+	SensitiveDataRedacted   bool                `json:"sensitiveDataRedacted"`
 }
 
 func validHTTPPacketLine(value string, required bool) bool {
@@ -114,19 +119,30 @@ func validHTTPPacketBody(body, encoding string) bool {
 	case "base64":
 		decoded, err := base64.StdEncoding.DecodeString(body)
 		return err == nil && len(decoded) <= MaxHTTPPacketBodyBytes
+	case "hex":
+		decoded, err := hex.DecodeString(body)
+		return err == nil && len(decoded) <= MaxHTTPPacketBodyBytes
 	default:
 		return false
 	}
 }
 
 func ValidateHTTPPacket(packet *HTTPPacket) error {
+	validContentEncoding := func(value string) bool {
+		return len(value) <= 256 && utf8.ValidString(value) && !strings.ContainsAny(value, "\r\n\x00")
+	}
 	if packet == nil {
 		return nil
+	}
+	if (packet.RequestBodyDecoded && packet.RequestContentEncoding == "") ||
+		(packet.ResponseBodyDecoded && packet.ResponseContentEncoding == "") {
+		return errors.New("decoded HTTP packet body must declare its wire content encoding")
 	}
 	if !validHTTPPacketLine(packet.RequestLine, true) || !validHTTPPacketLine(packet.ResponseLine, false) ||
 		!validHTTPPacketHeaders(packet.RequestHeaders) || !validHTTPPacketHeaders(packet.ResponseHeaders) ||
 		!validHTTPPacketBody(packet.RequestBody, packet.RequestBodyEncoding) ||
-		!validHTTPPacketBody(packet.ResponseBody, packet.ResponseBodyEncoding) {
+		!validHTTPPacketBody(packet.ResponseBody, packet.ResponseBodyEncoding) ||
+		!validContentEncoding(packet.RequestContentEncoding) || !validContentEncoding(packet.ResponseContentEncoding) {
 		return errors.New("invalid bounded HTTP packet")
 	}
 	return nil

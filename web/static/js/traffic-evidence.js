@@ -202,6 +202,54 @@
         }
     }
 
+    function formatHexBody(value) {
+        const hex = String(value || '').replace(/\s+/g, '').toLowerCase();
+        if (!hex || hex.length % 2 !== 0 || !/^[0-9a-f]+$/.test(hex)) return '[二进制正文无法解析]';
+        const lines = [];
+        for (let offset = 0; offset < hex.length; offset += 32) {
+            const chunk = hex.slice(offset, offset + 32);
+            const bytes = chunk.match(/.{2}/g) || [];
+            const left = bytes.slice(0, 8).join(' ');
+            const right = bytes.slice(8).join(' ');
+            const byteColumn = `${left.padEnd(23, ' ')}  ${right.padEnd(23, ' ')}`;
+            const ascii = bytes.map((byte) => {
+                const number = Number.parseInt(byte, 16);
+                return number >= 0x20 && number <= 0x7e ? String.fromCharCode(number) : '.';
+            }).join('');
+            lines.push(`${(offset / 2).toString(16).padStart(8, '0')}  ${byteColumn}  |${ascii}|`);
+        }
+        return lines.join('\n');
+    }
+
+    function base64AsHex(value) {
+        try {
+            const binary = typeof root.atob === 'function' ? root.atob(String(value || '')) : '';
+            if (!binary) return '[二进制正文无法解析]';
+            let hex = '';
+            for (let index = 0; index < binary.length; index += 1) hex += binary.charCodeAt(index).toString(16).padStart(2, '0');
+            return formatHexBody(hex);
+        } catch (_) {
+            return '[二进制正文无法解析]';
+        }
+    }
+
+    function packetBodyText(message) {
+        const view = message.body_view && typeof message.body_view === 'object' ? message.body_view : null;
+        if (view) {
+            const content = view.format === 'hex' ? formatHexBody(view.content) : String(view.content || '');
+            const notices = [];
+            if (view.decoded && view.content_encoding) notices.push(`[正文已按 Content-Encoding 解压：${view.content_encoding}；报文头保留原始捕获值]`);
+            if (view.format === 'hex') notices.push('[二进制正文 · Hex]');
+            const fallbackLabel = view.format === 'hex' ? '原始字节 Hex' : '未解压的原始正文';
+            if (view.error === 'unsupported_content_encoding') notices.push(`[不支持该 Content-Encoding，以下为${fallbackLabel}]`);
+            else if (view.error) notices.push(`[正文解压失败，以下为${fallbackLabel}]`);
+            notices.push(content);
+            return notices.filter(Boolean).join('\n');
+        }
+        if (message.body_encoding === 'base64') return `[二进制正文 · Hex]\n${base64AsHex(message.body)}`;
+        return String(message.body || '');
+    }
+
     function packetText(message) {
         const headers = Array.isArray(message.headers) ? message.headers : [];
         let start = '';
@@ -211,8 +259,7 @@
             start = `${message.protocol || 'HTTP/1.1'} ${message.status || 0}`;
         }
         const lines = [start, ...headers.map((header) => `${header.name || ''}: ${header.value || ''}`), ''];
-        if (message.body_encoding === 'base64') lines.push('[base64 encoded body]', message.body || '');
-        else lines.push(message.body || '');
+        lines.push(packetBodyText(message));
         return lines.join('\n');
     }
 
@@ -251,7 +298,9 @@
 			const decodedStage = message.stage === 'decoded_request' || message.stage === 'decoded_response';
             const card = create('section', `traffic-evidence-packet${decodedStage ? ' is-transform-output' : ''}`);
             const head = create('div', 'traffic-evidence-packet-head');
-			const stageLabel = decodedStage ? `${message.stage} · 脚本输出` : (message.stage || message.kind || 'packet');
+			const bodyView = message.body_view && typeof message.body_view === 'object' ? message.body_view : null;
+			const contentDecoded = Boolean(bodyView?.decoded && bodyView?.content_encoding);
+			const stageLabel = decodedStage ? `${message.stage} · 脚本输出` : `${message.stage || message.kind || 'packet'}${contentDecoded ? ` · 已解压 ${bodyView.content_encoding}` : ''}`;
             head.appendChild(create('span', '', stageLabel));
             const complete = message.complete !== false;
             head.appendChild(create('span', '', `${message.body_length || 0} bytes`));
@@ -268,6 +317,13 @@
                 truncation.appendChild(create('span', '', `当前显示 ${storedBytes}/${totalBytes} bytes`));
                 card.appendChild(truncation);
             }
+			if (bodyView && bodyView.complete === false && complete) {
+				const truncation = create('div', 'traffic-evidence-packet-truncation');
+				truncation.setAttribute('role', 'status');
+				truncation.appendChild(create('strong', '', '可读正文已达到显示上限'));
+				truncation.appendChild(create('span', '', `当前显示 ${Number(bodyView.stored_bytes || 0)} bytes；原始证据仍保持不变`));
+				card.appendChild(truncation);
+			}
             stages.appendChild(card);
         });
         if (!stages.childNodes.length) stages.appendChild(create('div', 'traffic-evidence-empty', '该事务没有可显示的数据包阶段'));

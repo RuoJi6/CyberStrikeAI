@@ -103,3 +103,18 @@ func TestValidateHTTPPacketAcceptsRFCFieldNameTokens(t *testing.T) {
 		t.Fatal("header value containing a newline was accepted")
 	}
 }
+
+func TestValidateHTTPPacketAcceptsNewHexAndDecodedProjection(t *testing.T) {
+	packet := &HTTPPacket{
+		RequestLine: "GET / HTTP/1.1", RequestHeaders: map[string][]string{},
+		ResponseLine: "HTTP/1.1 200 OK", ResponseHeaders: map[string][]string{"Content-Encoding": {"br"}},
+		ResponseBody: "00ff", ResponseBodyEncoding: "hex", ResponseContentEncoding: "br", ResponseBodyDecoded: true,
+	}
+	if err := ValidateHTTPPacket(packet); err != nil {
+		t.Fatalf("ValidateHTTPPacket: %v", err)
+	}
+	packet.ResponseContentEncoding = ""
+	if err := ValidateHTTPPacket(packet); err == nil {
+		t.Fatal("accepted decoded packet without wire content encoding")
+	}
+}

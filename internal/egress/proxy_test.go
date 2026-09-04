@@ -406,7 +406,7 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 			foundCompleteGet = true
 		}
 		if event.RequestType == ActivityRequestHTTPS && event.Method == http.MethodPost && event.Path == "/upload" && event.HTTPPacket != nil &&
-			event.HTTPPacket.RequestBody == uploadBody && len(event.HTTPPacket.RequestHeaders["Cookie"]) == 1 && event.HTTPPacket.ResponseBodyEncoding == "base64" {
+			event.HTTPPacket.RequestBody == uploadBody && len(event.HTTPPacket.RequestHeaders["Cookie"]) == 1 && event.HTTPPacket.ResponseBodyEncoding == "hex" {
 			foundCompleteUpload = true
 		}
 	}

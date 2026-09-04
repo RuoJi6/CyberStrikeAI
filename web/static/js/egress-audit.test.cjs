@@ -77,6 +77,24 @@ test('egress audit validates a closed integrity proof', () => {
     assert.equal(audit.isSafeIntegrity({ ...proof, extra: 'unsafe' }), false);
 });
 
+test('egress audit renders decoded content and legacy binary packets without Base64 text', () => {
+    const decoded = audit.packetDirectionTextForTest({
+        responseLine: 'HTTP/1.1 200 OK', responseHeaders: { 'Content-Encoding': ['br'], 'Content-Type': ['text/html'] },
+        responseBody: '<html>完整响应</html>', responseBodyEncoding: 'utf8', responseContentEncoding: 'br', responseBodyDecoded: true,
+    }, 'response');
+    assert.match(decoded, /HTTP\/1\.1 200 OK\nContent-Encoding: br/);
+    assert.match(decoded, /正文已按 Content-Encoding 解压：br/);
+    assert.match(decoded, /<html>完整响应<\/html>/);
+    assert.doesNotMatch(decoded, /base64/i);
+
+    const legacy = audit.packetDirectionTextForTest({
+        responseLine: 'HTTP/1.1 200 OK', responseHeaders: {}, responseBody: 'AP8=', responseBodyEncoding: 'base64',
+    }, 'response');
+    assert.match(legacy, /二进制正文 · Hex/);
+    assert.match(legacy, /00 ff/);
+    assert.doesNotMatch(legacy, /AP8=/);
+});
+
 test('egress audit URL state accepts only closed filters and supported page sizes', () => {
     assert.deepEqual(audit.readURLStateForTest('?audit_page=3&audit_page_size=50&audit_q=needle&audit_conversation=conversation-a&audit_category=network&audit_type=dns&audit_decision=blocked'), {
         page: 3, pageSize: 50, query: 'needle', conversation: 'conversation-a', category: 'network', type: 'dns', decision: 'blocked',
@@ -104,7 +122,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260903-1/);
+    assert.match(template, /egress-audit\.js\?v=20260904-2/);
     assert.equal(zh.containerManagement.auditReconcile, '状态校准');
     assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);

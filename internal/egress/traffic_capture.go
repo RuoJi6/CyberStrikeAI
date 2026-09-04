@@ -71,6 +71,21 @@ func (capture *fullBodyCapture) message(
 	}
 }
 
+func (capture *fullBodyCapture) packetSnapshot(contentType, contentEncoding string) (body, encoding string, truncated, decoded bool, normalizedContentEncoding string) {
+	view := traffic.BuildBodyView(
+		capture.content.Bytes(), contentType, contentEncoding,
+		capture.total == int64(capture.content.Len()), MaxHTTPPacketBodyBytes,
+	)
+	encoding = "utf8"
+	if view.Format == traffic.BodyViewFormatHex {
+		encoding = "hex"
+	}
+	if view.Content == "" {
+		encoding = ""
+	}
+	return view.Content, encoding, !view.Complete, view.Decoded, view.ContentEncoding
+}
+
 func consumeTrafficAttribution(ctx context.Context, headers http.Header) trafficAttribution {
 	stripLegacyAttributionHeaders(headers)
 	return trafficAttribution{provenance: networkprovenance.FromContext(ctx)}
