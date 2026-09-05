@@ -102,9 +102,9 @@ test('egress audit URL state accepts only closed filters and supported page size
     assert.deepEqual(audit.readURLStateForTest('?audit_page=3&audit_page_size=50&audit_q=needle&audit_conversation=conversation-a&audit_category=network&audit_type=dns&audit_decision=blocked'), {
         page: 3, pageSize: 50, query: 'needle', conversation: 'conversation-a', category: 'network', type: 'dns', decision: 'blocked',
     });
-	assert.equal(audit.readURLStateForTest('?audit_type=health').type, 'health');
+	assert.equal(audit.readURLStateForTest('?audit_type=health').type, 'all');
     assert.deepEqual(audit.readURLStateForTest('?audit_page=-2&audit_page_size=25&audit_category=secret&audit_type=socket&audit_decision=maybe'), {
-        page: 1, pageSize: 20, query: '', conversation: '', category: 'all', type: 'all', decision: 'all',
+        page: 1, pageSize: 20, query: '', conversation: '', category: 'network', type: 'all', decision: 'all',
     });
 });
 
@@ -116,7 +116,7 @@ test('egress audit accepts only a closed conversation option projection', () => 
 
 test('egress audit page is authenticated, searchable, pageable, exportable, and permission gated', () => {
     for (const id of [
-        'egress-audit-search', 'egress-audit-conversation', 'egress-audit-category', 'egress-audit-type', 'egress-audit-decision',
+        'egress-audit-search', 'egress-audit-conversation', 'egress-audit-type', 'egress-audit-decision',
         'egress-audit-page-size', 'egress-audit-refresh', 'egress-audit-export-json',
         'egress-audit-export-csv', 'egress-audit-summary', 'egress-audit-rows',
         'egress-audit-prev', 'egress-audit-next', 'egress-audit-pagination-meta', 'egress-audit-integrity',
@@ -125,7 +125,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260905-1/);
+    assert.match(template, /egress-audit\.js\?v=20260905-2/);
     assert.equal(zh.containerManagement.auditReconcile, '状态校准');
     assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);
@@ -175,7 +175,7 @@ test('egress audit translations and responsive table/card layout are complete', 
     assert.match(styles, /\.egress-audit-packet-grid\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-ready\s*\{/);
     assert.match(styles, /\.container-management-phase\.is-error\s*\{/);
-	assert.match(template, /style\.css\?v=20260905-1/);
+	assert.match(template, /style\.css\?v=20260905-2/);
     assert.match(template, /router\.js\?v=20260827-2/);
-    assert.match(template, /container-management\.js\?v=20260903-1/);
+    assert.match(template, /container-management\.js\?v=20260905-1/);
 });

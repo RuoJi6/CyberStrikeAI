@@ -44,7 +44,7 @@ test('new conversation panel shows workspace, boundary, inherited egress, and sa
     assert.match(styles, /@media \(max-width: 768px\)[\s\S]*?\.runtime-mode-wrapper \.runtime-mode-panel \{[\s\S]*?position: fixed/);
     assert.match(styles, /\.runtime-mode-wrapper \.runtime-mode-panel \{[\s\S]*?inset: auto 8px 76px 8px/);
     assert.ok((template.match(/data-unified-select="single"/g) || []).length >= 15);
-    for (const id of ['egress-audit-category', 'egress-audit-type', 'egress-audit-decision', 'egress-audit-page-size']) {
+    for (const id of ['egress-audit-type', 'egress-audit-decision', 'egress-audit-page-size']) {
         assert.match(template, new RegExp(`id="${id}"[^>]+data-unified-select="single"`));
     }
     assert.match(styles, /\.unified-select-trigger:focus-visible/);
@@ -194,7 +194,7 @@ test('container creation copy is bilingual and cache-busted', () => {
 	assert.match(en.chat.boundaryPolicyDefaultAllowHint, /HTTPS is decrypted and fully audited/);
     assert.match(zh.chat.egressTargetHint, /脱敏/);
     assert.match(en.chat.egressTargetHint, /credential-redacted/i);
-	assert.match(template, /style\.css\?v=20260905-1/);
+	assert.match(template, /style\.css\?v=20260905-2/);
 	assert.match(template, /chat\.js\?v=20260902-1/);
     assert.match(template, /unified-select\.js\?v=20260822-3/);
 	assert.match(template, /conversation-container-settings\.js\?v=20260904-4/);

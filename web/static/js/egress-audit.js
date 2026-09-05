@@ -3,6 +3,7 @@
     const api = factory(root || {});
     if (typeof module === 'object' && module.exports) module.exports = api;
     if (root) {
+        root.CyberStrikeEgressAudit = api;
         root.initEgressAuditPage = api.init;
         root.stopEgressAuditPage = api.stop;
         root.refreshEgressAuditPage = api.refresh;
@@ -32,7 +33,7 @@
     const state = {
         active: false, bound: false, loading: false, integrityLoading: false, conversationsLoading: false,
         generation: 0, searchTimer: null, listController: null, integrityController: null,
-        page: 1, pageSize: 20, query: '', conversation: '', category: 'all', type: 'all', decision: 'all',
+        page: 1, pageSize: 20, query: '', conversation: '', category: 'network', type: 'all', decision: 'all',
         total: 0, totalPages: 0, items: [], summary: { total: 0, network: 0, lifecycle: 0, blocked: 0, failures: 0 },
         conversations: [], integrity: null, integrityError: '', error: '', selected: new Set(),
     };
@@ -74,8 +75,8 @@
         state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
         state.query = Array.from(String(params.get(URL_KEYS.query) || '')).slice(0, 200).join('');
         state.conversation = Array.from(String(params.get(URL_KEYS.conversation) || '')).slice(0, 128).join('');
-        state.category = closedValue(params.get(URL_KEYS.category), CATEGORIES, 'all');
-        state.type = closedValue(params.get(URL_KEYS.type), TYPES, 'all');
+        state.category = 'network';
+        state.type = closedValue(params.get(URL_KEYS.type), new Set(['all', ...NETWORK_TYPES]), 'all');
         state.decision = closedValue(params.get(URL_KEYS.decision), DECISIONS, 'all');
     }
 
@@ -573,7 +574,7 @@
     }
 
     function hasActiveFilter() {
-        return Boolean(state.query || state.conversation || state.category !== 'all' || state.type !== 'all' || state.decision !== 'all');
+        return Boolean(state.query || state.conversation || state.type !== 'all' || state.decision !== 'all');
     }
 
     function renderSelectionControls() {
@@ -608,8 +609,6 @@
         if (summary) {
             summary.replaceChildren(
                 summaryCard(t('auditTotal', '总事件'), state.summary.total),
-                summaryCard(t('auditNetwork', '网络'), state.summary.network),
-                summaryCard(t('auditLifecycle', '生命周期'), state.summary.lifecycle),
                 summaryCard(t('auditBlocked', '阻断'), state.summary.blocked, state.summary.blocked ? 'danger' : 'neutral'),
                 summaryCard(t('auditFailures', '失败'), state.summary.failures, state.summary.failures ? 'danger' : 'success'),
             );
@@ -811,8 +810,8 @@
         const previousConversation = state.conversation;
         state.query = Array.from(element('egress-audit-search')?.value || '').slice(0, 200).join('');
         state.conversation = Array.from(element('egress-audit-conversation')?.value || '').slice(0, 128).join('');
-        state.category = closedValue(element('egress-audit-category')?.value, CATEGORIES, 'all');
-        state.type = closedValue(element('egress-audit-type')?.value, TYPES, 'all');
+        state.category = 'network';
+        state.type = closedValue(element('egress-audit-type')?.value, new Set(['all', ...NETWORK_TYPES]), 'all');
         state.decision = closedValue(element('egress-audit-decision')?.value, DECISIONS, 'all');
         const pageSize = Number.parseInt(element('egress-audit-page-size')?.value, 10);
         state.pageSize = PAGE_SIZES.has(pageSize) ? pageSize : 20;
@@ -848,6 +847,7 @@
         });
         element('egress-audit-export-json')?.addEventListener('click', function () { exportEvents('json'); });
         element('egress-audit-export-csv')?.addEventListener('click', function () { exportEvents('csv'); });
+        element('egress-audit-open-lifecycle')?.addEventListener('click', function () { root.openContainerLifecycle?.(state.conversation); });
         element('egress-audit-select-page')?.addEventListener('change', function (event) {
             state.items.forEach(function (item) {
                 if (event.target.checked) state.selected.add(item.id);

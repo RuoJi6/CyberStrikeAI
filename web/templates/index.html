@@ -31,7 +31,7 @@
             }
         })();
     </script>
-    <link rel="stylesheet" href="/static/css/style.css?v=20260905-1">
+    <link rel="stylesheet" href="/static/css/style.css?v=20260905-2">
     <link rel="stylesheet" href="/static/css/chat-plan-progress.css?v=20260813-4">
     <link rel="stylesheet" href="/static/css/c2.css">
     <link rel="stylesheet" href="/static/vendor/xterm.css">
@@ -5725,7 +5725,7 @@ def decode_request(ctx, wire: Message) -> Message:
                 <div id="page-egress-audit" class="page container-management-page" data-container-management-page="egress-audit" data-require-permission="audit:read">
                     <div class="container-management-shell">
                         <div class="page-header container-management-header">
-                            <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.auditTitle">出站审计</h2><p data-i18n="containerManagement.auditSubtitle">搜索、筛选和导出可追溯的网络与生命周期事件。</p></div>
+                            <div><span class="container-management-eyebrow" data-i18n="nav.containerManagement">容器管理</span><h2 class="container-management-page-title" data-i18n="containerManagement.auditTitle">出站审计</h2><p data-i18n="containerManagement.auditSubtitle">搜索、筛选和导出可追溯的网络事件。</p></div>
                         </div>
                         <div class="page-content container-management-content">
                             <section class="container-management-surface egress-audit-intro" aria-labelledby="egress-audit-focus-title"><span class="container-management-surface-icon" aria-hidden="true">≋</span><div><h3 id="egress-audit-focus-title" data-i18n="containerManagement.auditFocusTitle">持久审计记录</h3><p data-i18n="containerManagement.auditFocusDescription">关联对话、容器、Agent、快照、命中规则和上游路由。</p></div><span id="egress-audit-integrity" class="container-management-phase" role="status" aria-live="polite" data-i18n="containerManagement.auditIntegrityChecking">正在校验审计链…</span></section>
@@ -5733,13 +5733,13 @@ def decode_request(ctx, wire: Message) -> Message:
                                 <div class="egress-audit-filter-grid">
                                     <label class="egress-audit-field is-search"><span data-i18n="containerManagement.auditSearch">搜索</span><input id="egress-audit-search" type="search" maxlength="200" autocomplete="off" data-i18n="containerManagement.auditSearchPlaceholder" data-i18n-attr="placeholder" placeholder="搜索对话、域名、IP、规则或出口…"></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditConversationFilter">对话</span><select id="egress-audit-conversation" data-unified-select="single" data-unified-search="true"><option value="" data-i18n="containerManagement.auditAllConversations">全部对话</option></select></label>
-                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditCategory">类别</span><select id="egress-audit-category" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="network" data-i18n="containerManagement.auditCategoryNetwork">网络</option><option value="lifecycle" data-i18n="containerManagement.auditCategoryLifecycle">生命周期</option></select></label>
-                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option><option value="health" data-i18n="containerManagement.auditHealth">出站健康</option><option value="create" data-i18n="containerManagement.auditCreate">创建</option><option value="start" data-i18n="containerManagement.auditStart">启动</option><option value="stop" data-i18n="containerManagement.auditStop">停止</option><option value="rebuild" data-i18n="containerManagement.auditRebuild">重建</option><option value="delete" data-i18n="containerManagement.auditDelete">删除</option><option value="reconcile" data-i18n="containerManagement.auditReconcile">状态校准</option></select></label>
+                                    <label class="egress-audit-field"><span data-i18n="containerManagement.auditEventType">事件</span><select id="egress-audit-type" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="dns">DNS</option><option value="http">HTTP</option><option value="https" data-i18n="containerManagement.activityHTTPS">HTTPS（已解密）</option><option value="connect">CONNECT</option><option value="tcp">TCP</option><option value="udp">UDP</option><option value="icmp">ICMP</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.auditDecisionFilter">判定</span><select id="egress-audit-decision" data-unified-select="single" data-unified-search="false"><option value="all" data-i18n="containerManagement.filterAll">全部</option><option value="allowed" data-i18n="containerManagement.activityAllowed">允许</option><option value="blocked" data-i18n="containerManagement.activityBlocked">阻断</option><option value="success" data-i18n="containerManagement.auditSuccess">成功</option><option value="failure" data-i18n="containerManagement.auditFailure">失败</option></select></label>
                                     <label class="egress-audit-field"><span data-i18n="containerManagement.rowsPerPage">每页</span><select id="egress-audit-page-size" data-unified-select="single" data-unified-search="false"><option value="10">10</option><option value="20" selected>20</option><option value="50">50</option><option value="100">100</option></select></label>
                                 </div>
                                 <div class="egress-audit-actions"><button id="egress-audit-refresh" class="btn-secondary" type="button" data-i18n="common.refresh">刷新</button><button id="egress-audit-export-json" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportJSON">导出 JSON</button><button id="egress-audit-export-csv" class="btn-secondary" type="button" data-i18n="containerManagement.auditExportCSV">导出 CSV</button><button id="egress-audit-delete-selected" class="btn-danger" type="button" data-require-permission="audit:delete" disabled>删除已选 (0)</button><button id="egress-audit-delete-filtered" class="btn-danger" type="button" data-require-permission="audit:delete" disabled>删除筛选结果</button></div>
                             </section>
+                            <p class="egress-audit-lifecycle-link"><span data-i18n="containerManagement.auditLifecycleMoved">容器创建、启停、重建和销毁记录已移至对话容器。</span> <button id="egress-audit-open-lifecycle" class="btn-secondary" type="button" data-i18n="containerManagement.auditOpenLifecycle">查看生命周期记录</button></p>
                             <div id="egress-audit-summary" class="egress-audit-summary" aria-label="审计汇总" data-i18n="containerManagement.auditSummaryLabel" data-i18n-attr="aria-label"></div>
                             <section class="container-management-surface egress-audit-results" aria-labelledby="egress-audit-results-title">
                                 <div class="egress-audit-results-heading"><div><h3 id="egress-audit-results-title" data-i18n="containerManagement.auditResults">审计事件</h3><p id="egress-audit-load-state" role="status" aria-live="polite" data-i18n="containerManagement.auditLoading">正在加载审计事件…</p></div><div id="egress-audit-pagination-meta" class="egress-audit-pagination-meta"></div></div>
@@ -7559,10 +7559,11 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/rbac.js"></script>
     <script src="/static/js/c2.js"></script>
     <script src="/static/js/network-activity.js?v=20260905-1"></script>
-    <script src="/static/js/egress-audit.js?v=20260905-1"></script>
+    <script src="/static/js/egress-audit.js?v=20260905-2"></script>
     <script src="/static/js/boundary-rules.js?v=20260905-2"></script>
     <script src="/static/js/egress-management.js?v=20260905-1"></script>
-    <script src="/static/js/container-management.js?v=20260903-1"></script>
+    <script src="/static/js/container-lifecycle.js?v=20260905-1"></script>
+    <script src="/static/js/container-management.js?v=20260905-1"></script>
     <script src="/static/js/rbac-guards.js?v=20260717-1"></script>
 </body>
 </html>

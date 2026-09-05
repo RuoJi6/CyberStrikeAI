@@ -46,12 +46,14 @@ function readContainerRuntimeURLState() {
 }
 
 const initialContainerRuntimeURLState = readContainerRuntimeURLState();
+const initialContainerDetailParams = typeof URLSearchParams === 'undefined' ? { get: () => null } : new URLSearchParams(window.location?.search || '');
 
 const containerManagementState = {
     rows: [],
     boundaryPolicies: [],
     summary: { total: 0, running: 0, gateways: 0, persistent: 0, attention: 0 },
-    selectedConversationId: '',
+    selectedConversationId: initialContainerDetailParams.get('container_conversation') || '',
+    detailTab: ['overview', 'history', 'settings'].includes(initialContainerDetailParams.get('container_tab')) ? initialContainerDetailParams.get('container_tab') : 'overview',
     requestGeneration: 0,
     loading: false,
     page: initialContainerRuntimeURLState.page,
@@ -345,6 +347,7 @@ function renderConversationContainerDetail() {
     headingText.append(
         containerRuntimeElement('span', 'container-runtime-kicker', containerManagementT('liveObservation', '实时引擎观测')),
         containerRuntimeElement('h3', '', containerRuntimeRowTitle(record)),
+        containerRuntimeElement('p', '', `${containerManagementT('lifecycleConversation', '对话')} ${record.conversationId.slice(0, 8)} · ${containerManagementT('lifecycleGeneration', '第 {{generation}} 代', { generation: record.runtimeGeneration || 0 })}`),
         containerRuntimeElement('p', '', record.observation
             ? containerManagementT('observedAt', '观测于 {{time}}', { time: containerRuntimeFormatDate(record.observation.observedAt) })
             : containerManagementT('persistedState', '当前显示持久化状态')),
@@ -363,6 +366,38 @@ function renderConversationContainerDetail() {
 		containerRuntimeDetailField(containerManagementT('egressHealth', '出站健康'), containerRuntimeBadge(egressHealthStatus)),
     );
     root.append(statusGrid);
+
+    const tabs = containerRuntimeElement('div', 'container-runtime-detail-tabs');
+    tabs.setAttribute('role', 'tablist');
+    tabs.setAttribute('aria-label', containerManagementT('detailSections', '容器详情分区'));
+    const panels = {};
+    [['overview', 'detailOverview', '运行概况'], ['history', 'detailHistory', '生命周期记录'], ['settings', 'detailSettings', '设置与操作']].forEach(([name, key, label]) => {
+        const tab = containerRuntimeElement('button', 'container-runtime-detail-tab', containerManagementT(key, label));
+        tab.type = 'button'; tab.id = `container-detail-tab-${name}`;
+        tab.setAttribute('role', 'tab'); tab.setAttribute('aria-controls', `container-detail-panel-${name}`);
+        tab.setAttribute('aria-selected', String(containerManagementState.detailTab === name));
+        tab.tabIndex = containerManagementState.detailTab === name ? 0 : -1;
+        tab.addEventListener('click', () => selectContainerRuntimeDetailTab(name));
+        tab.addEventListener('keydown', event => {
+            const keys = ['overview', 'history', 'settings'];
+            let index = keys.indexOf(name);
+            if (event.key === 'ArrowRight') index = (index + 1) % keys.length;
+            else if (event.key === 'ArrowLeft') index = (index + keys.length - 1) % keys.length;
+            else if (event.key === 'Home') index = 0;
+            else if (event.key === 'End') index = keys.length - 1;
+            else return;
+            event.preventDefault(); selectContainerRuntimeDetailTab(keys[index]);
+            document.getElementById(`container-detail-tab-${keys[index]}`)?.focus();
+        });
+        const panel = containerRuntimeElement('section', 'container-runtime-detail-panel');
+        panel.id = `container-detail-panel-${name}`; panel.setAttribute('role', 'tabpanel');
+        panel.setAttribute('aria-labelledby', tab.id); panel.hidden = containerManagementState.detailTab !== name;
+        tabs.append(tab); panels[name] = panel;
+    });
+    root.append(tabs, panels.overview, panels.history, panels.settings);
+    const latest = containerRuntimeElement('div', 'container-runtime-latest-event');
+    latest.dataset.containerLifecycleLatest = record.conversationId;
+    panels.overview.append(latest);
 
 	if (gatewayConfigured && record.egressHealth && record.egressHealth.status !== 'healthy') {
 		const health = containerRuntimeElement('section', `container-egress-health is-${containerRuntimeStatusTone(record.egressHealth.status)}`);
@@ -383,14 +418,14 @@ function renderConversationContainerDetail() {
 			recover.addEventListener('click', () => recoverContainerEgressHealth(record.conversationId, recover));
 			health.append(recover);
 		}
-		root.append(health);
+		root.insertBefore(health, tabs);
 	}
 
     if (record.observation) {
         const resources = containerRuntimeElement('div', 'container-runtime-resources');
         resources.append(containerRuntimeResourceBlock('Agent', record.observation.agent, record.desired?.resources));
         if (record.observation.gateway) resources.append(containerRuntimeResourceBlock(containerManagementT('gateway', '网关'), record.observation.gateway, record.desired?.gatewayResources));
-        root.append(resources);
+        panels.overview.append(resources);
     }
 
     const metadata = containerRuntimeElement('dl', 'container-runtime-metadata');
@@ -406,7 +441,7 @@ function renderConversationContainerDetail() {
         containerRuntimeDetailField(containerManagementT('policyDNSAddress', '策略 DNS 地址'), record.observation?.policyDnsAddress || '—', { mono: true }),
         containerRuntimeDetailField(containerManagementT('readiness', '工具就绪'), containerRuntimeStatusLabel(record.readinessStatus || 'unknown')),
     );
-    root.append(metadata);
+    panels.overview.append(metadata);
 
     const policySwitch = containerRuntimeElement('section', 'container-boundary-policy-switch');
     const policyCopy = containerRuntimeElement('div', 'container-boundary-policy-switch-copy');
@@ -464,7 +499,7 @@ function renderConversationContainerDetail() {
 	policyButton.addEventListener('click', () => switchConversationBoundaryPolicy(record, policySelect, restrictedTargetsToggle, policyButton));
 	policyControls.append(policySelect, restrictedTargetsLabel, policyButton);
     policySwitch.append(policyCopy, policyControls);
-    root.append(policySwitch);
+    panels.settings.append(policySwitch);
     if (window.CyberStrikeSelect) {
         if (typeof window.CyberStrikeSelect.enhance === 'function') window.CyberStrikeSelect.enhance(policySelect);
         else if (typeof window.CyberStrikeSelect.refresh === 'function') window.CyberStrikeSelect.refresh(policySelect);
@@ -527,7 +562,7 @@ function renderConversationContainerDetail() {
     lifecycleButtons.append(startButton, stopButton, deleteButton);
     lifecycleControls.append(idleFields, idleActions, lifecycleButtons);
     lifecycle.append(lifecycleCopy, lifecycleControls);
-    root.append(lifecycle);
+    panels.settings.append(lifecycle);
     if (window.CyberStrikeSelect && typeof window.CyberStrikeSelect.enhance === 'function') window.CyberStrikeSelect.enhance(idleAction);
 
     if (record.status === 'created') {
@@ -547,15 +582,41 @@ function renderConversationContainerDetail() {
             }
         });
         workspaceActions.append(workspaceCopy, workspaceButton);
-        root.append(workspaceActions);
+        panels.overview.append(workspaceActions);
     }
 
     const latestError = containerRuntimeLatestError(record);
     if (latestError) {
         const error = containerRuntimeElement('div', 'container-runtime-error');
         error.append(containerRuntimeElement('strong', '', containerManagementT('latestError', '最后错误')), containerRuntimeElement('p', '', latestError));
-        root.append(error);
+        panels.overview.append(error);
     }
+    if (window.ContainerLifecycle) window.ContainerLifecycle.mount(panels.history, record, containerManagementState.detailTab === 'history');
+}
+
+function selectContainerRuntimeDetailTab(name) {
+    if (!['overview', 'history', 'settings'].includes(name)) return;
+    containerManagementState.detailTab = name;
+    writeContainerRuntimeURLState();
+    // Keep the panels mounted so switching tabs never discards an edited setting.
+    ['overview', 'history', 'settings'].forEach(key => {
+        const tab = document.getElementById(`container-detail-tab-${key}`);
+        if (tab) { tab.setAttribute('aria-selected', String(key === name)); tab.tabIndex = key === name ? 0 : -1; }
+        const panel = document.getElementById(`container-detail-panel-${key}`);
+        if (panel) panel.hidden = key !== name;
+    });
+}
+
+function openContainerLifecycle(conversationId) {
+    containerManagementState.detailTab = 'history';
+    if (conversationId) {
+        containerManagementState.selectedConversationId = conversationId;
+        containerManagementState.search = conversationId;
+        containerManagementState.page = 1;
+        containerManagementState.status = 'all';
+    }
+    writeContainerRuntimeURLState();
+    if (typeof window.switchPage === 'function') window.switchPage('conversation-containers');
 }
 
 async function saveContainerIdlePolicy(record, actionSelect, minutesInput, button) {
@@ -709,6 +770,8 @@ function writeContainerRuntimeURLState() {
     params.set(CONTAINER_RUNTIME_URL_PARAMS.status, containerManagementState.status);
     if (containerManagementState.search) params.set(CONTAINER_RUNTIME_URL_PARAMS.search, containerManagementState.search);
     else params.delete(CONTAINER_RUNTIME_URL_PARAMS.search);
+    if (containerManagementState.selectedConversationId) params.set('container_conversation', containerManagementState.selectedConversationId);
+    params.set('container_tab', containerManagementState.detailTab);
     const search = params.toString();
     window.history.replaceState(window.history.state, '', `${window.location.pathname || ''}${search ? `?${search}` : ''}${window.location.hash || ''}`);
 }
@@ -829,6 +892,7 @@ async function observeSelectedContainerRuntime(generation, conversationId) {
 
 async function selectContainerRuntimeConversation(conversationId) {
     containerManagementState.selectedConversationId = String(conversationId || '');
+    writeContainerRuntimeURLState();
     renderContainerManagementData();
     await observeSelectedContainerRuntime(containerManagementState.requestGeneration, containerManagementState.selectedConversationId);
 }
@@ -922,6 +986,7 @@ window.refreshContainerManagementData = refreshContainerManagementData;
 window.selectContainerRuntimeConversation = selectContainerRuntimeConversation;
 window.setContainerRuntimePage = setContainerRuntimePage;
 window.recoverContainerEgressHealth = recoverContainerEgressHealth;
+window.openContainerLifecycle = openContainerLifecycle;
 
 if (typeof document.addEventListener === 'function') {
     document.addEventListener('languagechange', () => {

@@ -4875,6 +4875,97 @@ html[data-theme="dark"] .traffic-transform-script-item.is-active { background: #
     min-height: 380px;
 }
 
+.container-runtime-detail-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 18px;
+}
+.container-runtime-detail-tab {
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--text-secondary);
+    padding: 12px 10px;
+    font: inherit;
+    font-size: .85rem;
+    cursor: pointer;
+}
+.container-runtime-detail-tab[aria-selected="true"] {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+    font-weight: 650;
+}
+.container-runtime-detail-panel { min-width: 0; }
+.container-runtime-detail-panel[hidden] { display: none; }
+.container-runtime-latest-event {
+    display: grid;
+    gap: 6px;
+    margin-bottom: 18px;
+    padding: 12px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    font-size: .8rem;
+    overflow-wrap: anywhere;
+}
+.container-runtime-latest-event span { color: var(--text-secondary); }
+.container-lifecycle-toolbar, .container-lifecycle-integrity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px;
+}
+.container-lifecycle-filter { display: grid; gap: 6px; min-width: 0; font-size: .78rem; }
+.container-lifecycle-filter select {
+    padding: 9px 12px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    min-height: 38px;
+    max-width: 100%;
+    font: inherit;
+}
+.container-lifecycle-history-hint, .container-lifecycle-load-state, .container-lifecycle-integrity p {
+    color: var(--text-secondary);
+    font-size: .78rem;
+    line-height: 1.6;
+    overflow-wrap: anywhere;
+}
+.container-lifecycle-history-hint { margin: 12px 0 18px; }
+.container-lifecycle-load-state.is-error { color: var(--danger-color, #dc2626); }
+.container-lifecycle-event { position: relative; padding: 0 0 22px 22px; min-width: 0; }
+.container-lifecycle-event::before { content: ''; position: absolute; top: 7px; left: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--primary-color); }
+.container-lifecycle-event.is-failure::before { background: #ef4444; }
+.container-lifecycle-event::after { content: ''; position: absolute; top: 17px; bottom: 2px; left: 6px; border-left: 1px solid var(--border-color); }
+.container-lifecycle-event-heading { display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 6px 16px; }
+.container-lifecycle-event-heading strong { color: var(--text-primary); font-size: .85rem; }
+.container-lifecycle-event-heading time { font-size: .74rem; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.container-lifecycle-event-context { margin: 5px 0; color: var(--text-secondary); font-size: .76rem; overflow-wrap: anywhere; }
+.container-lifecycle-event-details summary { padding: 5px 0; color: var(--primary-color); cursor: pointer; font-size: .78rem; }
+.container-lifecycle-event-fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    padding: 14px;
+    margin: 8px 0 0;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-primary);
+}
+.container-lifecycle-event-fields dd { white-space: pre-wrap; overflow-wrap: anywhere; }
+.container-lifecycle-integrity { margin-top: 16px; align-items: center; }
+.egress-audit-lifecycle-link { margin: 0; font-size: .82rem; color: var(--text-secondary); }
+@media (max-width: 760px) {
+    .container-lifecycle-event-fields { grid-template-columns: minmax(0, 1fr); }
+    .container-runtime-list { max-height: 230px; }
+    .container-runtime-detail-tab { min-height: 44px; padding: 10px 8px; }
+    .container-lifecycle-filter { flex: 1; }
+    .container-lifecycle-filter select { font-size: 16px; min-height: 44px; }
+}
+
 .container-runtime-detail-heading {
     display: flex;
     align-items: flex-start;
@@ -5424,7 +5515,7 @@ html[data-theme="dark"] .traffic-transform-script-item.is-active { background: #
 
 .egress-audit-summary {
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
     margin-bottom: 16px;
 }
