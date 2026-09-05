@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/networkprovenance"
 	"cyberstrike-ai/internal/traffic"
 
@@ -51,6 +52,7 @@ CREATE TABLE IF NOT EXISTS traffic_transactions (
 	bytes_down INTEGER NOT NULL DEFAULT 0 CHECK (bytes_down >= 0),
 	boundary_snapshot_id TEXT NOT NULL DEFAULT '',
 	rule_id TEXT NOT NULL DEFAULT '',
+	block_match_json TEXT NOT NULL DEFAULT '' CHECK (block_match_json = '' OR json_valid(block_match_json)),
 	upstream_route_id TEXT NOT NULL DEFAULT '',
 	transform_binding_id TEXT NOT NULL DEFAULT '',
 	transform_revision_id TEXT NOT NULL DEFAULT '',
@@ -123,6 +125,7 @@ func (db *DB) initTrafficTables() error {
 		{"outcome", `ALTER TABLE traffic_transactions ADD COLUMN outcome TEXT NOT NULL DEFAULT ''`},
 		{"error_code", `ALTER TABLE traffic_transactions ADD COLUMN error_code TEXT NOT NULL DEFAULT ''`},
 		{"error_summary", `ALTER TABLE traffic_transactions ADD COLUMN error_summary TEXT NOT NULL DEFAULT ''`},
+		{"block_match_json", `ALTER TABLE traffic_transactions ADD COLUMN block_match_json TEXT NOT NULL DEFAULT ''`},
 	} {
 		if err := db.addColumnIfMissing("traffic_transactions", column.name, column.statement); err != nil {
 			return fmt.Errorf("initialize traffic transaction column %s: %w", column.name, err)
@@ -172,19 +175,25 @@ func scanTrafficTransaction(scanner trafficTransactionScanner) (traffic.Transact
 	var item traffic.Transaction
 	var conversationID, projectID sql.NullString
 	var completedAt, aggregateFirstAt, aggregateLastAt sql.NullTime
+	var blockMatchJSON string
 	err := scanner.Scan(
 		&item.ID, &item.EventID, &conversationID, &projectID, &item.AgentID, &item.ToolName, &item.ExecutionID, &item.ToolCallID, &item.ActivityScopeID,
 		&item.RuntimeGeneration, &item.RuntimeInstanceID, &item.AttributionStatus, &item.DeclaredActivityKind, &item.ObservedActivityKind,
 		&item.RuntimeMode, &item.CaptureCoverage, &item.Scheme, &item.Host, &item.Port, &item.Method, &item.Path,
 		&item.HTTPStatus, &item.Outcome, &item.ErrorCode, &item.ErrorSummary,
 		&item.StartedAt, &completedAt, &item.LatencyMS, &item.BytesUp, &item.BytesDown,
-		&item.BoundarySnapshotID, &item.RuleID, &item.UpstreamRouteID,
+		&item.BoundarySnapshotID, &item.RuleID, &blockMatchJSON, &item.UpstreamRouteID,
 		&item.TransformBindingID, &item.TransformRevisionID, &item.TransformResult,
 		&item.AggregateKind, &item.AggregateCount, &aggregateFirstAt, &aggregateLastAt, &item.AggregateSummaryJSON,
 		&item.CreatedAt, &item.UpdatedAt,
 	)
 	if err != nil {
 		return traffic.Transaction{}, err
+	}
+	if blockMatchJSON != "" {
+		if err := json.Unmarshal([]byte(blockMatchJSON), &item.BlockMatch); err != nil {
+			return traffic.Transaction{}, fmt.Errorf("decode traffic block match: %w", err)
+		}
 	}
 	item.ConversationID = conversationID.String
 	item.ProjectID = projectID.String
@@ -209,7 +218,7 @@ const trafficTransactionSelect = `
 		runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
 		runtime_mode, capture_coverage, scheme, host, port, method, path, http_status, outcome, error_code, error_summary,
 		started_at, completed_at, latency_ms, bytes_up, bytes_down,
-		boundary_snapshot_id, rule_id, upstream_route_id,
+		boundary_snapshot_id, rule_id, block_match_json, upstream_route_id,
 		transform_binding_id, transform_revision_id, transform_result,
 		aggregate_kind, aggregate_count, aggregate_first_at, aggregate_last_at, aggregate_summary_json,
 		created_at, updated_at
@@ -305,6 +314,17 @@ func (db *DB) CreateTrafficTransaction(ctx context.Context, item *traffic.Transa
 	}
 	copyItem.CreatedAt = copyItem.CreatedAt.UTC()
 	copyItem.UpdatedAt = now
+	blockMatchJSON := ""
+	if copyItem.BlockMatch != nil {
+		if err := boundary.ValidateBlockMatch(copyItem.BlockMatch); err != nil {
+			return nil, err
+		}
+		encoded, err := json.Marshal(copyItem.BlockMatch)
+		if err != nil {
+			return nil, fmt.Errorf("encode traffic block match: %w", err)
+		}
+		blockMatchJSON = string(encoded)
+	}
 
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -317,16 +337,16 @@ func (db *DB) CreateTrafficTransaction(ctx context.Context, item *traffic.Transa
 			runtime_generation, runtime_instance_id, attribution_status, declared_activity_kind, observed_activity_kind,
 			runtime_mode, capture_coverage, scheme, host, port, method, path, http_status, outcome, error_code, error_summary,
 			started_at, completed_at, latency_ms, bytes_up, bytes_down,
-			boundary_snapshot_id, rule_id, upstream_route_id,
+			boundary_snapshot_id, rule_id, block_match_json, upstream_route_id,
 			transform_binding_id, transform_revision_id, transform_result,
 			aggregate_kind, aggregate_count, aggregate_first_at, aggregate_last_at, aggregate_summary_json,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, copyItem.ID, copyItem.EventID, nullIfEmpty(copyItem.ConversationID), nullIfEmpty(copyItem.ProjectID), copyItem.AgentID, copyItem.ToolName, copyItem.ExecutionID, copyItem.ToolCallID, copyItem.ActivityScopeID,
 		copyItem.RuntimeGeneration, copyItem.RuntimeInstanceID, copyItem.AttributionStatus, copyItem.DeclaredActivityKind, copyItem.ObservedActivityKind,
 		copyItem.RuntimeMode, copyItem.CaptureCoverage, copyItem.Scheme, copyItem.Host, copyItem.Port, copyItem.Method, copyItem.Path, copyItem.HTTPStatus, copyItem.Outcome, copyItem.ErrorCode, copyItem.ErrorSummary,
 		copyItem.StartedAt, copyItem.CompletedAt, copyItem.LatencyMS, copyItem.BytesUp, copyItem.BytesDown,
-		copyItem.BoundarySnapshotID, copyItem.RuleID, copyItem.UpstreamRouteID,
+		copyItem.BoundarySnapshotID, copyItem.RuleID, blockMatchJSON, copyItem.UpstreamRouteID,
 		copyItem.TransformBindingID, copyItem.TransformRevisionID, copyItem.TransformResult,
 		copyItem.AggregateKind, copyItem.AggregateCount, copyItem.AggregateFirstAt, copyItem.AggregateLastAt, copyItem.AggregateSummaryJSON,
 		copyItem.CreatedAt, copyItem.UpdatedAt)

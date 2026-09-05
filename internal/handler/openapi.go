@@ -373,6 +373,31 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"sensitiveDataRedacted": map[string]interface{}{"type": "boolean", "enum": []bool{false}},
 		},
 	}
+	blockRuleConstraintsSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false,
+		"required": []string{"host", "schemes", "ports", "pathPrefixes", "methods"},
+		"properties": map[string]interface{}{
+			"host":         map[string]interface{}{"type": "string", "maxLength": 253},
+			"schemes":      map[string]interface{}{"type": "array", "maxItems": 32, "items": map[string]interface{}{"type": "string", "maxLength": 32}},
+			"ports":        map[string]interface{}{"type": "array", "maxItems": 256, "items": map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 65535}},
+			"pathPrefixes": map[string]interface{}{"type": "array", "maxItems": 256, "items": map[string]interface{}{"type": "string", "maxLength": 2048}},
+			"methods":      map[string]interface{}{"type": "array", "maxItems": 256, "items": map[string]interface{}{"type": "string", "maxLength": 32}},
+		},
+	}
+	blockMatchSchema := map[string]interface{}{
+		"type": "object", "additionalProperties": false,
+		"description": "阻断时从不可变运行时边界快照复制的结构化命中详情；不含查询参数、凭据、请求头或正文。",
+		"required":    []string{"source", "type", "decisionPhase"},
+		"properties": map[string]interface{}{
+			"source":          map[string]interface{}{"type": "string", "enum": []string{"rule", "default", "system", "governance", "attribution"}},
+			"type":            map[string]interface{}{"type": "string", "enum": []string{"path-exact", "path-subtree", "method", "domain", "domain-wildcard", "ip", "cidr", "port", "protocol", "all", "hostname", "address"}},
+			"value":           map[string]interface{}{"type": "string", "maxLength": 2048},
+			"ruleConstraints": map[string]interface{}{"$ref": "#/components/schemas/BoundaryBlockRuleConstraints"},
+			"requestUrl":      map[string]interface{}{"type": "string", "maxLength": 4096, "description": "规范化 URL/网络目标；不含 query、fragment 或凭据。"},
+			"resolvedIp":      map[string]interface{}{"type": "string", "maxLength": 64},
+			"decisionPhase":   map[string]interface{}{"type": "string", "enum": []string{"request", "after-resolution", "connect"}},
+		},
+	}
 	egressAuditEventSchema := map[string]interface{}{
 		"type":                 "object",
 		"additionalProperties": false,
@@ -402,7 +427,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"attributionStatus":         map[string]interface{}{"type": "string", "enum": []string{"verified", "legacy_unattributed", "unattributed", "invalid"}},
 			"declaredActivityKind":      map[string]interface{}{"type": "string", "enum": []string{"normal", "fuzz", "unknown"}},
 			"observedActivityKind":      map[string]interface{}{"type": "string", "enum": []string{"single", "burst", "path_sweep"}},
-			"hashVersion":               map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 4},
+			"hashVersion":               map[string]interface{}{"type": "integer", "minimum": 1, "maximum": 5},
 			"snapshotId":                map[string]interface{}{"type": "string", "maxLength": 128},
 			"snapshotSha256":            map[string]interface{}{"type": "string", "maxLength": 128},
 			"domain":                    map[string]interface{}{"type": "string", "maxLength": 253},
@@ -415,6 +440,7 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 			"result":                    map[string]interface{}{"type": "string", "enum": []string{"success", "failure"}},
 			"ruleId":                    map[string]interface{}{"type": "string", "maxLength": 256},
 			"reason":                    map[string]interface{}{"type": "string", "maxLength": 128},
+			"blockMatch":                map[string]interface{}{"$ref": "#/components/schemas/BoundaryBlockMatch"},
 			"upstreamRouteId":           map[string]interface{}{"type": "string", "maxLength": 128},
 			"method":                    map[string]interface{}{"type": "string", "maxLength": 32},
 			"path":                      map[string]interface{}{"type": "string", "maxLength": 1024, "description": "仅规范化 path；不含 query 或 fragment。"},
@@ -542,6 +568,8 @@ func (h *OpenAPIHandler) GetOpenAPISpec(c *gin.Context) {
 				"ConversationEgressWrite":             conversationEgressWriteSchema,
 				"EgressDefaultView":                   egressDefaultViewSchema,
 				"HTTPPacket":                          httpPacketSchema,
+				"BoundaryBlockRuleConstraints":        blockRuleConstraintsSchema,
+				"BoundaryBlockMatch":                  blockMatchSchema,
 				"EgressAuditEvent":                    egressAuditEventSchema,
 				"EgressAuditIntegrity":                egressAuditIntegritySchema,
 				"EgressAuditSummary":                  egressAuditSummarySchema,

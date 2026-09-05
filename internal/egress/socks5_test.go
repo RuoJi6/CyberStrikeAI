@@ -1,8 +1,10 @@
 package egress
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
@@ -83,6 +85,48 @@ func TestSOCKS5ConnectCarriesAuthorizedRawTCPAndAuditsIt(t *testing.T) {
 	}
 }
 
+func TestSOCKS5ResolverFailureIsAConnectionResultNotABoundaryBlock(t *testing.T) {
+	events := make(chan ActivityEvent, 1)
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
+		ID: "tcp", Effect: boundary.EffectAllowAttack,
+		Target: boundary.RuleTarget{Host: "unresolved.example", Schemes: []string{"tcp"}, Ports: []int{22}},
+	}), ProxyOptions{
+		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("resolver unavailable")
+		},
+		ActivitySink: func(event ActivityEvent) { events <- event },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	socks, err := NewSOCKS5Proxy(proxy, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, client := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		socks.handleConnect(context.Background(), server, bufio.NewReader(server), "unresolved.example", 22)
+		_ = server.Close()
+	}()
+	_ = client.SetDeadline(time.Now().Add(2 * time.Second))
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(client, reply); err != nil || reply[1] != 2 {
+		t.Fatalf("SOCKS failure reply = %v, %v", reply, err)
+	}
+	_ = client.Close()
+	<-done
+	select {
+	case event := <-events:
+		if event.Decision != ActivityDecisionAllowed || event.Outcome != "dns_failed" || event.Reason != "" || event.RuleID != "" || event.BlockMatch != nil {
+			t.Fatalf("resolver activity = %#v", event)
+		}
+	default:
+		t.Fatal("resolver failure activity was not emitted")
+	}
+}
+
 func TestSOCKS5UDPDatagramCarriesAuthorizedPayloadAndAuditsIt(t *testing.T) {
 	events := make(chan ActivityEvent, 1)
 	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
@@ -144,6 +188,45 @@ func TestSOCKS5UDPDatagramCarriesAuthorizedPayloadAndAuditsIt(t *testing.T) {
 		}
 	default:
 		t.Fatal("UDP activity was not emitted")
+	}
+}
+
+func TestSOCKS5UDPResolverFailureIsNotABoundaryBlock(t *testing.T) {
+	events := make(chan ActivityEvent, 1)
+	proxy, err := NewProxy(testProxyPolicy(t, boundary.Rule{
+		ID: "udp", Effect: boundary.EffectAllowAttack,
+		Target: boundary.RuleTarget{Host: "unresolved.example", Schemes: []string{"udp"}, Ports: []int{53}},
+	}), ProxyOptions{
+		LookupNetIP: func(context.Context, string, string) ([]netip.Addr, error) {
+			return nil, errors.New("resolver unavailable")
+		},
+		ActivitySink: func(event ActivityEvent) { events <- event },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	socks, err := NewSOCKS5Proxy(proxy, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relay, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	client, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	socks.forwardUDP(context.Background(), relay, client.LocalAddr().(*net.UDPAddr), encodeSOCKS5UDPDatagram("unresolved.example", 53, []byte("query")))
+	select {
+	case event := <-events:
+		if event.Decision != ActivityDecisionAllowed || event.Outcome != "dns_failed" || event.Reason != "" || event.BlockMatch != nil {
+			t.Fatalf("UDP resolver activity = %#v", event)
+		}
+	default:
+		t.Fatal("UDP resolver failure activity was not emitted")
 	}
 }
 

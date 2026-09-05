@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
@@ -89,7 +90,7 @@ func TestEgressAuditHandlerListsGetsAndExportsSafeProjection(t *testing.T) {
 		t.Fatalf("csv export = %d %#v %s", csvRecorder.Code, csvRecorder.Header(), csvRecorder.Body.String())
 	}
 	records, err := csv.NewReader(strings.NewReader(csvRecorder.Body.String())).ReadAll()
-	if err != nil || len(records) != 2 || len(records[0]) != 45 || records[0][1] != "chain_sequence" || records[0][2] != "previous_hash" || records[0][3] != "event_hash" {
+	if err != nil || len(records) != 2 || len(records[0]) != 46 || records[0][1] != "chain_sequence" || records[0][2] != "previous_hash" || records[0][3] != "event_hash" || records[0][34] != "block_match_json" {
 		t.Fatalf("csv chain columns = %#v, %v", records, err)
 	}
 
@@ -251,6 +252,26 @@ func TestSafeAuditCSVCellDefendsFormulaPrefixesAndControls(t *testing.T) {
 	}
 }
 
+func TestWriteEgressAuditCSVIncludesStructuredBlockMatch(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(recorder)
+	match := &boundary.BlockMatch{
+		Source: boundary.MatchSourceRule, Type: boundary.MatchTypePathSubtree, Value: "/blocked/*",
+		RequestURL: "https://example.com:443/blocked/child", DecisionPhase: boundary.DecisionPhaseRequest,
+		RuleConstraints: &boundary.RuleConstraints{Host: "*", Schemes: []string{"https"}, Ports: []int{443}, PathPrefixes: []string{"/blocked/*"}, Methods: []string{"GET"}},
+	}
+	writeEgressAuditCSV(context, []database.EgressAuditEvent{{ID: "event", BlockMatch: match}})
+	records, err := csv.NewReader(strings.NewReader(recorder.Body.String())).ReadAll()
+	if err != nil || len(records) != 2 || len(records[1]) != 46 {
+		t.Fatalf("CSV records = %#v, %v", records, err)
+	}
+	var observed boundary.BlockMatch
+	if err := json.Unmarshal([]byte(records[1][34]), &observed); err != nil || observed.Value != "/blocked/*" || observed.RequestURL != match.RequestURL {
+		t.Fatalf("CSV block match = %#v, %v", observed, err)
+	}
+}
+
 func TestOpenAPIEgressAuditProjectionDocumentsFullPacketAndControlledDeletion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -271,7 +292,7 @@ func TestOpenAPIEgressAuditProjectionDocumentsFullPacketAndControlledDeletion(t 
 		t.Fatalf("audit schema is not closed: %#v", auditSchema)
 	}
 	properties := auditSchema["properties"].(map[string]interface{})
-	for _, required := range []string{"chainSequence", "previousHash", "eventHash", "conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "upstreamRouteId", "httpPacket"} {
+	for _, required := range []string{"chainSequence", "previousHash", "eventHash", "conversationId", "containerId", "agentId", "snapshotSha256", "domain", "decision", "ruleId", "blockMatch", "upstreamRouteId", "httpPacket"} {
 		if _, ok := properties[required]; !ok {
 			t.Fatalf("audit schema missing safe trace field %q", required)
 		}

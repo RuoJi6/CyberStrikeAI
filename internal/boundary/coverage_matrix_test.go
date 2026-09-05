@@ -34,7 +34,7 @@ func TestBoundaryCoverageOverlappingRulesAreStable(t *testing.T) {
 		Rule{ID: "block-admin", Effect: EffectBlocked, Target: RuleTarget{Host: "overlap.example", PathPrefixes: []string{"/admin"}}},
 	)
 	decision, err := priority.Evaluate("https://overlap.example/admin/users", "GET", nil, now)
-	requireCoverageDecision(t, decision, err, false, "block-admin", ReasonBlockedPath)
+	requireCoverageDecision(t, decision, err, false, "block-admin", ReasonBlockedPathSubtree)
 	decision, err = priority.Evaluate("https://overlap.example/public", "GET", nil, now)
 	requireCoverageDecision(t, decision, err, true, "attack-broad", ReasonAllowAttack)
 
@@ -115,7 +115,7 @@ func TestBoundaryCoverageEncodedPathsCannotEscapeRules(t *testing.T) {
 				requireCoverageDecision(t, decision, err, true, "visit", ReasonAllowVisit)
 				return
 			}
-			requireCoverageDecision(t, decision, err, false, test.wantRule, ReasonBlockedPath)
+			requireCoverageDecision(t, decision, err, false, test.wantRule, ReasonBlockedPathSubtree)
 		})
 	}
 
@@ -149,7 +149,7 @@ func TestBoundaryCoverageIPv6CanonicalizationAndCIDR(t *testing.T) {
 		Rule{ID: "ipv6-network", Effect: EffectBlocked, Target: RuleTarget{Host: "2606:4700::/32"}},
 	)
 	decision, err = blocked.Evaluate("https://["+publicIPv6+"]/", "GET", nil, now)
-	requireCoverageDecision(t, decision, err, false, "ipv6-network", ReasonBlockedTarget)
+	requireCoverageDecision(t, decision, err, false, "ipv6-network", ReasonBlockedCIDR)
 }
 
 func TestBoundaryCoveragePrivateAndSpecialAddressesAlwaysWin(t *testing.T) {
@@ -195,7 +195,7 @@ func TestBoundaryCoverageExpirationUsesClosedCutoff(t *testing.T) {
 	)
 
 	decision, err := policy.Evaluate("https://expiry.example/", "GET", nil, now.Add(-time.Nanosecond))
-	requireCoverageDecision(t, decision, err, false, "temporary-block", ReasonBlockedTarget)
+	requireCoverageDecision(t, decision, err, false, "temporary-block", ReasonBlockedDomain)
 	decision, err = policy.Evaluate("https://expiry.example/", "GET", nil, now)
 	requireCoverageDecision(t, decision, err, true, "visit", ReasonAllowVisit)
 	decision, err = policy.Evaluate("https://expiry.example/", "GET", nil, now.Add(time.Nanosecond))
@@ -228,7 +228,7 @@ func TestBoundaryCoverageRedirectEveryHopIsReevaluated(t *testing.T) {
 	hops := []hop{
 		{url: "https://origin.example/start", method: "POST", allowed: true, ruleID: "origin-post", reason: ReasonAllowVisit},
 		{url: "https://cdn.example/object", method: "GET", allowed: true, ruleID: "cdn-get", reason: ReasonAllowVisit},
-		{url: "https://cdn.example/public/%2e%2e/admin", method: "GET", ruleID: "block-cdn-admin", reason: ReasonBlockedPath},
+		{url: "https://cdn.example/public/%2e%2e/admin", method: "GET", ruleID: "block-cdn-admin", reason: ReasonBlockedPathSubtree},
 		{url: "https://unlisted.example/object", method: "GET", reason: ReasonDefaultDeny},
 		{url: "http://127.0.0.1/admin", method: "GET", reason: ReasonForbiddenAddress},
 		{url: "https://cdn.example/object", method: "GET", resolved: []netip.Addr{netip.MustParseAddr("10.0.0.5")}, reason: ReasonDNSRebinding},

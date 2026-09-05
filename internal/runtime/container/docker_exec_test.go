@@ -59,7 +59,7 @@ func TestDockerManagerExecAppendsBoundedRawBoundaryDenial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.ExitCode != 1 || !strings.Contains(stderr.String(), "本次工具执行触发 1 次网络阻断") || !strings.Contains(stderr.String(), "TCP 203.0.113.10:22（1 次）") || !strings.Contains(stderr.String(), "default_deny") {
+	if result.ExitCode != 1 || !strings.Contains(stderr.String(), "本次工具执行触发 1 次网络阻断") || !strings.Contains(stderr.String(), "请求：tcp://203.0.113.10:22（1 次）") || !strings.Contains(stderr.String(), "default_deny") {
 		t.Fatalf("result/feedback = %#v / %q", result, stderr.String())
 	}
 	if api.logsContainerID != "provider-gateway-1" || api.logsOptions.Follow || api.logsOptions.Tail != "all" || api.logsOptions.Since == "" || api.logsOptions.Until == "" {
@@ -137,51 +137,14 @@ func TestDockerManagerExecAppendsAggregatedBoundaryDenialAfterSuccessfulTool(t *
 	}
 	feedback := stderr.String()
 	if result.ExitCode != 0 || !strings.Contains(feedback, "本次工具执行触发 4 次网络阻断") ||
-		!strings.Contains(feedback, "TCP 47.116.200.74:22（2 次）：原因 blocked-target，规则 block-ssh") ||
-		!strings.Contains(feedback, "UDP time.example:123（1 次）：原因 default-deny，规则 边界默认拒绝") ||
-		!strings.Contains(feedback, "DNS blocked.example（1 次）：原因 blocked-target，规则 block-dns") ||
+		!strings.Contains(feedback, "请求：tcp://47.116.200.74:22（2 次）") ||
+		!strings.Contains(feedback, "原因：目标阻断（旧版记录）（blocked-target）") ||
+		!strings.Contains(feedback, "请求：udp://time.example:123（1 次）") ||
+		!strings.Contains(feedback, "请求：dns://blocked.example（1 次）") ||
 		strings.Contains(feedback, "HEALTH") || strings.Contains(feedback, "upstream.example") ||
 		!strings.Contains(feedback, "以下请求未到达目标") ||
-		!strings.Contains(feedback, "当前边界规则中网络策略已明确禁止上述访问，请停止测试上述访问") {
+		!strings.Contains(feedback, "当前边界或系统网络策略已明确禁止上述访问") {
 		t.Fatalf("result/feedback = %#v / %q", result, feedback)
-	}
-}
-
-func TestBoundaryFeedbackKeepsHTTPMethodAndPathInSeparateGroups(t *testing.T) {
-	base := egress.ActivityEvent{
-		RequestType: egress.ActivityRequestHTTPS,
-		Domain:      "example.com",
-		Port:        443,
-		Method:      "GET",
-		Path:        "/blocked",
-		RuleID:      "path-rule",
-		Reason:      "blocked-path",
-	}
-	child := base
-	child.Path = "/blocked/child"
-	post := base
-	post.Method = "POST"
-
-	groups := groupBoundaryFeedbackEvents([]egress.ActivityEvent{base, base, child, post})
-	if len(groups) != 3 || groups[0].count != 2 || groups[1].count != 1 || groups[2].count != 1 {
-		t.Fatalf("HTTP boundary feedback groups = %#v", groups)
-	}
-	if got := boundaryFeedbackRequest(groups[0].event); got != "HTTPS GET https://example.com:443/blocked" {
-		t.Fatalf("base HTTP boundary feedback = %q", got)
-	}
-	if got := boundaryFeedbackRequest(groups[1].event); got != "HTTPS GET https://example.com:443/blocked/child" {
-		t.Fatalf("child HTTP boundary feedback = %q", got)
-	}
-	if got := boundaryFeedbackRequest(groups[2].event); got != "HTTPS POST https://example.com:443/blocked" {
-		t.Fatalf("method-specific HTTP boundary feedback = %q", got)
-	}
-	if got := boundaryFeedbackReasonLabel(base.Reason); got != "路径阻断" {
-		t.Fatalf("path-block reason label = %q", got)
-	}
-	if got := boundaryFeedbackRequest(egress.ActivityEvent{
-		RequestType: egress.ActivityRequestTCP, Domain: "203.0.113.10", Port: 22,
-	}); got != "TCP 203.0.113.10:22" {
-		t.Fatalf("TCP boundary feedback changed = %q", got)
 	}
 }
 

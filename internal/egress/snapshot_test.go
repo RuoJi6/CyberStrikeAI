@@ -233,7 +233,7 @@ func TestLoadPolicyDefaultAllowSnapshotDefersHTTPSPathBlockUntilDecryption(t *te
 		t.Fatalf("unmatched path = %#v, %v", allowed, err)
 	}
 	blocked, err := policy.Evaluate("https://example.com/private/child", http.MethodGet, nil, time.Now().UTC())
-	if err != nil || blocked.Allowed || blocked.Reason != boundary.ReasonBlockedPath || blocked.RuleID != "block-private" {
+	if err != nil || blocked.Allowed || blocked.Reason != boundary.ReasonBlockedPathSubtree || blocked.RuleID != "block-private" {
 		t.Fatalf("blocked path = %#v, %v", blocked, err)
 	}
 	if tlsInspection == nil || !tlsInspection.Enabled {
@@ -415,11 +415,15 @@ func TestLoadPolicySnapshotPreservesWildcardAndExactPathBlacklist(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, rawURL := range []string{"https://one.example/api/items", "http://two.example/health"} {
+	for _, rawURL := range []string{"https://one.example/api/items"} {
 		decision, evalErr := policy.Evaluate(rawURL, http.MethodGet, nil, time.Now().UTC())
-		if evalErr != nil || decision.RuleID != "rule-blacklist" || decision.Reason != boundary.ReasonBlockedPath {
+		if evalErr != nil || decision.RuleID != "rule-blacklist" || decision.Reason != boundary.ReasonBlockedPathSubtree {
 			t.Fatalf("snapshot blacklist %q = %#v, %v", rawURL, decision, evalErr)
 		}
+	}
+	exact, err := policy.Evaluate("http://two.example/health", http.MethodGet, nil, time.Now().UTC())
+	if err != nil || exact.RuleID != "rule-blacklist" || exact.Reason != boundary.ReasonBlockedPathExact || exact.BlockMatch == nil || exact.BlockMatch.Value != "=/health" {
+		t.Fatalf("snapshot exact blacklist = %#v, %v", exact, err)
 	}
 	child, err := policy.Evaluate("https://one.example/health/check", http.MethodGet, nil, time.Now().UTC())
 	if err != nil || child.RuleID != "" || child.Reason != boundary.ReasonDefaultDeny {

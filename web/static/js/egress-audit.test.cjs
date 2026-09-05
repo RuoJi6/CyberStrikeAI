@@ -26,6 +26,7 @@ test('egress audit validates the closed safe projection without requiring omitte
         occurredAt: '2026-08-22T12:00:01Z', category: 'lifecycle', eventType: 'stop',
         conversationId: 'conversation-a', conversationTitle: 'audit target', result: 'success',
     };
+	const blockMatch = { source: 'rule', type: 'path-subtree', value: '/blocked/*', requestUrl: 'https://blocked.example:443/blocked/child', decisionPhase: 'request', ruleConstraints: { host: '*', schemes: ['https'], ports: [443], pathPrefixes: ['/blocked/*'], methods: ['GET'] } };
 	const health = {
 		id: 'eh-3', chainSequence: 3, previousHash: 'b'.repeat(64), eventHash: 'c'.repeat(64),
 		occurredAt: '2026-08-22T12:00:02Z', category: 'lifecycle', eventType: 'health',
@@ -36,6 +37,8 @@ test('egress audit validates the closed safe projection without requiring omitte
     assert.equal(audit.isSafeAuditEvent({ ...network, resolvedIps: undefined }), true);
     assert.equal(audit.isSafeAuditEvent({ ...network, aggregateCount: 25, aggregateKind: 'web-fuzz', aggregateFirstAt: '2026-08-22T12:00:00Z', aggregateLastAt: '2026-08-22T12:00:01Z', aggregateDistinctVariants: 25 }), true);
     assert.equal(audit.isSafeAuditEvent({ ...network, aggregateCount: 25, aggregateKind: 'web-fuzz' }), false);
+    assert.equal(audit.isSafeAuditEvent({ ...network, decision: 'blocked', reason: 'blocked-path-subtree', blockMatch, hashVersion: 5 }), true);
+    assert.equal(audit.isSafeAuditEvent({ ...network, decision: 'blocked', blockMatch: { ...blockMatch, requestUrl: 'https://blocked.example/\nforged' } }), false);
     assert.equal(audit.isSafeAuditEvent(lifecycle), true);
 	assert.equal(audit.isSafeAuditEvent(health), true);
     assert.equal(audit.isSafeAuditEvent({ ...network, eventType: 'raw_socket' }), false);
@@ -122,7 +125,7 @@ test('egress audit page is authenticated, searchable, pageable, exportable, and 
     ]) assert.match(template, new RegExp(`id="${id}"`));
     assert.match(template, /data-page="egress-audit" data-require-permission="audit:read"/);
     assert.match(template, /id="page-egress-audit"[^>]+data-require-permission="audit:read"/);
-    assert.match(template, /egress-audit\.js\?v=20260904-3/);
+    assert.match(template, /egress-audit\.js\?v=20260905-1/);
     assert.equal(zh.containerManagement.auditReconcile, '状态校准');
     assert.equal(zh.containerManagement.auditRuntimeReconciled, '容器运行时状态已校准');
     assert.match(template, /data-i18n="containerManagement\.auditPacket"/);

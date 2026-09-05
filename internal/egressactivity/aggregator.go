@@ -1,6 +1,7 @@
 package egressactivity
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -363,8 +364,10 @@ func (a *Aggregator) flush(key string) []egress.ActivityEvent {
 
 func activityGroupKey(event egress.ActivityEvent) string {
 	p := event.Provenance.Normalized()
+	blockMatch, _ := json.Marshal(event.BlockMatch)
 	base := fmt.Sprintf("%s|%s|%s|%s|%s|%s|%d|%s|%s|%s|%s|%s|%s|%s|%s", event.RequestType, event.Decision, event.RuleID, event.Reason, event.SnapshotID,
 		p.RuntimeMode, p.RuntimeGeneration, p.RuntimeInstanceID, p.AgentID, p.ToolName, p.ExecutionID, p.ToolCallID, p.ActivityScopeID, p.AttributionStatus, p.DeclaredActivityKind)
+	base += "|" + string(blockMatch)
 	switch event.RequestType {
 	case egress.ActivityRequestHTTP, egress.ActivityRequestHTTPS, egress.ActivityRequestCONNECT:
 		return base + "|" + strings.ToLower(strings.TrimSpace(event.Domain))

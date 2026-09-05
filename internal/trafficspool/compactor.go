@@ -402,6 +402,7 @@ func (s *CompactingSink) writeRecords(ctx context.Context, records []compactReco
 }
 
 func compactGroupKey(item traffic.Transaction) string {
+	blockMatch, _ := json.Marshal(item.BlockMatch)
 	return strings.Join([]string{
 		strings.ToLower(strings.TrimSpace(item.Scheme)),
 		strings.ToLower(strings.TrimSpace(item.Host)),
@@ -420,6 +421,7 @@ func compactGroupKey(item traffic.Transaction) string {
 		strings.TrimSpace(item.UpstreamRouteID),
 		strings.TrimSpace(item.Outcome),
 		strings.TrimSpace(item.ErrorCode),
+		string(blockMatch),
 	}, "|")
 }
 

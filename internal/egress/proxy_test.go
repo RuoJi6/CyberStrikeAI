@@ -243,7 +243,13 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 		Target: boundary.RuleTarget{Host: "blocked.example", Schemes: []string{"http", "https"}},
 	})
 	var events []ActivityEvent
-	proxy, err := NewProxy(policy, ProxyOptions{ActivitySink: func(event ActivityEvent) { events = append(events, event) }, Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+	var transactions []traffic.Transaction
+	var trafficMessages [][]traffic.Message
+	proxy, err := NewProxy(policy, ProxyOptions{ConversationID: "conversation-blocked", ActivitySink: func(event ActivityEvent) { events = append(events, event) }, TrafficSink: func(_ context.Context, transaction traffic.Transaction, messages []traffic.Message) error {
+		transactions = append(transactions, transaction)
+		trafficMessages = append(trafficMessages, messages)
+		return nil
+	}, Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
 		t.Fatal("blocked request reached transport")
 		return nil, nil
 	})})
@@ -255,17 +261,20 @@ func TestProxyDeniedResponseClearlyExplainsBoundaryBlockWithoutLeakingRequestDat
 	request.Header.Set("Authorization", "Bearer "+secret)
 	recorder := httptest.NewRecorder()
 	proxy.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Blocked") != "true" || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonBlockedTarget || recorder.Header().Get("X-CyberStrikeAI-Block-Rule") != "blocked-site" {
+	if recorder.Code != http.StatusForbidden || recorder.Header().Get("X-CyberStrikeAI-Blocked") != "true" || recorder.Header().Get("X-CyberStrikeAI-Block-Reason") != boundary.ReasonBlockedDomain || recorder.Header().Get("X-CyberStrikeAI-Block-Rule") != "blocked-site" {
 		t.Fatalf("blocked response = %d headers=%#v", recorder.Code, recorder.Header())
 	}
 	body := recorder.Body.String()
-	if !strings.Contains(body, "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(body, "blocked.example") || strings.Contains(body, secret) || strings.Contains(body, "/private") || strings.Contains(body, "Authorization") {
+	if !strings.Contains(body, "[CyberStrikeAI 网络边界] 请求未到达目标") || !strings.Contains(body, "请求：http://blocked.example:80/private") || !strings.Contains(body, "原因：域名阻断（blocked-domain）") || !strings.Contains(body, "完整规则：主机 blocked.example") || strings.Contains(body, secret) || strings.Contains(body, "?token") || strings.Contains(body, "Authorization") {
 		t.Fatalf("unsafe or unclear blocked response = %q", body)
 	}
 	if len(events) != 1 || events[0].HTTPStatus != http.StatusForbidden || events[0].BytesDown != int64(len(body)) || events[0].HTTPPacket == nil ||
 		events[0].HTTPPacket.ResponseLine != "HTTP/1.1 403 Forbidden" || len(events[0].HTTPPacket.ResponseHeaders["X-Cyberstrikeai-Blocked"]) != 1 || events[0].HTTPPacket.ResponseHeaders["X-Cyberstrikeai-Blocked"][0] != "true" || events[0].HTTPPacket.ResponseBody != body ||
 		!strings.Contains(events[0].HTTPPacket.RequestLine, "token="+secret) || len(events[0].HTTPPacket.RequestHeaders["Authorization"]) != 1 || events[0].HTTPPacket.RequestHeaders["Authorization"][0] != "Bearer "+secret {
 		t.Fatalf("blocked packet audit = %#v", events)
+	}
+	if len(transactions) != 1 || transactions[0].ErrorCode != boundary.ReasonBlockedDomain || transactions[0].BlockMatch == nil || transactions[0].BlockMatch.RequestURL != "http://blocked.example:80/private" || len(trafficMessages[0]) != 2 || trafficMessages[0][0].Stage != traffic.StageClientRequest || trafficMessages[0][1].Stage != traffic.StageClientResponse {
+		t.Fatalf("blocked traffic evidence = %#v / %#v", transactions, trafficMessages)
 	}
 
 	connect := httptest.NewRequest(http.MethodConnect, "http://proxy.invalid/", nil)
@@ -389,7 +398,7 @@ func TestProxyTLSInspectionReevaluatesHTTPSMethodAndPathAndCapturesRawPackets(t 
 	denied := performInspectedTLSRequest(t, proxy, roots, token, "GET /admin?token="+secret+" HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")
 	deniedBody, _ := io.ReadAll(denied.Body)
 	_ = denied.Body.Close()
-	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "CyberStrikeAI 出站边界已禁止访问该网站") || !strings.Contains(string(deniedBody), "block-admin") {
+	if denied.StatusCode != http.StatusForbidden || denied.ContentLength != int64(len(deniedBody)) || !strings.Contains(string(deniedBody), "原因：路径子树阻断（blocked-path-subtree）") || !strings.Contains(string(deniedBody), "命中条件：路径 /admin/*") || !strings.Contains(string(deniedBody), "block-admin") || strings.Contains(string(deniedBody), secret) {
 		t.Fatalf("denied inspected HTTPS response = %d %q", denied.StatusCode, deniedBody)
 	}
 	exactDenied := performInspectedTLSRequest(t, proxy, roots, token, "GET /admin/exact HTTP/1.1\r\nHost: inspect.example\r\nConnection: close\r\n\r\n")

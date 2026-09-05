@@ -25,6 +25,12 @@
         return root.document ? root.document.getElementById(id) : null;
     }
 
+    function t(key, fallback) {
+        const fullKey = `containerManagement.${key}`;
+        const translated = typeof root.t === 'function' ? root.t(fullKey) : fallback;
+        return !translated || translated === fullKey ? fallback : translated;
+    }
+
     function value(id) {
         const node = byId(id);
         return node ? String(node.value || '').trim() : '';
@@ -103,7 +109,10 @@
             requestCell.appendChild(create('span', 'traffic-evidence-method', item.method || '-'));
             row.appendChild(requestCell);
 
-            const target = `${item.scheme || 'http'}://${item.host || '-'}${item.path || '/'}`;
+            const defaultPort = item.scheme === 'https' ? 443 : 80;
+            const port = Number(item.port || 0);
+            const authority = `${item.host || '-'}${port && port !== defaultPort ? `:${port}` : ''}`;
+            const target = `${item.scheme || 'http'}://${authority}${item.path || '/'}`;
             const targetCell = create('td', 'traffic-evidence-target', target);
             targetCell.title = target;
             row.appendChild(targetCell);
@@ -267,6 +276,39 @@
         return lines.join('\n');
     }
 
+    function blockMatchSummary(match, storedReasonCode) {
+        if (!match || typeof match !== 'object') return null;
+        const labels = {
+            'path-exact': t('activityMatchPathExact', '精确路径'), 'path-subtree': t('activityMatchPathSubtree', '路径子树'),
+            method: t('activityMatchMethod', 'HTTP 方法'), domain: t('activityMatchDomain', '域名'),
+            'domain-wildcard': t('activityMatchDomainWildcard', '通配域名'), ip: t('activityMatchIP', 'IP 地址'),
+            cidr: t('activityMatchCIDR', 'CIDR 网段'), port: t('activityMatchPort', '端口'),
+            protocol: t('activityMatchProtocol', '协议'), all: t('activityMatchAll', '全部目标'),
+            hostname: t('activityMatchHostname', '主机名'), address: t('activityMatchAddress', '地址'),
+        };
+        let condition = `${labels[match.type] || match.type || '条件'} ${match.value || '—'}`;
+        if (match.resolvedIp && match.type === 'cidr') condition = `${match.resolvedIp} ∈ ${match.value || '—'}`;
+        else if (match.resolvedIp && match.resolvedIp !== match.value) condition += `（解析 IP ${match.resolvedIp}）`;
+        const rule = match.ruleConstraints;
+        const values = (items) => Array.isArray(items) && items.length ? items.join(', ') : t('activityAny', '任意');
+        const constraints = rule && typeof rule === 'object'
+            ? `${t('activityHost', '主机')} ${rule.host || '*'}；${t('activityProtocol', '协议')} ${values(rule.schemes)}；${t('activityPort', '端口')} ${values(rule.ports)}；${t('activityMethod', '方法')} ${values(rule.methods)}；${t('activityPath', '路径')} ${values(rule.pathPrefixes)}`
+            : '—';
+        const phases = {
+            request: t('activityPhaseRequest', '请求阶段'),
+            'after-resolution': t('activityPhaseAfterResolution', '解析后阶段'),
+            connect: t('activityPhaseConnect', '连接阶段'),
+        };
+        const reasonCodes = {
+            'path-exact': 'blocked-path-exact', 'path-subtree': 'blocked-path-subtree', method: 'blocked-method',
+            domain: 'blocked-domain', 'domain-wildcard': 'blocked-domain-wildcard', ip: 'blocked-ip', cidr: 'blocked-cidr',
+            port: 'blocked-port', protocol: 'blocked-protocol', all: match.source === 'default' ? 'default-deny' : 'blocked-all',
+            hostname: 'forbidden-hostname', address: match.source === 'system' && match.resolvedIp ? 'dns-rebinding' : 'forbidden-address',
+        };
+        const reasonCode = String(storedReasonCode || '').trim() || reasonCodes[match.type] || 'policy_denied';
+        return { request: match.requestUrl || '—', condition, constraints, phase: phases[match.decisionPhase] || match.decisionPhase || '—', reasonCode, reason: t(`activityValues.${reasonCode}`, reasonCode) };
+    }
+
     function renderDetail(payload) {
         const transaction = payload.transaction || {};
         const stages = byId('traffic-evidence-detail-stages');
@@ -277,6 +319,19 @@
 		setText(byId('traffic-evidence-detail-meta'), `${transaction.id || '-'} · event ${transaction.event_id || '—'} · ${transaction.scheme || ''}://${transaction.host || ''}${transaction.path || ''}${aggregateMeta}`);
 		const transformed = Boolean(transaction.transform_result || transaction.transform_binding_id || transaction.transform_revision_id);
 		const messages = Array.isArray(payload.messages) ? payload.messages : [];
+		const blockMatch = blockMatchSummary(transaction.block_match, transaction.error_code);
+		if (blockMatch) {
+			const blockCard = create('section', 'traffic-evidence-failure-summary traffic-evidence-block-match');
+			blockCard.appendChild(create('strong', '', `${t('activityBlockDetails', '网络边界阻断')} · ${t('activityRequestNotReached', '请求未到达目标')}`));
+			blockCard.appendChild(create('span', '', `${blockMatch.reason}（${blockMatch.reasonCode}） · ${t('activityRule', '规则')} ${transaction.rule_id || t('activitySystemPolicy', '系统策略')}`));
+			blockCard.appendChild(create('p', '', `${t('activityActualRequest', '实际请求')}：${blockMatch.request}`));
+			blockCard.appendChild(create('p', '', `${t('activityBlockReason', '阻断原因')}：${blockMatch.reason}（${blockMatch.reasonCode}）`));
+			blockCard.appendChild(create('p', '', `${t('activityMatchedCondition', '命中条件')}：${blockMatch.condition}`));
+			blockCard.appendChild(create('p', '', `${t('activityFullRule', '完整规则')}：${blockMatch.constraints}`));
+			blockCard.appendChild(create('p', '', `${t('activityDecisionPhase', '判定阶段')}：${blockMatch.phase}`));
+			blockCard.appendChild(create('p', '', `${t('activityBlockResult', '结果')}：${t('activityRequestNotReached', '请求未到达目标')}`));
+			stages.appendChild(blockCard);
+		}
 		if (transaction.error_code) {
 			const failureCard = create('section', 'traffic-evidence-failure-summary');
 			failureCard.appendChild(create('strong', '', messages.some((message) => message.stage === 'upstream_response') ? '上游响应未完整结束' : '上游响应未建立'));

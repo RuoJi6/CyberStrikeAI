@@ -25,7 +25,8 @@ test('SSE parser preserves split frames, event names, comments, and multi-line d
 test('client activity validation and filters use closed request/decision/provenance vocabularies', () => {
     const provenance = { version: 1, runtimeMode: 'container', runtimeGeneration: 2, runtimeInstanceId: 'gateway-a', agentId: 'container-agent', toolName: '', executionId: '', toolCallId: '', activityScopeId: '', attributionStatus: 'legacy_unattributed', declaredActivityKind: 'unknown', observedActivityKind: 'single' };
     const allowed = { eventId: 'event-allowed', timestamp: '2026-08-22T12:00:00Z', requestType: 'dns', decision: 'allowed', domain: 'allowed.example', resolvedIps: ['93.184.216.34'], agent: 'container-agent', tool: '', upstreamRouteId: 'route-a', provenance };
-    const blocked = { eventId: 'event-blocked', timestamp: '2026-08-22T12:00:01Z', requestType: 'connect', decision: 'blocked', domain: 'blocked.example', connectedIp: '', agent: 'container-agent', tool: '', upstreamRouteId: '', provenance };
+    const blockMatch = { source: 'rule', type: 'path-subtree', value: '/blocked/*', requestUrl: 'https://blocked.example:443/blocked/child', decisionPhase: 'request', ruleConstraints: { host: '*', schemes: ['https'], ports: [443], pathPrefixes: ['/blocked/*'], methods: ['GET'] } };
+    const blocked = { eventId: 'event-blocked', timestamp: '2026-08-22T12:00:01Z', requestType: 'connect', decision: 'blocked', domain: 'blocked.example', connectedIp: '', agent: 'container-agent', tool: '', upstreamRouteId: '', provenance, blockMatch };
     assert.equal(activity.isSafeActivityEvent(allowed), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, requestType: 'raw-socket' }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, decision: '<script>' }), false);
@@ -37,6 +38,9 @@ test('client activity validation and filters use closed request/decision/provena
     assert.equal(activity.isSafeActivityEvent({ ...allowed, dnsAnswers: new Array(129).fill('A') }), false);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration', aggregateFirstAt: '2026-08-22T12:00:00Z', aggregateLastAt: '2026-08-22T12:00:01Z', aggregateDistinctVariants: 30 }), true);
     assert.equal(activity.isSafeActivityEvent({ ...allowed, aggregateCount: 30, aggregateKind: 'dns-enumeration' }), false);
+    assert.equal(activity.isSafeActivityEvent(blocked), true);
+    assert.equal(activity.isSafeActivityEvent({ ...blocked, blockMatch: { ...blockMatch, value: '/blocked/*\nforged' } }), false);
+    assert.equal(activity.isSafeActivityEvent({ ...blocked, blockMatch: { ...blockMatch, source: 'untrusted' } }), false);
 	const filtered = activity.filteredEventsForTest([allowed, blocked], { domain: '93.184', requestType: 'dns', decision: 'allowed', agent: 'container-agent', tool: 'unknown', runtime: 'container', attribution: 'legacy_unattributed', route: 'route-a' });
     assert.deepEqual(filtered, [allowed]);
 });
@@ -88,7 +92,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
 		'network-activity-tool', 'network-activity-runtime', 'network-activity-attribution', 'network-activity-route', 'network-activity-pause',
         'network-activity-follow', 'network-activity-clear', 'network-activity-rows',
     ]) assert.match(template, new RegExp(`id="${id}"`));
-	assert.match(template, /network-activity\.js\?v=20260904-1/);
+	assert.match(template, /network-activity\.js\?v=20260905-1/);
     assert.match(source, /root\.apiFetch\(url, \{ method: 'GET', headers: \{ Accept: 'text\/event-stream' \}/);
     assert.match(source, /response\.body\.getReader\(\)/);
     assert.match(source, /new AbortController\(\)/);
@@ -107,6 +111,7 @@ test('network activity page is a real incremental authenticated stream UI', () =
     assert.doesNotMatch(source, /EventSource\s*\(/);
     assert.doesNotMatch(source, /\.innerHTML\s*=/);
     assert.match(source, /appendProvenanceDetails\(contextCell/);
+    assert.match(source, /appendBlockDetails\(decisionCell/);
     assert.match(source, /navigator\.clipboard\.writeText/);
     assert.match(source, /CONNECT（未解密）/);
     assert.match(router, /stopNetworkActivityPage\(\)/);

@@ -270,16 +270,24 @@ func (p *Proxy) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	if attributionErr != nil {
 		requestType, domain, port := attributionTarget(request)
 		now := p.now().UTC()
+		scheme := requestType
+		if scheme == ActivityRequestCONNECT {
+			scheme = ActivityRequestHTTPS
+		}
+		path := "/"
+		method := strings.ToUpper(strings.TrimSpace(request.Method))
+		if request.URL != nil {
+			path = activityHTTPPath(request.URL.Path)
+		}
+		target := boundary.RequestTarget{Scheme: scheme, Host: domain, Port: port, Path: path, Method: method}
 		event := ActivityEvent{
-			Timestamp: now, RequestType: requestType, Domain: domain, Port: port,
-			Decision: ActivityDecisionBlocked, Outcome: "attribution_rejected", Provenance: provenance,
+			EventID: uuid.NewString(), Timestamp: now, RequestType: requestType, Domain: domain, Port: port,
+			Decision: ActivityDecisionBlocked, Reason: "attribution-rejected", Outcome: "attribution_rejected", Provenance: provenance,
+			BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceAttribution, Type: boundary.MatchTypeAll, Value: "invalid-or-missing-provenance", RequestURL: boundary.RequestTargetURL(target), DecisionPhase: boundary.DecisionPhaseRequest},
 		}
 		if requestType == ActivityRequestHTTP || requestType == ActivityRequestHTTPS {
-			event.Method = strings.ToUpper(strings.TrimSpace(request.Method))
-			event.Path = "/"
-			if request.URL != nil {
-				event.Path = activityHTTPPath(request.URL.Path)
-			}
+			event.Method = method
+			event.Path = path
 			event.HTTPStatus = http.StatusProxyAuthRequired
 		}
 		emitActivity(p.activitySink, event)
@@ -323,7 +331,8 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		Timestamp: startedAt, RequestType: requestType,
 		Domain: decision.Target.Host, Port: decision.Target.Port,
 		Decision: ActivityDecisionBlocked, RuleID: decision.RuleID, Reason: decision.Reason,
-		Method: request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected", Provenance: attribution.provenance,
+		BlockMatch: decision.BlockMatch,
+		Method:     request.Method, Path: activityHTTPPath(decision.Target.Path), Outcome: "rejected", Provenance: attribution.provenance,
 	}
 	packet := newHTTPPacket(request, event.Path)
 	event.HTTPPacket = &packet
@@ -343,16 +352,22 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 	}
 	if isDNSOverHTTP(request, decision.Target.Path) {
 		event.Outcome = "encrypted_dns_denied"
-		headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, "encrypted-dns-denied", decision.RuleID)
+		event.Reason = "encrypted-dns-denied"
+		event.BlockMatch = &boundary.BlockMatch{Source: boundary.MatchSourceSystem, Type: boundary.MatchTypeProtocol, Value: "encrypted-dns", RequestURL: boundary.RequestTargetURL(decision.Target), DecisionPhase: boundary.DecisionPhaseRequest}
+		denied := decision
+		denied.Reason, denied.BlockMatch = event.Reason, event.BlockMatch
+		headers, body := writeBoundaryDeniedResponse(writer, denied)
 		captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
 		event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
+		p.emitDeniedForwardTrafficEvidence(context.WithoutCancel(request.Context()), request, attribution, denied, event, headers, body, startedAt, p.now().UTC())
 		return
 	}
 	if !proxyDecisionAllowed(decision) {
 		event.Outcome = "policy_denied"
-		headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, decision.Reason, decision.RuleID)
+		headers, body := writeBoundaryDeniedResponse(writer, decision)
 		captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
 		event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
+		p.emitDeniedForwardTrafficEvidence(context.WithoutCancel(request.Context()), request, attribution, decision, event, headers, body, startedAt, p.now().UTC())
 		return
 	}
 	event.Decision = ActivityDecisionAllowed
@@ -365,6 +380,7 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 		event.Outcome = block.outcome
 		event.HTTPStatus = http.StatusTooManyRequests
 		event.RetryAfterMS = block.retryAfterMS
+		event.BlockMatch = governanceBlockMatch(decision, block.reason)
 		writeRateLimitResponse(writer, block.retryAfterMS)
 		return
 	}
@@ -411,8 +427,9 @@ func (p *Proxy) serveForwardRequest(writer http.ResponseWriter, request *http.Re
 			event.Decision = ActivityDecisionBlocked
 			event.RuleID = denied.RuleID
 			event.Reason = denied.Reason
+			event.BlockMatch = denied.BlockMatch
 			event.Outcome = "policy_denied_after_resolution"
-			headers, body := writeBoundaryDeniedResponse(writer, decision.Target.Host, denied.Reason, denied.RuleID)
+			headers, body := writeBoundaryDeniedResponse(writer, denied)
 			captureSyntheticHTTPResponse(&packet, http.StatusForbidden, headers, body)
 			event.HTTPStatus, event.BytesDown = http.StatusForbidden, int64(len(body))
 			p.emitForwardTrafficEvidence(context.WithoutCancel(request.Context()), outbound, attribution, decision, event, fullRequestCapture, nil, nil, startedAt, p.now().UTC(), true, event.Outcome, trafficFailureSummary(event.Outcome))
@@ -517,10 +534,62 @@ func (p *Proxy) emitForwardTrafficEvidence(
 		HTTPStatus: event.HTTPStatus, Outcome: event.Outcome, ErrorCode: errorCode, ErrorSummary: errorSummary,
 		StartedAt: startedAt, CompletedAt: &completedAt, LatencyMS: activityLatencyMS(startedAt, completedAt),
 		BytesUp: requestCapture.total, BoundarySnapshotID: p.boundarySnapshotID,
-		RuleID: event.RuleID, UpstreamRouteID: p.upstreamRouteID,
+		RuleID: event.RuleID, BlockMatch: event.BlockMatch, UpstreamRouteID: p.upstreamRouteID,
 	}
 	if responseCapture != nil {
 		transaction.BytesDown = responseCapture.total
+	}
+	emitTraffic(p.trafficSink, ctx, transaction, messages)
+}
+
+// emitDeniedForwardTrafficEvidence records the request received by the proxy
+// and the synthetic 403 returned to the client. The request body is not
+// drained after an early denial; a declared body length is retained as a
+// truncated capture so policy enforcement cannot be delayed by a streaming
+// or oversized body.
+func (p *Proxy) emitDeniedForwardTrafficEvidence(
+	ctx context.Context,
+	request *http.Request,
+	attribution trafficAttribution,
+	decision boundary.Decision,
+	event ActivityEvent,
+	responseHeaders http.Header,
+	responseBody string,
+	startedAt, completedAt time.Time,
+) {
+	if request == nil {
+		return
+	}
+	transactionID := uuid.NewString()
+	protocol := strings.TrimSpace(request.Proto)
+	if protocol == "" {
+		protocol = "HTTP/1.1"
+	}
+	requestCapture := &fullBodyCapture{}
+	if request.ContentLength > 0 {
+		requestCapture.total = request.ContentLength
+	}
+	responseCapture := &fullBodyCapture{}
+	_, _ = responseCapture.Write([]byte(responseBody))
+	path := packetRequestTarget(request, event.Path)
+	messages := []traffic.Message{
+		requestCapture.message(transactionID, traffic.StageClientRequest, traffic.MessageKindRequest, request.Method, path, 0, protocol, trafficHeaders(request.Header, request.Host), startedAt),
+		responseCapture.message(transactionID, traffic.StageClientResponse, traffic.MessageKindResponse, "", "", http.StatusForbidden, "HTTP/1.1", trafficHeaders(responseHeaders, ""), completedAt),
+	}
+	transaction := traffic.Transaction{
+		ID: transactionID, EventID: event.EventID, ConversationID: p.conversationID,
+		AgentID: attribution.provenance.AgentID, ToolName: attribution.provenance.ToolName,
+		ExecutionID: attribution.provenance.ExecutionID, ToolCallID: attribution.provenance.ToolCallID,
+		ActivityScopeID: attribution.provenance.ActivityScopeID,
+		RuntimeMode:     p.runtimeMode, RuntimeGeneration: attribution.provenance.RuntimeGeneration,
+		RuntimeInstanceID: attribution.provenance.RuntimeInstanceID, AttributionStatus: attribution.provenance.AttributionStatus,
+		DeclaredActivityKind: attribution.provenance.DeclaredActivityKind, ObservedActivityKind: attribution.provenance.ObservedActivityKind,
+		CaptureCoverage: p.captureCoverage, Scheme: decision.Target.Scheme, Host: decision.Target.Host, Port: decision.Target.Port,
+		Method: request.Method, Path: path, HTTPStatus: http.StatusForbidden, Outcome: event.Outcome,
+		ErrorCode: decision.Reason, ErrorSummary: BoundaryReasonLabelZH(decision.Reason),
+		StartedAt: startedAt, CompletedAt: &completedAt, LatencyMS: activityLatencyMS(startedAt, completedAt),
+		BytesUp: requestCapture.total, BytesDown: responseCapture.total, BoundarySnapshotID: p.boundarySnapshotID,
+		RuleID: event.RuleID, BlockMatch: event.BlockMatch, UpstreamRouteID: p.upstreamRouteID,
 	}
 	emitTraffic(p.trafficSink, ctx, transaction, messages)
 }
@@ -577,20 +646,27 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 	if interceptTLS {
 		target, normalizeErr := boundary.NormalizeRequestTarget(targetURL, http.MethodConnect)
 		if normalizeErr != nil {
-			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			fallbackTarget := boundary.RequestTarget{Scheme: "https", Host: targetHost, Port: targetPort, Path: "/", Method: http.MethodConnect}
+			writeBoundaryDeniedResponse(writer, boundary.Decision{Reason: boundary.ReasonDefaultDeny, Target: fallbackTarget, BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceDefault, Type: boundary.MatchTypeAll, Value: "default-deny", RequestURL: targetURL, DecisionPhase: boundary.DecisionPhaseConnect}})
 			return
 		}
 		preflight, evaluateErr := p.policy.EvaluateDNS(targetHost, nil, startedAt)
-		decision = boundary.Decision{Allowed: preflight.Allowed, Effect: preflight.Effect, RuleID: preflight.RuleID, Reason: preflight.Reason, Target: target}
+		decision = boundary.Decision{Allowed: preflight.Allowed, Effect: preflight.Effect, RuleID: preflight.RuleID, Reason: preflight.Reason, Target: target, BlockMatch: preflight.BlockMatch}
+		if decision.BlockMatch != nil {
+			copyMatch := *decision.BlockMatch
+			copyMatch.RequestURL = boundary.RequestTargetURL(target)
+			copyMatch.DecisionPhase = boundary.DecisionPhaseConnect
+			decision.BlockMatch = &copyMatch
+		}
 		if evaluateErr != nil {
-			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			writeBoundaryDeniedResponse(writer, boundary.Decision{Reason: boundary.ReasonDefaultDeny, Target: target, BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceDefault, Type: boundary.MatchTypeAll, Value: "default-deny", RequestURL: boundary.RequestTargetURL(target), DecisionPhase: boundary.DecisionPhaseConnect}})
 			return
 		}
 	} else {
 		var evaluateErr error
 		decision, evaluateErr = p.policy.Evaluate(targetURL, http.MethodConnect, nil, startedAt)
 		if evaluateErr != nil {
-			writeBoundaryDeniedResponse(writer, targetHost, boundary.ReasonDefaultDeny, "")
+			writeBoundaryDeniedResponse(writer, boundary.Decision{Reason: boundary.ReasonDefaultDeny, Target: boundary.RequestTarget{Scheme: "https", Host: targetHost, Port: targetPort, Path: "/", Method: http.MethodConnect}, BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceDefault, Type: boundary.MatchTypeAll, Value: "default-deny", RequestURL: targetURL, DecisionPhase: boundary.DecisionPhaseConnect}})
 			return
 		}
 	}
@@ -599,6 +675,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		Timestamp: startedAt, RequestType: ActivityRequestCONNECT,
 		Domain: targetHost, Port: targetPort, Decision: ActivityDecisionBlocked,
 		RuleID: decision.RuleID, Reason: decision.Reason, Outcome: "policy_denied", Provenance: attribution.provenance,
+		BlockMatch: decision.BlockMatch,
 	}
 	clientResponseStatus := 0
 	var clientResponseHeaders http.Header
@@ -631,7 +708,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		}
 	}()
 	if !decision.Allowed || (!interceptTLS && !proxyDecisionAllowed(decision)) {
-		clientResponseHeaders, clientResponseBody = writeBoundaryDeniedResponse(writer, targetHost, decision.Reason, decision.RuleID)
+		clientResponseHeaders, clientResponseBody = writeBoundaryDeniedResponse(writer, decision)
 		clientResponseStatus = http.StatusForbidden
 		return
 	}
@@ -645,6 +722,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 			event.Reason = block.reason
 			event.Outcome = block.outcome
 			event.RetryAfterMS = block.retryAfterMS
+			event.BlockMatch = governanceBlockMatch(decision, block.reason)
 			writeRateLimitResponse(writer, block.retryAfterMS)
 			clientResponseStatus = http.StatusTooManyRequests
 			return
@@ -715,11 +793,13 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 		if err == nil {
 			event.RuleID = sniDecision.RuleID
 			event.Reason = sniDecision.Reason
+			event.BlockMatch = sniDecision.BlockMatch
 		}
 		return
 	}
 	event.RuleID = sniDecision.RuleID
 	event.Reason = sniDecision.Reason
+	event.BlockMatch = sniDecision.BlockMatch
 
 	upstream, err := p.dialAuthorized(request.Context(), proxyDialAuthorization{
 		rawURL: sniURL, method: http.MethodConnect, target: sniDecision.Target,
@@ -730,6 +810,7 @@ func (p *Proxy) serveConnect(writer http.ResponseWriter, request *http.Request) 
 			event.Decision = ActivityDecisionBlocked
 			event.RuleID = denied.RuleID
 			event.Reason = denied.Reason
+			event.BlockMatch = denied.BlockMatch
 			event.Outcome = "policy_denied_after_resolution"
 		} else {
 			event.Outcome, connectErrorSummary = classifyTrafficFailure(err)
@@ -818,6 +899,7 @@ func (p *Proxy) connectTrafficEvidence(
 		BytesDown:            event.BytesDown,
 		BoundarySnapshotID:   p.boundarySnapshotID,
 		RuleID:               event.RuleID,
+		BlockMatch:           event.BlockMatch,
 		UpstreamRouteID:      p.upstreamRouteID,
 	}, messages
 }
@@ -1053,7 +1135,8 @@ func (p *Proxy) emitHealthTransition(decision boundary.Decision, transition *req
 		Timestamp: now.UTC(), RequestType: ActivityRequestHealth,
 		Domain: decision.Target.Host, Decision: activityDecision,
 		RuleID: decision.RuleID, Reason: transition.reason,
-		Outcome: transition.outcome, RetryAfterMS: transition.retryAfterMS,
+		BlockMatch: governanceBlockMatch(decision, transition.reason),
+		Outcome:    transition.outcome, RetryAfterMS: transition.retryAfterMS,
 	})
 }
 
@@ -1067,16 +1150,12 @@ func writeRateLimitResponse(writer http.ResponseWriter, retryAfterMS int64) {
 }
 
 // writeBoundaryDeniedResponse gives command-line tools and the Agent a stable,
-// explicit explanation instead of an ambiguous transport failure. It only
-// includes the normalized host and policy metadata; paths, queries, headers,
-// request bodies and credentials are deliberately excluded.
-func writeBoundaryDeniedResponse(writer http.ResponseWriter, host, reason, ruleID string) (http.Header, string) {
-	host = safeBoundaryResponseValue(host, "the requested website")
-	reason = safeBoundaryResponseValue(reason, boundary.ReasonDefaultDeny)
-	ruleID = safeBoundaryResponseValue(ruleID, "default-deny")
-	body := fmt.Sprintf(
-		"CyberStrikeAI network boundary blocked access to %s (reason: %s; rule: %s). The request was not sent to the website.\nCyberStrikeAI 出站边界已禁止访问该网站（目标：%s；原因：%s；规则：%s），请求未发送到目标站点。\n",
-		host, reason, ruleID, host, reason, ruleID)
+// explicit explanation derived from the immutable decision. Query strings,
+// headers, bodies and credentials are deliberately excluded.
+func writeBoundaryDeniedResponse(writer http.ResponseWriter, decision boundary.Decision) (http.Header, string) {
+	reason := safeBoundaryResponseValue(decision.Reason, boundary.ReasonDefaultDeny)
+	ruleID := safeBoundaryResponseValue(decision.RuleID, "default-deny")
+	body := FormatBoundaryDeniedBody(decision)
 	headers := http.Header{
 		"Content-Type":                 {"text/plain; charset=utf-8"},
 		"Content-Length":               {strconv.Itoa(len(body))},
@@ -1090,6 +1169,14 @@ func writeBoundaryDeniedResponse(writer http.ResponseWriter, host, reason, ruleI
 	writer.WriteHeader(http.StatusForbidden)
 	_, _ = io.WriteString(writer, body)
 	return headers, body
+}
+
+func governanceBlockMatch(decision boundary.Decision, reason string) *boundary.BlockMatch {
+	return &boundary.BlockMatch{
+		Source: boundary.MatchSourceGovernance, Type: boundary.MatchTypeAll,
+		Value:      safeBoundaryResponseValue(reason, "governance-limit"),
+		RequestURL: boundary.RequestTargetURL(decision.Target), DecisionPhase: boundary.DecisionPhaseRequest,
+	}
 }
 
 func captureSyntheticHTTPResponse(packet *HTTPPacket, status int, headers http.Header, body string) {

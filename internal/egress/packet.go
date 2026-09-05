@@ -132,12 +132,17 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 	direct, err := f.policy.EvaluateNetwork(target.address.String(), target.port, target.protocol, []netip.Addr{target.address}, now)
 	if err != nil {
 		event.Reason = boundary.ReasonDefaultDeny
+		event.BlockMatch = &boundary.BlockMatch{
+			Source: boundary.MatchSourceDefault, Type: boundary.MatchTypeAll, Value: boundary.ReasonDefaultDeny,
+			RequestURL:    boundary.RequestTargetURL(boundary.RequestTarget{Scheme: target.protocol, Host: target.address.String(), Port: target.port, Path: "/"}),
+			DecisionPhase: boundary.DecisionPhaseConnect,
+		}
 		if observe {
 			emitActivity(f.activitySink, event)
 		}
 		return false, event, true
 	}
-	event.RuleID, event.Reason = direct.RuleID, direct.Reason
+	event.RuleID, event.Reason, event.BlockMatch = direct.RuleID, direct.Reason, direct.BlockMatch
 	if direct.Allowed {
 		f.pace(target)
 		event.Decision, event.Outcome = ActivityDecisionAllowed, "forwarded"
@@ -169,7 +174,7 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 		}
 		event.Domain = domain
 		event.ResolvedIPs = []string{target.address.String()}
-		event.RuleID, event.Reason = decision.RuleID, decision.Reason
+		event.RuleID, event.Reason, event.BlockMatch = decision.RuleID, decision.Reason, decision.BlockMatch
 		f.pace(target)
 		event.Decision, event.Outcome = ActivityDecisionAllowed, "forwarded"
 		if observe {
@@ -180,7 +185,7 @@ func (f *packetFilter) evaluate(packet []byte) (bool, ActivityEvent, bool) {
 	if explicitDenial != nil {
 		event.Domain = explicitDenial.Target.Host
 		event.ResolvedIPs = []string{target.address.String()}
-		event.RuleID, event.Reason = explicitDenial.RuleID, explicitDenial.Reason
+		event.RuleID, event.Reason, event.BlockMatch = explicitDenial.RuleID, explicitDenial.Reason, explicitDenial.BlockMatch
 	}
 	if observe {
 		emitActivity(f.activitySink, event)

@@ -145,12 +145,19 @@ func (p *SOCKS5Proxy) handleConnect(ctx context.Context, client net.Conn, client
 	started := p.now().UTC()
 	event := ActivityEvent{Timestamp: started, RequestType: ActivityRequestTCP, Domain: host, Port: port, Decision: ActivityDecisionBlocked, Outcome: "policy_denied"}
 	decision, addresses, err := p.resolveAndAuthorize(ctx, host, port, "tcp")
-	event.RuleID, event.Reason, event.ResolvedIPs = decision.RuleID, decision.Reason, activityIPStrings(addresses)
+	event.RuleID, event.Reason, event.BlockMatch, event.ResolvedIPs = decision.RuleID, decision.Reason, decision.BlockMatch, activityIPStrings(addresses)
 	defer func() {
 		event.LatencyMS = activityLatencyMS(started, p.now().UTC())
 		emitActivity(p.activitySink, event)
 	}()
 	if err != nil {
+		if proxyDecisionAllowed(decision) {
+			// Resolver/target preparation failures happened after policy allowed
+			// the request. Keep them as connection results, never as fabricated
+			// boundary denials.
+			event.Decision, event.Outcome = ActivityDecisionAllowed, "dns_failed"
+			event.Reason, event.RuleID, event.BlockMatch = "", "", nil
+		}
 		_ = writeSOCKS5Reply(client, 2, nil)
 		return
 	}
@@ -162,6 +169,7 @@ func (p *SOCKS5Proxy) handleConnect(ctx context.Context, client net.Conn, client
 	release, block, _ := p.guard.acquire(decision, started)
 	if block != nil {
 		event.Reason, event.Outcome, event.RetryAfterMS = block.reason, block.outcome, block.retryAfterMS
+		event.BlockMatch = governanceBlockMatch(decision, block.reason)
 		_ = writeSOCKS5Reply(client, 2, nil)
 		return
 	}
@@ -254,12 +262,16 @@ func (p *SOCKS5Proxy) forwardUDP(ctx context.Context, relay *net.UDPConn, client
 	}
 	event := ActivityEvent{Timestamp: started, RequestType: ActivityRequestUDP, Domain: host, Port: port, Decision: ActivityDecisionBlocked, Outcome: "policy_denied", BytesUp: int64(len(payload))}
 	decision, addresses, authErr := p.resolveAndAuthorize(ctx, host, port, "udp")
-	event.RuleID, event.Reason, event.ResolvedIPs = decision.RuleID, decision.Reason, activityIPStrings(addresses)
+	event.RuleID, event.Reason, event.BlockMatch, event.ResolvedIPs = decision.RuleID, decision.Reason, decision.BlockMatch, activityIPStrings(addresses)
 	defer func() {
 		event.LatencyMS = activityLatencyMS(started, p.now().UTC())
 		emitActivity(p.activitySink, event)
 	}()
 	if authErr != nil {
+		if proxyDecisionAllowed(decision) {
+			event.Decision, event.Outcome = ActivityDecisionAllowed, "dns_failed"
+			event.Reason, event.RuleID, event.BlockMatch = "", "", nil
+		}
 		return
 	}
 	if err := p.udpPacer.Wait(ctx); err != nil {
@@ -269,6 +281,7 @@ func (p *SOCKS5Proxy) forwardUDP(ctx context.Context, relay *net.UDPConn, client
 	release, block, _ := p.guard.acquire(decision, started)
 	if block != nil {
 		event.Reason, event.Outcome, event.RetryAfterMS = block.reason, block.outcome, block.retryAfterMS
+		event.BlockMatch = governanceBlockMatch(decision, block.reason)
 		return
 	}
 	defer release()

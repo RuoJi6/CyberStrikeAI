@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/database"
 	"cyberstrike-ai/internal/egress"
 	"cyberstrike-ai/internal/mcp"
@@ -26,6 +27,15 @@ import (
 )
 
 type hostTrafficRoundTripper struct{}
+
+type hostFeedbackExecutionBackend struct{}
+
+func (hostFeedbackExecutionBackend) Execute(_ context.Context, request security.ExecutionRequest) (security.ExecutionResult, error) {
+	if request.Output != nil {
+		request.Output("base-output")
+	}
+	return security.ExecutionResult{Output: "base-output", ExitCode: 0, Location: "host"}, nil
+}
 
 func (hostTrafficRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	body := "captured " + request.URL.Scheme + " " + request.URL.Path
@@ -245,6 +255,51 @@ func TestBuildHostTrafficCABundlePreservesSystemTrust(t *testing.T) {
 	})
 	if !bytes.Equal(bundle, []byte("SYSTEM-CA\nCONVERSATION-CA\n")) {
 		t.Fatalf("combined CA bundle = %q", bundle)
+	}
+}
+
+func TestProxiedHostExecutionAppendsStructuredBoundaryFeedback(t *testing.T) {
+	signer, err := networkprovenance.LoadOrCreateSigner(filepath.Join(t.TempDir(), "provenance.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := newHostActivityRecorder()
+	const executionID = "execution-host-block"
+	recorder.record(egress.ActivityEvent{
+		RequestType: egress.ActivityRequestHTTPS, Domain: "example.com", Port: 443, Method: http.MethodGet,
+		Decision: egress.ActivityDecisionBlocked, Reason: boundary.ReasonBlockedPathSubtree, RuleID: "rule-path",
+		Provenance: networkprovenance.NetworkProvenanceV1{ExecutionID: executionID}.Normalized(),
+		BlockMatch: &boundary.BlockMatch{
+			Source: boundary.MatchSourceRule, Type: boundary.MatchTypePathSubtree, Value: "/blocked/*",
+			RequestURL: "https://example.com:443/blocked/child", DecisionPhase: boundary.DecisionPhaseRequest,
+			RuleConstraints: &boundary.RuleConstraints{Host: "*", Schemes: []string{"https"}, Ports: []int{443}, PathPrefixes: []string{"/blocked/*"}, Methods: []string{"GET"}},
+		},
+	})
+	backend := &proxiedHostExecutionBackend{
+		base: hostFeedbackExecutionBackend{}, proxyURL: "http://127.0.0.1:18081", caPath: filepath.Join(t.TempDir(), "ca.pem"),
+		conversationID: "conversation-host", runtimeInstanceID: "runtime-host", signer: signer, recorder: recorder,
+	}
+	ctx := networkprovenance.WithContext(context.Background(), networkprovenance.NetworkProvenanceV1{
+		ExecutionID: executionID, AgentID: "agent-host", ToolName: "exec", ToolCallID: "call-host",
+	})
+	var streamed strings.Builder
+	result, err := backend.Execute(ctx, security.ExecutionRequest{
+		Command: []string{"printf", "ok"}, Output: func(value string) { streamed.WriteString(value) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{result.Output, streamed.String()} {
+		for _, wanted := range []string{
+			"https://example.com:443/blocked/child", "路径子树阻断（blocked-path-subtree）", "命中条件：路径 /blocked/*", "请求未发送到目标",
+		} {
+			if !strings.Contains(output, wanted) {
+				t.Fatalf("Host feedback missing %q: %q", wanted, output)
+			}
+		}
+	}
+	if items := recorder.take(executionID); len(items) != 0 {
+		t.Fatalf("Host feedback recorder was not drained: %#v", items)
 	}
 }
 

@@ -76,9 +76,47 @@ type hostTrafficProxy struct {
 	listener          net.Listener
 	sink              *trafficspool.CompactingSink
 	audit             *hostAuditQueue
+	recorder          *hostActivityRecorder
 	base              security.ExecutionBackend
 	closeOnce         sync.Once
 	closeErr          error
+}
+
+type hostActivityRecorder struct {
+	mu     sync.Mutex
+	events map[string][]egress.ActivityEvent
+}
+
+func newHostActivityRecorder() *hostActivityRecorder {
+	return &hostActivityRecorder{events: make(map[string][]egress.ActivityEvent)}
+}
+
+func (recorder *hostActivityRecorder) record(event egress.ActivityEvent) {
+	if recorder == nil || event.Decision != egress.ActivityDecisionBlocked {
+		return
+	}
+	executionID := strings.TrimSpace(event.Provenance.ExecutionID)
+	if executionID == "" {
+		return
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	items := recorder.events[executionID]
+	if len(items) >= 256 {
+		return
+	}
+	recorder.events[executionID] = append(items, event)
+}
+
+func (recorder *hostActivityRecorder) take(executionID string) []egress.ActivityEvent {
+	if recorder == nil || strings.TrimSpace(executionID) == "" {
+		return nil
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	items := recorder.events[executionID]
+	delete(recorder.events, executionID)
+	return append([]egress.ActivityEvent(nil), items...)
 }
 
 type hostAuditQueue struct {
@@ -277,6 +315,7 @@ type proxiedHostExecutionBackend struct {
 	conversationID    string
 	runtimeInstanceID string
 	signer            *networkprovenance.Signer
+	recorder          *hostActivityRecorder
 }
 
 func newHostTrafficProxyManager(db *database.DB, runner trafficTransformRunner, logger *zap.Logger, options ...any) *hostTrafficProxyManager {
@@ -410,6 +449,7 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 		return nil, fmt.Errorf("apply host traffic aggregation mode: %w", err)
 	}
 	auditQueue := newHostAuditQueue(manager.db, auditTarget, manager.logger, manager.ingestor, setting.Enabled, setting.AggregationMode, setting.RecordUpstreamFailures)
+	recorder := newHostActivityRecorder()
 	cleanupAuditQueue := true
 	defer func() {
 		if cleanupAuditQueue {
@@ -442,6 +482,7 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 				ConversationID: conversationID, RuntimeMode: networkprovenance.RuntimeModeHostMITM,
 				RuntimeGeneration: 1, RuntimeInstanceID: runtimeInstanceID,
 			})
+			recorder.record(event)
 			auditQueue.append(event)
 		},
 	})
@@ -464,7 +505,7 @@ func (manager *hostTrafficProxyManager) startProxy(conversationID string) (_ *ho
 		runtimeInstanceID: runtimeInstanceID, signer: manager.signer,
 		expiresAt: authority.Certificate.NotAfter.UTC(), server: server, listener: listener,
 		sink: compactor, base: security.NewHostExecutionBackend(),
-		audit: auditQueue,
+		audit: auditQueue, recorder: recorder,
 	}
 	cleanupCompactor = false
 	cleanupAuditQueue = false
@@ -521,7 +562,7 @@ func (proxy *hostTrafficProxy) backend() security.ExecutionBackend {
 	return &proxiedHostExecutionBackend{
 		base: proxy.base, proxyURL: proxy.proxyURL, caPath: proxy.caPath,
 		conversationID: proxy.conversationID, runtimeInstanceID: proxy.runtimeInstanceID,
-		signer: proxy.signer,
+		signer: proxy.signer, recorder: proxy.recorder,
 	}
 }
 
@@ -572,7 +613,15 @@ func (backend *proxiedHostExecutionBackend) Execute(ctx context.Context, request
 		"GIT_SSL_CAINFO="+backend.caPath,
 		"AWS_CA_BUNDLE="+backend.caPath,
 	)
-	return executeWithCredentialRedaction(ctx, backend.base, request, sensitiveValues)
+	output := request.Output
+	result, executeErr := executeWithCredentialRedaction(ctx, backend.base, request, sensitiveValues)
+	if feedback := egress.FormatBoundaryBlockFeedback(backend.recorder.take(provenance.ExecutionID), 8); feedback != "" {
+		result.Output += feedback
+		if output != nil {
+			output(feedback)
+		}
+	}
+	return result, executeErr
 }
 
 func (proxy *hostTrafficProxy) close(ctx context.Context) error {

@@ -121,20 +121,23 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 	}()
 	if header.OpCode != 0 {
 		event.Outcome = "unsupported_opcode"
+		setDNSSystemBlock(&event, event.Outcome, fmt.Sprintf("opcode-%d", header.OpCode))
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
 	if question.Class != dnsmessage.ClassINET {
 		event.Outcome = "unsupported_class"
+		setDNSSystemBlock(&event, event.Outcome, fmt.Sprintf("class-%d", question.Class))
 		return buildDNSResponse(header, &question, dnsmessage.RCodeRefused, nil, d.answerTTL)
 	}
 	if !supportedDNSQueryType(question.Type) {
 		event.Outcome = "unsupported_query_type"
+		setDNSSystemBlock(&event, event.Outcome, strings.ToLower(dnsQueryTypeName(question.Type)))
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
 	policyHost, err := dnsPolicyHost(question)
 	if err != nil {
 		event.Outcome = "invalid_query_name"
-		event.Reason = err.Error()
+		setDNSSystemBlock(&event, event.Outcome, "invalid-query-name")
 		return buildDNSResponse(header, &question, dnsmessage.RCodeRefused, nil, d.answerTTL)
 	}
 	initial, err := d.policy.EvaluateDNS(policyHost, nil, d.now().UTC())
@@ -143,6 +146,7 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 	}
 	event.RuleID = initial.RuleID
 	event.Reason = initial.Reason
+	event.BlockMatch = initial.BlockMatch
 	if err != nil || !initial.Allowed {
 		event.Outcome = "policy_denied"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
@@ -171,6 +175,7 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 		final, finalErr := d.policy.EvaluateDNS(initial.Host, addresses, d.now().UTC())
 		event.RuleID = final.RuleID
 		event.Reason = final.Reason
+		event.BlockMatch = final.BlockMatch
 		if finalErr != nil || !final.Allowed || final.RuleID != initial.RuleID || final.Effect != initial.Effect {
 			event.Outcome = "policy_denied_after_resolution"
 			return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
@@ -187,6 +192,7 @@ func (d *PolicyDNS) HandleQuery(ctx context.Context, packet []byte) ([]byte, err
 func (d *PolicyDNS) handleLegacyAddressQuery(ctx context.Context, header dnsmessage.Header, question dnsmessage.Question, initial boundary.DNSDecision, event *ActivityEvent) ([]byte, error) {
 	if question.Type != dnsmessage.TypeA && question.Type != dnsmessage.TypeAAAA {
 		event.Outcome = "unsupported_query_type"
+		setDNSSystemBlock(event, event.Outcome, strings.ToLower(dnsQueryTypeName(question.Type)))
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNotImplemented, nil, d.answerTTL)
 	}
 	lookupCtx, cancel := context.WithTimeout(ctx, d.lookupTimeout)
@@ -205,7 +211,7 @@ func (d *PolicyDNS) handleLegacyAddressQuery(ctx context.Context, header dnsmess
 	}
 	event.ResolvedIPs = activityIPStrings(addresses)
 	final, err := d.policy.EvaluateDNS(initial.Host, addresses, d.now().UTC())
-	event.RuleID, event.Reason = final.RuleID, final.Reason
+	event.RuleID, event.Reason, event.BlockMatch = final.RuleID, final.Reason, final.BlockMatch
 	if err != nil || !final.Allowed || final.RuleID != initial.RuleID || final.Effect != initial.Effect {
 		event.Outcome = "policy_denied_after_resolution"
 		return buildDNSResponse(header, &question, dnsmessage.RCodeNameError, nil, d.answerTTL)
@@ -215,6 +221,23 @@ func (d *PolicyDNS) handleLegacyAddressQuery(ctx context.Context, header dnsmess
 		d.dnsLeases.Remember(initial.Host, addresses, d.answerTTL, d.now().UTC())
 	}
 	return buildDNSResponse(header, &question, dnsmessage.RCodeSuccess, addresses, d.answerTTL)
+}
+
+func setDNSSystemBlock(event *ActivityEvent, reason, value string) {
+	if event == nil {
+		return
+	}
+	host := strings.TrimSpace(event.Domain)
+	if normalized, err := boundary.NormalizeHost(host); err == nil {
+		host = normalized
+	} else {
+		host = "invalid-dns-name"
+	}
+	event.Reason = reason
+	event.BlockMatch = &boundary.BlockMatch{
+		Source: boundary.MatchSourceSystem, Type: boundary.MatchTypeProtocol, Value: value,
+		RequestURL: "dns://" + host, DecisionPhase: boundary.DecisionPhaseRequest,
+	}
 }
 
 type dnsResponseMetadata struct {

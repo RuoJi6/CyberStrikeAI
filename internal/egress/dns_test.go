@@ -95,6 +95,26 @@ func TestPolicyDNSReturnsNXDOMAINWithoutLookupForDeniedNames(t *testing.T) {
 	}
 }
 
+func TestPolicyDNSSystemDenialCarriesStructuredMatch(t *testing.T) {
+	policy := testDNSPolicy(t)
+	var captured ActivityEvent
+	handler, err := NewPolicyDNS(policy, DNSOptions{ActivitySink: func(event ActivityEvent) { captured = event }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := handler.HandleQuery(context.Background(), dnsQuery(t, 91, "example.com.", dnsmessage.Type(65000)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, _ := parseDNSResponse(t, response)
+	if header.RCode != dnsmessage.RCodeNotImplemented || captured.Decision != ActivityDecisionBlocked || captured.Reason != "unsupported_query_type" || captured.BlockMatch == nil {
+		t.Fatalf("system DNS denial = header %#v event %#v", header, captured)
+	}
+	if captured.BlockMatch.Source != boundary.MatchSourceSystem || captured.BlockMatch.Type != boundary.MatchTypeProtocol || captured.BlockMatch.RequestURL != "dns://example.com" || captured.BlockMatch.DecisionPhase != boundary.DecisionPhaseRequest {
+		t.Fatalf("system DNS block match = %#v", captured.BlockMatch)
+	}
+}
+
 func TestPolicyDNSFailsClosedForRebindingAndResolverFailure(t *testing.T) {
 	policy := testDNSPolicy(t, boundary.Rule{ID: "visit", Effect: boundary.EffectAllowVisit, Target: boundary.RuleTarget{Host: "allowed.example"}})
 	tests := []struct {

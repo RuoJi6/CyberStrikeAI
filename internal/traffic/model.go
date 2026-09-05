@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"cyberstrike-ai/internal/boundary"
 )
 
 const (
@@ -59,49 +61,50 @@ type Header struct {
 }
 
 type Transaction struct {
-	ID                   string     `json:"id"`
-	EventID              string     `json:"event_id,omitempty"`
-	ConversationID       string     `json:"conversation_id,omitempty"`
-	ProjectID            string     `json:"project_id,omitempty"`
-	AgentID              string     `json:"agent_id,omitempty"`
-	ToolName             string     `json:"tool_name,omitempty"`
-	ExecutionID          string     `json:"execution_id,omitempty"`
-	ToolCallID           string     `json:"tool_call_id,omitempty"`
-	ActivityScopeID      string     `json:"activity_scope_id,omitempty"`
-	RuntimeGeneration    int        `json:"runtime_generation,omitempty"`
-	RuntimeInstanceID    string     `json:"runtime_instance_id,omitempty"`
-	AttributionStatus    string     `json:"attribution_status,omitempty"`
-	DeclaredActivityKind string     `json:"declared_activity_kind,omitempty"`
-	ObservedActivityKind string     `json:"observed_activity_kind,omitempty"`
-	RuntimeMode          string     `json:"runtime_mode"`
-	CaptureCoverage      string     `json:"capture_coverage"`
-	Scheme               string     `json:"scheme"`
-	Host                 string     `json:"host"`
-	Port                 int        `json:"port"`
-	Method               string     `json:"method"`
-	Path                 string     `json:"path"`
-	HTTPStatus           int        `json:"http_status,omitempty"`
-	Outcome              string     `json:"outcome,omitempty"`
-	ErrorCode            string     `json:"error_code,omitempty"`
-	ErrorSummary         string     `json:"error_summary,omitempty"`
-	StartedAt            time.Time  `json:"started_at"`
-	CompletedAt          *time.Time `json:"completed_at,omitempty"`
-	LatencyMS            int64      `json:"latency_ms"`
-	BytesUp              int64      `json:"bytes_up"`
-	BytesDown            int64      `json:"bytes_down"`
-	BoundarySnapshotID   string     `json:"boundary_snapshot_id,omitempty"`
-	RuleID               string     `json:"rule_id,omitempty"`
-	UpstreamRouteID      string     `json:"upstream_route_id,omitempty"`
-	TransformBindingID   string     `json:"transform_binding_id,omitempty"`
-	TransformRevisionID  string     `json:"transform_revision_id,omitempty"`
-	TransformResult      string     `json:"transform_result,omitempty"`
-	AggregateKind        string     `json:"aggregate_kind,omitempty"`
-	AggregateCount       int64      `json:"aggregate_count,omitempty"`
-	AggregateFirstAt     *time.Time `json:"aggregate_first_at,omitempty"`
-	AggregateLastAt      *time.Time `json:"aggregate_last_at,omitempty"`
-	AggregateSummaryJSON string     `json:"aggregate_summary_json,omitempty"`
-	CreatedAt            time.Time  `json:"created_at"`
-	UpdatedAt            time.Time  `json:"updated_at"`
+	ID                   string               `json:"id"`
+	EventID              string               `json:"event_id,omitempty"`
+	ConversationID       string               `json:"conversation_id,omitempty"`
+	ProjectID            string               `json:"project_id,omitempty"`
+	AgentID              string               `json:"agent_id,omitempty"`
+	ToolName             string               `json:"tool_name,omitempty"`
+	ExecutionID          string               `json:"execution_id,omitempty"`
+	ToolCallID           string               `json:"tool_call_id,omitempty"`
+	ActivityScopeID      string               `json:"activity_scope_id,omitempty"`
+	RuntimeGeneration    int                  `json:"runtime_generation,omitempty"`
+	RuntimeInstanceID    string               `json:"runtime_instance_id,omitempty"`
+	AttributionStatus    string               `json:"attribution_status,omitempty"`
+	DeclaredActivityKind string               `json:"declared_activity_kind,omitempty"`
+	ObservedActivityKind string               `json:"observed_activity_kind,omitempty"`
+	RuntimeMode          string               `json:"runtime_mode"`
+	CaptureCoverage      string               `json:"capture_coverage"`
+	Scheme               string               `json:"scheme"`
+	Host                 string               `json:"host"`
+	Port                 int                  `json:"port"`
+	Method               string               `json:"method"`
+	Path                 string               `json:"path"`
+	HTTPStatus           int                  `json:"http_status,omitempty"`
+	Outcome              string               `json:"outcome,omitempty"`
+	ErrorCode            string               `json:"error_code,omitempty"`
+	ErrorSummary         string               `json:"error_summary,omitempty"`
+	StartedAt            time.Time            `json:"started_at"`
+	CompletedAt          *time.Time           `json:"completed_at,omitempty"`
+	LatencyMS            int64                `json:"latency_ms"`
+	BytesUp              int64                `json:"bytes_up"`
+	BytesDown            int64                `json:"bytes_down"`
+	BoundarySnapshotID   string               `json:"boundary_snapshot_id,omitempty"`
+	RuleID               string               `json:"rule_id,omitempty"`
+	BlockMatch           *boundary.BlockMatch `json:"block_match,omitempty"`
+	UpstreamRouteID      string               `json:"upstream_route_id,omitempty"`
+	TransformBindingID   string               `json:"transform_binding_id,omitempty"`
+	TransformRevisionID  string               `json:"transform_revision_id,omitempty"`
+	TransformResult      string               `json:"transform_result,omitempty"`
+	AggregateKind        string               `json:"aggregate_kind,omitempty"`
+	AggregateCount       int64                `json:"aggregate_count,omitempty"`
+	AggregateFirstAt     *time.Time           `json:"aggregate_first_at,omitempty"`
+	AggregateLastAt      *time.Time           `json:"aggregate_last_at,omitempty"`
+	AggregateSummaryJSON string               `json:"aggregate_summary_json,omitempty"`
+	CreatedAt            time.Time            `json:"created_at"`
+	UpdatedAt            time.Time            `json:"updated_at"`
 }
 
 type Message struct {
@@ -291,6 +294,9 @@ func ValidateTransaction(transaction Transaction) error {
 	}
 	if strings.TrimSpace(transaction.Method) == "" || !strings.HasPrefix(transaction.Path, "/") {
 		return errors.New("traffic transaction request is invalid")
+	}
+	if err := boundary.ValidateBlockMatch(transaction.BlockMatch); err != nil {
+		return fmt.Errorf("traffic transaction block match is invalid: %w", err)
 	}
 	if transaction.HTTPStatus < 0 || transaction.HTTPStatus > 999 || transaction.LatencyMS < 0 || transaction.BytesUp < 0 || transaction.BytesDown < 0 || transaction.AggregateCount < 0 {
 		return errors.New("traffic transaction numeric values are invalid")

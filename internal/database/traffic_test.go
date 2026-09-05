@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/traffic"
 
 	"go.uber.org/zap"
@@ -89,6 +90,8 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 		Scheme: "https", Host: "API.Example.Test", Port: 443, Method: "post", Path: "/v1/encrypted",
 		HTTPStatus: 200, StartedAt: started, CompletedAt: &completed, LatencyMS: 25, BytesUp: 4, BytesDown: 5,
 		Outcome: "response_interrupted", ErrorCode: "response_interrupted", ErrorSummary: "The upstream response ended before its body was complete",
+		RuleID: "block-upload", BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceRule, Type: boundary.MatchTypePathSubtree, Value: "/v1/*", RequestURL: "https://api.example.test:443/v1/encrypted", DecisionPhase: boundary.DecisionPhaseRequest,
+			RuleConstraints: &boundary.RuleConstraints{Host: "api.example.test", Schemes: []string{"https"}, Ports: []int{443}, PathPrefixes: []string{"/v1/*"}, Methods: []string{"POST"}}},
 	}
 	detail, err := db.CreateTrafficTransaction(ctx, item, []traffic.Message{
 		testTrafficMessage(traffic.StageClientRequest, traffic.MessageKindRequest, "POST", "/v1/encrypted", 0, []byte{0, 1, 2, 3}),
@@ -105,7 +108,7 @@ func TestTrafficTransactionPersistsMessagesAndVulnerabilityEvidence(t *testing.T
 	if err != nil {
 		t.Fatalf("GetTrafficTransaction: %v", err)
 	}
-	if loaded.Transaction.Outcome != "response_interrupted" || loaded.Transaction.ErrorSummary == "" {
+	if loaded.Transaction.Outcome != "response_interrupted" || loaded.Transaction.ErrorSummary == "" || loaded.Transaction.BlockMatch == nil || loaded.Transaction.BlockMatch.Value != "/v1/*" {
 		t.Fatalf("loaded failure metadata = %#v", loaded.Transaction)
 	}
 	requestBody, err := traffic.DecodeBody(loaded.Messages[0])

@@ -17,7 +17,7 @@ test('流量证据列表不再展示常驻的不可信内容提示', () => {
     assert.doesNotMatch(html, /目标内容不可信/);
 	assert.match(html, /style\.css\?v=20260904-2/);
     assert.match(html, /router\.js\?v=20260827-2/);
-	assert.match(html, /traffic-evidence\.js\?v=8/);
+	assert.match(html, /traffic-evidence\.js\?v=9/);
 });
 
 test('漏洞详情以紧凑按钮在当前页弹窗显示多个完整数据包', () => {
@@ -46,6 +46,16 @@ test('失败事务明确显示上游响应未建立且不伪造响应报文', ()
 	assert.match(vulnerabilityScript, /上游响应未建立/);
 	assert.match(styles, /\.traffic-evidence-failure-summary/);
 	assert.match(styles, /\.vulnerability-packet-failure/);
+});
+
+test('边界阻断证据展示真实原因、命中条件、快照规则与判定阶段', () => {
+	assert.match(script, /blockMatchSummary\(transaction\.block_match, transaction\.error_code\)/);
+	assert.match(script, /rule\.pathPrefixes/);
+	for (const key of ['activityActualRequest', 'activityBlockReason', 'activityMatchedCondition', 'activityFullRule', 'activityDecisionPhase', 'activityRequestNotReached']) {
+		assert.equal(typeof zh.containerManagement[key], 'string');
+		assert.equal(typeof en.containerManagement[key], 'string');
+		assert.match(script, new RegExp(key));
+	}
 });
 
 test('压缩响应默认显示解压正文，二进制回退为 Hex 而不是 Base64', () => {

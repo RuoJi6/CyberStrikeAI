@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/egress"
 	"github.com/google/uuid"
 	mobystdcopy "github.com/moby/moby/api/pkg/stdcopy"
@@ -359,11 +358,6 @@ func (m *DockerManager) Exec(ctx context.Context, spec RuntimeSpec, request Exec
 
 const maxExecBoundaryFeedbackTargets = 8
 
-type execBoundaryFeedbackGroup struct {
-	event egress.ActivityEvent
-	count int
-}
-
 func (m *DockerManager) emitBoundaryBlockFeedback(ctx context.Context, spec RuntimeSpec, since, until time.Time, sink ExecOutputSink) {
 	if sink == nil || ctx == nil || ctx.Err() != nil {
 		return
@@ -372,95 +366,9 @@ func (m *DockerManager) emitBoundaryBlockFeedback(ctx context.Context, spec Runt
 	if !ok {
 		return
 	}
-	groups := groupBoundaryFeedbackEvents(events)
-
-	var message strings.Builder
-	fmt.Fprintf(&message, "\n[CyberStrikeAI 网络边界] 本次工具执行触发 %d 次网络阻断，以下请求未到达目标：\n", len(events))
-	visible := len(groups)
-	if visible > maxExecBoundaryFeedbackTargets {
-		visible = maxExecBoundaryFeedbackTargets
+	if message := egress.FormatBoundaryBlockFeedback(events, maxExecBoundaryFeedbackTargets); message != "" {
+		_ = sink(ExecStreamStderr, []byte(message))
 	}
-	for _, group := range groups[:visible] {
-		rule, reason := boundaryFeedbackRuleReason(group.event)
-		fmt.Fprintf(&message, "- %s（%d 次）：原因 %s，规则 %s\n",
-			boundaryFeedbackRequest(group.event), group.count, boundaryFeedbackReasonLabel(reason), rule)
-	}
-	if hidden := len(groups) - visible; hidden > 0 {
-		fmt.Fprintf(&message, "- 其他 %d 组被阻断目标请在出站审计中查看。\n", hidden)
-	}
-	message.WriteString("当前边界规则中网络策略已明确禁止上述访问，请停止测试上述访问。\n")
-	_ = sink(ExecStreamStderr, []byte(message.String()))
-}
-
-func groupBoundaryFeedbackEvents(events []egress.ActivityEvent) []execBoundaryFeedbackGroup {
-	groups := make([]execBoundaryFeedbackGroup, 0, len(events))
-	groupIndexes := make(map[string]int, len(events))
-	for _, event := range events {
-		rule, reason := boundaryFeedbackRuleReason(event)
-		key := strings.Join([]string{boundaryFeedbackRequest(event), rule, reason}, "\x00")
-		if index, exists := groupIndexes[key]; exists {
-			groups[index].count++
-			continue
-		}
-		groupIndexes[key] = len(groups)
-		groups = append(groups, execBoundaryFeedbackGroup{event: event, count: 1})
-	}
-	return groups
-}
-
-func boundaryFeedbackRequest(event egress.ActivityEvent) string {
-	requestType := strings.ToUpper(strings.TrimSpace(event.RequestType))
-	target := boundaryFeedbackTarget(event)
-	if event.RequestType != egress.ActivityRequestHTTP && event.RequestType != egress.ActivityRequestHTTPS {
-		return strings.TrimSpace(requestType + " " + target)
-	}
-	method := strings.ToUpper(strings.TrimSpace(event.Method))
-	path := strings.TrimSpace(event.Path)
-	if path == "" {
-		path = "/"
-	}
-	scheme := strings.ToLower(strings.TrimSpace(event.RequestType))
-	return strings.TrimSpace(requestType + " " + method + " " + scheme + "://" + target + path)
-}
-
-func boundaryFeedbackTarget(event egress.ActivityEvent) string {
-	target := strings.TrimSpace(event.Domain)
-	if target == "" {
-		target = strings.TrimSpace(event.ConnectedIP)
-	}
-	if target == "" {
-		target = "未知目标"
-	}
-	if event.Port > 0 {
-		target += ":" + fmt.Sprintf("%d", event.Port)
-	}
-	return target
-}
-
-func boundaryFeedbackRuleReason(event egress.ActivityEvent) (string, string) {
-	rule := strings.TrimSpace(event.RuleID)
-	reason := strings.TrimSpace(event.Reason)
-	if reason == "" {
-		reason = "policy_denied"
-	}
-	if rule == "" {
-		switch reason {
-		case boundary.ReasonForbiddenAddress, boundary.ReasonForbiddenHostname, boundary.ReasonDNSRebinding:
-			rule = "系统网络隔离"
-		case boundary.ReasonDefaultDeny:
-			rule = "边界默认拒绝"
-		default:
-			rule = "系统策略"
-		}
-	}
-	return rule, reason
-}
-
-func boundaryFeedbackReasonLabel(reason string) string {
-	if reason == boundary.ReasonBlockedPath {
-		return "路径阻断"
-	}
-	return reason
 }
 
 func (m *DockerManager) terminateExecProcess(spec RuntimeSpec, expected Runtime, controlFile string) error {

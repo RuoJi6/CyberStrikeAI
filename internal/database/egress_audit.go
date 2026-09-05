@@ -91,6 +91,7 @@ CREATE TABLE IF NOT EXISTS egress_audit_events (
 	bytes_up INTEGER NOT NULL DEFAULT 0,
 	bytes_down INTEGER NOT NULL DEFAULT 0,
 	http_packet_json TEXT NOT NULL DEFAULT '' CHECK (http_packet_json = '' OR json_valid(http_packet_json)),
+	block_match_json TEXT NOT NULL DEFAULT '' CHECK (block_match_json = '' OR json_valid(block_match_json)),
 	lifecycle_operation TEXT NOT NULL DEFAULT '',
 	lifecycle_state TEXT NOT NULL DEFAULT '',
 	message TEXT NOT NULL DEFAULT '',
@@ -166,6 +167,7 @@ BEGIN
 	SET chain_sequence = COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1,
 		previous_hash = COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 		chain_hash_version = CASE
+			WHEN NEW.block_match_json <> '' THEN 5
 			WHEN NEW.source_event_id <> '' OR NEW.runtime_mode <> '' OR NEW.runtime_instance_id <> '' OR NEW.tool_name <> ''
 				OR NEW.execution_id <> '' OR NEW.tool_call_id <> '' OR NEW.activity_scope_id <> '' OR NEW.attribution_status <> ''
 				OR NEW.declared_activity_kind <> '' OR NEW.observed_activity_kind <> '' THEN 4
@@ -173,7 +175,7 @@ BEGIN
 			WHEN NEW.http_packet_json <> '' THEN 2
 			ELSE 1
 		END,
-		event_hash = cyberstrike_egress_audit_hash_provenance(
+		event_hash = cyberstrike_egress_audit_hash_block_match(
 			COALESCE((SELECT last_hash FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), '%s'),
 			CAST(COALESCE((SELECT last_sequence FROM egress_audit_chain_heads WHERE conversation_id = NEW.conversation_id), 0) + 1 AS TEXT),
 			CAST(NEW.id AS TEXT), CAST(NEW.event_key AS TEXT), CAST(NEW.recorded_at AS TEXT), CAST(NEW.occurred_at AS TEXT),
@@ -188,7 +190,8 @@ BEGIN
 			CAST(NEW.source_event_id AS TEXT), CAST(NEW.runtime_mode AS TEXT), CAST(NEW.runtime_instance_id AS TEXT),
 			CAST(NEW.tool_name AS TEXT), CAST(NEW.execution_id AS TEXT), CAST(NEW.tool_call_id AS TEXT),
 			CAST(NEW.activity_scope_id AS TEXT), CAST(NEW.attribution_status AS TEXT),
-			CAST(NEW.declared_activity_kind AS TEXT), CAST(NEW.observed_activity_kind AS TEXT)
+			CAST(NEW.declared_activity_kind AS TEXT), CAST(NEW.observed_activity_kind AS TEXT),
+			CAST(NEW.block_match_json AS TEXT)
 		)
 	WHERE id = NEW.id;
 	INSERT INTO egress_audit_chain_heads (conversation_id, last_sequence, last_hash, event_count, updated_at)
@@ -322,61 +325,62 @@ WHERE r.initialization_status IN ('created', 'failed')
 // page and export APIs. HTTPPacket is returned only by the single-event detail
 // endpoint so list responses remain bounded.
 type EgressAuditEvent struct {
-	ID                        string             `json:"id"`
-	ChainSequence             int64              `json:"chainSequence"`
-	PreviousHash              string             `json:"previousHash"`
-	EventHash                 string             `json:"eventHash"`
-	RecordedAt                time.Time          `json:"recordedAt"`
-	OccurredAt                time.Time          `json:"occurredAt"`
-	Category                  string             `json:"category"`
-	EventType                 string             `json:"eventType"`
-	ConversationID            string             `json:"conversationId"`
-	ConversationTitle         string             `json:"conversationTitle"`
-	ContainerID               string             `json:"containerId,omitempty"`
-	AgentID                   string             `json:"agentId,omitempty"`
-	RuntimeGeneration         int                `json:"runtimeGeneration"`
-	SourceEventID             string             `json:"eventId,omitempty"`
-	RuntimeMode               string             `json:"runtimeMode,omitempty"`
-	RuntimeInstanceID         string             `json:"runtimeInstanceId,omitempty"`
-	ToolName                  string             `json:"toolName,omitempty"`
-	ExecutionID               string             `json:"executionId,omitempty"`
-	ToolCallID                string             `json:"toolCallId,omitempty"`
-	ActivityScopeID           string             `json:"activityScopeId,omitempty"`
-	AttributionStatus         string             `json:"attributionStatus,omitempty"`
-	DeclaredActivityKind      string             `json:"declaredActivityKind,omitempty"`
-	ObservedActivityKind      string             `json:"observedActivityKind,omitempty"`
-	HashVersion               int                `json:"hashVersion"`
-	SnapshotID                string             `json:"snapshotId,omitempty"`
-	SnapshotSHA256            string             `json:"snapshotSha256,omitempty"`
-	Domain                    string             `json:"domain,omitempty"`
-	DNSQueryType              string             `json:"dnsQueryType,omitempty"`
-	DNSAnswers                []string           `json:"dnsAnswers,omitempty"`
-	ResolvedIPs               []string           `json:"resolvedIps,omitempty"`
-	ConnectedIP               string             `json:"connectedIp,omitempty"`
-	Port                      int                `json:"port,omitempty"`
-	Decision                  string             `json:"decision,omitempty"`
-	Result                    string             `json:"result,omitempty"`
-	RuleID                    string             `json:"ruleId,omitempty"`
-	Reason                    string             `json:"reason,omitempty"`
-	UpstreamRouteID           string             `json:"upstreamRouteId,omitempty"`
-	Method                    string             `json:"method,omitempty"`
-	Path                      string             `json:"path,omitempty"`
-	HTTPStatus                int                `json:"httpStatus,omitempty"`
-	Outcome                   string             `json:"outcome,omitempty"`
-	LatencyMS                 int64              `json:"latencyMs"`
-	BytesUp                   int64              `json:"bytesUp,omitempty"`
-	BytesDown                 int64              `json:"bytesDown,omitempty"`
-	HTTPPacket                *egress.HTTPPacket `json:"httpPacket,omitempty"`
-	LifecycleOperation        string             `json:"lifecycleOperation,omitempty"`
-	LifecycleState            string             `json:"lifecycleState,omitempty"`
-	Message                   string             `json:"message,omitempty"`
-	AggregateCount            int64              `json:"aggregateCount,omitempty"`
-	AggregateKind             string             `json:"aggregateKind,omitempty"`
-	AggregateFirstAt          *time.Time         `json:"aggregateFirstAt,omitempty"`
-	AggregateLastAt           *time.Time         `json:"aggregateLastAt,omitempty"`
-	AggregateDistinctTargets  int                `json:"aggregateDistinctTargets,omitempty"`
-	AggregateDistinctPorts    int                `json:"aggregateDistinctPorts,omitempty"`
-	AggregateDistinctVariants int                `json:"aggregateDistinctVariants,omitempty"`
+	ID                        string               `json:"id"`
+	ChainSequence             int64                `json:"chainSequence"`
+	PreviousHash              string               `json:"previousHash"`
+	EventHash                 string               `json:"eventHash"`
+	RecordedAt                time.Time            `json:"recordedAt"`
+	OccurredAt                time.Time            `json:"occurredAt"`
+	Category                  string               `json:"category"`
+	EventType                 string               `json:"eventType"`
+	ConversationID            string               `json:"conversationId"`
+	ConversationTitle         string               `json:"conversationTitle"`
+	ContainerID               string               `json:"containerId,omitempty"`
+	AgentID                   string               `json:"agentId,omitempty"`
+	RuntimeGeneration         int                  `json:"runtimeGeneration"`
+	SourceEventID             string               `json:"eventId,omitempty"`
+	RuntimeMode               string               `json:"runtimeMode,omitempty"`
+	RuntimeInstanceID         string               `json:"runtimeInstanceId,omitempty"`
+	ToolName                  string               `json:"toolName,omitempty"`
+	ExecutionID               string               `json:"executionId,omitempty"`
+	ToolCallID                string               `json:"toolCallId,omitempty"`
+	ActivityScopeID           string               `json:"activityScopeId,omitempty"`
+	AttributionStatus         string               `json:"attributionStatus,omitempty"`
+	DeclaredActivityKind      string               `json:"declaredActivityKind,omitempty"`
+	ObservedActivityKind      string               `json:"observedActivityKind,omitempty"`
+	HashVersion               int                  `json:"hashVersion"`
+	SnapshotID                string               `json:"snapshotId,omitempty"`
+	SnapshotSHA256            string               `json:"snapshotSha256,omitempty"`
+	Domain                    string               `json:"domain,omitempty"`
+	DNSQueryType              string               `json:"dnsQueryType,omitempty"`
+	DNSAnswers                []string             `json:"dnsAnswers,omitempty"`
+	ResolvedIPs               []string             `json:"resolvedIps,omitempty"`
+	ConnectedIP               string               `json:"connectedIp,omitempty"`
+	Port                      int                  `json:"port,omitempty"`
+	Decision                  string               `json:"decision,omitempty"`
+	Result                    string               `json:"result,omitempty"`
+	RuleID                    string               `json:"ruleId,omitempty"`
+	Reason                    string               `json:"reason,omitempty"`
+	BlockMatch                *boundary.BlockMatch `json:"blockMatch,omitempty"`
+	UpstreamRouteID           string               `json:"upstreamRouteId,omitempty"`
+	Method                    string               `json:"method,omitempty"`
+	Path                      string               `json:"path,omitempty"`
+	HTTPStatus                int                  `json:"httpStatus,omitempty"`
+	Outcome                   string               `json:"outcome,omitempty"`
+	LatencyMS                 int64                `json:"latencyMs"`
+	BytesUp                   int64                `json:"bytesUp,omitempty"`
+	BytesDown                 int64                `json:"bytesDown,omitempty"`
+	HTTPPacket                *egress.HTTPPacket   `json:"httpPacket,omitempty"`
+	LifecycleOperation        string               `json:"lifecycleOperation,omitempty"`
+	LifecycleState            string               `json:"lifecycleState,omitempty"`
+	Message                   string               `json:"message,omitempty"`
+	AggregateCount            int64                `json:"aggregateCount,omitempty"`
+	AggregateKind             string               `json:"aggregateKind,omitempty"`
+	AggregateFirstAt          *time.Time           `json:"aggregateFirstAt,omitempty"`
+	AggregateLastAt           *time.Time           `json:"aggregateLastAt,omitempty"`
+	AggregateDistinctTargets  int                  `json:"aggregateDistinctTargets,omitempty"`
+	AggregateDistinctPorts    int                  `json:"aggregateDistinctPorts,omitempty"`
+	AggregateDistinctVariants int                  `json:"aggregateDistinctVariants,omitempty"`
 }
 
 type EgressAuditFilter struct {
@@ -495,6 +499,16 @@ func egressAuditHashValuesWithProvenance(values ...interface{}) string {
 	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v4-provenance\x00", values...)
 }
 
+func egressAuditHashValuesWithBlockMatch(values ...interface{}) string {
+	if len(values) == 0 {
+		return egressAuditHashValuesWithProvenance()
+	}
+	if fmt.Sprint(values[len(values)-1]) == "" {
+		return egressAuditHashValuesWithProvenance(values[:len(values)-1]...)
+	}
+	return egressAuditHashWithDomain("cyberstrike-egress-audit-chain-v5-block-match\x00", values...)
+}
+
 func egressAuditHashWithDomain(domain string, values ...interface{}) string {
 	hasher := sha256.New()
 	_, _ = hasher.Write([]byte(domain))
@@ -561,6 +575,7 @@ func (db *DB) initEgressAuditTables() error {
 		{"attribution_status", "ALTER TABLE egress_audit_events ADD COLUMN attribution_status TEXT NOT NULL DEFAULT ''"},
 		{"declared_activity_kind", "ALTER TABLE egress_audit_events ADD COLUMN declared_activity_kind TEXT NOT NULL DEFAULT ''"},
 		{"observed_activity_kind", "ALTER TABLE egress_audit_events ADD COLUMN observed_activity_kind TEXT NOT NULL DEFAULT ''"},
+		{"block_match_json", "ALTER TABLE egress_audit_events ADD COLUMN block_match_json TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("egress_audit_events", column.name, column.statement); err != nil {
 			return fmt.Errorf("initialize egress audit chain column %s: %w", column.name, err)
@@ -775,6 +790,17 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 		}
 		packetJSON = string(encodedPacket)
 	}
+	blockMatchJSON := ""
+	if event.BlockMatch != nil {
+		if validateErr := boundary.ValidateBlockMatch(event.BlockMatch); validateErr != nil {
+			return false, validateErr
+		}
+		encodedMatch, encodeErr := json.Marshal(event.BlockMatch)
+		if encodeErr != nil {
+			return false, fmt.Errorf("encode egress block match: %w", encodeErr)
+		}
+		blockMatchJSON = string(encodedMatch)
+	}
 	message, err := egressAuditNetworkMessage(event)
 	if err != nil {
 		return false, fmt.Errorf("encode egress audit aggregate: %w", err)
@@ -802,15 +828,15 @@ func (db *DB) AppendEgressNetworkAuditEvent(ctx context.Context, target EgressAu
 			activity_scope_id, attribution_status, declared_activity_kind, observed_activity_kind,
 			snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 			decision, rule_id, reason, upstream_route_id, method, path, http_status,
-			outcome, latency_ms, bytes_up, bytes_down, http_packet_json, message
-		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			outcome, latency_ms, bytes_up, bytes_down, http_packet_json, block_match_json, message
+		) VALUES (?, ?, ?, ?, 'network', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, id, eventKey, formatSQLiteUTC(now), formatSQLiteUTC(event.Timestamp.UTC()), event.RequestType,
 		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, provenance.AgentID, record.RuntimeGeneration,
 		event.EventID, provenance.RuntimeMode, provenance.RuntimeInstanceID, provenance.ToolName, provenance.ExecutionID, provenance.ToolCallID,
 		provenance.ActivityScopeID, provenance.AttributionStatus, provenance.DeclaredActivityKind, provenance.ObservedActivityKind,
 		event.SnapshotID, event.SnapshotSHA256, event.Domain, event.DNSQueryType, string(dnsAnswersJSON), string(resolvedJSON), event.ConnectedIP, event.Port,
 		event.Decision, event.RuleID, event.Reason, event.UpstreamRouteID, event.Method, event.Path, event.HTTPStatus,
-		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, packetJSON, message)
+		event.Outcome, event.LatencyMS, event.BytesUp, event.BytesDown, packetJSON, blockMatchJSON, message)
 	if err != nil {
 		return false, fmt.Errorf("append egress network audit event: %w", err)
 	}
@@ -857,6 +883,9 @@ func validateEgressNetworkAuditEvent(target EgressAuditRuntimeTarget, event egre
 		event.BytesDown < 0 || event.BytesDown > maxEgressAuditSafeInteger || event.RetryAfterMS < 0 || event.RetryAfterMS > int64(time.Hour/time.Millisecond) || len(event.ResolvedIPs) > 64 || len(event.DNSAnswers) > 128 ||
 		!validEgressAuditCode(event.Outcome, false) || !validEgressAuditCode(event.Reason, true) ||
 		!validEgressAuditText(event.RuleID, 256, true) || !validEgressAuditText(event.UpstreamRouteID, 128, true) {
+		return invalid()
+	}
+	if boundary.ValidateBlockMatch(event.BlockMatch) != nil {
 		return invalid()
 	}
 	provenance := event.Provenance.Normalized()
@@ -1114,6 +1143,7 @@ type egressAuditChainRow struct {
 	LifecycleState       string
 	Message              string
 	HTTPPacketJSON       string
+	BlockMatchJSON       string
 	ChainSequence        int64
 	PreviousHash         string
 	EventHash            string
@@ -1127,7 +1157,7 @@ const egressAuditChainSelect = `
 		activity_scope_id, attribution_status, declared_activity_kind, observed_activity_kind,
 		snapshot_id, snapshot_sha256, domain, dns_query_type, dns_answers_json, resolved_ips_json, connected_ip, port,
 		decision, result, rule_id, reason, upstream_route_id, method, path, http_status,
-		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json,
+		outcome, latency_ms, bytes_up, bytes_down, lifecycle_operation, lifecycle_state, message, http_packet_json, block_match_json,
 		chain_sequence, previous_hash, event_hash, chain_hash_version
 	FROM egress_audit_events`
 
@@ -1140,7 +1170,7 @@ func scanEgressAuditChainRow(scanner egressAuditScanner) (egressAuditChainRow, e
 		&row.ActivityScopeID, &row.AttributionStatus, &row.DeclaredActivityKind, &row.ObservedActivityKind,
 		&row.SnapshotID, &row.SnapshotSHA256, &row.Domain, &row.DNSQueryType, &row.DNSAnswersJSON, &row.ResolvedIPsJSON, &row.ConnectedIP, &row.Port,
 		&row.Decision, &row.Result, &row.RuleID, &row.Reason, &row.UpstreamRouteID, &row.Method, &row.Path, &row.HTTPStatus,
-		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON,
+		&row.Outcome, &row.LatencyMS, &row.BytesUp, &row.BytesDown, &row.LifecycleOperation, &row.LifecycleState, &row.Message, &row.HTTPPacketJSON, &row.BlockMatchJSON,
 		&row.ChainSequence, &row.PreviousHash, &row.EventHash, &row.ChainHashVersion,
 	)
 	return row, err
@@ -1163,13 +1193,16 @@ func (row egressAuditChainRow) calculatedHash(previousHash string, sequence int6
 	if row.ChainHashVersion == 0 {
 		return egressAuditHashValuesWithDNS(legacyValues...)
 	}
-	return egressAuditHashValuesWithProvenance(append(legacyValues,
+	return egressAuditHashValuesWithBlockMatch(append(legacyValues,
 		row.SourceEventID, row.RuntimeMode, row.RuntimeInstanceID, row.ToolName, row.ExecutionID, row.ToolCallID,
-		row.ActivityScopeID, row.AttributionStatus, row.DeclaredActivityKind, row.ObservedActivityKind,
+		row.ActivityScopeID, row.AttributionStatus, row.DeclaredActivityKind, row.ObservedActivityKind, row.BlockMatchJSON,
 	)...)
 }
 
 func (row egressAuditChainRow) inferredHashVersion() int {
+	if row.BlockMatchJSON != "" {
+		return 5
+	}
 	if row.SourceEventID != "" || row.RuntimeMode != "" || row.RuntimeInstanceID != "" || row.ToolName != "" ||
 		row.ExecutionID != "" || row.ToolCallID != "" || row.ActivityScopeID != "" || row.AttributionStatus != "" ||
 		row.DeclaredActivityKind != "" || row.ObservedActivityKind != "" {
@@ -1635,11 +1668,11 @@ func buildEgressAuditWhere(filter EgressAuditFilter) (string, []interface{}, err
 			OR e.domain LIKE ? ESCAPE '\' OR e.connected_ip LIKE ? ESCAPE '\'
 			OR e.resolved_ips_json LIKE ? ESCAPE '\' OR e.dns_query_type LIKE ? ESCAPE '\'
 			OR e.dns_answers_json LIKE ? ESCAPE '\' OR e.rule_id LIKE ? ESCAPE '\'
-			OR e.reason LIKE ? ESCAPE '\' OR e.upstream_route_id LIKE ? ESCAPE '\'
+			OR e.reason LIKE ? ESCAPE '\' OR e.block_match_json LIKE ? ESCAPE '\' OR e.upstream_route_id LIKE ? ESCAPE '\'
 			OR e.lifecycle_operation LIKE ? ESCAPE '\' OR e.message LIKE ? ESCAPE '\'
 			OR e.agent_id LIKE ? ESCAPE '\' OR e.tool_name LIKE ? ESCAPE '\'
 			OR e.execution_id LIKE ? ESCAPE '\' OR e.tool_call_id LIKE ? ESCAPE '\')`
-		for i := 0; i < 16; i++ {
+		for i := 0; i < 17; i++ {
 			args = append(args, pattern)
 		}
 	}
@@ -1653,10 +1686,11 @@ const egressAuditSelect = `
 		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
 		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
 		CASE WHEN e.chain_hash_version > 0 THEN e.chain_hash_version
+			WHEN e.block_match_json <> '' THEN 5
 			WHEN e.dns_query_type <> '' OR (e.dns_answers_json <> '' AND e.dns_answers_json <> '[]') THEN 3
 			WHEN e.http_packet_json <> '' THEN 2 ELSE 1 END,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
-		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
+		e.decision, e.result, e.rule_id, e.reason, e.block_match_json, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
 		e.lifecycle_operation, e.lifecycle_state, e.message
 	FROM egress_audit_events e
@@ -1668,10 +1702,11 @@ const egressAuditDetailSelect = `
 		e.source_event_id, e.runtime_mode, e.runtime_instance_id, e.tool_name, e.execution_id, e.tool_call_id,
 		e.activity_scope_id, e.attribution_status, e.declared_activity_kind, e.observed_activity_kind,
 		CASE WHEN e.chain_hash_version > 0 THEN e.chain_hash_version
+			WHEN e.block_match_json <> '' THEN 5
 			WHEN e.dns_query_type <> '' OR (e.dns_answers_json <> '' AND e.dns_answers_json <> '[]') THEN 3
 			WHEN e.http_packet_json <> '' THEN 2 ELSE 1 END,
 		e.snapshot_id, e.snapshot_sha256, e.domain, e.dns_query_type, e.dns_answers_json, e.resolved_ips_json, e.connected_ip, e.port,
-		e.decision, e.result, e.rule_id, e.reason, e.upstream_route_id, e.method, e.path,
+		e.decision, e.result, e.rule_id, e.reason, e.block_match_json, e.upstream_route_id, e.method, e.path,
 		e.http_status, e.outcome, e.latency_ms, e.bytes_up, e.bytes_down,
 		e.lifecycle_operation, e.lifecycle_state, e.message, e.http_packet_json
 	FROM egress_audit_events e
@@ -1777,7 +1812,7 @@ func scanEgressAuditEvent(scanner egressAuditScanner) (EgressAuditEvent, error) 
 
 func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bool) (EgressAuditEvent, error) {
 	var event EgressAuditEvent
-	var recordedAt, occurredAt, dnsAnswersJSON, resolvedJSON, packetJSON string
+	var recordedAt, occurredAt, dnsAnswersJSON, resolvedJSON, packetJSON, blockMatchJSON string
 	destinations := []interface{}{
 		&event.ID, &event.ChainSequence, &event.PreviousHash, &event.EventHash, &recordedAt, &occurredAt, &event.Category, &event.EventType,
 		&event.ConversationID, &event.ConversationTitle, &event.ContainerID, &event.AgentID, &event.RuntimeGeneration,
@@ -1785,7 +1820,7 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 		&event.ActivityScopeID, &event.AttributionStatus, &event.DeclaredActivityKind, &event.ObservedActivityKind,
 		&event.HashVersion,
 		&event.SnapshotID, &event.SnapshotSHA256, &event.Domain, &event.DNSQueryType, &dnsAnswersJSON, &resolvedJSON, &event.ConnectedIP, &event.Port,
-		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &event.UpstreamRouteID, &event.Method, &event.Path,
+		&event.Decision, &event.Result, &event.RuleID, &event.Reason, &blockMatchJSON, &event.UpstreamRouteID, &event.Method, &event.Path,
 		&event.HTTPStatus, &event.Outcome, &event.LatencyMS, &event.BytesUp, &event.BytesDown,
 		&event.LifecycleOperation, &event.LifecycleState, &event.Message,
 	}
@@ -1807,6 +1842,11 @@ func scanEgressAuditEventProjection(scanner egressAuditScanner, includePacket bo
 	if resolvedJSON != "" {
 		if err := json.Unmarshal([]byte(resolvedJSON), &event.ResolvedIPs); err != nil {
 			return event, fmt.Errorf("decode egress audit resolved addresses: %w", err)
+		}
+	}
+	if blockMatchJSON != "" {
+		if err := json.Unmarshal([]byte(blockMatchJSON), &event.BlockMatch); err != nil {
+			return event, fmt.Errorf("decode egress audit block match: %w", err)
 		}
 	}
 	if dnsAnswersJSON != "" {

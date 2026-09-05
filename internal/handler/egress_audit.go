@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -328,10 +329,16 @@ func writeEgressAuditCSV(c *gin.Context, items []database.EgressAuditEvent) {
 		"container_id", "agent_id", "runtime_generation", "snapshot_id", "snapshot_sha256", "domain",
 		"source_event_id", "runtime_mode", "runtime_instance_id", "tool_name", "execution_id", "tool_call_id", "activity_scope_id",
 		"attribution_status", "declared_activity_kind", "observed_activity_kind", "hash_version",
-		"resolved_ips", "connected_ip", "port", "decision", "result", "rule_id", "reason", "upstream_route_id", "method", "path",
+		"resolved_ips", "connected_ip", "port", "decision", "result", "rule_id", "reason", "block_match_json", "upstream_route_id", "method", "path",
 		"http_status", "outcome", "latency_ms", "bytes_up", "bytes_down", "lifecycle_operation", "lifecycle_state", "message",
 	})
 	for _, item := range items {
+		blockMatchJSON := ""
+		if item.BlockMatch != nil {
+			if encoded, err := json.Marshal(item.BlockMatch); err == nil {
+				blockMatchJSON = string(encoded)
+			}
+		}
 		row := []string{
 			item.ID, strconv.FormatInt(item.ChainSequence, 10), item.PreviousHash, item.EventHash,
 			item.OccurredAt.UTC().Format(time.RFC3339Nano), item.RecordedAt.UTC().Format(time.RFC3339Nano),
@@ -340,7 +347,7 @@ func writeEgressAuditCSV(c *gin.Context, items []database.EgressAuditEvent) {
 			item.SourceEventID, item.RuntimeMode, item.RuntimeInstanceID, item.ToolName, item.ExecutionID, item.ToolCallID, item.ActivityScopeID,
 			item.AttributionStatus, item.DeclaredActivityKind, item.ObservedActivityKind, strconv.Itoa(item.HashVersion),
 			strings.Join(item.ResolvedIPs, " "), item.ConnectedIP, strconv.Itoa(item.Port), item.Decision, item.Result,
-			item.RuleID, item.Reason, item.UpstreamRouteID, item.Method, item.Path, strconv.Itoa(item.HTTPStatus), item.Outcome,
+			item.RuleID, item.Reason, blockMatchJSON, item.UpstreamRouteID, item.Method, item.Path, strconv.Itoa(item.HTTPStatus), item.Outcome,
 			strconv.FormatInt(item.LatencyMS, 10), strconv.FormatInt(item.BytesUp, 10), strconv.FormatInt(item.BytesDown, 10),
 			item.LifecycleOperation, item.LifecycleState, item.Message,
 		}

@@ -298,7 +298,7 @@ func TestBoundaryPolicySimulationFailsClosedWithReasons(t *testing.T) {
 		name, url, reason, ruleID string
 		resolvedIPs               []string
 	}{
-		{name: "blocked path", url: "https://api.example/v1/admin/users", reason: boundary.ReasonBlockedPath, ruleID: "block-admin", resolvedIPs: []string{"93.184.216.34"}},
+		{name: "blocked path", url: "https://api.example/v1/admin/users", reason: boundary.ReasonBlockedPathSubtree, ruleID: "block-admin", resolvedIPs: []string{"93.184.216.34"}},
 		{name: "default deny", url: "https://unknown.example/", reason: boundary.ReasonDefaultDeny, resolvedIPs: []string{"93.184.216.34"}},
 		{name: "dns rebinding", url: "https://api.example/v1/run", reason: boundary.ReasonDNSRebinding, resolvedIPs: []string{"127.0.0.1"}},
 	}
@@ -344,7 +344,7 @@ func TestBoundaryPolicySimulationSupportsPathOnlyBlacklist(t *testing.T) {
 		allowed      bool
 	}{
 		{path: "/", reason: boundary.ReasonAllowVisit, allowed: true},
-		{path: "/blocked/child", reason: boundary.ReasonBlockedPath, allowed: false},
+		{path: "/blocked/child", reason: boundary.ReasonBlockedPathSubtree, allowed: false},
 	} {
 		recorder := performBoundarySimulation(router, policy.ID, map[string]interface{}{
 			"url": "https://example.com" + tc.path, "method": "GET", "resolvedIps": []string{"93.184.216.34"},

@@ -38,7 +38,7 @@ test('容器管理侧栏包含 7 个独立子页且每页有自己的页头', ()
         titles.add(title[1]);
     }
     assert.equal(titles.size, 7);
-	assert.match(template, /network-activity\.js\?v=20260904-1/);
+	assert.match(template, /network-activity\.js\?v=20260905-1/);
     assert.match(template, /boundary-rules\.js\?v=20260905-2/);
 	assert.match(template, /egress-management\.js\?v=20260905-1/);
     assert.match(template, /container-management\.js\?v=20260903-1/);

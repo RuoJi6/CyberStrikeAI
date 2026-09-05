@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/egress"
 	"cyberstrike-ai/internal/networkprovenance"
 	containerruntime "cyberstrike-ai/internal/runtime/container"
@@ -218,6 +219,8 @@ func TestEgressAuditPersistsCompactBatchMetadataAndWeightedSummary(t *testing.T)
 		Event: egress.ActivityEventName, Timestamp: firstAt, RequestType: egress.ActivityRequestTCP,
 		Domain: "47.116.200.74", ConnectedIP: "47.116.200.74", Port: 22,
 		Decision: egress.ActivityDecisionBlocked, RuleID: "block-ssh", Reason: "blocked-target", Outcome: "policy_denied",
+		BlockMatch: &boundary.BlockMatch{Source: boundary.MatchSourceRule, Type: boundary.MatchTypePort, Value: "22", RequestURL: "tcp://47.116.200.74:22", DecisionPhase: boundary.DecisionPhaseConnect,
+			RuleConstraints: &boundary.RuleConstraints{Host: "*", Schemes: []string{"tcp"}, Ports: []int{22}, PathPrefixes: []string{}, Methods: []string{}}},
 		SnapshotID: spec.EgressGateway.BoundarySnapshot.ID, SnapshotSHA256: spec.EgressGateway.BoundarySnapshot.SHA256,
 		AggregateCount: 20, AggregateKind: "connection-burst", AggregateFirstAt: &firstAt, AggregateLastAt: &lastAt,
 		AggregateDistinctTargets: 1, AggregateDistinctPorts: 1, AggregateDistinctVariants: 1,
@@ -226,7 +229,7 @@ func TestEgressAuditPersistsCompactBatchMetadataAndWeightedSummary(t *testing.T)
 		t.Fatalf("append aggregate = %v, %v", inserted, err)
 	}
 	items, err := db.ListEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll, Limit: 10})
-	if err != nil || len(items) != 2 || items[0].AggregateCount != 20 || items[0].AggregateKind != "connection-burst" || items[0].AggregateLastAt == nil {
+	if err != nil || len(items) != 2 || items[0].AggregateCount != 20 || items[0].AggregateKind != "connection-burst" || items[0].AggregateLastAt == nil || items[0].HashVersion != 5 || items[0].BlockMatch == nil || items[0].BlockMatch.Value != "22" {
 		t.Fatalf("aggregate projection = %#v, %v", items, err)
 	}
 	summary, err := db.SummarizeEgressAuditEvents(ctx, EgressAuditFilter{ConversationID: conversation.ID, Scope: RBACScopeAll})
@@ -581,6 +584,13 @@ func TestEgressAuditHashVersionFallbacksRemainCompatible(t *testing.T) {
 	v4 := egressAuditHashValuesWithProvenance(append(append([]interface{}{}, dnsValues...), provenance...)...)
 	if v4 == v3 {
 		t.Fatal("v4 provenance hash reused v3 domain")
+	}
+	if got := egressAuditHashValuesWithBlockMatch(append(append(append([]interface{}{}, dnsValues...), provenance...), "")...); got != v4 {
+		t.Fatalf("empty block match did not preserve v4 hash: %q != %q", got, v4)
+	}
+	v5 := egressAuditHashValuesWithBlockMatch(append(append(append([]interface{}{}, dnsValues...), provenance...), `{"source":"rule","type":"port","value":"22","decisionPhase":"connect"}`)...)
+	if v5 == v4 {
+		t.Fatal("v5 block-match hash reused v4 domain")
 	}
 }
 

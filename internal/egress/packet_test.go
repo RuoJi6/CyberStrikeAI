@@ -125,7 +125,7 @@ func TestPacketFilterAppliesPortRulesIndependentlyDuringMixedScan(t *testing.T) 
 		t.Fatalf("allowed port decision = %#v, evaluated=%v allowed=%v", event, evaluated, allowed)
 	}
 	allowed, event, evaluated = filter.evaluate(testIPv4Packet(6, address, 81))
-	if !evaluated || allowed || event.RuleID != "block-example-81" || event.Reason != boundary.ReasonBlockedTarget || dispositionForPacket(allowed, evaluated, event) != packetDispositionReject {
+	if !evaluated || allowed || event.RuleID != "block-example-81" || event.Reason != boundary.ReasonBlockedDomain || dispositionForPacket(allowed, evaluated, event) != packetDispositionReject {
 		t.Fatalf("blocked port decision = %#v, evaluated=%v allowed=%v", event, evaluated, allowed)
 	}
 }

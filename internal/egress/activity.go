@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"cyberstrike-ai/internal/boundary"
 	"cyberstrike-ai/internal/networkprovenance"
 	"github.com/google/uuid"
 )
@@ -165,6 +166,7 @@ type ActivityEvent struct {
 	Decision                  string                                `json:"decision"`
 	RuleID                    string                                `json:"ruleId,omitempty"`
 	Reason                    string                                `json:"reason,omitempty"`
+	BlockMatch                *boundary.BlockMatch                  `json:"blockMatch,omitempty"`
 	UpstreamRouteID           string                                `json:"upstreamRouteId,omitempty"`
 	Method                    string                                `json:"method,omitempty"`
 	Path                      string                                `json:"path,omitempty"`

@@ -35,7 +35,7 @@ func TestPolicyDefaultsToDenyAndUsesFixedPriority(t *testing.T) {
 				{ID: "attack", Effect: EffectAllowAttack, Target: RuleTarget{Host: "example.com"}},
 				{ID: "blocked-host", Effect: EffectBlocked, Target: RuleTarget{Host: "example.com"}},
 			},
-			url: "https://example.com/v1", method: "GET", wantRuleID: "blocked-host", wantReason: ReasonBlockedTarget,
+			url: "https://example.com/v1", method: "GET", wantRuleID: "blocked-host", wantReason: ReasonBlockedDomain,
 		},
 		{
 			name: "blocked path outranks blocked host",
@@ -43,14 +43,14 @@ func TestPolicyDefaultsToDenyAndUsesFixedPriority(t *testing.T) {
 				{ID: "blocked-host", Effect: EffectBlocked, Target: RuleTarget{Host: "example.com"}},
 				{ID: "blocked-path", Effect: EffectBlocked, Target: RuleTarget{Host: "example.com", PathPrefixes: []string{"/admin"}}},
 			},
-			url: "https://example.com/admin/users", method: "GET", wantRuleID: "blocked-path", wantReason: ReasonBlockedPath,
+			url: "https://example.com/admin/users", method: "GET", wantRuleID: "blocked-path", wantReason: ReasonBlockedPathSubtree,
 		},
 		{
 			name: "legacy auth only fails closed after credential injection removal",
 			rules: []Rule{
 				{ID: "auth", Effect: EffectAuthOnly, AuthProfileID: "profile-1", Target: RuleTarget{Host: "auth.example"}},
 			},
-			url: "https://auth.example/", method: "GET", wantRuleID: "auth", wantReason: ReasonBlockedTarget,
+			url: "https://auth.example/", method: "GET", wantRuleID: "auth", wantReason: ReasonBlockedDomain,
 		},
 	}
 	for _, test := range tests {
@@ -349,7 +349,7 @@ func TestPolicyAllowsExplicitPublicIPAndBlocksConfiguredNetwork(t *testing.T) {
 		t.Fatal(err)
 	}
 	decision, err = blocked.Evaluate("https://8.8.8.8/", "GET", nil, now)
-	if err != nil || decision.Allowed || decision.RuleID != "blocked-network" || decision.Reason != ReasonBlockedTarget {
+	if err != nil || decision.Allowed || decision.RuleID != "blocked-network" || decision.Reason != ReasonBlockedCIDR {
 		t.Fatalf("network decision = %#v, %v", decision, err)
 	}
 }
@@ -378,13 +378,13 @@ func TestPolicyDNSAllowsOnlyNamesWithActiveRulesAndRejectsUnsafeAnswers(t *testi
 		addresses          []netip.Addr
 	}{
 		{name: "unknown", host: "unknown.example", reason: ReasonDefaultDeny},
-		{name: "blocked host", host: "blocked.example", reason: ReasonBlockedTarget},
+		{name: "blocked host", host: "blocked.example", reason: ReasonBlockedDomain},
 		{name: "expired", host: "expired.example", reason: ReasonDefaultDeny},
 		{name: "forbidden hostname", host: "metadata.google.internal", reason: ReasonForbiddenHostname},
 		{name: "unmatched DoH hostname", host: "cloudflare-dns.com", reason: ReasonDefaultDeny},
 		{name: "private rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("192.168.1.2")}, reason: ReasonDNSRebinding},
 		{name: "mixed rebinding", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}, reason: ReasonDNSRebinding},
-		{name: "blocked public network", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}, reason: ReasonBlockedTarget},
+		{name: "blocked public network", host: "allowed.example", addresses: []netip.Addr{netip.MustParseAddr("93.184.216.34")}, reason: ReasonBlockedCIDR},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			decision, decisionErr := policy.EvaluateDNS(test.host, test.addresses, now)
@@ -465,11 +465,15 @@ func TestPolicyBlockedPathSubtreesExactInterfacesAndURLShorthand(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, rawURL := range []string{"https://one.example/api", "https://two.example/api/users", "http://ssss.com/sdasdad", "http://ssss.com/sdasdad/child", "https://any.example/desasdasdasd/sdadsd"} {
+	for _, rawURL := range []string{"https://one.example/api", "https://two.example/api/users", "http://ssss.com/sdasdad", "http://ssss.com/sdasdad/child"} {
 		decision, evalErr := policy.Evaluate(rawURL, "GET", nil, now)
-		if evalErr != nil || decision.Allowed || decision.Reason != ReasonBlockedPath {
+		if evalErr != nil || decision.Allowed || decision.Reason != ReasonBlockedPathSubtree {
 			t.Fatalf("blocked path %q = %#v, %v", rawURL, decision, evalErr)
 		}
+	}
+	exact, err := policy.Evaluate("https://any.example/desasdasdasd/sdadsd", "GET", nil, now)
+	if err != nil || exact.Allowed || exact.Reason != ReasonBlockedPathExact || exact.BlockMatch == nil || exact.BlockMatch.Value != "=/desasdasdasd/sdadsd" {
+		t.Fatalf("exact blocked path = %#v, %v", exact, err)
 	}
 	for _, rawURL := range []string{
 		"https://one.example/apix",

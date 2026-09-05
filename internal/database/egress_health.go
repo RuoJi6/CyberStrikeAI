@@ -121,6 +121,17 @@ func (db *DB) appendEgressHealthEvent(ctx context.Context, target EgressAuditRun
 	if projection.cooldownUntil != nil {
 		cooldownUntil = formatSQLiteUTC(*projection.cooldownUntil)
 	}
+	blockMatchJSON := ""
+	if event.BlockMatch != nil {
+		if err := boundary.ValidateBlockMatch(event.BlockMatch); err != nil {
+			return false, err
+		}
+		encodedMatch, err := json.Marshal(event.BlockMatch)
+		if err != nil {
+			return false, fmt.Errorf("encode egress health block match: %w", err)
+		}
+		blockMatchJSON = string(encodedMatch)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -130,17 +141,17 @@ func (db *DB) appendEgressHealthEvent(ctx context.Context, target EgressAuditRun
 		INSERT OR IGNORE INTO egress_audit_events (
 			id, event_key, recorded_at, occurred_at, category, event_type,
 			conversation_id, conversation_title, container_id, agent_id, runtime_generation,
-			snapshot_id, snapshot_sha256, domain, decision, result, rule_id, reason,
+			snapshot_id, snapshot_sha256, domain, decision, result, rule_id, reason, block_match_json,
 			upstream_route_id, outcome, lifecycle_operation, lifecycle_state, message
 		) VALUES (
 			?, ?, ?, ?, 'lifecycle', 'health',
 			?, ?, ?, 'container-agent', ?,
-			?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
 			'health', ?, ?
 		)
 	`, id, eventKey, formatSQLiteUTC(recordedAt), formatSQLiteUTC(event.Timestamp.UTC()),
 		record.ConversationID, sanitizeEgressAuditDisplayText(target.ConversationTitle, 512), record.ProviderID, record.RuntimeGeneration,
-		event.SnapshotID, event.SnapshotSHA256, event.Domain, event.Decision, projection.result, event.RuleID, event.Reason,
+		event.SnapshotID, event.SnapshotSHA256, event.Domain, event.Decision, projection.result, event.RuleID, event.Reason, blockMatchJSON,
 		event.UpstreamRouteID, event.Outcome, projection.status, projection.message)
 	if err != nil {
 		return false, fmt.Errorf("append egress health audit event: %w", err)
@@ -203,6 +214,9 @@ func validateEgressHealthEvent(target EgressAuditRuntimeTarget, event egress.Act
 		event.HTTPStatus != 0 || event.ConnectedIP != "" || len(event.ResolvedIPs) != 0 || event.BytesUp != 0 || event.BytesDown != 0 ||
 		event.LatencyMS != 0 || !validEgressAuditCode(event.Reason, false) || !validEgressAuditCode(event.Outcome, false) ||
 		!validEgressAuditText(event.RuleID, 256, true) {
+		return invalid()
+	}
+	if boundary.ValidateBlockMatch(event.BlockMatch) != nil {
 		return invalid()
 	}
 	if event.Domain != "" {

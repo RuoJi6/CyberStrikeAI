@@ -22,7 +22,7 @@
         'eventId', 'runtimeMode', 'runtimeInstanceId', 'toolName', 'executionId', 'toolCallId', 'activityScopeId',
         'attributionStatus', 'declaredActivityKind', 'observedActivityKind', 'hashVersion',
         'connectedIp', 'port', 'decision', 'result', 'ruleId', 'reason', 'upstreamRouteId', 'method', 'path',
-        'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket',
+        'httpStatus', 'outcome', 'latencyMs', 'bytesUp', 'bytesDown', 'lifecycleOperation', 'lifecycleState', 'message', 'httpPacket', 'blockMatch',
         'aggregateCount', 'aggregateKind', 'aggregateFirstAt', 'aggregateLastAt', 'aggregateDistinctTargets', 'aggregateDistinctPorts', 'aggregateDistinctVariants',
     ]);
     const URL_KEYS = Object.freeze({
@@ -151,6 +151,28 @@
         return text;
     }
 
+    function isSafeBlockMatch(match) {
+        if (!match || typeof match !== 'object' || Array.isArray(match)) return false;
+        const fields = new Set(['source', 'type', 'value', 'ruleConstraints', 'requestUrl', 'resolvedIp', 'decisionPhase']);
+        if (Object.keys(match).some((key) => !fields.has(key))) return false;
+        if (!['rule', 'default', 'system', 'governance', 'attribution'].includes(String(match.source || ''))) return false;
+        if (!safeString(match.type, 64) || !['request', 'after-resolution', 'connect'].includes(String(match.decisionPhase || ''))) return false;
+        for (const [value, maximum] of [[match.value, 2048], [match.requestUrl, 4096], [match.resolvedIp, 64]]) {
+            if (value !== undefined && (safeString(value, maximum) === null || /[\r\n\0]/.test(value))) return false;
+        }
+        if (match.ruleConstraints !== undefined) {
+            const constraints = match.ruleConstraints;
+            if (!constraints || typeof constraints !== 'object' || Array.isArray(constraints)) return false;
+            if (Object.keys(constraints).some((key) => !['host', 'schemes', 'ports', 'pathPrefixes', 'methods'].includes(key))) return false;
+            if (safeString(constraints.host, 253) === null || /[\r\n\0]/.test(constraints.host)) return false;
+            for (const field of ['schemes', 'pathPrefixes', 'methods']) {
+                if (!Array.isArray(constraints[field]) || constraints[field].length > 256 || constraints[field].some((item) => safeString(item, 2048) === null || /[\r\n\0]/.test(item))) return false;
+            }
+            if (!Array.isArray(constraints.ports) || constraints.ports.length > 256 || constraints.ports.some((port) => !Number.isInteger(port) || port < 1 || port > 65535)) return false;
+        }
+        return true;
+    }
+
     function isSafeAuditEvent(event) {
         if (!event || typeof event !== 'object') return false;
         if (Object.keys(event).some((key) => !AUDIT_EVENT_FIELDS.has(key))) return false;
@@ -183,12 +205,13 @@
             const numeric = Number(value || 0);
             if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric > maximum) return false;
         }
-        if (![0, 1, 2, 3, 4].includes(Number(event.hashVersion || 0))) return false;
+        if (![0, 1, 2, 3, 4, 5].includes(Number(event.hashVersion || 0))) return false;
         if (event.runtimeMode && !['container', 'host_mitm'].includes(event.runtimeMode)) return false;
         if (event.attributionStatus && !['verified', 'legacy_unattributed', 'unattributed', 'invalid'].includes(event.attributionStatus)) return false;
         if (event.category === 'network' && !['allowed', 'blocked'].includes(event.decision)) return false;
         if (event.category === 'lifecycle' && !['success', 'failure'].includes(event.result)) return false;
         if (event.httpPacket !== undefined && !isSafeHTTPPacket(event.httpPacket)) return false;
+        if (event.blockMatch !== undefined && !isSafeBlockMatch(event.blockMatch)) return false;
         const aggregateCount = Number(event.aggregateCount || 0);
         if (!Number.isSafeInteger(aggregateCount) || aggregateCount < 0 || aggregateCount === 1) return false;
         if (aggregateCount > 1 && (typeof event.aggregateKind !== 'string' || Number.isNaN(Date.parse(event.aggregateFirstAt)) || Number.isNaN(Date.parse(event.aggregateLastAt)))) return false;
@@ -377,6 +400,48 @@
         return td;
     }
 
+    function blockMatchLabel(match) {
+        if (!match) return '—';
+        const labels = {
+            'path-exact': t('activityMatchPathExact', '精确路径'), 'path-subtree': t('activityMatchPathSubtree', '路径子树'),
+            method: t('activityMatchMethod', 'HTTP 方法'), domain: t('activityMatchDomain', '域名'),
+            'domain-wildcard': t('activityMatchDomainWildcard', '通配域名'), ip: t('activityMatchIP', 'IP 地址'),
+            cidr: t('activityMatchCIDR', 'CIDR 网段'), port: t('activityMatchPort', '端口'),
+            protocol: t('activityMatchProtocol', '协议'), all: t('activityMatchAll', '全部目标'),
+            hostname: t('activityMatchHostname', '主机名'), address: t('activityMatchAddress', '地址'),
+        };
+        if (match.resolvedIp && match.type === 'cidr') return `${match.resolvedIp} ∈ ${match.value || '—'}`;
+        let result = `${labels[match.type] || match.type} ${match.value || '—'}`;
+        if (match.resolvedIp && match.resolvedIp !== match.value) result += `（${t('activityResolvedIP', '解析 IP')} ${match.resolvedIp}）`;
+        return result;
+    }
+
+    function blockRuleConstraints(match) {
+        const rule = match && match.ruleConstraints;
+        if (!rule) return '—';
+        const values = (items) => Array.isArray(items) && items.length ? items.join(', ') : t('activityAny', '任意');
+        return `${t('activityHost', '主机')} ${rule.host || '*'}；${t('activityProtocol', '协议')} ${values(rule.schemes)}；${t('activityPort', '端口')} ${values(rule.ports)}；${t('activityMethod', '方法')} ${values(rule.methods)}；${t('activityPath', '路径')} ${values(rule.pathPrefixes)}`;
+    }
+
+    function appendBlockDetails(container, event) {
+        const match = event.blockMatch;
+        if (event.category !== 'network' || event.decision !== 'blocked' || !match) return;
+        const phases = { request: t('activityPhaseRequest', '请求阶段'), 'after-resolution': t('activityPhaseAfterResolution', '解析后阶段'), connect: t('activityPhaseConnect', '连接阶段') };
+        const details = create('details', 'network-activity-provenance network-activity-block-match');
+        details.appendChild(create('summary', '', t('activityBlockDetails', '阻断详情')));
+        const body = create('div', 'network-activity-provenance-body');
+        [
+            [t('activityActualRequest', '实际请求'), match.requestUrl || '—'],
+            [t('activityBlockReason', '阻断原因'), `${t(`activityValues.${event.reason || 'unknown'}`, event.reason || 'unknown')}（${event.reason || 'unknown'}）`],
+            [t('activityMatchedCondition', '命中条件'), blockMatchLabel(match)],
+            [t('activityFullRule', '完整规则'), blockRuleConstraints(match)],
+            [t('activityDecisionPhase', '判定阶段'), phases[match.decisionPhase] || match.decisionPhase],
+            [t('activityBlockResult', '结果'), t('activityRequestNotReached', '请求未到达目标')],
+        ].forEach(([label, value]) => body.appendChild(create('div', 'network-activity-provenance-line', `${label}：${value}`)));
+        details.appendChild(body);
+        container.appendChild(details);
+    }
+
     function eventRow(event) {
         const row = create('tr', `is-${event.category}`);
         const target = event.category === 'network'
@@ -409,6 +474,8 @@
         const resultDetail = event.category === 'network'
             ? `${Number(event.aggregateCount || 0) > 1 ? `${event.aggregateKind} · ${event.aggregateCount} 次 · ` : ''}${event.httpStatus ? `HTTP ${event.httpStatus} · ` : ''}${Number(event.latencyMs || 0)} ms`
             : t(`status.${event.lifecycleState}`, event.lifecycleState);
+        const decisionCell = cell(t('activityDecision', '策略判定'), verdictLabel(verdict), rule, `is-decision is-${verdict}`);
+        appendBlockDetails(decisionCell, event);
         row.append(
             selectionCell(event),
             cell(t('activityTime', '时间'), formatDate(event.occurredAt), '', 'is-time'),
@@ -416,12 +483,12 @@
             cell(t('activityConversation', '对话'), event.conversationTitle || event.conversationId, event.conversationId, 'is-conversation'),
             cell(t('activityTarget', '目标'), target, resolution, 'is-target'),
             packetCell(event, packet),
-            cell(t('activityDecision', '策略判定'), verdictLabel(verdict), rule, `is-decision is-${verdict}`),
+            decisionCell,
             cell(t('auditTrace', '追溯'), tracePrimary, traceSecondary, 'is-trace'),
             cell(t('activityResult', '结果'), outcome, resultDetail, 'is-result'),
         );
         if (event.category === 'network') {
-            row.title = [`event: ${event.eventId || '—'}`, `execution: ${event.executionId || '—'}`, `tool-call: ${event.toolCallId || '—'}`, `scope: ${event.activityScopeId || '—'}`, `generation: ${event.runtimeGeneration || 0}`, `declared: ${event.declaredActivityKind || 'unknown'}`, `observed: ${event.observedActivityKind || 'single'}`, `hash v${event.hashVersion || 1}`].join('\n');
+            row.title = [`event: ${event.eventId || '—'}`, `execution: ${event.executionId || '—'}`, `tool-call: ${event.toolCallId || '—'}`, `scope: ${event.activityScopeId || '—'}`, `generation: ${event.runtimeGeneration || 0}`, `declared: ${event.declaredActivityKind || 'unknown'}`, `observed: ${event.observedActivityKind || 'single'}`, `block-match: ${JSON.stringify(event.blockMatch || {})}`, `hash v${event.hashVersion || 1}`].join('\n');
         }
         return row;
     }
