@@ -101,6 +101,26 @@ func (h *TrafficHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"items": items, "total": total, "page": page, "page_size": pageSize, "total_pages": totalPages})
 }
 
+// Conversations returns the safe, scoped options used by the traffic evidence
+// conversation picker. It is separate from the paged transaction projection so
+// changing filters never makes options disappear.
+func (h *TrafficHandler) Conversations(c *gin.Context) {
+	session, ok := security.CurrentSession(c)
+	if !ok {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.Header("X-Content-Type-Options", "nosniff")
+	conversations, err := h.db.ListTrafficTransactionConversations(c.Request.Context(), session.UserID, session.ScopeFor("traffic:read"))
+	if err != nil {
+		h.logger.Warn("读取流量证据对话失败", zap.Error(err))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "无法读取流量证据对话"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
+}
+
 func decorateReplayTransformTransaction(item *traffic.Transaction) {
 	if item == nil || !strings.HasPrefix(item.ExecutionID, trafficReplayTransformAttributionPrefix) {
 		return

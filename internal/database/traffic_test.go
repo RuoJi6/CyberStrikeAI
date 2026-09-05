@@ -172,6 +172,44 @@ func TestTrafficTransactionPersistsEmptyBodyAsBlob(t *testing.T) {
 	}
 }
 
+func TestListTrafficTransactionConversationsIsScopedAndOrdered(t *testing.T) {
+	db, err := NewDB(filepath.Join(t.TempDir(), "traffic-conversations.db"), zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	first, _ := db.CreateConversation("first traffic", ConversationCreateMeta{})
+	second, _ := db.CreateConversation("second traffic", ConversationCreateMeta{})
+	if _, err := db.Exec(`UPDATE conversations SET owner_user_id = ? WHERE id = ?`, "owner-a", first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE conversations SET owner_user_id = ? WHERE id = ?`, "owner-b", second.ID); err != nil {
+		t.Fatal(err)
+	}
+	for index, conversation := range []*Conversation{first, second, first} {
+		item := &traffic.Transaction{
+			ConversationID: conversation.ID, RuntimeMode: traffic.RuntimeModeHost,
+			CaptureCoverage: traffic.CaptureCoverageBestEffort, Scheme: "https", Host: "example.test", Port: 443,
+			Method: "GET", Path: "/", StartedAt: time.Now().UTC().Add(time.Duration(index) * time.Second),
+		}
+		if _, err := db.CreateTrafficTransaction(context.Background(), item, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := db.ListTrafficTransactionConversations(context.Background(), "", RBACScopeAll)
+	if err != nil || len(all) != 2 || all[0].ConversationID != first.ID || all[0].ConversationTitle != first.Title {
+		t.Fatalf("all traffic conversations = %#v, %v", all, err)
+	}
+	owned, err := db.ListTrafficTransactionConversations(context.Background(), "owner-a", RBACScopeOwn)
+	if err != nil || len(owned) != 1 || owned[0].ConversationID != first.ID {
+		t.Fatalf("owned traffic conversations = %#v, %v", owned, err)
+	}
+	other, err := db.ListTrafficTransactionConversations(context.Background(), "owner-c", RBACScopeOwn)
+	if err != nil || len(other) != 0 {
+		t.Fatalf("unowned traffic conversations = %#v, %v", other, err)
+	}
+}
+
 func TestTrafficEvidenceRejectsCrossConversationLink(t *testing.T) {
 	db, err := NewDB(filepath.Join(t.TempDir(), "traffic-scope.db"), zap.NewNop())
 	if err != nil {

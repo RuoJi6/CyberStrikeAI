@@ -17,7 +17,16 @@ test('流量证据列表不再展示常驻的不可信内容提示', () => {
     assert.doesNotMatch(html, /目标内容不可信/);
 	assert.match(html, /style\.css\?v=20260904-2/);
     assert.match(html, /router\.js\?v=20260827-2/);
-	assert.match(html, /traffic-evidence\.js\?v=9/);
+	assert.match(html, /traffic-evidence\.js\?v=10/);
+});
+
+test('流量证据对话筛选使用可搜索下拉并按权限单独加载选项', () => {
+    assert.match(html, /id="traffic-evidence-conversation"[^>]+data-unified-select="single"[^>]+data-unified-search="true"/);
+    assert.doesNotMatch(html, /id="traffic-evidence-conversation"[^>]+type="text"/);
+    assert.match(script, /\/api\/traffic-transactions\/conversations/);
+    assert.match(script, /option\.dataset\.searchText = `\$\{title\} \$\{item\.conversationId\}`/);
+    assert.match(script, /CyberStrikeSelect\.enhance\(select\)/);
+    assert.match(script, /shortConversationID\(item\.conversationId\)/);
 });
 
 test('漏洞详情以紧凑按钮在当前页弹窗显示多个完整数据包', () => {

@@ -12,6 +12,8 @@
         totalPages: 0,
         query: '',
         conversation: '',
+        conversations: [],
+        conversationsLoading: false,
         runtime: '',
         timer: null,
         listController: null,
@@ -19,6 +21,8 @@
         detailController: null,
         detailRequestID: 0,
         detailTransactionID: '',
+        conversationController: null,
+        conversationRequestID: 0,
     };
 
     function byId(id) {
@@ -84,6 +88,72 @@
         if (mode === 'container') return '容器';
         if (mode === 'host') return '本机';
         return '未标注';
+    }
+
+    function isSafeConversation(item) {
+        if (!item || typeof item !== 'object') return false;
+        if (Object.keys(item).some((key) => !['conversationId', 'conversationTitle'].includes(key))) return false;
+        const id = String(item.conversationId || '').trim();
+        return Boolean(id) && id.length <= 128 && String(item.conversationTitle || '').length <= 512;
+    }
+
+    function shortConversationID(value) {
+        const id = String(value || '').trim();
+        return id.length > 12 ? `${id.slice(0, 8)}…${id.slice(-4)}` : id;
+    }
+
+    function syncConversationOptions() {
+        const select = byId('traffic-evidence-conversation');
+        if (!select) return;
+        const current = state.conversation;
+        const all = create('option', '', '全部有流量的对话');
+        all.value = '';
+        const options = [all];
+        state.conversations.forEach((item) => {
+            const title = String(item.conversationTitle || '').trim() || item.conversationId;
+            const label = title === item.conversationId ? title : `${title} · ${shortConversationID(item.conversationId)}`;
+            const option = create('option', '', label);
+            option.value = item.conversationId;
+            option.title = item.conversationId;
+            option.dataset.searchText = `${title} ${item.conversationId}`;
+            options.push(option);
+        });
+        if (current && !state.conversations.some((item) => item.conversationId === current)) {
+            const option = create('option', '', current);
+            option.value = current;
+            option.dataset.searchText = current;
+            options.push(option);
+        }
+        select.replaceChildren(...options);
+        select.value = current;
+        select.disabled = state.conversationsLoading;
+        if (root.CyberStrikeSelect) {
+            root.CyberStrikeSelect.enhance(select);
+            root.CyberStrikeSelect.refresh(select);
+        }
+    }
+
+    async function loadConversations() {
+        if (typeof root.apiFetch !== 'function' || state.conversationsLoading) return;
+        state.conversationsLoading = true;
+        const requestID = ++state.conversationRequestID;
+        syncConversationOptions();
+        try {
+            const response = await requestWithTimeout('/api/traffic-transactions/conversations', 'conversationController');
+            if (requestID !== state.conversationRequestID) return;
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const payload = await response.json();
+            if (requestID !== state.conversationRequestID) return;
+            state.conversations = Array.isArray(payload.conversations) ? payload.conversations.filter(isSafeConversation) : [];
+        } catch (error) {
+            if (requestID !== state.conversationRequestID || error?.name === 'AbortError') return;
+            state.conversations = [];
+        } finally {
+            if (requestID === state.conversationRequestID) {
+                state.conversationsLoading = false;
+                syncConversationOptions();
+            }
+        }
     }
 
     function transformResultLabel(result) {
@@ -439,7 +509,10 @@
     function bind() {
         if (state.bound) return;
         state.bound = true;
-        byId('traffic-evidence-refresh')?.addEventListener('click', () => void load(false));
+        byId('traffic-evidence-refresh')?.addEventListener('click', () => {
+            void loadConversations();
+            void load(false);
+        });
         byId('traffic-evidence-prev')?.addEventListener('click', () => { if (state.page > 1) { state.page--; void load(false); } });
         byId('traffic-evidence-next')?.addEventListener('click', () => { if (state.page < state.totalPages) { state.page++; void load(false); } });
         ['traffic-evidence-conversation', 'traffic-evidence-runtime', 'traffic-evidence-page-size'].forEach((id) => {
@@ -458,10 +531,14 @@
     function init() {
         state.active = true;
         bind();
+        void loadConversations();
         void load(false);
     }
 
     root.initTrafficEvidencePage = init;
-    root.refreshTrafficEvidencePage = () => load(false);
+    root.refreshTrafficEvidencePage = () => {
+        void loadConversations();
+        return load(false);
+    };
     root.openTrafficEvidenceTransaction = openDetail;
 }(typeof window !== 'undefined' ? window : globalThis));

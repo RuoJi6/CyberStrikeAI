@@ -167,6 +167,11 @@ type TrafficTransactionFilter struct {
 	Offset            int
 }
 
+type TrafficConversation struct {
+	ConversationID    string `json:"conversationId"`
+	ConversationTitle string `json:"conversationTitle"`
+}
+
 type trafficTransactionScanner interface {
 	Scan(...interface{}) error
 }
@@ -572,6 +577,33 @@ func (db *DB) ListTrafficTransactions(ctx context.Context, filter TrafficTransac
 		return nil, 0, fmt.Errorf("list traffic transactions: %w", err)
 	}
 	return result, total, nil
+}
+
+// ListTrafficTransactionConversations returns only conversations represented
+// by captured traffic and applies the same RBAC scope as the transaction list.
+func (db *DB) ListTrafficTransactionConversations(ctx context.Context, userID, scope string) ([]TrafficConversation, error) {
+	filter := TrafficTransactionFilter{UserID: userID, Scope: scope}
+	where, args := appendTrafficAccessFilter(` WHERE conversation_id IS NOT NULL AND TRIM(conversation_id) <> ''`, nil, filter)
+	rows, err := db.QueryContext(ctx, `
+		SELECT conversation_id,
+			COALESCE(NULLIF((SELECT c.title FROM conversations c WHERE c.id = traffic_transactions.conversation_id), ''), conversation_id)
+		FROM traffic_transactions`+where+`
+		GROUP BY conversation_id
+		ORDER BY MAX(started_at) DESC, conversation_id DESC
+		LIMIT 5000`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list traffic transaction conversations: %w", err)
+	}
+	defer rows.Close()
+	result := make([]TrafficConversation, 0)
+	for rows.Next() {
+		var item TrafficConversation
+		if err := rows.Scan(&item.ConversationID, &item.ConversationTitle); err != nil {
+			return nil, fmt.Errorf("scan traffic transaction conversation: %w", err)
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func trafficEvidenceScopesMatch(vulnerabilityProject, vulnerabilityConversation, transactionProject, transactionConversation string) bool {

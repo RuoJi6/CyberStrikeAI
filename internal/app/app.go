@@ -1484,6 +1484,7 @@ func setupRoutes(
 		protected.GET("/egress-audit-events/export", egressAuditHandler.Export)
 		protected.GET("/egress-audit-events/:id", egressAuditHandler.Get)
 		protected.GET("/traffic-transactions", trafficHandler.List)
+		protected.GET("/traffic-transactions/conversations", trafficHandler.Conversations)
 		protected.GET("/traffic-transactions/:id", trafficHandler.Get)
 		protected.POST("/traffic-transactions/:id/replay", trafficHandler.Replay)
 		protected.GET("/traffic-transforms", trafficHandler.ListTrafficTransformsDashboard)

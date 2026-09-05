@@ -3037,7 +3037,7 @@
                     <div class="page-content traffic-evidence-content">
                         <section class="traffic-evidence-controls" aria-label="流量筛选">
                             <label class="traffic-evidence-search"><span>搜索</span><input id="traffic-evidence-search" type="search" maxlength="200" autocomplete="off" placeholder="事务 ID、主机、路径或方法…"></label>
-                            <label><span>对话 ID</span><input id="traffic-evidence-conversation" type="text" maxlength="128" autocomplete="off" placeholder="全部已授权对话"></label>
+                            <label class="traffic-evidence-conversation-field"><span>对话</span><select id="traffic-evidence-conversation" data-unified-select="single" data-unified-search="true"><option value="">全部有流量的对话</option></select></label>
                             <label><span>运行位置</span><select id="traffic-evidence-runtime"><option value="">全部</option><option value="container">容器（强制覆盖）</option><option value="host">本机（尽力覆盖）</option></select></label>
                             <label><span>每页</span><select id="traffic-evidence-page-size"><option value="20">20</option><option value="50">50</option><option value="100">100</option></select></label>
                         </section>
@@ -7547,7 +7547,7 @@ def decode_request(ctx, wire: Message) -> Message:
     <script src="/static/js/projects.js?v=20260819-1"></script>
     <script src="/static/js/conversation-container-settings.js?v=20260904-4"></script>
     <script src="/static/js/vulnerability.js?v=21"></script>
-    <script src="/static/js/traffic-evidence.js?v=9"></script>
+    <script src="/static/js/traffic-evidence.js?v=10"></script>
     <script src="/static/js/traffic-replay.js?v=5"></script>
     <script src="/static/js/traffic-transforms.js?v=10"></script>
     <script src="/static/js/webshell.js"></script>
