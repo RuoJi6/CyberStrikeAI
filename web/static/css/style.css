@@ -30907,6 +30907,8 @@ select.unified-select-native {
 
 .unified-select-option {
     display: flex;
+    /* Preserve wrapped labels; the options list scrolls instead of shrinking rows. */
+    flex: 0 0 auto;
     align-items: flex-start;
     gap: 9px;
     width: 100%;
