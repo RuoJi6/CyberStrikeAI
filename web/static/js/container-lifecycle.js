@@ -9,7 +9,7 @@
     const PAGE_SIZE = 10;
     const state = { id: '', revision: '', record: null, host: null, page: 1, type: 'all', result: 'all',
         items: [], total: 0, pages: 0, latest: null, loading: false, loaded: false, error: '',
-        generation: 0, controller: null, integrity: '', verifying: false, verification: 0 };
+        generation: 0, controller: null, integrity: '', verifying: false, verification: 0, controls: [], focusFilter: '' };
 
     function t(key, fallback, values = {}) {
         if (typeof root.containerManagementT === 'function') return root.containerManagementT(key, fallback, values);
@@ -108,7 +108,9 @@
         const heading = el('div', 'container-lifecycle-event-heading');
         const time = el('time', '', date(event.occurredAt)); time.dateTime = event.occurredAt;
         heading.append(el('strong', '', eventTitle(event)), time); article.append(heading);
-        article.append(el('p', 'container-lifecycle-event-context', `${t('lifecycleGeneration', '第 {{generation}} 代', { generation: event.runtimeGeneration })} · ${t('lifecycleSequence', '审计序号 {{sequence}}', { sequence: event.chainSequence })}`));
+        const version = el('p', 'container-lifecycle-event-context', `${t('lifecycleGeneration', '容器实例版本：{{generation}}', { generation: event.runtimeGeneration })} · ${t('lifecycleSequence', '审计序号：{{sequence}}', { sequence: event.chainSequence })}`);
+        version.title = t('lifecycleGenerationHint', '用于区分同一对话重建前后的运行环境；重建成功后递增，普通启停不变。');
+        article.append(version);
         const context = failureContext(event, state.record);
         if (context) article.append(el('p', 'container-lifecycle-event-context', context));
         const details = el('details', 'container-lifecycle-event-details');
@@ -142,18 +144,30 @@
     function button(label, action, disabled = false) {
         const node = el('button', 'btn-secondary', label); node.type = 'button'; node.disabled = disabled; node.addEventListener('click', action); return node;
     }
-    function selectFilter(label, entries, value, update) {
+    function selectFilter(key, label, entries, value, update) {
         const wrapper = el('label', 'container-lifecycle-filter'); wrapper.append(el('span', '', label));
         const select = el('select'); entries.forEach(([value, label]) => { const option = el('option', '', label); option.value = value; select.append(option); });
+        select.id = `container-lifecycle-${key}`;
+        select.setAttribute('aria-label', label);
+        select.dataset.unifiedSelect = 'single'; select.dataset.unifiedSearch = 'false';
         select.value = value; select.disabled = state.loading;
-        select.addEventListener('change', () => { update(select.value); state.page = 1; load(); }); wrapper.append(select); return wrapper;
+        select.addEventListener('change', () => { state.focusFilter = select.id; update(select.value); state.page = 1; load(); });
+        state.controls.push(select); wrapper.append(select); return wrapper;
     }
     function render() {
         if (!state.host || !state.host.isConnected) return;
+        const active = root.document.activeElement;
+        const restoreFocus = state.focusFilter && (active === root.document.body || state.controls.some(select => {
+            const instance = root.CyberStrikeSelect?.get?.(select);
+            return active === select || instance?.wrapper.contains(active) || instance?.menu.contains(active);
+        }));
+        // Menus are portalled to body: release them before replacing their controls.
+        state.controls.forEach(select => root.CyberStrikeSelect?.destroy?.(select));
+        state.controls = [];
         state.host.replaceChildren();
         const filters = el('div', 'container-lifecycle-toolbar');
-        filters.append(selectFilter(t('lifecycleOperation', '生命周期操作'), [['all', t('filterAll', '全部')], ...OPERATIONS.map(value => [value, operationLabel(value)])], state.type, value => { state.type = value; }));
-        filters.append(selectFilter(t('lifecycleResult', '操作结果'), [['all', t('filterAll', '全部')], ['success', t('auditSuccess', '成功')], ['failure', t('auditFailure', '失败')]], state.result, value => { state.result = value; }));
+        filters.append(selectFilter('operation', t('lifecycleOperation', '生命周期操作'), [['all', t('filterAll', '全部')], ...OPERATIONS.map(value => [value, operationLabel(value)])], state.type, value => { state.type = value; }));
+        filters.append(selectFilter('result', t('lifecycleResult', '操作结果'), [['all', t('filterAll', '全部')], ['success', t('auditSuccess', '成功')], ['failure', t('auditFailure', '失败')]], state.result, value => { state.result = value; }));
         filters.append(button(t('refresh', '刷新'), load, state.loading));
         state.host.append(filters, el('p', 'container-lifecycle-history-hint', t('lifecycleHistoryHint', '按已记录的操作结果展示，最新在前。旧记录未采集的原因、操作者及子步骤不作推断。')));
         const status = el('p', `container-lifecycle-load-state${state.error ? ' is-error' : ''}`, state.loading ? t('lifecycleLoading', '正在加载生命周期记录…') : state.error);
@@ -168,11 +182,18 @@
         const integrity = el('div', 'container-lifecycle-integrity');
         integrity.append(button(state.verifying ? t('auditIntegrityChecking', '正在校验审计链…') : t('lifecycleVerify', '校验此对话审计链'), verify, state.verifying || state.loading || Boolean(state.error)));
         const message = el('p', '', state.integrity || t('lifecycleIntegrityHint', '原始事件及其审计链保持不变；此处仅调整展示入口。')); message.setAttribute('role', 'status'); integrity.append(message); state.host.append(integrity);
+        state.controls.forEach(select => root.CyberStrikeSelect?.enhance?.(select));
+        if (!state.loading && state.focusFilter) {
+            const select = state.controls.find(select => select.id === state.focusFilter);
+            if (restoreFocus && select) (root.CyberStrikeSelect?.get?.(select)?.trigger || select).focus?.();
+            state.focusFilter = '';
+        }
     }
     function mount(host, record, active) {
         const revision = [record.conversationId, record.runtimeGeneration, record.status, record.lifecycleState, record.lifecycleCompletedAt, record.updatedAt].join('|');
         const changed = state.id !== record.conversationId;
         if (changed) {
+            state.focusFilter = '';
             if (state.controller) state.controller.abort(); state.generation++; state.verification++;
             Object.assign(state, { id: record.conversationId, page: 1, type: 'all', result: 'all', items: [], total: 0, pages: 0, latest: null, error: '', loaded: false, loading: false, integrity: '', verifying: false, revision: '' });
         }

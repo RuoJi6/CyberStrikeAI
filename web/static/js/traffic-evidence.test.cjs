@@ -15,9 +15,19 @@ const en = JSON.parse(fs.readFileSync('web/static/i18n/en-US.json', 'utf8'));
 test('流量证据列表不再展示常驻的不可信内容提示', () => {
     assert.doesNotMatch(html, /traffic-evidence-notice/);
     assert.doesNotMatch(html, /目标内容不可信/);
-	assert.match(html, /style\.css\?v=20260905-2/);
+	assert.match(html, /style\.css\?v=20260906-1/);
     assert.match(html, /router\.js\?v=20260827-2/);
-	assert.match(html, /traffic-evidence\.js\?v=10/);
+	assert.match(html, /traffic-evidence\.js\?v=11/);
+});
+
+test('流量证据列表移除捕获方式列，但保留运行位置和存储策略', () => {
+    const table = html.match(/<table class="traffic-evidence-table">([\s\S]*?)<\/table>/)[1];
+    assert.equal((table.match(/<th>/g) || []).length, 8);
+    assert.doesNotMatch(table, /<th>捕获<\/th>/);
+    assert.match(table, /<th>运行位置<\/th>/);
+    assert.match(table, /<th>存储策略<\/th>/);
+    assert.doesNotMatch(script, /captureCell|traffic-evidence-capture/);
+    assert.doesNotMatch(styles, /\.traffic-evidence-capture/);
 });
 
 test('流量证据对话筛选使用可搜索下拉并按权限单独加载选项', () => {

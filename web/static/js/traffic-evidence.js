@@ -235,11 +235,6 @@
             }
             row.appendChild(storageCell);
 
-            const captureCell = create('td');
-            const coverage = item.capture_coverage || 'unknown';
-            captureCell.appendChild(create('span', `traffic-evidence-capture${coverage === 'enforced' ? ' is-enforced' : ''}`, coverage === 'enforced' ? '强制' : '尽力'));
-            row.appendChild(captureCell);
-
             const open = () => void openDetail(item.id);
             row.addEventListener('click', open);
             row.addEventListener('keydown', (event) => {

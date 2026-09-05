@@ -347,7 +347,8 @@ function renderConversationContainerDetail() {
     headingText.append(
         containerRuntimeElement('span', 'container-runtime-kicker', containerManagementT('liveObservation', '实时引擎观测')),
         containerRuntimeElement('h3', '', containerRuntimeRowTitle(record)),
-        containerRuntimeElement('p', '', `${containerManagementT('lifecycleConversation', '对话')} ${record.conversationId.slice(0, 8)} · ${containerManagementT('lifecycleGeneration', '第 {{generation}} 代', { generation: record.runtimeGeneration || 0 })}`),
+        containerRuntimeElement('p', '', `${containerManagementT('lifecycleConversation', '对话')} ${record.conversationId.slice(0, 8)} · ${containerManagementT('lifecycleGeneration', '容器实例版本：{{generation}}', { generation: record.runtimeGeneration || 0 })}`),
+        containerRuntimeElement('p', '', containerManagementT('lifecycleGenerationHint', '用于区分同一对话重建前后的运行环境；重建成功后递增，普通启停不变。')),
         containerRuntimeElement('p', '', record.observation
             ? containerManagementT('observedAt', '观测于 {{time}}', { time: containerRuntimeFormatDate(record.observation.observedAt) })
             : containerManagementT('persistedState', '当前显示持久化状态')),

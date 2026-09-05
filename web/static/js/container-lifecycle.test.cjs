@@ -39,15 +39,54 @@ class Node {
     addEventListener(name, fn) { this.events[name] = fn; }
     get text() { return this.textContent + this.children.map(n => n.text).join(' '); }
 }
-function setup(permission = true) {
+function setup(permission = true, translations) {
     const pending = []; const summary = new Node(); summary.dataset.containerLifecycleLatest = 'b';
     const window = { document: { createElement: tag => new Node(tag), querySelectorAll: () => [summary] }, setTimeout, clearTimeout,
         hasPermission: () => permission, CyberStrikeEgressAudit: audit,
         apiFetch: url => new Promise(resolve => pending.push({ url, resolve })) };
+    if (translations) window.containerManagementT = (key, fallback, values = {}) => Object.entries(values).reduce(
+        (text, [name, value]) => text.replaceAll(`{{${name}}}`, String(value)), translations[key] || fallback);
     vm.runInNewContext(source, { window, URLSearchParams, AbortController });
-    return { api: window.ContainerLifecycle, pending, summary };
+    return { api: window.ContainerLifecycle, pending, summary, window };
 }
 const settle = () => new Promise(resolve => setImmediate(resolve));
+test('lifecycle dropdowns use shared controls and release old portals on refresh and conversation switch', async () => {
+    const { api, pending, window } = setup(); const instances = new Map(); let destroyed = 0;
+    window.CyberStrikeSelect = {
+        enhance(select) { instances.set(select, {}); },
+        destroy(select) { if (instances.delete(select)) destroyed++; },
+    };
+    const host = new Node(); api.mount(host, { conversationId: 'a' }, true);
+    assert.equal(instances.size, 2);
+    const controls = [...instances.keys()];
+    assert.deepEqual(controls.map(select => select.id), ['container-lifecycle-operation', 'container-lifecycle-result']);
+    assert.ok(controls.every(select => select.dataset.unifiedSelect === 'single' && select.dataset.unifiedSearch === 'false' && select.disabled));
+    pending[0].resolve({ ok: true, json: async () => payload('a') }); await settle();
+    assert.equal(instances.size, 2); assert.ok([...instances.keys()].every(select => !select.disabled));
+    host.isConnected = false;
+    api.mount(new Node(), { conversationId: 'b' }, true);
+    pending[1].resolve({ ok: true, json: async () => payload('b') }); await settle();
+    assert.equal(instances.size, 2); assert.ok(destroyed >= 6);
+});
+
+test('instance version wording and explanation render in both languages and without translations', async () => {
+    for (const language of [null, 'zh-CN', 'en-US']) {
+        const labels = language ? JSON.parse(fs.readFileSync(`${__dirname}/../i18n/${language}.json`)).containerManagement : null;
+        const { api, pending } = setup(true, labels); const host = new Node();
+        api.mount(host, { conversationId: 'a' }, true);
+        pending[0].resolve({ ok: true, json: async () => payload('a') }); await settle();
+        const version = host.children.find(node => node.tag === 'article').children.find(node => node.className === 'container-lifecycle-event-context');
+        assert.equal(version.text, language === 'en-US' ? 'Container instance version: 2 · Audit sequence: 1' : '容器实例版本：2 · 审计序号：1');
+        assert.match(version.title, language === 'en-US' ? /successful rebuild.*ordinary starts and stops leave it unchanged/ : /重建成功后递增，普通启停不变/);
+        assert.doesNotMatch(host.text, /第\s*2\s*代|Generation 2/);
+    }
+    const management = fs.readFileSync(`${__dirname}/container-management.js`, 'utf8');
+    assert.match(management, /containerManagementT\('lifecycleGeneration', '容器实例版本：\{\{generation\}\}'/);
+    assert.match(management, /containerRuntimeElement\('p', '', containerManagementT\('lifecycleGenerationHint'/);
+    const template = fs.readFileSync(`${__dirname}/../../templates/index.html`, 'utf8');
+    assert.match(template, /container-lifecycle\.js\?v=20260906-2/);
+});
+
 test('late responses cannot replace the selected conversation history', async () => {
     const { api, pending, summary } = setup(); const a = new Node(), b = new Node();
     api.mount(a, { conversationId: 'a' }, true); api.mount(b, { conversationId: 'b' }, true);
